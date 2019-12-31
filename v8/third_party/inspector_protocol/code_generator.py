@@ -80,7 +80,7 @@ def read_config():
     config_file = arg_options.config
     config_base = os.path.dirname(config_file)
     config_values = arg_options.config_value
-    inspector_protocol_dir = arg_options.inspector_protocol_dir.lstrip('/')
+    inspector_protocol_dir = arg_options.inspector_protocol_dir
   except Exception:
     # Work with python 2 and 3 http://docs.python.org/py3k/howto/pyporting.html
     exc = sys.exc_info()[1]
