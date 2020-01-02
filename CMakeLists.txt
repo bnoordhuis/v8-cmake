@@ -21,6 +21,7 @@ set(is-s390 0)
 set(is-x64 1)
 
 set(v8_enable_i18n_support 0)
+set(v8_enable_concurrent_marking 1)
 
 set(
   v8_defines
@@ -28,6 +29,7 @@ set(
   $<${is-linux}:V8_HAVE_TARGET_OS> $<${is-linux}:V8_TARGET_OS_LINUX>
   $<${is-win}:V8_HAVE_TARGET_OS> $<${is-win}:V8_TARGET_OS_WIN>
   $<${is-x64}:V8_TARGET_ARCH_X64>
+  $<${v8_enable_concurrent_marking}:V8_CONCURRENT_MARKING>
 )
 
 set(D ${CMAKE_SOURCE_DIR}/v8)
