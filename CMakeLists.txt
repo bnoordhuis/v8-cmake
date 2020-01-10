@@ -17,7 +17,7 @@ include(GenerateBuiltinsList)
 check_python_module_exists(PYTHON_HAVE_MARKUPSAFE markupsafe)
 
 if (NOT CMAKE_CXX_STANDARD)
-  set(CMAKE_CXX_STANDARD 17)
+  set(CMAKE_CXX_STANDARD 14)
 endif()
 
 if (NOT CMAKE_C_STANDARD)
@@ -69,6 +69,16 @@ set(
 
 set(D ${PROJECT_SOURCE_DIR}/v8)
 
+set(disable-exceptions
+  $<$<CXX_COMPILER_ID:AppleClang>:-fno-exceptions>
+  $<$<CXX_COMPILER_ID:Clang>:-fno-exceptions>
+  $<$<CXX_COMPILER_ID:GNU>:-fno-exceptions>)
+
+set(enable-exceptions
+  $<$<CXX_COMPILER_ID:AppleClang>:-fexceptions>
+  $<$<CXX_COMPILER_ID:Clang>:-fexceptions>
+  $<$<CXX_COMPILER_ID:GNU>:-fexceptions>)
+
 #
 # d8
 #
@@ -81,15 +91,15 @@ add_executable(
   ${D}/src/d8/d8-console.cc
   ${D}/src/d8/d8-js.cc
   ${D}/src/d8/d8-platforms.cc
-  ${D}/src/d8/d8.cc
-)
+  ${D}/src/d8/d8.cc)
 
+target_compile_options(d8 PRIVATE ${disable-exceptions})
 target_include_directories(d8
   PUBLIC
-    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/v8/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
   PRIVATE
-    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}>
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/v8>
 )
 
 target_link_libraries(d8
@@ -99,7 +109,6 @@ target_link_libraries(d8
     v8_snapshot
     v8_inspector
     v8_libplatform)
-set_property(TARGET d8 PROPERTY EXCLUDE_FROM_ALL ON)
 
 # more granular library support
 add_library(v8-i18n-support OBJECT)
@@ -123,6 +132,7 @@ list(APPEND i18n-sources
   ${PROJECT_SOURCE_DIR}/v8/src/strings/char-predicates.cc)
 
 target_sources(v8-i18n-support PRIVATE ${i18n-sources})
+target_compile_options(v8-i18n-support PRIVATE ${disable-exceptions})
 target_link_libraries(v8-i18n-support PRIVATE v8_torque_generated)
 
 target_include_directories(v8-i18n-support
@@ -263,9 +273,8 @@ set_property(SOURCE ${D}/src/diagnostics/unwinding-info-win64.cc
   APPEND PROPERTY
     COMPILE_DEFINITIONS UNICODE)
 
-target_compile_definitions(v8_base_without_compiler 
-
-  PRIVATE ${v8_defines})
+target_compile_definitions(v8_base_without_compiler PRIVATE ${v8_defines})
+target_compile_options(v8_base_without_compiler PRIVATE ${disable-exceptions})
 
 target_include_directories(
   v8_base_without_compiler
@@ -297,6 +306,7 @@ list(FILTER compiler-sources EXCLUDE REGEX ".*backend/.*/.*[.]cc$")
 add_library(v8_compiler STATIC)
 target_sources(v8_compiler PRIVATE ${compiler-sources})
 target_compile_definitions(v8_compiler PRIVATE ${v8_defines})
+target_compile_options(v8_compiler PRIVATE ${disable-exceptions})
 
 target_include_directories(
   v8_compiler
@@ -377,6 +387,7 @@ add_library(
 )
 
 target_compile_definitions(v8_initializers PRIVATE ${v8_defines})
+target_compile_options(v8_initializers PRIVATE ${disable-exceptions})
 
 target_include_directories(
   v8_initializers
@@ -398,6 +409,7 @@ add_library(
   ${D}/src/init/setup-isolate-deserialize.cc
 )
 
+target_compile_options(v8_snapshot PRIVATE ${disable-exceptions})
 target_include_directories(v8_snapshot PRIVATE ${D})
 target_link_libraries(v8_snapshot
   PRIVATE
@@ -428,8 +440,7 @@ add_custom_command(
 # Note: this is the inspector, broken out for ease of maintenance.
 # The GN files are conceptually structured the same but they don't
 # build it as a separate library. We do because it's easier that way.
-set(
-  inspector_files
+set(inspector_files
   ${PROJECT_BINARY_DIR}/inspector/include/inspector/Debugger.h
   ${PROJECT_BINARY_DIR}/inspector/include/inspector/Runtime.h
   ${PROJECT_BINARY_DIR}/inspector/include/inspector/Schema.h
@@ -456,8 +467,7 @@ foreach(filename IN LISTS inspector_files)
 endforeach()
 list(REMOVE_DUPLICATES inspector_dirs)
 
-add_library(
-  v8_inspector STATIC
+add_library(v8_inspector STATIC
   ${D}/src/inspector/custom-preview.cc
   ${D}/src/inspector/injected-script.cc
   ${D}/src/inspector/inspected-context.cc
@@ -491,18 +501,18 @@ add_library(
   ${inspector_files}
 )
 
-set_property(TARGET v8_inspector PROPERTY EXCLUDE_FROM_ALL ON)
-
 target_compile_features(v8_inspector PUBLIC cxx_std_17)
+target_compile_options(v8_inspector PRIVATE ${disable-exceptions})
 
-target_include_directories(
-  v8_inspector
-  PRIVATE ${D} ${D}/include ${PROJECT_BINARY_DIR}/inspector)
+target_include_directories(v8_inspector
+  PRIVATE
+    ${PROJECT_BINARY_DIR}/inspector
+    ${D}
+    ${D}/include)
 
 target_link_libraries(v8_inspector PRIVATE v8_torque_generated)
 
-set(
-  inspector_templates
+set(inspector_templates
   ${D}/third_party/inspector_protocol/lib/base_string_adapter_cc.template
   ${D}/third_party/inspector_protocol/lib/base_string_adapter_h.template
   ${D}/third_party/inspector_protocol/lib/DispatcherBase_cpp.template
@@ -566,6 +576,7 @@ add_library(
   ${D}/src/libplatform/worker-thread.cc
 )
 
+target_compile_options(v8_libplatform PRIVATE ${disable-exceptions})
 target_include_directories(
   v8_libplatform
   PUBLIC ${D}/include
@@ -578,11 +589,10 @@ target_link_libraries(v8_libplatform PRIVATE v8_libbase)
 # v8_libsampler
 #
 
-add_library(
-  v8_libsampler STATIC
-  ${D}/src/libsampler/sampler.cc
-)
+add_library(v8_libsampler STATIC
+  ${D}/src/libsampler/sampler.cc)
 
+target_compile_options(v8_libsampler PRIVATE ${disable-exceptions})
 target_include_directories(v8_libsampler PRIVATE ${D})
 target_link_libraries(v8_libsampler PRIVATE v8_libbase)
 
@@ -590,8 +600,7 @@ target_link_libraries(v8_libsampler PRIVATE v8_libbase)
 # v8_libbase
 #
 
-add_library(
-  v8_libbase STATIC
+add_library(v8_libbase STATIC
   ${D}/src/base/bits.cc
   ${D}/src/base/bounded-page-allocator.cc
   ${D}/src/base/cpu.cc
@@ -628,8 +637,8 @@ set_property(SOURCE ${D}/src/base/utils/random-number-generator.cc
 set_property(SOURCE ${D}/src/base/platform/platform-win32.cc
   APPEND PROPERTY COMPILE_DEFINITIONS UNICODE)
 
+target_compile_options(v8_libbase PRIVATE ${disable-exceptions})
 target_include_directories(v8_libbase PRIVATE ${D})
-
 target_link_libraries(v8_libbase
   PRIVATE
     Threads::Threads
@@ -717,6 +726,7 @@ add_library(
   ${torque-outputs}
   ${torque_outputs})
 
+target_compile_options(v8_torque_generated PRIVATE ${disable-exceptions})
 target_include_directories(v8_torque_generated
   PUBLIC
     ${PROJECT_BINARY_DIR}
@@ -747,32 +757,11 @@ add_custom_command(
 #
 # torque
 #
+file(GLOB torque-program-sources CONFIGURE_DEPENDS ${PROJECT_SOURCE_DIR}/v8/src/torque/*.cc)
 
-add_executable(torque
-
-  ${D}/src/torque/cfg.cc
-  ${D}/src/torque/class-debug-reader-generator.cc
-  ${D}/src/torque/csa-generator.cc
-  ${D}/src/torque/declarable.cc
-  ${D}/src/torque/declaration-visitor.cc
-  ${D}/src/torque/declarations.cc
-  ${D}/src/torque/earley-parser.cc
-  ${D}/src/torque/global-context.cc
-  ${D}/src/torque/implementation-visitor.cc
-  ${D}/src/torque/instance-type-generator.cc
-  ${D}/src/torque/instructions.cc
-  ${D}/src/torque/server-data.cc
-  ${D}/src/torque/source-positions.cc
-  ${D}/src/torque/torque-compiler.cc
-  ${D}/src/torque/torque-parser.cc
-  ${D}/src/torque/torque.cc
-  ${D}/src/torque/type-inference.cc
-  ${D}/src/torque/type-oracle.cc
-  ${D}/src/torque/type-visitor.cc
-  ${D}/src/torque/types.cc
-  ${D}/src/torque/utils.cc
-)
-
+add_executable(torque)
+target_sources(torque PRIVATE ${torque-program-sources})
+target_compile_options(torque PRIVATE ${enable-exceptions})
 target_include_directories(torque PRIVATE ${D})
 target_link_libraries(torque PRIVATE v8_libbase)
 
@@ -793,8 +782,8 @@ add_executable(mksnapshot
   ${D}/src/snapshot/snapshot-empty.cc
 )
 
+target_compile_options(mksnapshot PRIVATE ${disable-exceptions})
 target_include_directories(mksnapshot PRIVATE ${D})
-
 target_link_libraries(mksnapshot
   PRIVATE
     v8_libbase
