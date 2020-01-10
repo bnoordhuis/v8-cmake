@@ -467,39 +467,16 @@ foreach(filename IN LISTS inspector_files)
 endforeach()
 list(REMOVE_DUPLICATES inspector_dirs)
 
+file(GLOB inspector-protocol-sources CONFIGURE_DEPENDS v8/third_party/inspector_protocol/crdtp/*.cc)
+file(GLOB inspector-sources CONFIGURE_DEPENDS v8/src/inspector/*.cc)
+
+list(FILTER inspector-protocol-sources EXCLUDE REGEX "_test[.]cc$")
+list(FILTER inspector-protocol-sources EXCLUDE REGEX "crdtp/test_.*[.]cc$")
+
 add_library(v8_inspector STATIC
-  ${D}/src/inspector/custom-preview.cc
-  ${D}/src/inspector/injected-script.cc
-  ${D}/src/inspector/inspected-context.cc
-  ${D}/src/inspector/remote-object-id.cc
-  ${D}/src/inspector/search-util.cc
-  ${D}/src/inspector/string-16.cc
-  ${D}/src/inspector/string-util.cc
-  ${D}/src/inspector/test-interface.cc
-  ${D}/src/inspector/v8-console-agent-impl.cc
-  ${D}/src/inspector/v8-console-message.cc
-  ${D}/src/inspector/v8-console.cc
-  ${D}/src/inspector/v8-debugger-agent-impl.cc
-  ${D}/src/inspector/v8-debugger-script.cc
-  ${D}/src/inspector/v8-debugger.cc
-  ${D}/src/inspector/v8-heap-profiler-agent-impl.cc
-  ${D}/src/inspector/v8-inspector-impl.cc
-  ${D}/src/inspector/v8-inspector-session-impl.cc
-  ${D}/src/inspector/v8-profiler-agent-impl.cc
-  ${D}/src/inspector/v8-regex.cc
-  ${D}/src/inspector/v8-runtime-agent-impl.cc
-  ${D}/src/inspector/v8-schema-agent-impl.cc
-  ${D}/src/inspector/v8-stack-trace-impl.cc
-  ${D}/src/inspector/v8-string-conversions.cc
-  ${D}/src/inspector/v8-value-utils.cc
-  ${D}/src/inspector/value-mirror.cc
-  ${D}/src/inspector/wasm-translation.cc
-  ${D}/third_party/inspector_protocol/crdtp/cbor.cc
-  ${D}/third_party/inspector_protocol/crdtp/json.cc
-  ${D}/third_party/inspector_protocol/crdtp/json_platform_v8.cc
-  ${D}/third_party/inspector_protocol/crdtp/status.cc
-  ${inspector_files}
-)
+  ${inspector-protocol-sources}
+  ${inspector-sources}
+  ${inspector_files})
 
 target_compile_features(v8_inspector PUBLIC cxx_std_17)
 target_compile_options(v8_inspector PRIVATE ${disable-exceptions})
@@ -512,28 +489,10 @@ target_include_directories(v8_inspector
 
 target_link_libraries(v8_inspector PRIVATE v8_torque_generated)
 
-set(inspector_templates
-  ${D}/third_party/inspector_protocol/lib/base_string_adapter_cc.template
-  ${D}/third_party/inspector_protocol/lib/base_string_adapter_h.template
-  ${D}/third_party/inspector_protocol/lib/DispatcherBase_cpp.template
-  ${D}/third_party/inspector_protocol/lib/DispatcherBase_h.template
-  ${D}/third_party/inspector_protocol/lib/ErrorSupport_cpp.template
-  ${D}/third_party/inspector_protocol/lib/ErrorSupport_h.template
-  ${D}/third_party/inspector_protocol/lib/Forward_h.template
-  ${D}/third_party/inspector_protocol/lib/FrontendChannel_h.template
-  ${D}/third_party/inspector_protocol/lib/Object_cpp.template
-  ${D}/third_party/inspector_protocol/lib/Object_h.template
-  ${D}/third_party/inspector_protocol/lib/Parser_cpp.template
-  ${D}/third_party/inspector_protocol/lib/Parser_h.template
-  ${D}/third_party/inspector_protocol/lib/Protocol_cpp.template
-  ${D}/third_party/inspector_protocol/lib/ValueConversions_h.template
-  ${D}/third_party/inspector_protocol/lib/Values_cpp.template
-  ${D}/third_party/inspector_protocol/lib/Values_h.template
-  ${D}/third_party/inspector_protocol/templates/Exported_h.template
-  ${D}/third_party/inspector_protocol/templates/Imported_h.template
-  ${D}/third_party/inspector_protocol/templates/TypeBuilder_cpp.template
-  ${D}/third_party/inspector_protocol/templates/TypeBuilder_h.template
-)
+file(GLOB inspector-templates
+  CONFIGURE_DEPENDS
+    "${PROJECT_SOURCE_DIR}/v8/third_party/inspector_protocol/lib/*.template"
+    "${PROJECT_SOURCE_DIR}/v8/third_party/inspector_protocol/templates/*.template")
 
 add_custom_command(
   COMMAND ${CMAKE_COMMAND} -E make_directory ${inspector_dirs}
@@ -551,7 +510,7 @@ add_custom_command(
   DEPENDS
     ${D}/third_party/inspector_protocol/code_generator.py
     ${D}/src/inspector/inspector_protocol_config.json
-    ${inspector_templates}
+    ${inspector-templates}
     ${inspector_dirs}
   OUTPUT
     ${inspector_files}
@@ -561,20 +520,20 @@ add_custom_command(
 # v8_libplatform
 #
 
-add_library(
-  v8_libplatform STATIC
-  ${D}/src/libplatform/default-foreground-task-runner.cc
-  ${D}/src/libplatform/default-platform.cc
-  ${D}/src/libplatform/default-worker-threads-task-runner.cc
-  ${D}/src/libplatform/delayed-task-queue.cc
-  ${D}/src/libplatform/task-queue.cc
-  ${D}/src/libplatform/tracing/trace-buffer.cc
-  ${D}/src/libplatform/tracing/trace-config.cc
-  ${D}/src/libplatform/tracing/trace-object.cc
-  ${D}/src/libplatform/tracing/trace-writer.cc
-  ${D}/src/libplatform/tracing/tracing-controller.cc
-  ${D}/src/libplatform/worker-thread.cc
-)
+add_library(v8_libplatform STATIC)
+target_sources(v8_libplatform
+  PRIVATE
+    ${D}/src/libplatform/default-foreground-task-runner.cc
+    ${D}/src/libplatform/default-platform.cc
+    ${D}/src/libplatform/default-worker-threads-task-runner.cc
+    ${D}/src/libplatform/delayed-task-queue.cc
+    ${D}/src/libplatform/task-queue.cc
+    ${D}/src/libplatform/tracing/trace-buffer.cc
+    ${D}/src/libplatform/tracing/trace-config.cc
+    ${D}/src/libplatform/tracing/trace-object.cc
+    ${D}/src/libplatform/tracing/trace-writer.cc
+    ${D}/src/libplatform/tracing/tracing-controller.cc
+    ${D}/src/libplatform/worker-thread.cc)
 
 target_compile_options(v8_libplatform PRIVATE ${disable-exceptions})
 target_include_directories(
