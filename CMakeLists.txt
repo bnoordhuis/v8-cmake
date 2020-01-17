@@ -1,4 +1,5 @@
 cmake_minimum_required(VERSION 3.4)
+set(CMAKE_USER_MAKE_RULES_OVERRIDE "${CMAKE_CURRENT_SOURCE_DIR}/cmake/MSVC.cmake")
 set(CMAKE_DISABLE_IN_SOURCE_BUILD ON)
 project(V8 LANGUAGES ASM CXX C)
 
@@ -36,6 +37,8 @@ string(CONCAT is-posix $<OR:
   ${is-aix}
 >)
 
+set(is-msvc $<CXX_COMPILER_ID:MSVC>)
+
 # FIXME obviously
 set(is-arm 0)
 set(is-arm64 0)
@@ -51,6 +54,7 @@ string(CONCAT is-x64 $<OR:
 >)
 
 option(V8_ENABLE_CONCURRENT_MARKING "Enable concurrent marking" ON)
+option(V8_ENABLE_THIRD_PARTY_HEAP "Enable third party HEAP library" OFF)
 option(V8_ENABLE_I18N "Enable Internationalization support")
 
 set(
@@ -65,16 +69,20 @@ set(
   $<${is-win}:NOMINMAX>
   $<$<OR:${is-win},${is-x64}>:V8_OS_WINX64>
   $<$<BOOL:${V8_ENABLE_CONCURRENT_MARKING}>:V8_CONCURRENT_MARKING>
+  $<$<BOOL:${V8_ENABLE_THIRD_PARTY_HEAP}>:V8_ENABLE_THIRD_PARTY_HEAP>
+  $<${is-win}:V8_OS_WIN32>
 )
 
 set(D ${PROJECT_SOURCE_DIR}/v8)
 
 set(disable-exceptions
+  $<$<CXX_COMPILER_ID:MSVC>:/EHs-c->
   $<$<CXX_COMPILER_ID:AppleClang>:-fno-exceptions>
   $<$<CXX_COMPILER_ID:Clang>:-fno-exceptions>
   $<$<CXX_COMPILER_ID:GNU>:-fno-exceptions>)
 
 set(enable-exceptions
+  $<$<CXX_COMPILER_ID:MSVC>:/EHsc>
   $<$<CXX_COMPILER_ID:AppleClang>:-fexceptions>
   $<$<CXX_COMPILER_ID:Clang>:-fexceptions>
   $<$<CXX_COMPILER_ID:GNU>:-fexceptions>)
@@ -93,6 +101,7 @@ add_executable(
   ${D}/src/d8/d8-platforms.cc
   ${D}/src/d8/d8.cc)
 
+target_compile_definitions(d8 PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 target_compile_options(d8 PRIVATE ${disable-exceptions})
 target_include_directories(d8
   PUBLIC
@@ -132,6 +141,7 @@ list(APPEND i18n-sources
   ${PROJECT_SOURCE_DIR}/v8/src/strings/char-predicates.cc)
 
 target_sources(v8-i18n-support PRIVATE ${i18n-sources})
+target_compile_definitions(v8-i18n-support PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 target_compile_options(v8-i18n-support PRIVATE ${disable-exceptions})
 target_link_libraries(v8-i18n-support PRIVATE v8_torque_generated)
 
@@ -268,12 +278,27 @@ add_library(v8_base_without_compiler STATIC
   ${zone-sources}
   $<TARGET_OBJECTS:v8-adler32>
 )
+if (WIN32)
+  if (CMAKE_SYSTEM_VERSION VERSION_GREATER 10) # Windows 10
+    set(windows-version 0x0A00)
+  elseif (CMAKE_SYSTEM_VERSION VERSION_GREATER 6.3) # Windows 8.1
+    set(windows-version 0x0603)
+  elseif (CMAKE_SYSTEM_VERSION VERSION_GREATER 6.2) # Windows 8
+    set(windows-version 0x0602)
+  elseif (CMAKE_SYSTEM_VERSION VERSION_GREATER 6.1) # Windows 7
+    set(windows-version 0x0601)
+  elseif (CMAKE_SYSTEM_VERSION VERSION_GREATER 6.0) # Windows Vista
+    set(windows-version 0x0600)
+  endif()
+endif()
 
 set_property(SOURCE ${D}/src/diagnostics/unwinding-info-win64.cc
   APPEND PROPERTY
-    COMPILE_DEFINITIONS UNICODE)
+    COMPILE_DEFINITIONS
+      UNICODE
+      _WIN32_WINNT=${windows-version})
 
-target_compile_definitions(v8_base_without_compiler PRIVATE ${v8_defines})
+target_compile_definitions(v8_base_without_compiler PRIVATE ${v8_defines} $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 target_compile_options(v8_base_without_compiler PRIVATE ${disable-exceptions})
 
 target_include_directories(
@@ -305,7 +330,7 @@ list(FILTER compiler-sources EXCLUDE REGEX ".*backend/.*/.*[.]cc$")
 
 add_library(v8_compiler STATIC)
 target_sources(v8_compiler PRIVATE ${compiler-sources})
-target_compile_definitions(v8_compiler PRIVATE ${v8_defines})
+target_compile_definitions(v8_compiler PRIVATE ${v8_defines} $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 target_compile_options(v8_compiler PRIVATE ${disable-exceptions})
 
 target_include_directories(
@@ -386,7 +411,7 @@ add_library(
   ${D}/src/interpreter/interpreter-intrinsics-generator.cc
 )
 
-target_compile_definitions(v8_initializers PRIVATE ${v8_defines})
+target_compile_definitions(v8_initializers PRIVATE ${v8_defines} $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 target_compile_options(v8_initializers PRIVATE ${disable-exceptions})
 
 target_include_directories(
@@ -409,6 +434,7 @@ add_library(
   ${D}/src/init/setup-isolate-deserialize.cc
 )
 
+target_compile_definitions(v8_snapshot PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 target_compile_options(v8_snapshot PRIVATE ${disable-exceptions})
 target_include_directories(v8_snapshot PRIVATE ${D})
 target_link_libraries(v8_snapshot
@@ -480,6 +506,7 @@ add_library(v8_inspector STATIC
 
 target_compile_features(v8_inspector PUBLIC cxx_std_17)
 target_compile_options(v8_inspector PRIVATE ${disable-exceptions})
+target_compile_definitions(v8_inspector PUBLIC $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 
 target_include_directories(v8_inspector
   PRIVATE
@@ -535,6 +562,7 @@ target_sources(v8_libplatform
     ${D}/src/libplatform/tracing/tracing-controller.cc
     ${D}/src/libplatform/worker-thread.cc)
 
+target_compile_definitions(v8_libplatform PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 target_compile_options(v8_libplatform PRIVATE ${disable-exceptions})
 target_include_directories(
   v8_libplatform
@@ -551,6 +579,7 @@ target_link_libraries(v8_libplatform PRIVATE v8_libbase)
 add_library(v8_libsampler STATIC
   ${D}/src/libsampler/sampler.cc)
 
+target_compile_definitions(v8_libsampler PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 target_compile_options(v8_libsampler PRIVATE ${disable-exceptions})
 target_include_directories(v8_libsampler PRIVATE ${D})
 target_link_libraries(v8_libsampler PRIVATE v8_libbase)
@@ -581,6 +610,7 @@ add_library(v8_libbase STATIC
   ${D}/src/base/vlq-base64.cc
   $<$<NOT:$<OR:${is-win},${is-aix}>>:${D}/src/base/platform/platform-posix-time.cc>
   $<${is-win}:${D}/src/base/platform/platform-win32.cc>
+  $<${is-win}:${D}/src/base/debug/stack_trace_win.cc>
   $<${is-aix}:${D}/src/base/debug/stack_trace_posix.cc>
   $<${is-aix}:${D}/src/base/platform/platform-aix.cc>
   $<${is-darwin}:${D}/src/base/debug/stack_trace_posix.cc>
@@ -593,9 +623,7 @@ add_library(v8_libbase STATIC
 set_property(SOURCE ${D}/src/base/utils/random-number-generator.cc
   APPEND PROPERTY COMPILE_DEFINITIONS _CRT_RAND_S)
 
-set_property(SOURCE ${D}/src/base/platform/platform-win32.cc
-  APPEND PROPERTY COMPILE_DEFINITIONS UNICODE)
-
+target_compile_definitions(v8_libbase PRIVATE $<${is-win}:UNICODE> $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 target_compile_options(v8_libbase PRIVATE ${disable-exceptions})
 target_include_directories(v8_libbase PRIVATE ${D})
 target_link_libraries(v8_libbase
@@ -604,6 +632,7 @@ target_link_libraries(v8_libbase
     $<${is-linux}:${CMAKE_DL_LIBS}>
     $<${is-linux}:rt>
     $<${is-win}:winmm>
+    $<${is-win}:dbghelp>
 )
 
 #
@@ -685,6 +714,7 @@ add_library(
   ${torque-outputs}
   ${torque_outputs})
 
+target_compile_definitions(v8_torque_generated PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 target_compile_options(v8_torque_generated PRIVATE ${disable-exceptions})
 target_include_directories(v8_torque_generated
   PUBLIC
@@ -703,6 +733,7 @@ add_custom_command(
     ${torque_dirs}
     ${torque_files_abs}
   OUTPUT
+    ${torque-outputs}
     ${torque_outputs}
 )
 
@@ -741,6 +772,7 @@ add_executable(mksnapshot
   ${D}/src/snapshot/snapshot-empty.cc
 )
 
+target_compile_definitions(mksnapshot PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 target_compile_options(mksnapshot PRIVATE ${disable-exceptions})
 target_include_directories(mksnapshot PRIVATE ${D})
 target_link_libraries(mksnapshot
