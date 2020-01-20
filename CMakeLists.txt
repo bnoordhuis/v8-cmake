@@ -32,7 +32,7 @@ set(
   $<${v8_enable_concurrent_marking}:V8_CONCURRENT_MARKING>
 )
 
-set(D ${CMAKE_SOURCE_DIR}/v8)
+set(D ${PROJECT_SOURCE_DIR}/v8)
 
 #
 # d8
