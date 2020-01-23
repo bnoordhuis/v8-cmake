@@ -26,4 +26,4 @@ To build the library and the `d8` shell:
 
 If CMake complains about `python` being incompatible or too old:
 
-    $ cmake -DPYTHON_EXECUTABLE=/usr/bin/python3 ..
+    $ cmake -DPYTHON_EXECUTABLE=/usr/bin/python3 /path/to/v8-cmake
