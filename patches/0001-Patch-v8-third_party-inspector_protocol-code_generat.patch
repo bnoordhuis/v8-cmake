@@ -1,0 +1,27 @@
+From 47cc9432a63d75d5a82394b75f6c4529277b14c4 Mon Sep 17 00:00:00 2001
+From: Ben Noordhuis <info@bnoordhuis.nl>
+Date: Tue, 31 Dec 2019 14:55:32 +0100
+Subject: [PATCH] Patch v8/third_party/inspector_protocol/code_generator.py
+
+It mangles absolute paths without this patch. GN apparently passes
+relative paths but that's not robust with CMake.
+---
+ v8/third_party/inspector_protocol/code_generator.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/v8/third_party/inspector_protocol/code_generator.py b/v8/third_party/inspector_protocol/code_generator.py
+index 4260dbe..50e439e 100755
+--- a/v8/third_party/inspector_protocol/code_generator.py
++++ b/v8/third_party/inspector_protocol/code_generator.py
+@@ -80,7 +80,7 @@ def read_config():
+     config_file = arg_options.config
+     config_base = os.path.dirname(config_file)
+     config_values = arg_options.config_value
+-    inspector_protocol_dir = arg_options.inspector_protocol_dir.lstrip('/')
++    inspector_protocol_dir = arg_options.inspector_protocol_dir
+   except Exception:
+     # Work with python 2 and 3 http://docs.python.org/py3k/howto/pyporting.html
+     exc = sys.exc_info()[1]
+-- 
+2.20.1
+
