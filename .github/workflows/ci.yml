@@ -1,0 +1,26 @@
+name: v8-cmake
+
+on:
+  pull_request:
+    paths:
+      - 'v8/**'
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [macos-latest, ubuntu-16.04, ubuntu-18.04, windows-latest]
+    runs-on: ${{matrix.os}}
+    steps:
+      - uses: actions/checkout@v2
+      - name: setup
+        run: cmake -E make_directory ${{runner.workspace}}/build
+      # Note: `cmake -B ${{runner.workspace}}/build` needs
+      # cmake 3.13 but Ubuntu 16.04 comes with cmake 3.12.
+      - name: configure
+        run: cmake ${{runner.workspace}}/v8-cmake
+        working-directory: ${{runner.workspace}}/build
+      - name: build
+        run: cmake --build ${{runner.workspace}}/build -j 2
+      - name: test
+        run: ${{runner.workspace}}/build/d8 -e 42

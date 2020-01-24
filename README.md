@@ -1,3 +1,5 @@
+![](https://github.com/bnoordhuis/v8-cmake/workflows/v8-cmake/badge.svg)
+
 A port of the [V8 JavaScript engine](https://v8.dev/) to the
 [CMake](https://cmake.org/) build system.
 
