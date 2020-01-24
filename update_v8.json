@@ -29,5 +29,11 @@
     "commit": "e77e1c06c8881abff0c7418368d147ff4a474d08",
     "path": "v8/third_party/zlib",
     "url": "https://chromium.googlesource.com/chromium/src/third_party/zlib.git"
+  },
+  {
+    "branch": "master",
+    "commit": "8f45f5cfa0009d2a70589bcda0349b8cb2b72783",
+    "path": "v8/third_party/markupsafe",
+    "url": "https://chromium.googlesource.com/chromium/src/third_party/markupsafe.git"
   }
 ]
