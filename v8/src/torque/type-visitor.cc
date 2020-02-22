@@ -98,18 +98,21 @@ const AbstractType* TypeVisitor::ComputeType(
     ReportError("cannot declare a transient type that is also constexpr");
   }
 
-  const AbstractType* non_constexpr_version = nullptr;
+  const Type* non_constexpr_version = nullptr;
   if (decl->is_constexpr) {
     QualifiedName non_constexpr_name{GetNonConstexprName(decl->name->value)};
-    const Type* non_constexpr_type =
-        Declarations::LookupType(non_constexpr_name);
-    non_constexpr_version = AbstractType::DynamicCast(non_constexpr_type);
-    DCHECK_NOT_NULL(non_constexpr_version);
+    if (auto type = Declarations::TryLookupType(non_constexpr_name)) {
+      non_constexpr_version = *type;
+    }
   }
 
-  return TypeOracle::GetAbstractType(parent_type, decl->name->value,
-                                     decl->transient, generates,
-                                     non_constexpr_version, specialized_from);
+  AbstractTypeFlags flags = AbstractTypeFlag::kNone;
+  if (decl->transient) flags |= AbstractTypeFlag::kTransient;
+  if (decl->is_constexpr) flags |= AbstractTypeFlag::kConstexpr;
+
+  return TypeOracle::GetAbstractType(parent_type, decl->name->value, flags,
+                                     generates, non_constexpr_version,
+                                     specialized_from);
 }
 
 void DeclareMethods(AggregateType* container_type,
@@ -131,14 +134,77 @@ void DeclareMethods(AggregateType* container_type,
   }
 }
 
+const BitFieldStructType* TypeVisitor::ComputeType(
+    BitFieldStructDeclaration* decl, MaybeSpecializationKey specialized_from) {
+  CurrentSourcePosition::Scope position_scope(decl->pos);
+  if (specialized_from.has_value()) {
+    ReportError("Bitfield struct specialization is not supported");
+  }
+  const Type* parent = TypeVisitor::ComputeType(decl->parent);
+  if (!IsAnyUnsignedInteger(parent)) {
+    ReportError(
+        "Bitfield struct must extend from an unsigned integer type, not ",
+        parent->ToString());
+  }
+  auto opt_size = SizeOf(parent);
+  if (!opt_size.has_value()) {
+    ReportError("Cannot determine size of bitfield struct ", decl->name->value,
+                " because of unsized parent type ", parent->ToString());
+  }
+  const size_t size = 8 * std::get<0>(*opt_size);  // Convert bytes to bits.
+  BitFieldStructType* type = TypeOracle::GetBitFieldStructType(parent, decl);
+
+  // Iterate through all of the declared fields, checking their validity and
+  // registering them on the newly-constructed BitFieldStructType instance.
+  int offset = 0;
+  for (const auto& field : decl->fields) {
+    CurrentSourcePosition::Scope field_position_scope(
+        field.name_and_type.type->pos);
+    const Type* field_type = TypeVisitor::ComputeType(field.name_and_type.type);
+    if (!IsAllowedAsBitField(field_type)) {
+      ReportError("Type not allowed as bitfield: ",
+                  field.name_and_type.name->value);
+    }
+
+    // Compute the maximum number of bits that could be used for a field of this
+    // type. Booleans are a special case, not included in SizeOf, because their
+    // runtime size is 32 bits but they should only occupy 1 bit as a bitfield.
+    size_t field_type_size = 0;
+    if (field_type->IsSubtypeOf(TypeOracle::GetBoolType())) {
+      field_type_size = 1;
+    } else {
+      auto opt_field_type_size = SizeOf(field_type);
+      if (!opt_field_type_size.has_value()) {
+        ReportError("Size unknown for type ", field_type->ToString());
+      }
+      field_type_size = 8 * std::get<0>(*opt_field_type_size);
+    }
+
+    if (field.num_bits < 1 ||
+        static_cast<size_t>(field.num_bits) > field_type_size) {
+      ReportError("Invalid number of bits for ",
+                  field.name_and_type.name->value);
+    }
+    type->RegisterField({field.name_and_type.name->pos,
+                         {field.name_and_type.name->value, field_type},
+                         offset,
+                         field.num_bits});
+    offset += field.num_bits;
+    if (static_cast<size_t>(offset) > size) {
+      ReportError("Too many total bits in ", decl->name->value);
+    }
+  }
+
+  return type;
+}
+
 const StructType* TypeVisitor::ComputeType(
     StructDeclaration* decl, MaybeSpecializationKey specialized_from) {
   StructType* struct_type = TypeOracle::GetStructType(decl, specialized_from);
   CurrentScope::Scope struct_namespace_scope(struct_type->nspace());
   CurrentSourcePosition::Scope position_activator(decl->pos);
 
-  size_t offset = 0;
-  bool packable = true;
+  ResidueClass offset = 0;
   for (auto& field : decl->fields) {
     CurrentSourcePosition::Scope position_activator(
         field.name_and_type.type->pos);
@@ -151,20 +217,11 @@ const StructType* TypeVisitor::ComputeType(
             struct_type,
             base::nullopt,
             {field.name_and_type.name->value, field_type},
-            offset,
+            offset.SingleValue(),
             false,
             field.const_qualified,
             false};
     auto optional_size = SizeOf(f.name_and_type.type);
-    // Structs may contain fields that aren't representable in packed form. If
-    // so, then this field and any subsequent fields should have their offsets
-    // marked as invalid.
-    if (!optional_size.has_value()) {
-      packable = false;
-    }
-    if (!packable) {
-      f.offset = Field::kInvalidOffset;
-    }
     struct_type->RegisterField(f);
     // Offsets are assigned based on an assumption of no space between members.
     // This might lead to invalid alignment in some cases, but most structs are
@@ -176,6 +233,10 @@ const StructType* TypeVisitor::ComputeType(
       size_t field_size = 0;
       std::tie(field_size, std::ignore) = *optional_size;
       offset += field_size;
+    } else {
+      // Structs may contain fields that aren't representable in packed form. If
+      // so, the offset of subsequent fields are marked as invalid.
+      offset = ResidueClass::Unknown();
     }
   }
   return struct_type;
@@ -243,7 +304,8 @@ const ClassType* TypeVisitor::ComputeType(
     }
     const Type* super_type = TypeVisitor::ComputeType(*decl->super);
     const ClassType* super_class = ClassType::DynamicCast(super_type);
-    const Type* struct_type = Declarations::LookupGlobalType("Struct");
+    const Type* struct_type =
+        Declarations::LookupGlobalType(QualifiedName("Struct"));
     if (!super_class || super_class != struct_type) {
       ReportError("Intern class ", decl->name->value,
                   " must extend class Struct.");
@@ -321,8 +383,13 @@ Signature TypeVisitor::MakeSignature(const CallableDeclaration* declaration) {
 void TypeVisitor::VisitClassFieldsAndMethods(
     ClassType* class_type, const ClassDeclaration* class_declaration) {
   const ClassType* super_class = class_type->GetSuperClass();
-  size_t class_offset = super_class ? super_class->size() : 0;
-  bool seen_indexed_field = false;
+  ResidueClass class_offset = 0;
+  size_t header_size = 0;
+  if (super_class) {
+    class_offset = super_class->size();
+    header_size = super_class->header_size();
+  }
+
   for (const ClassFieldExpression& field_expression :
        class_declaration->fields) {
     CurrentSourcePosition::Scope position_activator(
@@ -350,7 +417,8 @@ void TypeVisitor::VisitClassFieldsAndMethods(
         ReportError("non-extern classes do not support weak fields");
       }
     }
-    if (const StructType* struct_type = StructType::DynamicCast(field_type)) {
+    const StructType* struct_type = StructType::DynamicCast(field_type);
+    if (struct_type && struct_type != TypeOracle::GetFloat64OrHoleType()) {
       for (const Field& struct_field : struct_type->fields()) {
         if (!struct_field.name_and_type.type->IsSubtypeOf(
                 TypeOracle::GetTaggedType())) {
@@ -365,47 +433,42 @@ void TypeVisitor::VisitClassFieldsAndMethods(
         }
       }
     }
-    base::Optional<NameAndType> index_field;
-    if (field_expression.index) {
-      if (seen_indexed_field ||
-          (super_class && super_class->HasIndexedField())) {
-        ReportError(
-            "only one indexable field is currently supported per class");
-      }
-      seen_indexed_field = true;
-      index_field = class_type->LookupFieldInternal(*field_expression.index)
-                        .name_and_type;
-    } else {
-      if (seen_indexed_field) {
-        ReportError("cannot declare non-indexable field \"",
-                    field_expression.name_and_type.name,
-                    "\" after an indexable field "
-                    "declaration");
-      }
-    }
+    base::Optional<Expression*> array_length = field_expression.index;
     const Field& field = class_type->RegisterField(
         {field_expression.name_and_type.name->pos,
          class_type,
-         index_field,
+         array_length,
          {field_expression.name_and_type.name->value, field_type},
-         class_offset,
+         class_offset.SingleValue(),
          field_expression.weak,
          field_expression.const_qualified,
          field_expression.generate_verify});
-    size_t field_size;
-    std::tie(field_size, std::ignore) = field.GetFieldSizeInformation();
-    // Our allocations don't support alignments beyond kTaggedSize.
-    size_t alignment = std::min(
-        static_cast<size_t>(TargetArchitecture::TaggedSize()), field_size);
-    if (alignment > 0 && class_offset % alignment != 0) {
-      ReportError("field ", field_expression.name_and_type.name, " at offset ",
-                  class_offset, " is not ", alignment, "-byte aligned.");
+    ResidueClass field_size = std::get<0>(field.GetFieldSizeInformation());
+    if (field.index) {
+      if (auto literal = NumberLiteralExpression::DynamicCast(*field.index)) {
+        size_t value = static_cast<size_t>(literal->number);
+        if (value != literal->number) {
+          Error("non-integral array length").Position(field.pos);
+        }
+        field_size *= value;
+      } else {
+        field_size *= ResidueClass::Unknown();
+      }
     }
-    if (!field_expression.index) {
-      class_offset += field_size;
+    field.ValidateAlignment(class_offset);
+    class_offset += field_size;
+    // In-object properties are not considered part of the header.
+    if (class_offset.SingleValue() && !class_type->IsShape()) {
+      header_size = *class_offset.SingleValue();
+    }
+    if (!field.index && !class_offset.SingleValue()) {
+      Error("Indexed fields have to be at the end of the object")
+          .Position(field.pos);
     }
   }
-  class_type->SetSize(class_offset);
+  DCHECK_GT(header_size, 0);
+  class_type->header_size_ = header_size;
+  class_type->size_ = class_offset;
   class_type->GenerateAccessors();
   DeclareMethods(class_type, class_declaration->methods);
 }

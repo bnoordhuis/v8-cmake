@@ -540,8 +540,7 @@ class DeletePropertyBaseAssembler : public AccessorAssembler {
 
     BIND(&dictionary_found);
     TNode<IntPtrT> key_index = var_name_index.value();
-    TNode<Uint32T> details =
-        LoadDetailsByKeyIndex<NameDictionary>(properties, key_index);
+    TNode<Uint32T> details = LoadDetailsByKeyIndex(properties, key_index);
     GotoIf(IsSetWord32(details, PropertyDetails::kAttributesDontDeleteMask),
            dont_delete);
     // Overwrite the entry itself (see NameDictionary::SetEntry).
@@ -1002,7 +1001,7 @@ TF_BUILTIN(GetProperty, CodeStubAssembler) {
           TNode<Name> unique_name, Label* next_holder, Label* if_bailout) {
         TVARIABLE(Object, var_value);
         Label if_found(this);
-        TryGetOwnProperty(context, receiver, holder, holder_map,
+        TryGetOwnProperty(context, receiver, CAST(holder), holder_map,
                           holder_instance_type, unique_name, &if_found,
                           &var_value, next_holder, if_bailout);
         BIND(&if_found);
@@ -1057,7 +1056,7 @@ TF_BUILTIN(GetPropertyWithReceiver, CodeStubAssembler) {
           TNode<Name> unique_name, Label* next_holder, Label* if_bailout) {
         TVARIABLE(Object, var_value);
         Label if_found(this);
-        TryGetOwnProperty(context, receiver, holder, holder_map,
+        TryGetOwnProperty(context, receiver, CAST(holder), holder_map,
                           holder_instance_type, unique_name, &if_found,
                           &var_value, next_holder, if_bailout);
         BIND(&if_found);

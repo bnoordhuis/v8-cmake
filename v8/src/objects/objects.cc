@@ -98,6 +98,7 @@
 #include "src/objects/microtask-inl.h"
 #include "src/objects/module-inl.h"
 #include "src/objects/promise-inl.h"
+#include "src/objects/property-descriptor-object-inl.h"
 #include "src/objects/property-descriptor.h"
 #include "src/objects/prototype.h"
 #include "src/objects/slots-atomic-inl.h"
@@ -405,15 +406,13 @@ Handle<String> AsStringOrEmpty(Isolate* isolate, Handle<Object> object) {
 }
 
 Handle<String> NoSideEffectsErrorToString(Isolate* isolate,
-                                          Handle<Object> input) {
-  Handle<JSReceiver> receiver = Handle<JSReceiver>::cast(input);
-
+                                          Handle<JSReceiver> error) {
   Handle<Name> name_key = isolate->factory()->name_string();
-  Handle<Object> name = JSReceiver::GetDataProperty(receiver, name_key);
+  Handle<Object> name = JSReceiver::GetDataProperty(error, name_key);
   Handle<String> name_str = AsStringOrEmpty(isolate, name);
 
   Handle<Name> msg_key = isolate->factory()->message_string();
-  Handle<Object> msg = JSReceiver::GetDataProperty(receiver, msg_key);
+  Handle<Object> msg = JSReceiver::GetDataProperty(error, msg_key);
   Handle<String> msg_str = AsStringOrEmpty(isolate, msg);
 
   if (name_str->length() == 0) return msg_str;
@@ -422,7 +421,12 @@ Handle<String> NoSideEffectsErrorToString(Isolate* isolate,
   IncrementalStringBuilder builder(isolate);
   builder.AppendString(name_str);
   builder.AppendCString(": ");
-  builder.AppendString(msg_str);
+
+  if (builder.Length() + msg_str->length() <= String::kMaxLength) {
+    builder.AppendString(msg_str);
+  } else {
+    builder.AppendCString("<a very large string>");
+  }
 
   return builder.Finish().ToHandleChecked();
 }
@@ -493,7 +497,8 @@ Handle<String> Object::NoSideEffectsToString(Isolate* isolate,
       // When internally formatting error objects, use a side-effects-free
       // version of Error.prototype.toString independent of the actually
       // installed toString method.
-      return NoSideEffectsErrorToString(isolate, input);
+      return NoSideEffectsErrorToString(isolate,
+                                        Handle<JSReceiver>::cast(input));
     } else if (*to_string == *isolate->object_to_string()) {
       Handle<Object> ctor = JSReceiver::GetDataProperty(
           receiver, isolate->factory()->constructor_string());
@@ -1141,8 +1146,8 @@ MaybeHandle<Object> JSProxy::GetProperty(Isolate* isolate,
   // 7. If trap is undefined, then
   if (trap->IsUndefined(isolate)) {
     // 7.a Return target.[[Get]](P, Receiver).
-    LookupIterator it =
-        LookupIterator::PropertyOrElement(isolate, receiver, name, target);
+    LookupIterator::Key key(isolate, name);
+    LookupIterator it(isolate, receiver, key, target);
     MaybeHandle<Object> result = Object::GetProperty(&it);
     *was_found = it.IsFound();
     return result;
@@ -2142,11 +2147,6 @@ void Tuple2::BriefPrintDetails(std::ostream& os) {
   os << " " << Brief(value1()) << ", " << Brief(value2());
 }
 
-void Tuple3::BriefPrintDetails(std::ostream& os) {
-  os << " " << Brief(value1()) << ", " << Brief(value2()) << ", "
-     << Brief(value3());
-}
-
 void ClassPositions::BriefPrintDetails(std::ostream& os) {
   os << " " << start() << ", " << end();
 }
@@ -2981,8 +2981,8 @@ Maybe<bool> JSProxy::SetProperty(Handle<JSProxy> proxy, Handle<Name> name,
   ASSIGN_RETURN_ON_EXCEPTION_VALUE(
       isolate, trap, Object::GetMethod(handler, trap_name), Nothing<bool>());
   if (trap->IsUndefined(isolate)) {
-    LookupIterator it =
-        LookupIterator::PropertyOrElement(isolate, receiver, name, target);
+    LookupIterator::Key key(isolate, name);
+    LookupIterator it(isolate, receiver, key, target);
 
     return Object::SetSuperProperty(&it, value, StoreOrigin::kMaybeKeyed,
                                     should_throw);
@@ -3474,7 +3474,7 @@ Maybe<bool> JSProxy::SetPrivateSymbol(Isolate* isolate, Handle<JSProxy> proxy,
           ? desc->value()
           : Handle<Object>::cast(isolate->factory()->undefined_value());
 
-  LookupIterator it(proxy, private_name, proxy);
+  LookupIterator it(isolate, proxy, private_name, proxy);
 
   if (it.IsFound()) {
     DCHECK_EQ(LookupIterator::DATA, it.state());
@@ -3971,6 +3971,65 @@ Handle<WeakArrayList> WeakArrayList::AddToEnd(Isolate* isolate,
   return array;
 }
 
+// static
+Handle<WeakArrayList> WeakArrayList::Append(Isolate* isolate,
+                                            Handle<WeakArrayList> array,
+                                            const MaybeObjectHandle& value,
+                                            AllocationType allocation) {
+  int length = array->length();
+
+  if (length < array->capacity()) {
+    array->Set(length, *value);
+    array->set_length(length + 1);
+    return array;
+  }
+
+  // Not enough space in the array left, either grow, shrink or
+  // compact the array.
+  int new_length = array->CountLiveElements() + 1;
+
+  bool shrink = new_length < length / 4;
+  bool grow = 3 * (length / 4) < new_length;
+
+  if (shrink || grow) {
+    // Grow or shrink array and compact out-of-place.
+    int new_capacity = CapacityForLength(new_length);
+    array = isolate->factory()->CompactWeakArrayList(array, new_capacity,
+                                                     allocation);
+
+  } else {
+    // Perform compaction in the current array.
+    array->Compact(isolate);
+  }
+
+  // Now append value to the array, there should always be enough space now.
+  DCHECK_LT(array->length(), array->capacity());
+
+  // Reload length, allocation might have killed some weak refs.
+  int index = array->length();
+  array->Set(index, *value);
+  array->set_length(index + 1);
+  return array;
+}
+
+void WeakArrayList::Compact(Isolate* isolate) {
+  int length = this->length();
+  int new_length = 0;
+
+  for (int i = 0; i < length; i++) {
+    MaybeObject value = Get(isolate, i);
+
+    if (!value->IsCleared()) {
+      if (new_length != i) {
+        Set(new_length, value);
+      }
+      ++new_length;
+    }
+  }
+
+  set_length(new_length);
+}
+
 bool WeakArrayList::IsFull() { return length() == capacity(); }
 
 // static
@@ -3980,9 +4039,7 @@ Handle<WeakArrayList> WeakArrayList::EnsureSpace(Isolate* isolate,
                                                  AllocationType allocation) {
   int capacity = array->capacity();
   if (capacity < length) {
-    int new_capacity = length;
-    new_capacity = new_capacity + Max(new_capacity / 2, 2);
-    int grow_by = new_capacity - capacity;
+    int grow_by = CapacityForLength(length) - capacity;
     array = isolate->factory()->CopyWeakArrayListAndGrow(array, grow_by,
                                                          allocation);
   }
@@ -3997,6 +4054,16 @@ int WeakArrayList::CountLiveWeakReferences() const {
     }
   }
   return live_weak_references;
+}
+
+int WeakArrayList::CountLiveElements() const {
+  int non_cleared_objects = 0;
+  for (int i = 0; i < length(); i++) {
+    if (!Get(i)->IsCleared()) {
+      ++non_cleared_objects;
+    }
+  }
+  return non_cleared_objects;
 }
 
 bool WeakArrayList::RemoveOne(const MaybeObjectHandle& value) {
@@ -4044,6 +4111,13 @@ Handle<WeakArrayList> PrototypeUsers::Add(Isolate* isolate,
 
   // If there are empty slots, use one of them.
   int empty_slot = Smi::ToInt(empty_slot_index(*array));
+
+  if (empty_slot == kNoEmptySlotsMarker) {
+    // GCs might have cleared some references, rescan the array for empty slots.
+    PrototypeUsers::ScanForEmptySlots(*array);
+    empty_slot = Smi::ToInt(empty_slot_index(*array));
+  }
+
   if (empty_slot != kNoEmptySlotsMarker) {
     DCHECK_GE(empty_slot, kFirstIndex);
     CHECK_LT(empty_slot, array->length());
@@ -4064,6 +4138,15 @@ Handle<WeakArrayList> PrototypeUsers::Add(Isolate* isolate,
   array->set_length(length + 1);
   if (assigned_index != nullptr) *assigned_index = length;
   return array;
+}
+
+// static
+void PrototypeUsers::ScanForEmptySlots(WeakArrayList array) {
+  for (int i = kFirstIndex; i < array.length(); i++) {
+    if (array.Get(i)->IsCleared()) {
+      PrototypeUsers::MarkSlotEmpty(array, i);
+    }
+  }
 }
 
 WeakArrayList PrototypeUsers::Compact(Handle<WeakArrayList> array, Heap* heap,
@@ -4961,59 +5044,58 @@ void SharedFunctionInfo::ScriptIterator::Reset(Isolate* isolate,
   index_ = 0;
 }
 
-void SharedFunctionInfo::SetScript(Handle<SharedFunctionInfo> shared,
-                                   Handle<HeapObject> script_object,
+void SharedFunctionInfo::SetScript(ReadOnlyRoots roots,
+                                   HeapObject script_object,
                                    int function_literal_id,
                                    bool reset_preparsed_scope_data) {
-  if (shared->script() == *script_object) return;
-  Isolate* isolate = shared->GetIsolate();
+  DisallowHeapAllocation no_gc;
 
-  if (reset_preparsed_scope_data &&
-      shared->HasUncompiledDataWithPreparseData()) {
-    shared->ClearPreparseData();
+  if (script() == script_object) return;
+
+  if (reset_preparsed_scope_data && HasUncompiledDataWithPreparseData()) {
+    ClearPreparseData();
   }
 
   // Add shared function info to new script's list. If a collection occurs,
   // the shared function info may be temporarily in two lists.
   // This is okay because the gc-time processing of these lists can tolerate
   // duplicates.
-  if (script_object->IsScript()) {
-    DCHECK(!shared->script().IsScript());
-    Handle<Script> script = Handle<Script>::cast(script_object);
-    Handle<WeakFixedArray> list =
-        handle(script->shared_function_infos(), isolate);
+  if (script_object.IsScript()) {
+    DCHECK(!script().IsScript());
+    Script script = Script::cast(script_object);
+    WeakFixedArray list = script.shared_function_infos();
 #ifdef DEBUG
-    DCHECK_LT(function_literal_id, list->length());
-    MaybeObject maybe_object = list->Get(function_literal_id);
+    DCHECK_LT(function_literal_id, list.length());
+    MaybeObject maybe_object = list.Get(function_literal_id);
     HeapObject heap_object;
     if (maybe_object->GetHeapObjectIfWeak(&heap_object)) {
-      DCHECK_EQ(heap_object, *shared);
+      DCHECK_EQ(heap_object, *this);
     }
 #endif
-    list->Set(function_literal_id, HeapObjectReference::Weak(*shared));
+    list.Set(function_literal_id, HeapObjectReference::Weak(*this));
   } else {
-    DCHECK(shared->script().IsScript());
+    DCHECK(script().IsScript());
 
     // Remove shared function info from old script's list.
-    Script old_script = Script::cast(shared->script());
+    Script old_script = Script::cast(script());
 
     // Due to liveedit, it might happen that the old_script doesn't know
     // about the SharedFunctionInfo, so we have to guard against that.
-    Handle<WeakFixedArray> infos(old_script.shared_function_infos(), isolate);
-    if (function_literal_id < infos->length()) {
+    WeakFixedArray infos = old_script.shared_function_infos();
+    if (function_literal_id < infos.length()) {
       MaybeObject raw =
           old_script.shared_function_infos().Get(function_literal_id);
       HeapObject heap_object;
-      if (raw->GetHeapObjectIfWeak(&heap_object) && heap_object == *shared) {
+      if (raw->GetHeapObjectIfWeak(&heap_object) && heap_object == *this) {
         old_script.shared_function_infos().Set(
-            function_literal_id, HeapObjectReference::Strong(
-                                     ReadOnlyRoots(isolate).undefined_value()));
+            function_literal_id,
+            HeapObjectReference::Strong(roots.undefined_value()));
       }
     }
   }
 
   // Finally set new script.
-  shared->set_script(*script_object);
+  set_script(script_object);
 }
 
 bool SharedFunctionInfo::HasBreakInfo() const {
@@ -5230,7 +5312,9 @@ void SharedFunctionInfo::DisableOptimization(BailoutReason reason) {
   // Code should be the lazy compilation stub or else interpreted.
   DCHECK(abstract_code().kind() == AbstractCode::INTERPRETED_FUNCTION ||
          abstract_code().kind() == AbstractCode::BUILTIN);
-  PROFILE(GetIsolate(), CodeDisableOptEvent(abstract_code(), *this));
+  PROFILE(GetIsolate(),
+          CodeDisableOptEvent(handle(abstract_code(), GetIsolate()),
+                              handle(*this, GetIsolate())));
   if (FLAG_trace_opt) {
     PrintF("[disabled optimization for ");
     ShortPrint();
@@ -5238,27 +5322,21 @@ void SharedFunctionInfo::DisableOptimization(BailoutReason reason) {
   }
 }
 
+// static
 void SharedFunctionInfo::InitFromFunctionLiteral(
-    Handle<SharedFunctionInfo> shared_info, FunctionLiteral* lit,
-    bool is_toplevel) {
-  Isolate* isolate = shared_info->GetIsolate();
-  bool needs_position_info = true;
+    Isolate* isolate, Handle<SharedFunctionInfo> shared_info,
+    FunctionLiteral* lit, bool is_toplevel) {
+  DCHECK(!shared_info->name_or_scope_info().IsScopeInfo());
 
   // When adding fields here, make sure DeclarationScope::AnalyzePartially is
   // updated accordingly.
   shared_info->set_internal_formal_parameter_count(lit->parameter_count());
   shared_info->SetFunctionTokenPosition(lit->function_token_position(),
                                         lit->start_position());
-  if (shared_info->scope_info().HasPositionInfo()) {
-    shared_info->scope_info().SetPositionInfo(lit->start_position(),
-                                              lit->end_position());
-    needs_position_info = false;
-  }
   shared_info->set_syntax_kind(lit->syntax_kind());
   shared_info->set_allows_lazy_compilation(lit->AllowsLazyCompilation());
   shared_info->set_language_mode(lit->language_mode());
   shared_info->set_function_literal_id(lit->function_literal_id());
-  //  shared_info->set_kind(lit->kind());
   // FunctionKind must have already been set.
   DCHECK(lit->kind() == shared_info->kind());
   shared_info->set_needs_home_object(lit->scope()->NeedsHomeObject());
@@ -5290,32 +5368,31 @@ void SharedFunctionInfo::InitFromFunctionLiteral(
     shared_info->set_is_safe_to_skip_arguments_adaptor(
         lit->SafeToSkipArgumentsAdaptor());
     DCHECK_NULL(lit->produced_preparse_data());
+
     // If we're about to eager compile, we'll have the function literal
     // available, so there's no need to wastefully allocate an uncompiled data.
-    // TODO(leszeks): This should be explicitly passed as a parameter, rather
-    // than relying on a property of the literal.
-    needs_position_info = false;
+    return;
+  }
+
+  shared_info->set_is_safe_to_skip_arguments_adaptor(false);
+  shared_info->UpdateExpectedNofPropertiesFromEstimate(lit);
+
+  Handle<UncompiledData> data;
+
+  ProducedPreparseData* scope_data = lit->produced_preparse_data();
+  if (scope_data != nullptr) {
+    Handle<PreparseData> preparse_data =
+        scope_data->Serialize(shared_info->GetIsolate());
+
+    data = isolate->factory()->NewUncompiledDataWithPreparseData(
+        lit->inferred_name(), lit->start_position(), lit->end_position(),
+        preparse_data);
   } else {
-    shared_info->set_is_safe_to_skip_arguments_adaptor(false);
-    ProducedPreparseData* scope_data = lit->produced_preparse_data();
-    if (scope_data != nullptr) {
-      Handle<PreparseData> preparse_data =
-          scope_data->Serialize(shared_info->GetIsolate());
-      Handle<UncompiledData> data =
-          isolate->factory()->NewUncompiledDataWithPreparseData(
-              lit->inferred_name(), lit->start_position(), lit->end_position(),
-              preparse_data);
-      shared_info->set_uncompiled_data(*data);
-      needs_position_info = false;
-    }
-    shared_info->UpdateExpectedNofPropertiesFromEstimate(lit);
+    data = isolate->factory()->NewUncompiledDataWithoutPreparseData(
+        lit->inferred_name(), lit->start_position(), lit->end_position());
   }
-  if (needs_position_info) {
-    Handle<UncompiledData> data =
-        isolate->factory()->NewUncompiledDataWithoutPreparseData(
-            lit->inferred_name(), lit->start_position(), lit->end_position());
-    shared_info->set_uncompiled_data(*data);
-  }
+
+  shared_info->set_uncompiled_data(*data);
 }
 
 uint16_t SharedFunctionInfo::get_property_estimate_from_literal(
@@ -5597,7 +5674,7 @@ bool JSArray::HasReadOnlyLength(Handle<JSArray> array) {
   }
 
   Isolate* isolate = array->GetIsolate();
-  LookupIterator it(array, isolate->factory()->length_string(), array,
+  LookupIterator it(isolate, array, isolate->factory()->length_string(), array,
                     LookupIterator::OWN_SKIP_INTERCEPTOR);
   CHECK_EQ(LookupIterator::ACCESSOR, it.state());
   return it.IsReadOnly();
@@ -5789,10 +5866,29 @@ Handle<Object> JSPromise::Fulfill(Handle<JSPromise> promise,
                                  PromiseReaction::kFulfill);
 }
 
+static void MoveMessageToPromise(Isolate* isolate, Handle<JSPromise> promise) {
+  if (isolate->thread_local_top()->pending_message_obj_.IsTheHole(isolate)) {
+    return;
+  }
+
+  Handle<Object> message =
+      handle(isolate->thread_local_top()->pending_message_obj_, isolate);
+  Handle<Symbol> key = isolate->factory()->promise_debug_message_symbol();
+  Object::SetProperty(isolate, promise, key, message, StoreOrigin::kMaybeKeyed,
+                      Just(ShouldThrow::kThrowOnError))
+      .Assert();
+
+  // The message object for a rejected promise was only stored for this purpose.
+  // Clear it, otherwise we might leak memory.
+  isolate->clear_pending_message();
+}
+
 // static
 Handle<Object> JSPromise::Reject(Handle<JSPromise> promise,
                                  Handle<Object> reason, bool debug_event) {
   Isolate* const isolate = promise->GetIsolate();
+
+  if (isolate->debug()->is_active()) MoveMessageToPromise(isolate, promise);
 
   if (debug_event) isolate->debug()->OnPromiseReject(promise, reason);
   isolate->RunPromiseHook(PromiseHookType::kResolve, promise,
@@ -6064,10 +6160,12 @@ Handle<JSRegExp> JSRegExp::Copy(Handle<JSRegExp> regexp) {
 }
 
 Object JSRegExp::Code(bool is_latin1) const {
+  DCHECK_EQ(TypeTag(), JSRegExp::IRREGEXP);
   return DataAt(code_index(is_latin1));
 }
 
 Object JSRegExp::Bytecode(bool is_latin1) const {
+  DCHECK_EQ(TypeTag(), JSRegExp::IRREGEXP);
   return DataAt(bytecode_index(is_latin1));
 }
 
@@ -6595,7 +6693,7 @@ void StringTable::EnsureCapacityForDeserialization(Isolate* isolate,
                                                    int expected) {
   Handle<StringTable> table = isolate->factory()->string_table();
   // We need a key instance for the virtual hash function.
-  table = StringTable::EnsureCapacity(isolate, table, expected);
+  table = EnsureCapacity(isolate, table, expected);
   isolate->heap()->SetRootStringTable(*table);
 }
 
@@ -6647,7 +6745,7 @@ Handle<String> StringTable::LookupKey(Isolate* isolate, StringTableKey* key) {
 
   table = StringTable::CautiousShrink(isolate, table);
   // Adding new string. Grow table if needed.
-  table = StringTable::EnsureCapacity(isolate, table, 1);
+  table = EnsureCapacity(isolate, table);
   isolate->heap()->SetRootStringTable(*table);
 
   return AddKeyNoResize(isolate, key);
@@ -6789,7 +6887,7 @@ Handle<StringSet> StringSet::New(Isolate* isolate) {
 Handle<StringSet> StringSet::Add(Isolate* isolate, Handle<StringSet> stringset,
                                  Handle<String> name) {
   if (!stringset->Has(isolate, name)) {
-    stringset = EnsureCapacity(isolate, stringset, 1);
+    stringset = EnsureCapacity(isolate, stringset);
     uint32_t hash = ShapeT::Hash(isolate, *name);
     InternalIndex entry = stringset->FindInsertionEntry(hash);
     stringset->set(EntryToIndex(entry), *name);
@@ -6807,7 +6905,7 @@ Handle<ObjectHashSet> ObjectHashSet::Add(Isolate* isolate,
                                          Handle<Object> key) {
   int32_t hash = key->GetOrCreateHash(isolate).value();
   if (!set->Has(isolate, key, hash)) {
-    set = EnsureCapacity(isolate, set, 1);
+    set = EnsureCapacity(isolate, set);
     InternalIndex entry = set->FindInsertionEntry(hash);
     set->set(EntryToIndex(entry), *key);
     set->ElementAdded();
@@ -7003,7 +7101,7 @@ Handle<CompilationCacheTable> CompilationCacheTable::PutScript(
   src = String::Flatten(isolate, src);
   StringSharedKey key(src, shared, language_mode, kNoSourcePosition);
   Handle<Object> k = key.AsHandle(isolate);
-  cache = EnsureCapacity(isolate, cache, 1);
+  cache = EnsureCapacity(isolate, cache);
   InternalIndex entry = cache->FindInsertionEntry(key.Hash());
   cache->set(EntryToIndex(entry), *k);
   cache->set(EntryToIndex(entry) + 1, *value);
@@ -7035,7 +7133,7 @@ Handle<CompilationCacheTable> CompilationCacheTable::PutEval(
     }
   }
 
-  cache = EnsureCapacity(isolate, cache, 1);
+  cache = EnsureCapacity(isolate, cache);
   InternalIndex entry = cache->FindInsertionEntry(key.Hash());
   Handle<Object> k =
       isolate->factory()->NewNumber(static_cast<double>(key.Hash()));
@@ -7049,7 +7147,7 @@ Handle<CompilationCacheTable> CompilationCacheTable::PutRegExp(
     Isolate* isolate, Handle<CompilationCacheTable> cache, Handle<String> src,
     JSRegExp::Flags flags, Handle<FixedArray> value) {
   RegExpKey key(src, flags);
-  cache = EnsureCapacity(isolate, cache, 1);
+  cache = EnsureCapacity(isolate, cache);
   InternalIndex entry = cache->FindInsertionEntry(key.Hash());
   // We store the value in the key slot, and compare the search key
   // to the stored value with a custon IsMatch function during lookups.
@@ -7111,15 +7209,16 @@ Handle<Derived> BaseNameDictionary<Derived, Shape>::New(
   Handle<Derived> dict = Dictionary<Derived, Shape>::New(
       isolate, at_least_space_for, allocation, capacity_option);
   dict->SetHash(PropertyArray::kNoHashSentinel);
-  dict->SetNextEnumerationIndex(PropertyDetails::kInitialIndex);
+  dict->set_next_enumeration_index(PropertyDetails::kInitialIndex);
   return dict;
 }
 
 template <typename Derived, typename Shape>
-Handle<Derived> BaseNameDictionary<Derived, Shape>::EnsureCapacity(
-    Isolate* isolate, Handle<Derived> dictionary, int n) {
-  // Check whether there are enough enumeration indices to add n elements.
-  if (!PropertyDetails::IsValidIndex(dictionary->NextEnumerationIndex() + n)) {
+int BaseNameDictionary<Derived, Shape>::NextEnumerationIndex(
+    Isolate* isolate, Handle<Derived> dictionary) {
+  int index = dictionary->next_enumeration_index();
+  // Check whether the next enumeration index is valid.
+  if (!PropertyDetails::IsValidIndex(index)) {
     // If not, we generate new indices for the properties.
     int length = dictionary->NumberOfElements();
 
@@ -7140,11 +7239,12 @@ Handle<Derived> BaseNameDictionary<Derived, Shape>::EnsureCapacity(
       dictionary->DetailsAtPut(isolate, index, new_details);
     }
 
-    // Set the next enumeration index.
-    dictionary->SetNextEnumerationIndex(PropertyDetails::kInitialIndex +
-                                        length);
+    index = PropertyDetails::kInitialIndex + length;
   }
-  return HashTable<Derived, Shape>::EnsureCapacity(isolate, dictionary, n);
+
+  // Don't update the next enumeration index here, since we might be looking at
+  // an immutable empty dictionary.
+  return index;
 }
 
 template <typename Derived, typename Shape>
@@ -7193,13 +7293,13 @@ Handle<Derived> BaseNameDictionary<Derived, Shape>::Add(
   DCHECK_EQ(0, details.dictionary_index());
   // Assign an enumeration index to the property and update
   // SetNextEnumerationIndex.
-  int index = dictionary->NextEnumerationIndex();
+  int index = Derived::NextEnumerationIndex(isolate, dictionary);
   details = details.set_index(index);
   dictionary = AddNoUpdateNextEnumerationIndex(isolate, dictionary, key, value,
                                                details, entry_out);
   // Update enumeration index here in order to avoid potential modification of
   // the canonical empty dictionary which lives in read only space.
-  dictionary->SetNextEnumerationIndex(index + 1);
+  dictionary->set_next_enumeration_index(index + 1);
   return dictionary;
 }
 
@@ -7213,7 +7313,7 @@ Handle<Derived> Dictionary<Derived, Shape>::Add(Isolate* isolate,
   // Validate that the key is absent.
   SLOW_DCHECK(dictionary->FindEntry(isolate, key).is_not_found());
   // Check whether the dictionary should be extended.
-  dictionary = Derived::EnsureCapacity(isolate, dictionary, 1);
+  dictionary = Derived::EnsureCapacity(isolate, dictionary);
 
   // Compute the key object.
   Handle<Object> k = Shape::AsHandle(isolate, key);
@@ -7560,7 +7660,7 @@ Handle<Derived> ObjectHashTableBase<Derived, Shape>::Put(Isolate* isolate,
   }
 
   // Check whether the hash table should be extended.
-  table = Derived::EnsureCapacity(isolate, table, 1);
+  table = Derived::EnsureCapacity(isolate, table);
   table->AddEntry(table->FindInsertionEntry(hash), *key, *value);
   return table;
 }
@@ -7725,6 +7825,7 @@ Handle<PropertyCell> PropertyCell::InvalidateEntry(
   bool is_the_hole = cell->value().IsTheHole(isolate);
   // Cell is officially mutable henceforth.
   PropertyDetails details = cell->property_details();
+  DCHECK(details.IsConfigurable());
   details = details.set_cell_type(is_the_hole ? PropertyCellType::kUninitialized
                                               : PropertyCellType::kMutable);
   new_cell->set_property_details(details);
@@ -7802,15 +7903,14 @@ Handle<PropertyCell> PropertyCell::PrepareForValue(
   const PropertyDetails original_details = cell->property_details();
   // Data accesses could be cached in ics or optimized code.
   bool invalidate =
-      (original_details.kind() == kData && details.kind() == kAccessor) ||
-      (!original_details.IsReadOnly() && details.IsReadOnly());
+      original_details.kind() == kData && details.kind() == kAccessor;
   int index;
   PropertyCellType old_type = original_details.cell_type();
   // Preserve the enumeration index unless the property was deleted or never
   // initialized.
   if (cell->value().IsTheHole(isolate)) {
-    index = dictionary->NextEnumerationIndex();
-    dictionary->SetNextEnumerationIndex(index + 1);
+    index = GlobalDictionary::NextEnumerationIndex(isolate, dictionary);
+    dictionary->set_next_enumeration_index(index + 1);
   } else {
     index = original_details.dictionary_index();
   }
@@ -7872,7 +7972,7 @@ int JSGeneratorObject::source_position() const {
 }
 
 // static
-AccessCheckInfo AccessCheckInfo::Get(const Isolate* isolate,
+AccessCheckInfo AccessCheckInfo::Get(Isolate* isolate,
                                      Handle<JSObject> receiver) {
   DisallowHeapAllocation no_gc;
   DCHECK(receiver->map().is_access_check_needed());
@@ -8055,6 +8155,15 @@ Maybe<bool> JSFinalizationGroup::Cleanup(
     Isolate* isolate, Handle<JSFinalizationGroup> finalization_group,
     Handle<Object> cleanup) {
   DCHECK(cleanup->IsCallable());
+  // Attempt to shrink key_map now, as unregister tokens are held weakly and the
+  // map is not shrinkable when sweeping dead tokens during GC itself.
+  if (!finalization_group->key_map().IsUndefined(isolate)) {
+    Handle<SimpleNumberDictionary> key_map = handle(
+        SimpleNumberDictionary::cast(finalization_group->key_map()), isolate);
+    key_map = SimpleNumberDictionary::Shrink(isolate, key_map);
+    finalization_group->set_key_map(*key_map);
+  }
+
   // It's possible that the cleared_cells list is empty, since
   // FinalizationGroup.unregister() removed all its elements before this task
   // ran. In that case, don't call the cleanup function.
@@ -8083,53 +8192,6 @@ Maybe<bool> JSFinalizationGroup::Cleanup(
     // function returns?
   }
   return Just(true);
-}
-
-MaybeHandle<FixedArray> JSReceiver::GetPrivateEntries(
-    Isolate* isolate, Handle<JSReceiver> receiver) {
-  PropertyFilter key_filter = static_cast<PropertyFilter>(PRIVATE_NAMES_ONLY);
-
-  Handle<FixedArray> keys;
-  ASSIGN_RETURN_ON_EXCEPTION_VALUE(
-      isolate, keys,
-      KeyAccumulator::GetKeys(receiver, KeyCollectionMode::kOwnOnly, key_filter,
-                              GetKeysConversion::kConvertToString),
-      MaybeHandle<FixedArray>());
-
-  // Calculate number of private entries to return in the FixedArray.
-  // TODO(v8:9839): take the number of private methods/accessors into account.
-  int private_brand_count = 0;
-  for (int i = 0; i < keys->length(); ++i) {
-    // Exclude the private brand symbols.
-    if (Symbol::cast(keys->get(i)).is_private_brand()) {
-      private_brand_count++;
-    }
-  }
-  int private_entries_count = keys->length() - private_brand_count;
-
-  Handle<FixedArray> entries =
-      isolate->factory()->NewFixedArray(private_entries_count * 2);
-  int length = 0;
-
-  for (int i = 0; i < keys->length(); ++i) {
-    Handle<Object> obj_key = handle(keys->get(i), isolate);
-    Handle<Symbol> key(Symbol::cast(*obj_key), isolate);
-    CHECK(key->is_private_name());
-    if (key->is_private_brand()) {
-      // TODO(v8:9839): get the private methods/accessors of the instance
-      // using the brand and add them to the entries.
-      continue;
-    }
-    Handle<Object> value;
-    ASSIGN_RETURN_ON_EXCEPTION_VALUE(
-        isolate, value, Object::GetProperty(isolate, receiver, key),
-        MaybeHandle<FixedArray>());
-
-    entries->set(length++, *key);
-    entries->set(length++, *value);
-  }
-  DCHECK_EQ(length, entries->length());
-  return FixedArray::ShrinkOrEmpty(isolate, entries, length);
 }
 
 }  // namespace internal

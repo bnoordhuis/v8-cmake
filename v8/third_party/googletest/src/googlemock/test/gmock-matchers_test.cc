@@ -41,10 +41,12 @@
 #endif
 
 #include "gmock/gmock-matchers.h"
-#include "gmock/gmock-more-matchers.h"
 
 #include <string.h>
 #include <time.h>
+
+#include <array>
+#include <cstdint>
 #include <deque>
 #include <forward_list>
 #include <functional>
@@ -60,9 +62,11 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
+
+#include "gmock/gmock-more-matchers.h"
 #include "gmock/gmock.h"
-#include "gtest/gtest.h"
 #include "gtest/gtest-spi.h"
+#include "gtest/gtest.h"
 
 namespace testing {
 namespace gmock_matchers_test {
@@ -2054,6 +2058,114 @@ TEST(PairMatchBaseTest, WorksWithMoveOnly) {
   EXPECT_TRUE(matcher.Matches(pointers));
 }
 
+// Tests that IsNan() matches a NaN, with float.
+TEST(IsNan, FloatMatchesNan) {
+  float quiet_nan = std::numeric_limits<float>::quiet_NaN();
+  float other_nan = std::nanf("1");
+  float real_value = 1.0f;
+
+  Matcher<float> m = IsNan();
+  EXPECT_TRUE(m.Matches(quiet_nan));
+  EXPECT_TRUE(m.Matches(other_nan));
+  EXPECT_FALSE(m.Matches(real_value));
+
+  Matcher<float&> m_ref = IsNan();
+  EXPECT_TRUE(m_ref.Matches(quiet_nan));
+  EXPECT_TRUE(m_ref.Matches(other_nan));
+  EXPECT_FALSE(m_ref.Matches(real_value));
+
+  Matcher<const float&> m_cref = IsNan();
+  EXPECT_TRUE(m_cref.Matches(quiet_nan));
+  EXPECT_TRUE(m_cref.Matches(other_nan));
+  EXPECT_FALSE(m_cref.Matches(real_value));
+}
+
+// Tests that IsNan() matches a NaN, with double.
+TEST(IsNan, DoubleMatchesNan) {
+  double quiet_nan = std::numeric_limits<double>::quiet_NaN();
+  double other_nan = std::nan("1");
+  double real_value = 1.0;
+
+  Matcher<double> m = IsNan();
+  EXPECT_TRUE(m.Matches(quiet_nan));
+  EXPECT_TRUE(m.Matches(other_nan));
+  EXPECT_FALSE(m.Matches(real_value));
+
+  Matcher<double&> m_ref = IsNan();
+  EXPECT_TRUE(m_ref.Matches(quiet_nan));
+  EXPECT_TRUE(m_ref.Matches(other_nan));
+  EXPECT_FALSE(m_ref.Matches(real_value));
+
+  Matcher<const double&> m_cref = IsNan();
+  EXPECT_TRUE(m_cref.Matches(quiet_nan));
+  EXPECT_TRUE(m_cref.Matches(other_nan));
+  EXPECT_FALSE(m_cref.Matches(real_value));
+}
+
+// Tests that IsNan() matches a NaN, with long double.
+TEST(IsNan, LongDoubleMatchesNan) {
+  long double quiet_nan = std::numeric_limits<long double>::quiet_NaN();
+  long double other_nan = std::nan("1");
+  long double real_value = 1.0;
+
+  Matcher<long double> m = IsNan();
+  EXPECT_TRUE(m.Matches(quiet_nan));
+  EXPECT_TRUE(m.Matches(other_nan));
+  EXPECT_FALSE(m.Matches(real_value));
+
+  Matcher<long double&> m_ref = IsNan();
+  EXPECT_TRUE(m_ref.Matches(quiet_nan));
+  EXPECT_TRUE(m_ref.Matches(other_nan));
+  EXPECT_FALSE(m_ref.Matches(real_value));
+
+  Matcher<const long double&> m_cref = IsNan();
+  EXPECT_TRUE(m_cref.Matches(quiet_nan));
+  EXPECT_TRUE(m_cref.Matches(other_nan));
+  EXPECT_FALSE(m_cref.Matches(real_value));
+}
+
+// Tests that IsNan() works with Not.
+TEST(IsNan, NotMatchesNan) {
+  Matcher<float> mf = Not(IsNan());
+  EXPECT_FALSE(mf.Matches(std::numeric_limits<float>::quiet_NaN()));
+  EXPECT_FALSE(mf.Matches(std::nanf("1")));
+  EXPECT_TRUE(mf.Matches(1.0));
+
+  Matcher<double> md = Not(IsNan());
+  EXPECT_FALSE(md.Matches(std::numeric_limits<double>::quiet_NaN()));
+  EXPECT_FALSE(md.Matches(std::nan("1")));
+  EXPECT_TRUE(md.Matches(1.0));
+
+  Matcher<long double> mld = Not(IsNan());
+  EXPECT_FALSE(mld.Matches(std::numeric_limits<long double>::quiet_NaN()));
+  EXPECT_FALSE(mld.Matches(std::nanl("1")));
+  EXPECT_TRUE(mld.Matches(1.0));
+}
+
+// Tests that IsNan() can describe itself.
+TEST(IsNan, CanDescribeSelf) {
+  Matcher<float> mf = IsNan();
+  EXPECT_EQ("is NaN", Describe(mf));
+
+  Matcher<double> md = IsNan();
+  EXPECT_EQ("is NaN", Describe(md));
+
+  Matcher<long double> mld = IsNan();
+  EXPECT_EQ("is NaN", Describe(mld));
+}
+
+// Tests that IsNan() can describe itself with Not.
+TEST(IsNan, CanDescribeSelfWithNot) {
+  Matcher<float> mf = Not(IsNan());
+  EXPECT_EQ("isn't NaN", Describe(mf));
+
+  Matcher<double> md = Not(IsNan());
+  EXPECT_EQ("isn't NaN", Describe(md));
+
+  Matcher<long double> mld = Not(IsNan());
+  EXPECT_EQ("isn't NaN", Describe(mld));
+}
+
 // Tests that FloatEq() matches a 2-tuple where
 // FloatEq(first field) matches the second field.
 TEST(FloatEq2Test, MatchesEqualArguments) {
@@ -2876,18 +2988,13 @@ TEST(MatcherAssertionTest, WorksWhenMatcherIsNotSatisfied) {
   static unsigned short n;  // NOLINT
   n = 5;
 
-  // VC++ prior to version 8.0 SP1 has a bug where it will not see any
-  // functions declared in the namespace scope from within nested classes.
-  // EXPECT/ASSERT_(NON)FATAL_FAILURE macros use nested classes so that all
-  // namespace-level functions invoked inside them need to be explicitly
-  // resolved.
-  EXPECT_FATAL_FAILURE(ASSERT_THAT(n, ::testing::Gt(10)),
+  EXPECT_FATAL_FAILURE(ASSERT_THAT(n, Gt(10)),
                        "Value of: n\n"
                        "Expected: is > 10\n"
                        "  Actual: 5" + OfType("unsigned short"));
   n = 0;
   EXPECT_NONFATAL_FAILURE(
-      EXPECT_THAT(n, ::testing::AllOf(::testing::Le(7), ::testing::Ge(5))),
+      EXPECT_THAT(n, AllOf(Le(7), Ge(5))),
       "Value of: n\n"
       "Expected: (is <= 7) and (is >= 5)\n"
       "  Actual: 0" + OfType("unsigned short"));
@@ -2901,11 +3008,11 @@ TEST(MatcherAssertionTest, WorksForByRefArguments) {
   static int n;
   n = 0;
   EXPECT_THAT(n, AllOf(Le(7), Ref(n)));
-  EXPECT_FATAL_FAILURE(ASSERT_THAT(n, ::testing::Not(::testing::Ref(n))),
+  EXPECT_FATAL_FAILURE(ASSERT_THAT(n, Not(Ref(n))),
                        "Value of: n\n"
                        "Expected: does not reference the variable @");
   // Tests the "Actual" part.
-  EXPECT_FATAL_FAILURE(ASSERT_THAT(n, ::testing::Not(::testing::Ref(n))),
+  EXPECT_FATAL_FAILURE(ASSERT_THAT(n, Not(Ref(n))),
                        "Actual: 0" + OfType("int") + ", which is located @");
 }
 
@@ -5093,14 +5200,14 @@ TEST(WhenSortedTest, WorksForStreamlike) {
   // Streamlike 'container' provides only minimal iterator support.
   // Its iterators are tagged with input_iterator_tag.
   const int a[5] = {2, 1, 4, 5, 3};
-  Streamlike<int> s(a, a + GTEST_ARRAY_SIZE_(a));
+  Streamlike<int> s(std::begin(a), std::end(a));
   EXPECT_THAT(s, WhenSorted(ElementsAre(1, 2, 3, 4, 5)));
   EXPECT_THAT(s, Not(WhenSorted(ElementsAre(2, 1, 4, 5, 3))));
 }
 
 TEST(WhenSortedTest, WorksForVectorConstRefMatcherOnStreamlike) {
   const int a[] = {2, 1, 4, 5, 3};
-  Streamlike<int> s(a, a + GTEST_ARRAY_SIZE_(a));
+  Streamlike<int> s(std::begin(a), std::end(a));
   Matcher<const std::vector<int>&> vector_match = ElementsAre(1, 2, 3, 4, 5);
   EXPECT_THAT(s, WhenSorted(vector_match));
   EXPECT_THAT(s, Not(WhenSorted(ElementsAre(2, 1, 4, 5, 3))));
@@ -5145,7 +5252,7 @@ TEST(IsSupersetOfTest, WorksForEmpty) {
 
 TEST(IsSupersetOfTest, WorksForStreamlike) {
   const int a[5] = {1, 2, 3, 4, 5};
-  Streamlike<int> s(a, a + GTEST_ARRAY_SIZE_(a));
+  Streamlike<int> s(std::begin(a), std::end(a));
 
   vector<int> expected;
   expected.push_back(1);
@@ -5273,7 +5380,7 @@ TEST(IsSubsetOfTest, WorksForEmpty) {
 
 TEST(IsSubsetOfTest, WorksForStreamlike) {
   const int a[5] = {1, 2};
-  Streamlike<int> s(a, a + GTEST_ARRAY_SIZE_(a));
+  Streamlike<int> s(std::begin(a), std::end(a));
 
   vector<int> expected;
   expected.push_back(1);
@@ -5367,14 +5474,14 @@ TEST(IsSubsetOfTest, WorksWithMoveOnly) {
 
 TEST(ElemensAreStreamTest, WorksForStreamlike) {
   const int a[5] = {1, 2, 3, 4, 5};
-  Streamlike<int> s(a, a + GTEST_ARRAY_SIZE_(a));
+  Streamlike<int> s(std::begin(a), std::end(a));
   EXPECT_THAT(s, ElementsAre(1, 2, 3, 4, 5));
   EXPECT_THAT(s, Not(ElementsAre(2, 1, 4, 5, 3)));
 }
 
 TEST(ElemensAreArrayStreamTest, WorksForStreamlike) {
   const int a[5] = {1, 2, 3, 4, 5};
-  Streamlike<int> s(a, a + GTEST_ARRAY_SIZE_(a));
+  Streamlike<int> s(std::begin(a), std::end(a));
 
   vector<int> expected;
   expected.push_back(1);
@@ -5421,7 +5528,7 @@ TEST(ElementsAreTest, TakesStlContainer) {
 
 TEST(UnorderedElementsAreArrayTest, SucceedsWhenExpected) {
   const int a[] = {0, 1, 2, 3, 4};
-  std::vector<int> s(a, a + GTEST_ARRAY_SIZE_(a));
+  std::vector<int> s(std::begin(a), std::end(a));
   do {
     StringMatchResultListener listener;
     EXPECT_TRUE(ExplainMatchResult(UnorderedElementsAreArray(a),
@@ -5432,8 +5539,8 @@ TEST(UnorderedElementsAreArrayTest, SucceedsWhenExpected) {
 TEST(UnorderedElementsAreArrayTest, VectorBool) {
   const bool a[] = {0, 1, 0, 1, 1};
   const bool b[] = {1, 0, 1, 1, 0};
-  std::vector<bool> expected(a, a + GTEST_ARRAY_SIZE_(a));
-  std::vector<bool> actual(b, b + GTEST_ARRAY_SIZE_(b));
+  std::vector<bool> expected(std::begin(a), std::end(a));
+  std::vector<bool> actual(std::begin(b), std::end(b));
   StringMatchResultListener listener;
   EXPECT_TRUE(ExplainMatchResult(UnorderedElementsAreArray(expected),
                                  actual, &listener)) << listener.str();
@@ -5444,7 +5551,7 @@ TEST(UnorderedElementsAreArrayTest, WorksForStreamlike) {
   // Its iterators are tagged with input_iterator_tag, and it has no
   // size() or empty() methods.
   const int a[5] = {2, 1, 4, 5, 3};
-  Streamlike<int> s(a, a + GTEST_ARRAY_SIZE_(a));
+  Streamlike<int> s(std::begin(a), std::end(a));
 
   ::std::vector<int> expected;
   expected.push_back(1);
@@ -5527,7 +5634,7 @@ TEST_F(UnorderedElementsAreTest, WorksWithUncopyable) {
 
 TEST_F(UnorderedElementsAreTest, SucceedsWhenExpected) {
   const int a[] = {1, 2, 3};
-  std::vector<int> s(a, a + GTEST_ARRAY_SIZE_(a));
+  std::vector<int> s(std::begin(a), std::end(a));
   do {
     StringMatchResultListener listener;
     EXPECT_TRUE(ExplainMatchResult(UnorderedElementsAre(1, 2, 3),
@@ -5537,7 +5644,7 @@ TEST_F(UnorderedElementsAreTest, SucceedsWhenExpected) {
 
 TEST_F(UnorderedElementsAreTest, FailsWhenAnElementMatchesNoMatcher) {
   const int a[] = {1, 2, 3};
-  std::vector<int> s(a, a + GTEST_ARRAY_SIZE_(a));
+  std::vector<int> s(std::begin(a), std::end(a));
   std::vector<Matcher<int> > mv;
   mv.push_back(1);
   mv.push_back(2);
@@ -5553,7 +5660,7 @@ TEST_F(UnorderedElementsAreTest, WorksForStreamlike) {
   // Its iterators are tagged with input_iterator_tag, and it has no
   // size() or empty() methods.
   const int a[5] = {2, 1, 4, 5, 3};
-  Streamlike<int> s(a, a + GTEST_ARRAY_SIZE_(a));
+  Streamlike<int> s(std::begin(a), std::end(a));
 
   EXPECT_THAT(s, UnorderedElementsAre(1, 2, 3, 4, 5));
   EXPECT_THAT(s, Not(UnorderedElementsAre(2, 2, 3, 4, 5)));
@@ -5869,8 +5976,9 @@ TEST_F(BipartiteNonSquareTest, SimpleBacktracking) {
   //  :.......:
   //    0 1 2
   MatchMatrix g(4, 3);
-  static const size_t kEdges[][2] = {{0, 2}, {1, 1}, {2, 1}, {3, 0}};
-  for (size_t i = 0; i < GTEST_ARRAY_SIZE_(kEdges); ++i) {
+  constexpr std::array<std::array<size_t, 2>, 4> kEdges = {
+      {{{0, 2}}, {{1, 1}}, {{2, 1}}, {{3, 0}}}};
+  for (size_t i = 0; i < kEdges.size(); ++i) {
     g.SetEdge(kEdges[i][0], kEdges[i][1], true);
   }
   EXPECT_THAT(FindBacktrackingMaxBPM(g),
@@ -5916,9 +6024,9 @@ TEST_P(BipartiteRandomTest, LargerNets) {
   int iters = GetParam().second;
   MatchMatrix graph(static_cast<size_t>(nodes), static_cast<size_t>(nodes));
 
-  auto seed = static_cast<testing::internal::UInt32>(GTEST_FLAG(random_seed));
+  auto seed = static_cast<uint32_t>(GTEST_FLAG(random_seed));
   if (seed == 0) {
-    seed = static_cast<testing::internal::UInt32>(time(nullptr));
+    seed = static_cast<uint32_t>(time(nullptr));
   }
 
   for (; iters > 0; --iters, ++seed) {

@@ -182,13 +182,24 @@ TEST(DisasmX64) {
   __ decq(rdx);
   __ cdq();
 
+  __ repstosl();
   __ repstosq();
 
   __ nop();
   __ idivq(rdx);
   __ mull(rdx);
   __ mulq(rdx);
+
+  __ negb(rdx);
+  __ negb(r10);
+  __ negw(rdx);
+  __ negl(rdx);
   __ negq(rdx);
+  __ negb(Operand(rsp, 12));
+  __ negw(Operand(rsp, 12));
+  __ negl(Operand(rsp, 12));
+  __ negb(Operand(rsp, 12));
+
   __ notq(rdx);
   __ testq(Operand(rbx, rcx, times_4, 10000), rdx);
 
@@ -433,11 +444,6 @@ TEST(DisasmX64) {
     __ xorpd(xmm0, xmm1);
     __ xorpd(xmm0, Operand(rbx, rcx, times_4, 10000));
 
-    __ pslld(xmm0, 6);
-    __ psrld(xmm0, 6);
-    __ psllq(xmm0, 6);
-    __ psrlq(xmm0, 6);
-
     __ pcmpeqd(xmm1, xmm0);
 
     __ punpckldq(xmm1, xmm11);
@@ -454,6 +460,12 @@ TEST(DisasmX64) {
     SSE2_INSTRUCTION_LIST(EMIT_SSE2_INSTR)
     SSE2_INSTRUCTION_LIST_SD(EMIT_SSE2_INSTR)
 #undef EMIT_SSE2_INSTR
+
+#define EMIT_SSE2_SHIFT_IMM(instruction, notUsed1, notUsed2, notUsed3, \
+                            notUsed4)                                  \
+  __ instruction(xmm3, 0xA3);
+    SSE2_INSTRUCTION_LIST_SHIFT_IMM(EMIT_SSE2_SHIFT_IMM)
+#undef EMIT_SSE2_SHIFT_IMM
   }
 
   // cmov.
@@ -563,8 +575,11 @@ TEST(DisasmX64) {
       __ cvtps2dq(xmm5, Operand(rdx, 4));
       __ cvtdq2ps(xmm5, xmm1);
       __ cvtdq2ps(xmm5, Operand(rdx, 4));
+      __ blendvpd(xmm5, xmm1);
+      __ blendvpd(xmm5, Operand(rdx, 4));
 
       SSE4_INSTRUCTION_LIST(EMIT_SSE34_INSTR)
+      SSE4_PMOV_INSTRUCTION_LIST(EMIT_SSE34_INSTR)
       SSE4_EXTRACT_INSTRUCTION_LIST(EMIT_SSE34_IMM_INSTR)
     }
   }
@@ -632,6 +647,7 @@ TEST(DisasmX64) {
       __ vminsd(xmm9, xmm1, Operand(rbx, rcx, times_8, 10000));
       __ vmaxsd(xmm8, xmm1, xmm2);
       __ vmaxsd(xmm9, xmm1, Operand(rbx, rcx, times_1, 10000));
+      __ vroundss(xmm9, xmm1, xmm2, kRoundDown);
       __ vroundsd(xmm8, xmm3, xmm0, kRoundDown);
       __ vsqrtsd(xmm8, xmm1, xmm2);
       __ vsqrtsd(xmm9, xmm1, Operand(rbx, rcx, times_1, 10000));
@@ -660,6 +676,7 @@ TEST(DisasmX64) {
       __ vmovups(xmm5, xmm1);
       __ vmovups(xmm5, Operand(rdx, 4));
       __ vmovups(Operand(rdx, 4), xmm5);
+      __ vmovlhps(xmm1, xmm3, xmm5);
 
       __ vandps(xmm0, xmm9, xmm2);
       __ vandps(xmm9, xmm1, Operand(rbx, rcx, times_4, 10000));
@@ -679,8 +696,6 @@ TEST(DisasmX64) {
 
       __ vpcmpeqd(xmm0, xmm15, xmm5);
       __ vpcmpeqd(xmm15, xmm0, Operand(rbx, rcx, times_4, 10000));
-      __ vpsllq(xmm0, xmm15, 21);
-      __ vpsrlq(xmm15, xmm0, 21);
 
       __ vcmpps(xmm5, xmm4, xmm1, 1);
       __ vcmpps(xmm5, xmm4, Operand(rbx, rcx, times_4, 10000), 1);
@@ -737,24 +752,35 @@ TEST(DisasmX64) {
       SSE2_INSTRUCTION_LIST(EMIT_SSE2_AVXINSTR)
       SSSE3_INSTRUCTION_LIST(EMIT_SSE34_AVXINSTR)
       SSE4_INSTRUCTION_LIST(EMIT_SSE34_AVXINSTR)
+      SSE4_2_INSTRUCTION_LIST(EMIT_SSE34_AVXINSTR)
 #undef EMIT_SSE2_AVXINSTR
 #undef EMIT_SSE34_AVXINSTR
+
+#define EMIT_SSE4_PMOV_AVXINSTR(instruction, notUsed1, notUsed2, notUsed3, \
+                                notUsed4)                                  \
+  __ v##instruction(xmm10, xmm1);                                          \
+  __ v##instruction(xmm10, Operand(rdx, 4));
+      SSE4_PMOV_INSTRUCTION_LIST(EMIT_SSE4_PMOV_AVXINSTR)
+#undef EMIT_SSE4_PMOV_AVXINSTR
+
+#define EMIT_SSE2_SHIFT_IMM_AVX(instruction, notUsed1, notUsed2, notUsed3, \
+                                notUsed4)                                  \
+  __ v##instruction(xmm0, xmm15, 21);
+      SSE2_INSTRUCTION_LIST_SHIFT_IMM(EMIT_SSE2_SHIFT_IMM_AVX)
+#undef EMIT_SSE2_SHIFT_IMM_AVX
 
       __ vinsertps(xmm1, xmm2, xmm3, 1);
       __ vinsertps(xmm1, xmm2, Operand(rbx, rcx, times_4, 10000), 1);
       __ vextractps(rax, xmm1, 1);
 
       __ vlddqu(xmm1, Operand(rbx, rcx, times_4, 10000));
-      __ vpsllw(xmm0, xmm15, 21);
-      __ vpsrlw(xmm0, xmm15, 21);
-      __ vpsraw(xmm0, xmm15, 21);
-      __ vpsrad(xmm0, xmm15, 21);
       __ vpextrb(rax, xmm2, 12);
       __ vpextrb(Operand(rbx, rcx, times_4, 10000), xmm2, 12);
       __ vpextrw(rax, xmm2, 5);
       __ vpextrw(Operand(rbx, rcx, times_4, 10000), xmm2, 5);
       __ vpextrd(rax, xmm2, 2);
       __ vpextrd(Operand(rbx, rcx, times_4, 10000), xmm2, 2);
+      __ vpextrq(rax, xmm2, 2);
 
       __ vpinsrb(xmm1, xmm2, rax, 12);
       __ vpinsrb(xmm1, xmm2, Operand(rbx, rcx, times_4, 10000), 12);
@@ -762,11 +788,19 @@ TEST(DisasmX64) {
       __ vpinsrw(xmm1, xmm2, Operand(rbx, rcx, times_4, 10000), 5);
       __ vpinsrd(xmm1, xmm2, rax, 2);
       __ vpinsrd(xmm1, xmm2, Operand(rbx, rcx, times_4, 10000), 2);
+      __ vpinsrq(xmm1, xmm2, rax, 9);
+      __ vpinsrq(xmm1, xmm2, Operand(rbx, rcx, times_4, 10000), 9);
       __ vpshufd(xmm1, xmm2, 85);
       __ vpshuflw(xmm1, xmm2, 85);
       __ vpshuflw(xmm1, Operand(rbx, rcx, times_4, 10000), 85);
       __ vshufps(xmm3, xmm2, xmm3, 3);
+      __ vpblendw(xmm1, xmm2, xmm3, 23);
+      __ vpblendw(xmm1, xmm2, Operand(rbx, rcx, times_4, 10000), 23);
+      __ vpalignr(xmm1, xmm2, xmm3, 4);
 
+      __ vblendvpd(xmm1, xmm2, xmm3, xmm4);
+
+      __ vmovddup(xmm1, xmm2);
       __ vmovddup(xmm1, Operand(rbx, rcx, times_4, 10000));
       __ vbroadcastss(xmm1, Operand(rbx, rcx, times_4, 10000));
     }
@@ -776,77 +810,12 @@ TEST(DisasmX64) {
   {
     if (CpuFeatures::IsSupported(FMA3)) {
       CpuFeatureScope scope(&assm, FMA3);
-      __ vfmadd132sd(xmm0, xmm1, xmm2);
-      __ vfmadd132sd(xmm0, xmm1, Operand(rbx, rcx, times_4, 10000));
-      __ vfmadd213sd(xmm0, xmm1, xmm2);
-      __ vfmadd213sd(xmm0, xmm1, Operand(rbx, rcx, times_4, 10000));
-      __ vfmadd231sd(xmm0, xmm1, xmm2);
-      __ vfmadd231sd(xmm0, xmm1, Operand(rbx, rcx, times_4, 10000));
-
-      __ vfmadd132sd(xmm9, xmm10, xmm11);
-      __ vfmadd132sd(xmm9, xmm10, Operand(r9, r11, times_4, 10000));
-      __ vfmadd213sd(xmm9, xmm10, xmm11);
-      __ vfmadd213sd(xmm9, xmm10, Operand(r9, r11, times_4, 10000));
-      __ vfmadd231sd(xmm9, xmm10, xmm11);
-      __ vfmadd231sd(xmm9, xmm10, Operand(r9, r11, times_4, 10000));
-
-      __ vfmsub132sd(xmm0, xmm1, xmm2);
-      __ vfmsub132sd(xmm0, xmm1, Operand(rbx, rcx, times_4, 10000));
-      __ vfmsub213sd(xmm0, xmm1, xmm2);
-      __ vfmsub213sd(xmm0, xmm1, Operand(rbx, rcx, times_4, 10000));
-      __ vfmsub231sd(xmm0, xmm1, xmm2);
-      __ vfmsub231sd(xmm0, xmm1, Operand(rbx, rcx, times_4, 10000));
-
-      __ vfnmadd132sd(xmm0, xmm1, xmm2);
-      __ vfnmadd132sd(xmm0, xmm1, Operand(rbx, rcx, times_4, 10000));
-      __ vfnmadd213sd(xmm0, xmm1, xmm2);
-      __ vfnmadd213sd(xmm0, xmm1, Operand(rbx, rcx, times_4, 10000));
-      __ vfnmadd231sd(xmm0, xmm1, xmm2);
-      __ vfnmadd231sd(xmm0, xmm1, Operand(rbx, rcx, times_4, 10000));
-
-      __ vfnmsub132sd(xmm0, xmm1, xmm2);
-      __ vfnmsub132sd(xmm0, xmm1, Operand(rbx, rcx, times_4, 10000));
-      __ vfnmsub213sd(xmm0, xmm1, xmm2);
-      __ vfnmsub213sd(xmm0, xmm1, Operand(rbx, rcx, times_4, 10000));
-      __ vfnmsub231sd(xmm0, xmm1, xmm2);
-      __ vfnmsub231sd(xmm0, xmm1, Operand(rbx, rcx, times_4, 10000));
-
-      __ vfmadd132ss(xmm0, xmm1, xmm2);
-      __ vfmadd132ss(xmm0, xmm1, Operand(rbx, rcx, times_4, 10000));
-      __ vfmadd213ss(xmm0, xmm1, xmm2);
-      __ vfmadd213ss(xmm0, xmm1, Operand(rbx, rcx, times_4, 10000));
-      __ vfmadd231ss(xmm0, xmm1, xmm2);
-      __ vfmadd231ss(xmm0, xmm1, Operand(rbx, rcx, times_4, 10000));
-
-      __ vfmsub132ss(xmm0, xmm1, xmm2);
-      __ vfmsub132ss(xmm0, xmm1, Operand(rbx, rcx, times_4, 10000));
-      __ vfmsub213ss(xmm0, xmm1, xmm2);
-      __ vfmsub213ss(xmm0, xmm1, Operand(rbx, rcx, times_4, 10000));
-      __ vfmsub231ss(xmm0, xmm1, xmm2);
-      __ vfmsub231ss(xmm0, xmm1, Operand(rbx, rcx, times_4, 10000));
-
-      __ vfnmadd132ss(xmm0, xmm1, xmm2);
-      __ vfnmadd132ss(xmm0, xmm1, Operand(rbx, rcx, times_4, 10000));
-      __ vfnmadd213ss(xmm0, xmm1, xmm2);
-      __ vfnmadd213ss(xmm0, xmm1, Operand(rbx, rcx, times_4, 10000));
-      __ vfnmadd231ss(xmm0, xmm1, xmm2);
-      __ vfnmadd231ss(xmm0, xmm1, Operand(rbx, rcx, times_4, 10000));
-
-      __ vfnmsub132ss(xmm0, xmm1, xmm2);
-      __ vfnmsub132ss(xmm0, xmm1, Operand(rbx, rcx, times_4, 10000));
-      __ vfnmsub213ss(xmm0, xmm1, xmm2);
-      __ vfnmsub213ss(xmm0, xmm1, Operand(rbx, rcx, times_4, 10000));
-      __ vfnmsub231ss(xmm0, xmm1, xmm2);
-      __ vfnmsub231ss(xmm0, xmm1, Operand(rbx, rcx, times_4, 10000));
-
-      __ vfmadd231ps(xmm0, xmm1, xmm2);
-      __ vfmadd231ps(xmm0, xmm1, Operand(rbx, rcx, times_4, 10000));
-      __ vfnmadd231ps(xmm0, xmm1, xmm2);
-      __ vfnmadd231ps(xmm0, xmm1, Operand(rbx, rcx, times_4, 10000));
-      __ vfmadd231pd(xmm0, xmm1, xmm2);
-      __ vfmadd231pd(xmm0, xmm1, Operand(rbx, rcx, times_4, 10000));
-      __ vfnmadd231pd(xmm0, xmm1, xmm2);
-      __ vfnmadd231pd(xmm0, xmm1, Operand(rbx, rcx, times_4, 10000));
+#define EMIT_FMA(instr, notUsed1, notUsed2, notUsed3, notUsed4, notUsed5, \
+                 notUsed6)                                                \
+  __ instr(xmm9, xmm10, xmm11);                                           \
+  __ instr(xmm9, xmm10, Operand(rbx, rcx, times_4, 10000));
+      FMA_INSTRUCTION_LIST(EMIT_FMA)
+#undef EMIT_FMA
     }
   }
 
@@ -958,6 +927,18 @@ TEST(DisasmX64) {
     __ cmpxchgw(Operand(rbx, rcx, times_4, 10000), rax);
     __ cmpxchgl(Operand(rbx, rcx, times_4, 10000), rax);
     __ cmpxchgq(Operand(rbx, rcx, times_4, 10000), rax);
+  }
+
+  // xadd.
+  {
+    __ xaddb(Operand(rsp, 12), rax);
+    __ xaddw(Operand(rsp, 12), rax);
+    __ xaddl(Operand(rsp, 12), rax);
+    __ xaddq(Operand(rsp, 12), rax);
+    __ xaddb(Operand(rbx, rcx, times_4, 10000), rax);
+    __ xaddw(Operand(rbx, rcx, times_4, 10000), rax);
+    __ xaddl(Operand(rbx, rcx, times_4, 10000), rax);
+    __ xaddq(Operand(rbx, rcx, times_4, 10000), rax);
   }
 
   // lock prefix.

@@ -3,6 +3,7 @@
 # found in the LICENSE file.
 
 [
+##############################################################################
 ['system == macos and asan', {
   # BUG(820416).
   'BitsDeathTest*': [SKIP],

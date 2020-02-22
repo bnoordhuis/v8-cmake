@@ -1417,11 +1417,9 @@ WASM_SUMMARY_DISPATCH(int, byte_offset)
 #undef WASM_SUMMARY_DISPATCH
 
 int FrameSummary::WasmFrameSummary::SourcePosition() const {
-  Handle<WasmModuleObject> module_object(wasm_instance()->module_object(),
-                                         isolate());
-  return WasmModuleObject::GetSourcePosition(module_object, function_index(),
-                                             byte_offset(),
-                                             at_to_number_conversion());
+  const wasm::WasmModule* module = wasm_instance()->module_object().module();
+  return GetSourcePosition(module, function_index(), byte_offset(),
+                           at_to_number_conversion());
 }
 
 Handle<Script> FrameSummary::WasmFrameSummary::script() const {
@@ -1901,6 +1899,10 @@ WasmInstanceObject WasmCompiledFrame::wasm_instance() const {
   const int offset = WasmCompiledFrameConstants::kWasmInstanceOffset;
   Object instance(Memory<Address>(fp() + offset));
   return WasmInstanceObject::cast(instance);
+}
+
+wasm::NativeModule* WasmCompiledFrame::native_module() const {
+  return module_object().native_module();
 }
 
 WasmModuleObject WasmCompiledFrame::module_object() const {

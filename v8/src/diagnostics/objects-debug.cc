@@ -62,6 +62,7 @@
 #include "src/objects/module-inl.h"
 #include "src/objects/oddball-inl.h"
 #include "src/objects/promise-inl.h"
+#include "src/objects/property-descriptor-object-inl.h"
 #include "src/objects/stack-frame-info-inl.h"
 #include "src/objects/struct-inl.h"
 #include "src/objects/template-objects-inl.h"
@@ -230,16 +231,6 @@ void HeapObject::HeapObjectVerify(Isolate* isolate) {
       break;
     case FILLER_TYPE:
       break;
-    case SMALL_ORDERED_HASH_SET_TYPE:
-      SmallOrderedHashSet::cast(*this).SmallOrderedHashSetVerify(isolate);
-      break;
-    case SMALL_ORDERED_HASH_MAP_TYPE:
-      SmallOrderedHashMap::cast(*this).SmallOrderedHashMapVerify(isolate);
-      break;
-    case SMALL_ORDERED_NAME_DICTIONARY_TYPE:
-      SmallOrderedNameDictionary::cast(*this).SmallOrderedNameDictionaryVerify(
-          isolate);
-      break;
     case CODE_DATA_CONTAINER_TYPE:
       CodeDataContainer::cast(*this).CodeDataContainerVerify(isolate);
       break;
@@ -295,8 +286,7 @@ void BytecodeArray::BytecodeArrayVerify(Isolate* isolate) {
   VerifyHeapPointer(isolate, constant_pool());
   CHECK(source_position_table().IsUndefined() ||
         source_position_table().IsException() ||
-        source_position_table().IsByteArray() ||
-        source_position_table().IsSourcePositionTableWithFrameCache());
+        source_position_table().IsByteArray());
   CHECK(handler_table().IsByteArray());
 }
 
@@ -1058,9 +1048,9 @@ void WeakCell::WeakCellVerify(Isolate* isolate) {
     CHECK_EQ(WeakCell::cast(next()).prev(), *this);
   }
 
-  CHECK_IMPLIES(key().IsUndefined(isolate),
+  CHECK_IMPLIES(unregister_token().IsUndefined(isolate),
                 key_list_prev().IsUndefined(isolate));
-  CHECK_IMPLIES(key().IsUndefined(isolate),
+  CHECK_IMPLIES(unregister_token().IsUndefined(isolate),
                 key_list_next().IsUndefined(isolate));
 
   CHECK(key_list_prev().IsWeakCell() || key_list_prev().IsUndefined(isolate));

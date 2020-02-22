@@ -268,7 +268,6 @@ Node* JSInliner::CreateArtificialFrameState(Node* node, Node* outer_frame_state,
 
 namespace {
 
-// TODO(mstarzinger,verwaest): Move this predicate onto SharedFunctionInfo?
 bool NeedsImplicitReceiver(SharedFunctionInfoRef shared_info) {
   DisallowHeapAllocation no_gc;
   return !shared_info.construct_as_builtin() &&
@@ -420,7 +419,8 @@ Reduction JSInliner::ReduceJSCall(Node* node) {
   // always hold true.
   CHECK(shared_info->is_compiled());
 
-  if (!FLAG_concurrent_inlining && info_->is_source_positions_enabled()) {
+  if (!broker()->is_concurrent_inlining() &&
+      info_->is_source_positions_enabled()) {
     SharedFunctionInfo::EnsureSourcePositionsAvailable(isolate(),
                                                        shared_info->object());
   }

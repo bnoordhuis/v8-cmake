@@ -1168,10 +1168,6 @@ void InstructionSelector::VisitChangeUint32ToUint64(Node* node) {
   VisitRR(this, kPPC_Uint32ToUint64, node);
 }
 
-void InstructionSelector::VisitChangeTaggedToCompressed(Node* node) {
-  UNIMPLEMENTED();
-}
-
 void InstructionSelector::VisitChangeFloat64ToUint64(Node* node) {
   VisitRR(this, kPPC_DoubleToUint64, node);
 }
@@ -2197,6 +2193,14 @@ void InstructionSelector::VisitI16x8GtU(Node* node) { UNIMPLEMENTED(); }
 
 void InstructionSelector::VisitI16x8GeU(Node* node) { UNIMPLEMENTED(); }
 
+void InstructionSelector::VisitI16x8RoundingAverageU(Node* node) {
+  UNIMPLEMENTED();
+}
+
+void InstructionSelector::VisitI8x16RoundingAverageU(Node* node) {
+  UNIMPLEMENTED();
+}
+
 void InstructionSelector::VisitI8x16Neg(Node* node) { UNIMPLEMENTED(); }
 
 void InstructionSelector::VisitI8x16Splat(Node* node) { UNIMPLEMENTED(); }
@@ -2250,6 +2254,8 @@ void InstructionSelector::VisitS128Or(Node* node) { UNIMPLEMENTED(); }
 void InstructionSelector::VisitS128Xor(Node* node) { UNIMPLEMENTED(); }
 
 void InstructionSelector::VisitS128Not(Node* node) { UNIMPLEMENTED(); }
+
+void InstructionSelector::VisitS128AndNot(Node* node) { UNIMPLEMENTED(); }
 
 void InstructionSelector::VisitS128Zero(Node* node) { UNIMPLEMENTED(); }
 
@@ -2443,9 +2449,14 @@ void InstructionSelector::VisitI64x2ShrS(Node* node) { UNIMPLEMENTED(); }
 
 void InstructionSelector::VisitI64x2ShrU(Node* node) { UNIMPLEMENTED(); }
 
+void InstructionSelector::VisitI64x2Mul(Node* node) { UNIMPLEMENTED(); }
+
 void InstructionSelector::VisitF64x2Min(Node* node) { UNIMPLEMENTED(); }
 
 void InstructionSelector::VisitF64x2Max(Node* node) { UNIMPLEMENTED(); }
+
+void InstructionSelector::VisitLoadTransform(Node* node) { UNIMPLEMENTED(); }
+
 // static
 MachineOperatorBuilder::Flags
 InstructionSelector::SupportedMachineOperatorFlags() {

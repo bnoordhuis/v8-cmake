@@ -4,12 +4,14 @@
 
 #include <iostream>
 
+#include "src/torque/types.h"
+
+#include "src/base/bits.h"
 #include "src/torque/ast.h"
 #include "src/torque/declarable.h"
 #include "src/torque/global-context.h"
 #include "src/torque/type-oracle.h"
 #include "src/torque/type-visitor.h"
-#include "src/torque/types.h"
 
 namespace v8 {
 namespace internal {
@@ -17,16 +19,19 @@ namespace torque {
 
 // This custom copy constructor doesn't copy aliases_ and id_ because they
 // should be distinct for each type.
-Type::Type(const Type& other) V8_NOEXCEPT : TypeBase(other),
-                                            parent_(other.parent_),
-                                            aliases_(),
-                                            id_(TypeOracle::FreshTypeId()) {}
+Type::Type(const Type& other) V8_NOEXCEPT
+    : TypeBase(other),
+      parent_(other.parent_),
+      aliases_(),
+      id_(TypeOracle::FreshTypeId()),
+      constexpr_version_(other.constexpr_version_) {}
 Type::Type(TypeBase::Kind kind, const Type* parent,
            MaybeSpecializationKey specialized_from)
     : TypeBase(kind),
       parent_(parent),
       id_(TypeOracle::FreshTypeId()),
-      specialized_from_(specialized_from) {}
+      specialized_from_(specialized_from),
+      constexpr_version_(nullptr) {}
 
 std::string Type::ToString() const {
   if (aliases_.size() == 0)
@@ -74,6 +79,15 @@ bool Type::IsSubtypeOf(const Type* supertype) const {
     subtype = subtype->parent();
   }
   return false;
+}
+
+std::string Type::GetConstexprGeneratedTypeName() const {
+  const Type* constexpr_version = ConstexprVersion();
+  if (constexpr_version == nullptr) {
+    Error("Type '", ToString(), "' requires a constexpr representation");
+    return "";
+  }
+  return constexpr_version->GetGeneratedTypeName();
 }
 
 base::Optional<const ClassType*> Type::ClassSupertype() const {
@@ -245,6 +259,19 @@ const Type* SubtractType(const Type* a, const Type* b) {
   return TypeOracle::GetUnionType(result);
 }
 
+std::string BitFieldStructType::ToExplicitString() const {
+  return "bitfield struct " + name();
+}
+
+const BitField& BitFieldStructType::LookupField(const std::string& name) const {
+  for (const BitField& field : fields_) {
+    if (field.name_and_type.name == name) {
+      return field;
+    }
+  }
+  ReportError("Couldn't find bitfield ", name);
+}
+
 void AggregateType::CheckForDuplicateFields() const {
   // Check the aggregate hierarchy and currently defined class for duplicate
   // field declarations.
@@ -338,23 +365,8 @@ std::string StructType::GetGeneratedTypeNameImpl() const {
 
 size_t StructType::PackedSize() const {
   size_t result = 0;
-  if (!fields_.empty()) {
-    const Field& last = fields_.back();
-    if (last.offset == Field::kInvalidOffset) {
-      // This struct can't be packed. Find the first invalid field and use its
-      // name and position for the error.
-      for (const Field& field : fields_) {
-        if (field.offset == Field::kInvalidOffset) {
-          Error("Cannot compute packed size of ", ToString(), " due to field ",
-                field.name_and_type.name, " of unknown size")
-              .Position(field.pos);
-          return 0;
-        }
-      }
-    }
-    size_t field_size = 0;
-    std::tie(field_size, std::ignore) = last.GetFieldSizeInformation();
-    result = last.offset + field_size;
+  for (const Field& field : fields()) {
+    result += std::get<0>(field.GetFieldSizeInformation());
   }
   return result;
 }
@@ -401,11 +413,7 @@ std::vector<Method*> AggregateType::Methods(const std::string& name) const {
   return result;
 }
 
-std::string StructType::ToExplicitString() const {
-  std::stringstream result;
-  result << "struct " << name();
-  return result.str();
-}
+std::string StructType::ToExplicitString() const { return "struct " + name(); }
 
 void StructType::Finalize() const {
   if (is_finalized_) return;
@@ -425,7 +433,7 @@ ClassType::ClassType(const Type* parent, Namespace* nspace,
                      const std::string& generates, const ClassDeclaration* decl,
                      const TypeAlias* alias)
     : AggregateType(Kind::kClassType, parent, nspace, name),
-      size_(0),
+      size_(ResidueClass::Unknown()),
       flags_(flags & ~(kInternalFlags)),
       generates_(generates),
       decl_(decl),
@@ -447,11 +455,7 @@ std::string ClassType::GetGeneratedTypeNameImpl() const {
                        : "TNode<" + GetGeneratedTNodeTypeName() + ">";
 }
 
-std::string ClassType::ToExplicitString() const {
-  std::stringstream result;
-  result << "class " << name();
-  return result.str();
-}
+std::string ClassType::ToExplicitString() const { return "class " + name(); }
 
 bool ClassType::AllowInstantiation() const {
   return (!IsExtern() || nspace()->IsDefaultNamespace()) && !IsAbstract();
@@ -495,8 +499,7 @@ std::vector<Field> ClassType::ComputeAllFields() const {
 
 void ClassType::GenerateAccessors() {
   // For each field, construct AST snippets that implement a CSA accessor
-  // function and define a corresponding '.field' operator. The
-  // implementation iterator will turn the snippets into code.
+  // function. The implementation iterator will turn the snippets into code.
   for (auto& field : fields_) {
     if (field.index || field.name_and_type.type == TypeOracle::GetVoidType()) {
       continue;
@@ -645,7 +648,7 @@ bool Signature::HasSameTypesAs(const Signature& other,
 bool IsAssignableFrom(const Type* to, const Type* from) {
   if (to == from) return true;
   if (from->IsSubtypeOf(to)) return true;
-  return TypeOracle::IsImplicitlyConvertableFrom(to, from);
+  return TypeOracle::ImplicitlyConvertableFrom(to, from).has_value();
 }
 
 bool operator<(const Type& a, const Type& b) { return a.id() < b.id(); }
@@ -726,6 +729,75 @@ std::tuple<size_t, std::string> Field::GetFieldSizeInformation() const {
   return std::make_tuple(0, "#no size");
 }
 
+size_t Type::AlignmentLog2() const {
+  if (parent()) return parent()->AlignmentLog2();
+  return TargetArchitecture::TaggedSize();
+}
+
+size_t AbstractType::AlignmentLog2() const {
+  size_t alignment;
+  if (this == TypeOracle::GetTaggedType()) {
+    alignment = TargetArchitecture::TaggedSize();
+  } else if (this == TypeOracle::GetRawPtrType()) {
+    alignment = TargetArchitecture::RawPtrSize();
+  } else if (this == TypeOracle::GetVoidType()) {
+    alignment = 1;
+  } else if (this == TypeOracle::GetInt8Type()) {
+    alignment = kUInt8Size;
+  } else if (this == TypeOracle::GetUint8Type()) {
+    alignment = kUInt8Size;
+  } else if (this == TypeOracle::GetInt16Type()) {
+    alignment = kUInt16Size;
+  } else if (this == TypeOracle::GetUint16Type()) {
+    alignment = kUInt16Size;
+  } else if (this == TypeOracle::GetInt32Type()) {
+    alignment = kInt32Size;
+  } else if (this == TypeOracle::GetUint32Type()) {
+    alignment = kInt32Size;
+  } else if (this == TypeOracle::GetFloat64Type()) {
+    alignment = kDoubleSize;
+  } else if (this == TypeOracle::GetIntPtrType()) {
+    alignment = TargetArchitecture::RawPtrSize();
+  } else if (this == TypeOracle::GetUIntPtrType()) {
+    alignment = TargetArchitecture::RawPtrSize();
+  } else {
+    return Type::AlignmentLog2();
+  }
+  alignment = std::min(alignment, TargetArchitecture::TaggedSize());
+  return base::bits::WhichPowerOfTwo(alignment);
+}
+
+size_t StructType::AlignmentLog2() const {
+  if (this == TypeOracle::GetFloat64OrHoleType()) {
+    return TypeOracle::GetFloat64Type()->AlignmentLog2();
+  }
+  size_t alignment_log_2 = 0;
+  for (const Field& field : fields()) {
+    alignment_log_2 =
+        std::max(alignment_log_2, field.name_and_type.type->AlignmentLog2());
+  }
+  return alignment_log_2;
+}
+
+void Field::ValidateAlignment(ResidueClass at_offset) const {
+  const Type* type = name_and_type.type;
+  const StructType* struct_type = StructType::DynamicCast(type);
+  if (struct_type && struct_type != TypeOracle::GetFloat64OrHoleType()) {
+    for (const Field& field : struct_type->fields()) {
+      field.ValidateAlignment(at_offset);
+      size_t field_size = std::get<0>(field.GetFieldSizeInformation());
+      at_offset += field_size;
+    }
+  } else {
+    size_t alignment_log_2 = name_and_type.type->AlignmentLog2();
+    if (at_offset.AlignmentLog2() < alignment_log_2) {
+      Error("field ", name_and_type.name, " at offset ", at_offset, " is not ",
+            size_t{1} << alignment_log_2, "-byte aligned.")
+          .Position(pos);
+    }
+  }
+}
+
 base::Optional<std::tuple<size_t, std::string>> SizeOf(const Type* type) {
   std::string size_string;
   size_t size;
@@ -766,12 +838,51 @@ base::Optional<std::tuple<size_t, std::string>> SizeOf(const Type* type) {
     size = TargetArchitecture::RawPtrSize();
     size_string = "kIntptrSize";
   } else if (const StructType* struct_type = StructType::DynamicCast(type)) {
-    size = struct_type->PackedSize();
-    size_string = std::to_string(size);
+    if (type == TypeOracle::GetFloat64OrHoleType()) {
+      size = kDoubleSize;
+      size_string = "kDoubleSize";
+    } else {
+      size = struct_type->PackedSize();
+      size_string = std::to_string(size);
+    }
   } else {
     return {};
   }
   return std::make_tuple(size, size_string);
+}
+
+bool IsAnyUnsignedInteger(const Type* type) {
+  return type == TypeOracle::GetUint32Type() ||
+         type == TypeOracle::GetUint16Type() ||
+         type == TypeOracle::GetUint8Type() ||
+         type == TypeOracle::GetUIntPtrType();
+}
+
+bool IsAllowedAsBitField(const Type* type) {
+  if (type->IsBitFieldStructType()) {
+    // No nested bitfield structs for now. We could reconsider if there's a
+    // compelling use case.
+    return false;
+  }
+  // Any integer-ish type, including bools and enums which inherit from integer
+  // types, are allowed. Note, however, that we always zero-extend during
+  // decoding regardless of signedness.
+  return type->IsSubtypeOf(TypeOracle::GetUint32Type()) ||
+         type->IsSubtypeOf(TypeOracle::GetUIntPtrType()) ||
+         type->IsSubtypeOf(TypeOracle::GetInt32Type()) ||
+         type->IsSubtypeOf(TypeOracle::GetIntPtrType()) ||
+         type->IsSubtypeOf(TypeOracle::GetBoolType());
+}
+
+base::Optional<NameAndType> ExtractSimpleFieldArraySize(
+    const ClassType& class_type, Expression* array_size) {
+  IdentifierExpression* identifier =
+      IdentifierExpression::DynamicCast(array_size);
+  if (!identifier || !identifier->generic_arguments.empty() ||
+      !identifier->namespace_qualification.empty())
+    return {};
+  if (!class_type.HasField(identifier->name->value)) return {};
+  return class_type.LookupField(identifier->name->value).name_and_type;
 }
 
 }  // namespace torque

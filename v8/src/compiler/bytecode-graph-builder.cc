@@ -369,6 +369,10 @@ class BytecodeGraphBuilder {
   NativeContextRef native_context() const { return native_context_; }
   SharedFunctionInfoRef shared_info() const { return shared_info_; }
 
+  bool should_disallow_heap_access() const {
+    return broker_->is_concurrent_inlining();
+  }
+
 #define DECLARE_VISIT_BYTECODE(name, ...) void Visit##name();
   BYTECODE_LIST(DECLARE_VISIT_BYTECODE)
 #undef DECLARE_VISIT_BYTECODE
@@ -962,8 +966,9 @@ BytecodeGraphBuilder::BytecodeGraphBuilder(
       bytecode_analysis_(broker_->GetBytecodeAnalysis(
           bytecode_array().object(), osr_offset,
           flags & BytecodeGraphBuilderFlag::kAnalyzeEnvironmentLiveness,
-          FLAG_concurrent_inlining ? SerializationPolicy::kAssumeSerialized
-                                   : SerializationPolicy::kSerializeIfNeeded)),
+          should_disallow_heap_access()
+              ? SerializationPolicy::kAssumeSerialized
+              : SerializationPolicy::kSerializeIfNeeded)),
       environment_(nullptr),
       osr_(!osr_offset.IsNone()),
       currently_peeled_loop_offset_(-1),
@@ -981,7 +986,7 @@ BytecodeGraphBuilder::BytecodeGraphBuilder(
       source_positions_(source_positions),
       start_position_(shared_info.StartPosition(), inlining_id),
       tick_counter_(tick_counter) {
-  if (FLAG_concurrent_inlining) {
+  if (should_disallow_heap_access()) {
     // With concurrent inlining on, the source position address doesn't change
     // because it's been copied from the heap.
     source_position_iterator_ = std::make_unique<SourcePositionTableIterator>(
@@ -1018,7 +1023,7 @@ FeedbackSource BytecodeGraphBuilder::CreateFeedbackSource(int slot_id) {
 }
 
 void BytecodeGraphBuilder::CreateGraph() {
-  DisallowHeapAccessIf disallow_heap_access(FLAG_concurrent_inlining);
+  DisallowHeapAccessIf disallow_heap_access(should_disallow_heap_access());
   SourcePositionTable::Scope pos_scope(source_positions_, start_position_);
 
   // Set up the basic structure of the graph. Outputs for {Start} are the formal
@@ -1313,7 +1318,7 @@ void BytecodeGraphBuilder::VisitBytecodes() {
     VisitSingleBytecode();
   }
 
-  if (!FLAG_concurrent_inlining && has_one_shot_bytecode) {
+  if (!should_disallow_heap_access() && has_one_shot_bytecode) {
     // (For concurrent inlining this is done in the serializer instead.)
     isolate()->CountUsage(
         v8::Isolate::UseCounterFeature::kOptimizedFunctionWithOneShotBytecode);
@@ -2007,7 +2012,7 @@ void BytecodeGraphBuilder::VisitCreateClosure() {
 }
 
 void BytecodeGraphBuilder::VisitCreateBlockContext() {
-  DisallowHeapAccessIf no_heap_access(FLAG_concurrent_inlining);
+  DisallowHeapAccessIf no_heap_access(should_disallow_heap_access());
   ScopeInfoRef scope_info(
       broker(), bytecode_iterator().GetConstantForIndexOperand(0, isolate()));
   const Operator* op = javascript()->CreateBlockContext(scope_info.object());
@@ -2016,7 +2021,7 @@ void BytecodeGraphBuilder::VisitCreateBlockContext() {
 }
 
 void BytecodeGraphBuilder::VisitCreateFunctionContext() {
-  DisallowHeapAccessIf no_heap_access(FLAG_concurrent_inlining);
+  DisallowHeapAccessIf no_heap_access(should_disallow_heap_access());
   ScopeInfoRef scope_info(
       broker(), bytecode_iterator().GetConstantForIndexOperand(0, isolate()));
   uint32_t slots = bytecode_iterator().GetUnsignedImmediateOperand(1);
@@ -2027,7 +2032,7 @@ void BytecodeGraphBuilder::VisitCreateFunctionContext() {
 }
 
 void BytecodeGraphBuilder::VisitCreateEvalContext() {
-  DisallowHeapAccessIf no_heap_access(FLAG_concurrent_inlining);
+  DisallowHeapAccessIf no_heap_access(should_disallow_heap_access());
   ScopeInfoRef scope_info(
       broker(), bytecode_iterator().GetConstantForIndexOperand(0, isolate()));
   uint32_t slots = bytecode_iterator().GetUnsignedImmediateOperand(1);
@@ -2038,7 +2043,7 @@ void BytecodeGraphBuilder::VisitCreateEvalContext() {
 }
 
 void BytecodeGraphBuilder::VisitCreateCatchContext() {
-  DisallowHeapAccessIf no_heap_access(FLAG_concurrent_inlining);
+  DisallowHeapAccessIf no_heap_access(should_disallow_heap_access());
   interpreter::Register reg = bytecode_iterator().GetRegisterOperand(0);
   Node* exception = environment()->LookupRegister(reg);
   ScopeInfoRef scope_info(
@@ -2050,7 +2055,7 @@ void BytecodeGraphBuilder::VisitCreateCatchContext() {
 }
 
 void BytecodeGraphBuilder::VisitCreateWithContext() {
-  DisallowHeapAccessIf no_heap_access(FLAG_concurrent_inlining);
+  DisallowHeapAccessIf no_heap_access(should_disallow_heap_access());
   Node* object =
       environment()->LookupRegister(bytecode_iterator().GetRegisterOperand(0));
   ScopeInfoRef scope_info(
@@ -2103,8 +2108,6 @@ void BytecodeGraphBuilder::VisitCreateArrayLiteral() {
   // data to converge. So, we disable allocation site mementos in optimized
   // code. We can revisit this when we have data to the contrary.
   literal_flags |= ArrayLiteral::kDisableMementos;
-  // TODO(mstarzinger): Thread through number of elements. The below number is
-  // only an estimate and does not match {ArrayLiteral::values::length}.
   int number_of_elements =
       array_boilerplate_description.constants_elements_length();
   Node* literal = NewNode(javascript()->CreateLiteralArray(
@@ -2134,8 +2137,6 @@ void BytecodeGraphBuilder::VisitCreateObjectLiteral() {
   int bytecode_flags = bytecode_iterator().GetFlagOperand(2);
   int literal_flags =
       interpreter::CreateObjectLiteralFlags::FlagsBits::decode(bytecode_flags);
-  // TODO(mstarzinger): Thread through number of properties. The below number is
-  // only an estimate and does not match {ObjectLiteral::properties_count}.
   int number_of_properties = constant_properties.size();
   Node* literal = NewNode(javascript()->CreateLiteralObject(
       constant_properties.object(), pair, literal_flags, number_of_properties));
@@ -2161,7 +2162,7 @@ void BytecodeGraphBuilder::VisitCloneObject() {
 }
 
 void BytecodeGraphBuilder::VisitGetTemplateObject() {
-  DisallowHeapAccessIf no_heap_access(FLAG_concurrent_inlining);
+  DisallowHeapAccessIf no_heap_access(should_disallow_heap_access());
   FeedbackSource source =
       CreateFeedbackSource(bytecode_iterator().GetIndexOperand(1));
   TemplateObjectDescriptionRef description(
@@ -3640,7 +3641,6 @@ void BytecodeGraphBuilder::MergeIntoSuccessorEnvironment(int target_offset) {
     // Append merge nodes to the environment. We may merge here with another
     // environment. So add a place holder for merge nodes. We may add redundant
     // but will be eliminated in a later pass.
-    // TODO(mstarzinger): Be smarter about this!
     NewMerge();
     merge_environment = environment();
   } else {

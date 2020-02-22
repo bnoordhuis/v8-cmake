@@ -243,6 +243,7 @@ class V8_EXPORT_PRIVATE Debug {
   bool SetBreakpointForFunction(Handle<SharedFunctionInfo> shared,
                                 Handle<String> condition, int* id);
   void RemoveBreakpoint(int id);
+  void RemoveBreakpointForWasmScript(Handle<Script> script, int id);
 
   // Find breakpoints from the debug info and the break location and check
   // whether they are hit. Return an empty handle if not, or a FixedArray with
@@ -266,8 +267,6 @@ class V8_EXPORT_PRIVATE Debug {
   bool GetPossibleBreakpoints(Handle<Script> script, int start_position,
                               int end_position, bool restrict_to_function,
                               std::vector<BreakLocation>* locations);
-
-  MaybeHandle<JSArray> GetPrivateFields(Handle<JSReceiver> receiver);
 
   bool IsBlackboxed(Handle<SharedFunctionInfo> shared);
 

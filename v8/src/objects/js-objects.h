@@ -19,6 +19,10 @@
 namespace v8 {
 namespace internal {
 
+// Enum for functions that offer a second mode that does not cause allocations.
+// Used in conjunction with LookupIterator and unboxed double fields.
+enum class AllocationPolicy { kAllocationAllowed, kAllocationDisallowed };
+
 enum InstanceType : uint16_t;
 class JSGlobalObject;
 class JSGlobalProxy;
@@ -237,7 +241,9 @@ class JSReceiver : public HeapObject {
 
   inline static Handle<Object> GetDataProperty(Handle<JSReceiver> object,
                                                Handle<Name> name);
-  V8_EXPORT_PRIVATE static Handle<Object> GetDataProperty(LookupIterator* it);
+  V8_EXPORT_PRIVATE static Handle<Object> GetDataProperty(
+      LookupIterator* it, AllocationPolicy allocation_policy =
+                              AllocationPolicy::kAllocationAllowed);
 
   // Retrieves a permanent object identity hash code. The undefined value might
   // be returned in case no hash was created yet.
@@ -269,9 +275,6 @@ class JSReceiver : public HeapObject {
   DEFINE_FIELD_OFFSET_CONSTANTS(HeapObject::kHeaderSize,
                                 TORQUE_GENERATED_JS_RECEIVER_FIELDS)
   bool HasProxyInPrototype(Isolate* isolate);
-
-  V8_WARN_UNUSED_RESULT static MaybeHandle<FixedArray> GetPrivateEntries(
-      Isolate* isolate, Handle<JSReceiver> receiver);
 
   OBJECT_CONSTRUCTORS(JSReceiver, HeapObject);
 };
@@ -477,7 +480,6 @@ class JSObject : public TorqueGeneratedJSObject<JSObject, JSReceiver> {
   GetPropertyAttributesWithFailedAccessCheck(LookupIterator* it);
 
   // Defines an AccessorPair property on the given object.
-  // TODO(mstarzinger): Rename to SetAccessor().
   V8_EXPORT_PRIVATE static MaybeHandle<Object> DefineAccessor(
       Handle<JSObject> object, Handle<Name> name, Handle<Object> getter,
       Handle<Object> setter, PropertyAttributes attributes);
@@ -1079,7 +1081,10 @@ class JSFunction : public JSFunctionOrBoundFunction {
 
   // Resets function to clear compiled data after bytecode has been flushed.
   inline bool NeedsResetDueToFlushedBytecode();
-  inline void ResetIfBytecodeFlushed();
+  inline void ResetIfBytecodeFlushed(
+      base::Optional<std::function<void(HeapObject object, ObjectSlot slot,
+                                        HeapObject target)>>
+          gc_notify_updated_slot = base::nullopt);
 
   DECL_GETTER(has_prototype_slot, bool)
 
@@ -1228,6 +1233,10 @@ class JSGlobalObject : public JSSpecialObject {
   DECL_CAST(JSGlobalObject)
 
   inline bool IsDetached();
+
+  // May be called by the concurrent GC when the global object is not
+  // fully initialized.
+  DECL_GETTER(native_context_unchecked, Object)
 
   // Dispatched behavior.
   DECL_PRINTER(JSGlobalObject)

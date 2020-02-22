@@ -503,8 +503,11 @@ void CodeGenerator::AssembleDeconstructFrame() {
 
 void CodeGenerator::AssemblePrepareTailCall() {
   if (frame_access_state()->has_frame()) {
-    __ Ldr(lr, MemOperand(fp, StandardFrameConstants::kCallerPCOffset));
-    __ Ldr(fp, MemOperand(fp, StandardFrameConstants::kCallerFPOffset));
+    static_assert(
+        StandardFrameConstants::kCallerFPOffset + kSystemPointerSize ==
+            StandardFrameConstants::kCallerPCOffset,
+        "Offsets must be consecutive for ldp!");
+    __ Ldp(fp, lr, MemOperand(fp, StandardFrameConstants::kCallerFPOffset));
   }
   frame_access_state()->SetFrameAccessToSP();
 }
@@ -790,7 +793,9 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         __ CallCFunction(func, num_parameters, 0);
       }
       __ Bind(&return_location);
-      RecordSafepoint(instr->reference_map(), Safepoint::kNoLazyDeopt);
+      if (linkage()->GetIncomingDescriptor()->IsWasmCapiFunction()) {
+        RecordSafepoint(instr->reference_map(), Safepoint::kNoLazyDeopt);
+      }
       frame_access_state()->SetFrameAccessToDefault();
       // Ideally, we should decrement SP delta to match the change of stack
       // pointer in CallCFunction. However, for certain architectures (e.g.
@@ -2248,6 +2253,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       SIMD_BINOP_CASE(kArm64I16x8MaxU, Umax, 8H);
       SIMD_BINOP_CASE(kArm64I16x8GtU, Cmhi, 8H);
       SIMD_BINOP_CASE(kArm64I16x8GeU, Cmhs, 8H);
+      SIMD_BINOP_CASE(kArm64I16x8RoundingAverageU, Urhadd, 8H);
     case kArm64I8x16Splat: {
       __ Dup(i.OutputSimd128Register().V16B(), i.InputRegister32(0));
       break;
@@ -2355,6 +2361,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       SIMD_BINOP_CASE(kArm64I8x16MaxU, Umax, 16B);
       SIMD_BINOP_CASE(kArm64I8x16GtU, Cmhi, 16B);
       SIMD_BINOP_CASE(kArm64I8x16GeU, Cmhs, 16B);
+      SIMD_BINOP_CASE(kArm64I8x16RoundingAverageU, Urhadd, 16B);
     case kArm64S128Zero: {
       __ Movi(i.OutputSimd128Register().V16B(), 0);
       break;
@@ -2391,6 +2398,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
              i.InputSimd128Register(2).V16B());
       break;
     }
+      SIMD_BINOP_CASE(kArm64S128AndNot, Bic, 16B);
     case kArm64S32x4Shuffle: {
       Simd128Register dst = i.OutputSimd128Register().V4S(),
                       src0 = i.InputSimd128Register(0).V4S(),

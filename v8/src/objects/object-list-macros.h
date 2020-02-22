@@ -85,11 +85,8 @@ class ZoneForwardList;
   V(ObjectBoilerplateDescription)              \
   V(Boolean)                                   \
   V(BooleanWrapper)                            \
-  V(BreakPoint)                                \
-  V(BreakPointInfo)                            \
   V(ByteArray)                                 \
   V(BytecodeArray)                             \
-  V(CachedTemplateObject)                      \
   V(CallHandlerInfo)                           \
   V(Callable)                                  \
   V(Cell)                                      \
@@ -193,7 +190,6 @@ class ZoneForwardList;
   V(PromiseReactionJobTask)                    \
   V(PropertyArray)                             \
   V(PropertyCell)                              \
-  V(PropertyDescriptorObject)                  \
   V(RegExpMatchInfo)                           \
   V(ScopeInfo)                                 \
   V(ScriptContextTable)                        \

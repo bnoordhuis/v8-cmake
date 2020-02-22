@@ -76,6 +76,10 @@ class WasmStreaming::WasmStreamingImpl {
         });
   }
 
+  void SetUrl(internal::Vector<const char> url) {
+    streaming_decoder_->SetUrl(url);
+  }
+
  private:
   Isolate* const isolate_;
   std::shared_ptr<internal::wasm::StreamingDecoder> streaming_decoder_;
@@ -105,6 +109,10 @@ bool WasmStreaming::SetCompiledModuleBytes(const uint8_t* bytes, size_t size) {
 
 void WasmStreaming::SetClient(std::shared_ptr<Client> client) {
   impl_->SetClient(client);
+}
+
+void WasmStreaming::SetUrl(const char* url, size_t length) {
+  impl_->SetUrl(internal::VectorOf(url, length));
 }
 
 // static
@@ -1090,6 +1098,9 @@ void WebAssemblyTable(const v8::FunctionCallbackInfo<v8::Value>& args) {
     } else if (enabled_features.has_anyref() &&
                string->StringEquals(v8_str(isolate, "anyref"))) {
       type = i::wasm::kWasmAnyRef;
+    } else if (enabled_features.has_anyref() &&
+               string->StringEquals(v8_str(isolate, "nullref"))) {
+      type = i::wasm::kWasmNullRef;
     } else {
       thrower.TypeError("Descriptor property 'element' must be 'anyfunc'");
       return;
@@ -1159,7 +1170,11 @@ void WebAssemblyMemory(const v8::FunctionCallbackInfo<v8::Value>& args) {
     if (maybe_value.ToLocal(&value)) {
       shared = value->BooleanValue(isolate) ? i::SharedFlag::kShared
                                             : i::SharedFlag::kNotShared;
+    } else {
+      DCHECK(i_isolate->has_scheduled_exception());
+      return;
     }
+
     // Throw TypeError if shared is true, and the descriptor has no "maximum"
     if (shared == i::SharedFlag::kShared && maximum == -1) {
       thrower.TypeError(
@@ -1215,6 +1230,9 @@ bool GetValueType(Isolate* isolate, MaybeLocal<Value> maybe,
   } else if (enabled_features.has_anyref() &&
              string->StringEquals(v8_str(isolate, "anyfunc"))) {
     *type = i::wasm::kWasmFuncRef;
+  } else if (enabled_features.has_anyref() &&
+             string->StringEquals(v8_str(isolate, "nullref"))) {
+    *type = i::wasm::kWasmNullRef;
   } else if (enabled_features.has_eh() &&
              string->StringEquals(v8_str(isolate, "exnref"))) {
     *type = i::wasm::kWasmExnRef;
@@ -1251,6 +1269,9 @@ void WebAssemblyGlobal(const v8::FunctionCallbackInfo<v8::Value>& args) {
     v8::Local<v8::Value> value;
     if (maybe.ToLocal(&value)) {
       is_mutable = value->BooleanValue(isolate);
+    } else {
+      DCHECK(i_isolate->has_scheduled_exception());
+      return;
     }
   }
 
@@ -1335,7 +1356,7 @@ void WebAssemblyGlobal(const v8::FunctionCallbackInfo<v8::Value>& args) {
     case i::wasm::kWasmAnyRef:
     case i::wasm::kWasmExnRef: {
       if (args.Length() < 2) {
-        // When no inital value is provided, we have to use the WebAssembly
+        // When no initial value is provided, we have to use the WebAssembly
         // default value 'null', and not the JS default value 'undefined'.
         global_obj->SetAnyRef(i_isolate->factory()->null_value());
         break;
@@ -1343,9 +1364,20 @@ void WebAssemblyGlobal(const v8::FunctionCallbackInfo<v8::Value>& args) {
       global_obj->SetAnyRef(Utils::OpenHandle(*value));
       break;
     }
+    case i::wasm::kWasmNullRef:
+      if (args.Length() < 2) {
+        // When no initial value is provided, we have to use the WebAssembly
+        // default value 'null', and not the JS default value 'undefined'.
+        global_obj->SetNullRef(i_isolate->factory()->null_value());
+        break;
+      }
+      if (!global_obj->SetNullRef(Utils::OpenHandle(*value))) {
+        thrower.TypeError("The value of nullref globals must be null");
+      }
+      break;
     case i::wasm::kWasmFuncRef: {
       if (args.Length() < 2) {
-        // When no inital value is provided, we have to use the WebAssembly
+        // When no initial value is provided, we have to use the WebAssembly
         // default value 'null', and not the JS default value 'undefined'.
         global_obj->SetFuncRef(i_isolate, i_isolate->factory()->null_value());
         break;
@@ -1774,7 +1806,10 @@ void WebAssemblyGlobalGetValueCommon(
       break;
     case i::wasm::kWasmAnyRef:
     case i::wasm::kWasmFuncRef:
+    case i::wasm::kWasmNullRef:
     case i::wasm::kWasmExnRef:
+      DCHECK_IMPLIES(receiver->type() == i::wasm::kWasmNullRef,
+                     receiver->GetRef()->IsNull());
       return_value.Set(Utils::ToLocal(receiver->GetRef()));
       break;
     default:
@@ -1847,6 +1882,11 @@ void WebAssemblyGlobalSetValue(
       receiver->SetAnyRef(Utils::OpenHandle(*args[0]));
       break;
     }
+    case i::wasm::kWasmNullRef:
+      if (!receiver->SetNullRef(Utils::OpenHandle(*args[0]))) {
+        thrower.TypeError("The value of nullref must be null");
+      }
+      break;
     case i::wasm::kWasmFuncRef: {
       if (!receiver->SetFuncRef(i_isolate, Utils::OpenHandle(*args[0]))) {
         thrower.TypeError(
@@ -1906,14 +1946,12 @@ Handle<JSFunction> CreateFunc(Isolate* isolate, Handle<String> name,
   return function;
 }
 
-// TODO(mstarzinger): Pass {has_prototype} as an argument and audit all calls
-// for whether a "prototype" property is expected. Also add respective tests.
 Handle<JSFunction> InstallFunc(Isolate* isolate, Handle<JSObject> object,
                                const char* str, FunctionCallback func,
-                               int length = 0,
+                               int length, bool has_prototype = false,
                                PropertyAttributes attributes = NONE) {
   Handle<String> name = v8_str(isolate, str);
-  Handle<JSFunction> function = CreateFunc(isolate, name, func, true);
+  Handle<JSFunction> function = CreateFunc(isolate, name, func, has_prototype);
   function->shared().set_length(length);
   JSObject::AddProperty(isolate, object, name, function, attributes);
   return function;
@@ -1923,7 +1961,7 @@ Handle<JSFunction> InstallConstructorFunc(Isolate* isolate,
                                          Handle<JSObject> object,
                                          const char* str,
                                          FunctionCallback func) {
-  return InstallFunc(isolate, object, str, func, 1, DONT_ENUM);
+  return InstallFunc(isolate, object, str, func, 1, true, DONT_ENUM);
 }
 
 Handle<String> GetterName(Isolate* isolate, Handle<String> name) {
@@ -1957,11 +1995,9 @@ void InstallGetterSetter(Isolate* isolate, Handle<JSObject> object,
       CreateFunc(isolate, SetterName(isolate, name), setter, false);
   setter_func->shared().set_length(1);
 
-  v8::PropertyAttribute attributes = v8::None;
-
   Utils::ToLocal(object)->SetAccessorProperty(
       Utils::ToLocal(name), Utils::ToLocal(getter_func),
-      Utils::ToLocal(setter_func), attributes);
+      Utils::ToLocal(setter_func), v8::None);
 }
 
 // Assigns a dummy instance template to the given constructor function. Used to

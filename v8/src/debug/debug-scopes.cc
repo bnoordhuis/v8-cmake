@@ -238,9 +238,9 @@ void ScopeIterator::TryParseAndRetrieveScopes(ReparseStrategy strategy) {
   Handle<Script> script(Script::cast(shared_info->script()), isolate_);
   if (scope_info->scope_type() == FUNCTION_SCOPE &&
       strategy == ReparseStrategy::kFunctionLiteral) {
-    info_ = new ParseInfo(isolate_, shared_info);
+    info_ = new ParseInfo(isolate_, *shared_info);
   } else {
-    info_ = new ParseInfo(isolate_, script);
+    info_ = new ParseInfo(isolate_, *script);
     info_->set_eager();
   }
 
@@ -261,7 +261,7 @@ void ScopeIterator::TryParseAndRetrieveScopes(ReparseStrategy strategy) {
 
   if (parsing::ParseAny(info_, shared_info, isolate_) &&
       Rewriter::Rewrite(info_)) {
-    info_->ast_value_factory()->Internalize(isolate_);
+    info_->ast_value_factory()->Internalize(isolate_->factory());
     DeclarationScope* literal_scope = info_->literal()->scope();
 
     ScopeChainRetriever scope_chain_retriever(literal_scope, function_,
@@ -442,7 +442,6 @@ void ScopeIterator::Next() {
 
   UnwrapEvaluationContext();
 }
-
 
 // Return the type of the current scope.
 ScopeIterator::ScopeType ScopeIterator::Type() const {
@@ -1006,7 +1005,7 @@ bool ScopeIterator::SetContextExtensionValue(Handle<String> variable_name,
   DCHECK(context_->extension_object().IsJSContextExtensionObject());
   Handle<JSObject> ext(context_->extension_object(), isolate_);
   LookupIterator it(isolate_, ext, variable_name, LookupIterator::OWN);
-  Maybe<bool> maybe = JSReceiver::HasOwnProperty(ext, variable_name);
+  Maybe<bool> maybe = JSReceiver::HasProperty(&it);
   DCHECK(maybe.IsJust());
   if (!maybe.FromJust()) return false;
 

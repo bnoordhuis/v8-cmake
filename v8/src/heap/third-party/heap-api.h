@@ -18,13 +18,18 @@ class Heap {
 
   static v8::Isolate* GetIsolate(Address address);
 
-  AllocationResult Allocate(size_t size_in_bytes);
-
-  AllocationResult AllocateCode(size_t size_in_bytes);
+  AllocationResult Allocate(size_t size_in_bytes, AllocationType type,
+                            AllocationAlignment align);
 
   Address GetObjectFromInnerPointer(Address inner_pointer);
 
-  void CollectGarbage();
+  static bool InCodeSpace(Address address);
+
+  static bool InReadOnlySpace(Address address);
+
+  static bool IsValidHeapObject(HeapObject object);
+
+  bool CollectGarbage();
 };
 
 }  // namespace third_party_heap

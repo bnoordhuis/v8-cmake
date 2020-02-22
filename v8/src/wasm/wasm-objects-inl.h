@@ -88,8 +88,6 @@ ACCESSORS(WasmModuleObject, managed_native_module, Managed<wasm::NativeModule>,
           kNativeModuleOffset)
 ACCESSORS(WasmModuleObject, export_wrappers, FixedArray, kExportWrappersOffset)
 ACCESSORS(WasmModuleObject, script, Script, kScriptOffset)
-OPTIONAL_ACCESSORS(WasmModuleObject, asm_js_offset_table, ByteArray,
-                   kAsmJsOffsetTableOffset)
 wasm::NativeModule* WasmModuleObject::native_module() const {
   return managed_native_module().raw();
 }
@@ -104,7 +102,6 @@ const wasm::WasmModule* WasmModuleObject::module() const {
 bool WasmModuleObject::is_asm_js() {
   bool asm_js = is_asmjs_module(module());
   DCHECK_EQ(asm_js, script().IsUserJavaScript());
-  DCHECK_EQ(asm_js, has_asm_js_offset_table());
   return asm_js;
 }
 
@@ -182,6 +179,15 @@ void WasmGlobalObject::SetAnyRef(Handle<Object> value) {
   // We use this getter anyref and exnref.
   DCHECK(type() == wasm::kWasmAnyRef || type() == wasm::kWasmExnRef);
   tagged_buffer().set(offset(), *value);
+}
+
+bool WasmGlobalObject::SetNullRef(Handle<Object> value) {
+  DCHECK_EQ(type(), wasm::kWasmNullRef);
+  if (!value->IsNull()) {
+    return false;
+  }
+  tagged_buffer().set(offset(), *value);
+  return true;
 }
 
 bool WasmGlobalObject::SetFuncRef(Isolate* isolate, Handle<Object> value) {
@@ -379,7 +385,6 @@ ACCESSORS(WasmDebugInfo, wasm_instance, WasmInstanceObject, kInstanceOffset)
 ACCESSORS(WasmDebugInfo, interpreter_handle, Object, kInterpreterHandleOffset)
 ACCESSORS(WasmDebugInfo, interpreter_reference_stack, Cell,
           kInterpreterReferenceStackOffset)
-OPTIONAL_ACCESSORS(WasmDebugInfo, locals_names, FixedArray, kLocalsNamesOffset)
 OPTIONAL_ACCESSORS(WasmDebugInfo, c_wasm_entries, FixedArray,
                    kCWasmEntriesOffset)
 OPTIONAL_ACCESSORS(WasmDebugInfo, c_wasm_entry_map, Managed<wasm::SignatureMap>,
@@ -403,7 +408,6 @@ TQ_SMI_ACCESSORS(WasmExceptionTag, index)
 ACCESSORS(AsmWasmData, managed_native_module, Managed<wasm::NativeModule>,
           kManagedNativeModuleOffset)
 ACCESSORS(AsmWasmData, export_wrappers, FixedArray, kExportWrappersOffset)
-ACCESSORS(AsmWasmData, asm_js_offset_table, ByteArray, kAsmJsOffsetTableOffset)
 ACCESSORS(AsmWasmData, uses_bitset, HeapNumber, kUsesBitsetOffset)
 
 #include "src/objects/object-macros-undef.h"

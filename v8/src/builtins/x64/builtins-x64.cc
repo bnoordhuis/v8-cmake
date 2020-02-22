@@ -1238,7 +1238,7 @@ static void Generate_InterpreterPushArgs(MacroAssembler* masm,
   __ subq(start_address, Immediate(kSystemPointerSize));
   __ bind(&loop_check);
   __ cmpq(start_address, scratch);
-  __ j(greater, &loop_header, Label::kNear);
+  __ j(above, &loop_header, Label::kNear);
 }
 
 // static
@@ -1382,8 +1382,8 @@ static void Generate_InterpreterEnterBytecode(MacroAssembler* masm) {
   __ CmpObjectType(rbx, INTERPRETER_DATA_TYPE, kScratchRegister);
   __ j(not_equal, &builtin_trampoline, Label::kNear);
 
-  __ movq(rbx,
-          FieldOperand(rbx, InterpreterData::kInterpreterTrampolineOffset));
+  __ LoadTaggedPointerField(
+      rbx, FieldOperand(rbx, InterpreterData::kInterpreterTrampolineOffset));
   __ addq(rbx, Immediate(Code::kHeaderSize - kHeapObjectTag));
   __ jmp(&trampoline_loaded, Label::kNear);
 
@@ -2028,7 +2028,7 @@ void Builtins::Generate_CallOrConstructForwardVarargs(MacroAssembler* masm,
     __ JumpIfSmi(rdx, &new_target_not_constructor, Label::kNear);
     __ LoadTaggedPointerField(rbx, FieldOperand(rdx, HeapObject::kMapOffset));
     __ testb(FieldOperand(rbx, Map::kBitFieldOffset),
-             Immediate(Map::IsConstructorBit::kMask));
+             Immediate(Map::Bits1::IsConstructorBit::kMask));
     __ j(not_zero, &new_target_constructor, Label::kNear);
     __ bind(&new_target_not_constructor);
     {
@@ -2129,15 +2129,6 @@ void Builtins::Generate_CallFunction(MacroAssembler* masm,
            Immediate(SharedFunctionInfo::IsNativeBit::kMask |
                      SharedFunctionInfo::IsStrictBit::kMask));
   __ j(not_zero, &done_convert);
-
-  // Check if the window is marked as detached.
-  Label detached_window, after_detached_window;
-  __ LoadNativeContextSlot(Context::DETACHED_WINDOW_REASON_INDEX,
-                           kScratchRegister);
-  __ Cmp(kScratchRegister, Smi::zero());
-  __ j(not_zero, &detached_window);
-  __ bind(&after_detached_window);
-
   {
     // ----------- S t a t e -------------
     //  -- rax : the number of arguments (not including the receiver)
@@ -2215,15 +2206,6 @@ void Builtins::Generate_CallFunction(MacroAssembler* masm,
     __ Push(rdi);
     __ CallRuntime(Runtime::kThrowConstructorNonCallableError);
   }
-
-  __ bind(&detached_window);
-  {
-    FrameScope frame(masm, StackFrame::INTERNAL);
-    __ PushCallerSaved(kDontSaveFPRegs, kScratchRegister);
-    __ CallRuntime(Runtime::kReportDetachedWindowAccess);
-    __ PopCallerSaved(kDontSaveFPRegs, kScratchRegister);
-  }
-  __ jmp(&after_detached_window);
 }
 
 namespace {
@@ -2366,7 +2348,7 @@ void Builtins::Generate_Call(MacroAssembler* masm, ConvertReceiverMode mode) {
 
   // Check if target has a [[Call]] internal method.
   __ testb(FieldOperand(rcx, Map::kBitFieldOffset),
-           Immediate(Map::IsCallableBit::kMask));
+           Immediate(Map::Bits1::IsCallableBit::kMask));
   __ j(zero, &non_callable, Label::kNear);
 
   // Check if target is a proxy and call CallProxy external builtin
@@ -2466,7 +2448,7 @@ void Builtins::Generate_Construct(MacroAssembler* masm) {
   // Check if target has a [[Construct]] internal method.
   __ LoadTaggedPointerField(rcx, FieldOperand(rdi, HeapObject::kMapOffset));
   __ testb(FieldOperand(rcx, Map::kBitFieldOffset),
-           Immediate(Map::IsConstructorBit::kMask));
+           Immediate(Map::Bits1::IsConstructorBit::kMask));
   __ j(zero, &non_constructor);
 
   // Dispatch based on instance type.

@@ -1289,8 +1289,8 @@ void MacroAssembler::CheckDebugHook(Register fun, Register new_target,
   ExternalReference debug_hook_active =
       ExternalReference::debug_hook_on_function_call_address(isolate());
   Move(r6, debug_hook_active);
-  tm(MemOperand(r6), Operand::Zero());
-  bne(&skip_hook);
+  tm(MemOperand(r6), Operand(0xFF));
+  beq(&skip_hook);
 
   {
     // Load receiver to pass it later to DebugOnFunctionCall hook.
@@ -1684,7 +1684,7 @@ void MacroAssembler::AssertConstructor(Register object, Register scratch) {
     Check(ne, AbortReason::kOperandIsASmiAndNotAConstructor);
     LoadMap(scratch, object);
     tm(FieldMemOperand(scratch, Map::kBitFieldOffset),
-       Operand(Map::IsConstructorBit::kMask));
+       Operand(Map::Bits1::IsConstructorBit::kMask));
     Check(ne, AbortReason::kOperandIsNotAConstructor);
   }
 }

@@ -236,6 +236,9 @@ inline bool decode_local_type(uint8_t val, ValueType* result) {
     case kLocalAnyRef:
       *result = kWasmAnyRef;
       return true;
+    case kLocalNullRef:
+      *result = kWasmNullRef;
+      return true;
     case kLocalExnRef:
       *result = kWasmExnRef;
       return true;
@@ -508,7 +511,7 @@ struct MemoryInitImmediate {
   inline MemoryInitImmediate(Decoder* decoder, const byte* pc) {
     uint32_t len = 0;
     data_segment_index =
-        decoder->read_i32v<validate>(pc + 2, &len, "data segment index");
+        decoder->read_u32v<validate>(pc + 2, &len, "data segment index");
     memory = MemoryIndexImmediate<validate>(decoder, pc + 1 + len);
     length = len + memory.length;
   }
@@ -520,7 +523,7 @@ struct DataDropImmediate {
   unsigned length;
 
   inline DataDropImmediate(Decoder* decoder, const byte* pc) {
-    index = decoder->read_i32v<validate>(pc + 2, &length, "data segment index");
+    index = decoder->read_u32v<validate>(pc + 2, &length, "data segment index");
   }
 };
 
@@ -547,7 +550,7 @@ struct TableInitImmediate {
   inline TableInitImmediate(Decoder* decoder, const byte* pc) {
     uint32_t len = 0;
     elem_segment_index =
-        decoder->read_i32v<validate>(pc + 2, &len, "elem segment index");
+        decoder->read_u32v<validate>(pc + 2, &len, "elem segment index");
     table = TableIndexImmediate<validate>(decoder, pc + 1 + len);
     length = len + table.length;
   }
@@ -559,7 +562,7 @@ struct ElemDropImmediate {
   unsigned length;
 
   inline ElemDropImmediate(Decoder* decoder, const byte* pc) {
-    index = decoder->read_i32v<validate>(pc + 2, &length, "elem segment index");
+    index = decoder->read_u32v<validate>(pc + 2, &length, "elem segment index");
   }
 };
 
@@ -856,6 +859,15 @@ class WasmDecoder : public Decoder {
           }
           decoder->error(decoder->pc() - 1,
                          "invalid local type 'funcref', enable with "
+                         "--experimental-wasm-anyref");
+          return false;
+        case kLocalNullRef:
+          if (enabled.has_anyref()) {
+            type = kWasmNullRef;
+            break;
+          }
+          decoder->error(decoder->pc() - 1,
+                         "invalid local type 'nullref', enable with "
                          "--experimental-wasm-anyref");
           return false;
         case kLocalExnRef:
@@ -1807,8 +1819,8 @@ class WasmFullDecoder : public WasmDecoder<validate> {
           auto exception = Pop(0, kWasmExnRef);
           const WasmExceptionSig* sig = imm.index.exception->sig;
           size_t value_count = sig->parameter_count();
-          // TODO(mstarzinger): This operand stack mutation is an ugly hack to
-          // make both type checking here as well as environment merging in the
+          // TODO(wasm): This operand stack mutation is an ugly hack to make
+          // both type checking here as well as environment merging in the
           // graph builder interface work out of the box. We should introduce
           // special handling for both and do minimal/no stack mutation here.
           for (size_t i = 0; i < value_count; ++i) Push(sig->GetParam(i));
@@ -2311,12 +2323,10 @@ class WasmFullDecoder : public WasmDecoder<validate> {
           byte numeric_index =
               this->template read_u8<validate>(this->pc_ + 1, "numeric index");
           opcode = static_cast<WasmOpcode>(opcode << 8 | numeric_index);
-          if (opcode < kExprMemoryInit) {
-            CHECK_PROTOTYPE_OPCODE(sat_f2i_conversions);
-          } else if (opcode == kExprTableGrow || opcode == kExprTableSize ||
-                     opcode == kExprTableFill) {
+          if (opcode == kExprTableGrow || opcode == kExprTableSize ||
+              opcode == kExprTableFill) {
             CHECK_PROTOTYPE_OPCODE(anyref);
-          } else {
+          } else if (opcode >= kExprMemoryInit) {
             CHECK_PROTOTYPE_OPCODE(bulk_memory);
           }
           TRACE_PART(TRACE_INST_FORMAT, startrel(this->pc_),
@@ -3175,9 +3185,6 @@ class WasmFullDecoder : public WasmDecoder<validate> {
   }
 
   void BuildSimplePrototypeOperator(WasmOpcode opcode) {
-    if (WasmOpcodes::IsSignExtensionOpcode(opcode)) {
-      RET_ON_PROTOTYPE_OPCODE(se);
-    }
     if (WasmOpcodes::IsAnyRefOpcode(opcode)) {
       RET_ON_PROTOTYPE_OPCODE(anyref);
     }

@@ -433,8 +433,7 @@ void InstructionSelector::VisitStore(Node* node) {
         opcode | AddressingModeField::encode(addressing_mode);
     if ((ElementSizeLog2Of(store_rep.representation()) <
          kSystemPointerSizeLog2) &&
-        (value->opcode() == IrOpcode::kTruncateInt64ToInt32) &&
-        CanCover(node, value)) {
+        value->opcode() == IrOpcode::kTruncateInt64ToInt32) {
       value = value->InputAt(0);
     }
     InstructionOperand value_operand =
@@ -669,8 +668,7 @@ void VisitWord32Shift(InstructionSelector* selector, Node* node,
   Node* left = m.left().node();
   Node* right = m.right().node();
 
-  if (left->opcode() == IrOpcode::kTruncateInt64ToInt32 &&
-      selector->CanCover(node, left)) {
+  if (left->opcode() == IrOpcode::kTruncateInt64ToInt32) {
     left = left->InputAt(0);
   }
 
@@ -941,6 +939,17 @@ void InstructionSelector::VisitSimd128ReverseBytes(Node* node) {
 
 void InstructionSelector::VisitInt32Add(Node* node) {
   X64OperandGenerator g(this);
+
+  // No need to truncate the values before Int32Add.
+  DCHECK_EQ(node->InputCount(), 2);
+  Node* left = node->InputAt(0);
+  Node* right = node->InputAt(1);
+  if (left->opcode() == IrOpcode::kTruncateInt64ToInt32) {
+    node->ReplaceInput(0, left->InputAt(0));
+  }
+  if (right->opcode() == IrOpcode::kTruncateInt64ToInt32) {
+    node->ReplaceInput(1, right->InputAt(0));
+  }
 
   // Try to match the Add to a leal pattern
   BaseWithIndexAndDisplacement32Matcher m(node);
@@ -1232,6 +1241,12 @@ void InstructionSelector::VisitBitcastWord32ToWord64(Node* node) {
 }
 
 void InstructionSelector::VisitChangeInt32ToInt64(Node* node) {
+  DCHECK_EQ(node->InputCount(), 1);
+  Node* input = node->InputAt(0);
+  if (input->opcode() == IrOpcode::kTruncateInt64ToInt32) {
+    node->ReplaceInput(0, input->InputAt(0));
+  }
+
   X64OperandGenerator g(this);
   Node* const value = node->InputAt(0);
   if (value->opcode() == IrOpcode::kLoad && CanCover(node, value)) {
@@ -1336,12 +1351,6 @@ void InstructionSelector::VisitChangeUint32ToUint64(Node* node) {
     return EmitIdentity(node);
   }
   Emit(kX64Movl, g.DefineAsRegister(node), g.Use(value));
-}
-
-void InstructionSelector::VisitChangeTaggedToCompressed(Node* node) {
-  // The top 32 bits in the 64-bit register will be undefined, and
-  // must not be used by a dependent node.
-  return EmitIdentity(node);
 }
 
 namespace {
@@ -1807,13 +1816,11 @@ void VisitWordCompare(InstructionSelector* selector, Node* node,
   // The 32-bit comparisons automatically truncate Word64
   // values to Word32 range, no need to do that explicitly.
   if (opcode == kX64Cmp32 || opcode == kX64Test32) {
-    if (left->opcode() == IrOpcode::kTruncateInt64ToInt32 &&
-        selector->CanCover(node, left)) {
+    if (left->opcode() == IrOpcode::kTruncateInt64ToInt32) {
       left = left->InputAt(0);
     }
 
-    if (right->opcode() == IrOpcode::kTruncateInt64ToInt32 &&
-        selector->CanCover(node, right)) {
+    if (right->opcode() == IrOpcode::kTruncateInt64ToInt32) {
       right = right->InputAt(0);
     }
   }
@@ -2675,6 +2682,7 @@ VISIT_ATOMIC_BINOP(Xor)
   V(I16x8MinU)             \
   V(I16x8MaxU)             \
   V(I16x8GeU)              \
+  V(I16x8RoundingAverageU) \
   V(I8x16SConvertI16x8)    \
   V(I8x16Add)              \
   V(I8x16AddSaturateS)     \
@@ -2690,6 +2698,7 @@ VISIT_ATOMIC_BINOP(Xor)
   V(I8x16MinU)             \
   V(I8x16MaxU)             \
   V(I8x16GeU)              \
+  V(I8x16RoundingAverageU) \
   V(S128And)               \
   V(S128Or)                \
   V(S128Xor)
@@ -2883,6 +2892,13 @@ void InstructionSelector::VisitS128Select(Node* node) {
        g.UseRegister(node->InputAt(2)));
 }
 
+void InstructionSelector::VisitS128AndNot(Node* node) {
+  X64OperandGenerator g(this);
+  // andnps a b does ~a & b, but we want a & !b, so flip the input.
+  Emit(kX64S128AndNot, g.DefineSameAsFirst(node),
+       g.UseRegister(node->InputAt(1)), g.UseRegister(node->InputAt(0)));
+}
+
 void InstructionSelector::VisitF64x2Abs(Node* node) {
   X64OperandGenerator g(this);
   InstructionOperand temps[] = {g.TempDoubleRegister()};
@@ -2895,21 +2911,6 @@ void InstructionSelector::VisitF64x2Neg(Node* node) {
   InstructionOperand temps[] = {g.TempDoubleRegister()};
   Emit(kX64F64x2Neg, g.DefineSameAsFirst(node), g.UseRegister(node->InputAt(0)),
        arraysize(temps), temps);
-}
-
-void InstructionSelector::VisitF64x2SConvertI64x2(Node* node) {
-  X64OperandGenerator g(this);
-  InstructionOperand temps[] = {g.TempRegister(), g.TempRegister()};
-  Emit(kX64F64x2SConvertI64x2, g.DefineSameAsFirst(node),
-       g.UseRegister(node->InputAt(0)), arraysize(temps), temps);
-}
-
-void InstructionSelector::VisitF64x2UConvertI64x2(Node* node) {
-  X64OperandGenerator g(this);
-  InstructionOperand temps[] = {g.TempRegister(), g.TempSimd128Register()};
-  // Need dst to be unique to temp because Cvtqui2sd will zero temp.
-  Emit(kX64F64x2UConvertI64x2, g.DefineSameAsFirst(node),
-       g.UseUniqueRegister(node->InputAt(0)), arraysize(temps), temps);
 }
 
 void InstructionSelector::VisitF32x4UConvertI32x4(Node* node) {

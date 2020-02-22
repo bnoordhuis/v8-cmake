@@ -25,6 +25,7 @@ namespace torque_internal {
     const object: HeapObject;
     const offset: intptr;
   }
+  type UninitializedHeapObject extends HeapObject;
 }
 
 type Tagged generates 'TNode<MaybeObject>' constexpr 'MaybeObject';
@@ -70,7 +71,42 @@ type BuiltinPtr extends Smi generates 'TNode<BuiltinPtr>';
 type Context extends HeapObject generates 'TNode<Context>';
 type NativeContext extends Context;
 
+struct float64_or_hole {
+  is_hole: bool;
+  value: float64;
+}
+
+intrinsic %FromConstexpr<To: type, From: type>(b: From): To;
+intrinsic %RawDownCast<To: type, From: type>(x: From): To;
+intrinsic %RawConstexprCast<To: type, From: type>(f: From): To;
+extern macro SmiConstant(constexpr Smi): Smi;
+extern macro TaggedToSmi(Object): Smi
+    labels CastError;
+extern macro TaggedToHeapObject(Object): HeapObject
+    labels CastError;
+
+extern macro IntPtrConstant(constexpr int31): intptr;
+
 macro FromConstexpr<To: type, From: type>(o: From): To;
+FromConstexpr<Smi, constexpr Smi>(s: constexpr Smi): Smi {
+  return SmiConstant(s);
+}
+FromConstexpr<Smi, constexpr int31>(s: constexpr int31): Smi {
+  return %FromConstexpr<Smi>(s);
+}
+FromConstexpr<intptr, constexpr int31>(i: constexpr int31): intptr {
+  return IntPtrConstant(i);
+}
+
+macro Cast<A : type extends Object>(implicit context: Context)(o: Object): A
+    labels CastError {
+  return Cast<A>(TaggedToHeapObject(o) otherwise CastError)
+      otherwise CastError;
+}
+Cast<Smi>(o: Object): Smi
+    labels CastError {
+  return TaggedToSmi(o) otherwise CastError;
+}
 )";
 
 TorqueCompilerResult TestCompileTorque(std::string source) {
@@ -124,6 +160,10 @@ void ExpectFailingCompilation(
       source, MatcherVector<T>{{message_pattern, LineAndColumn::Invalid()}});
 }
 
+// TODO(almuthanna): the definition of this function is skipped on Fuchsia
+// because it causes an 'unused function' exception upon buidling gn
+// Ticket: https://crbug.com/1028617
+#if !defined(V8_TARGET_OS_FUCHSIA)
 int CountPreludeLines() {
   static int result = -1;
   if (result == -1) {
@@ -132,17 +172,23 @@ int CountPreludeLines() {
   }
   return result;
 }
+#endif
 
 using SubstrWithPosition =
     std::pair<::testing::PolymorphicMatcher<
                   ::testing::internal::HasSubstrMatcher<std::string>>,
               LineAndColumn>;
 
+// TODO(almuthanna): the definition of this function is skipped on Fuchsia
+// because it causes an 'unused function' exception upon buidling gn
+// Ticket: https://crbug.com/1028617
+#if !defined(V8_TARGET_OS_FUCHSIA)
 SubstrWithPosition SubstrTester(const std::string& message, int line, int col) {
   // Change line and column from 1-based to 0-based.
   return {::testing::HasSubstr(message),
           LineAndColumn{line + CountPreludeLines() - 1, col - 1}};
 }
+#endif
 
 using SubstrVector = std::vector<SubstrWithPosition>;
 
@@ -234,6 +280,10 @@ TEST(Torque, TypeDeclarationOrder) {
   )");
 }
 
+// TODO(almuthanna): These tests were skipped because they cause a crash when
+// they are ran on Fuchsia. This issue should be solved later on
+// Ticket: https://crbug.com/1028617
+#if !defined(V8_TARGET_OS_FUCHSIA)
 TEST(Torque, ConditionalFields) {
   // This class should throw alignment errors if @if decorators aren't
   // working.
@@ -278,6 +328,7 @@ TEST(Torque, DoubleUnderScorePrefixIllegalForIdentifiers) {
   )",
                            HasSubstr("Lexer Error"));
 }
+#endif
 
 TEST(Torque, UnusedLetBindingLintError) {
   ExpectFailingCompilation(R"(
@@ -296,6 +347,10 @@ TEST(Torque, UnderscorePrefixSilencesUnusedWarning) {
   )");
 }
 
+// TODO(almuthanna): This test was skipped because it causes a crash when it is
+// ran on Fuchsia. This issue should be solved later on
+// Ticket: https://crbug.com/1028617
+#if !defined(V8_TARGET_OS_FUCHSIA)
 TEST(Torque, UsingUnderscorePrefixedIdentifierError) {
   ExpectFailingCompilation(R"(
     @export macro Foo(y: Smi) {
@@ -305,6 +360,7 @@ TEST(Torque, UsingUnderscorePrefixedIdentifierError) {
   )",
                            HasSubstr("Trying to reference '_x'"));
 }
+#endif
 
 TEST(Torque, UnusedArgumentLintError) {
   ExpectFailingCompilation(R"(
@@ -346,10 +402,15 @@ TEST(Torque, NoUnusedWarningForVariablesOnlyUsedInAsserts) {
   )");
 }
 
+// TODO(almuthanna): This test was skipped because it causes a crash when it is
+// ran on Fuchsia. This issue should be solved later on
+// Ticket: https://crbug.com/1028617
+#if !defined(V8_TARGET_OS_FUCHSIA)
 TEST(Torque, ImportNonExistentFile) {
   ExpectFailingCompilation(R"(import "foo/bar.tq")",
                            HasSubstr("File 'foo/bar.tq' not found."));
 }
+#endif
 
 TEST(Torque, LetShouldBeConstLintError) {
   ExpectFailingCompilation(R"(
@@ -370,6 +431,10 @@ TEST(Torque, LetShouldBeConstIsSkippedForStructs) {
   )");
 }
 
+// TODO(almuthanna): These tests were skipped because they cause a crash when
+// they are ran on Fuchsia. This issue should be solved later on
+// Ticket: https://crbug.com/1028617
+#if !defined(V8_TARGET_OS_FUCHSIA)
 TEST(Torque, GenericAbstractType) {
   ExpectSuccessfulCompilation(R"(
     type Foo<T: type> extends HeapObject;
@@ -471,7 +536,7 @@ TEST(Torque, SpecializationRequesters) {
       A<T>();
     }
     struct C<T: type> {
-      Method() {
+      macro Method() {
         B<T>();
       }
     }
@@ -482,6 +547,70 @@ TEST(Torque, SpecializationRequesters) {
           SubstrTester("Note: in specialization B<Smi> requested here", 8, 9),
           SubstrTester("Note: in specialization C<Smi> requested here", 11,
                        5)});
+}
+#endif
+
+TEST(Torque, Enums) {
+  ExpectSuccessfulCompilation(R"(
+    extern enum MyEnum {
+      kValue0,
+      kValue1,
+      kValue2,
+      kValue3
+    }
+  )");
+
+  ExpectFailingCompilation(R"(
+    extern enum MyEmptyEnum {
+    }
+  )",
+                           HasSubstr("unexpected token \"}\""));
+}
+
+TEST(Torque, EnumInTypeswitch) {
+  ExpectSuccessfulCompilation(R"(
+    extern enum MyEnum extends Smi {
+      kA,
+      kB,
+      kC
+    }
+
+    @export
+    macro Test(implicit context: Context)(v : MyEnum): Smi {
+      typeswitch(v) {
+        case (MyEnum::kA | MyEnum::kB): {
+          return 1;
+        }
+        case (MyEnum::kC): {
+          return 2;
+        }
+      }
+    }
+  )");
+
+  ExpectSuccessfulCompilation(R"(
+    extern enum MyEnum extends Smi {
+      kA,
+      kB,
+      kC,
+      ...
+    }
+
+    @export
+    macro Test(implicit context: Context)(v : MyEnum): Smi {
+      typeswitch(v) {
+         case (MyEnum::kC): {
+          return 2;
+        }
+        case (MyEnum::kA | MyEnum::kB): {
+          return 1;
+        }
+       case (MyEnum): {
+          return 0;
+        }
+      }
+    }
+  )");
 }
 
 }  // namespace torque

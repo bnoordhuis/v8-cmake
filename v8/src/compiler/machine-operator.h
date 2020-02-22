@@ -413,7 +413,6 @@ class V8_EXPORT_PRIVATE MachineOperatorBuilder final
   const Operator* ChangeInt64ToFloat64();
   const Operator* ChangeUint32ToFloat64();
   const Operator* ChangeUint32ToUint64();
-  const Operator* ChangeTaggedToCompressed();
 
   // These operators truncate or round numbers, both changing the representation
   // of the number and mapping multiple input values onto the same output value.
@@ -537,8 +536,6 @@ class V8_EXPORT_PRIVATE MachineOperatorBuilder final
 
   // SIMD operators.
   const Operator* F64x2Splat();
-  const Operator* F64x2SConvertI64x2();
-  const Operator* F64x2UConvertI64x2();
   const Operator* F64x2Abs();
   const Operator* F64x2Neg();
   const Operator* F64x2Sqrt();
@@ -666,6 +663,7 @@ class V8_EXPORT_PRIVATE MachineOperatorBuilder final
   const Operator* I16x8MaxU();
   const Operator* I16x8GtU();
   const Operator* I16x8GeU();
+  const Operator* I16x8RoundingAverageU();
 
   const Operator* I8x16Splat();
   const Operator* I8x16ExtractLaneU(int32_t);
@@ -695,6 +693,7 @@ class V8_EXPORT_PRIVATE MachineOperatorBuilder final
   const Operator* I8x16MaxU();
   const Operator* I8x16GtU();
   const Operator* I8x16GeU();
+  const Operator* I8x16RoundingAverageU();
 
   const Operator* S128Load();
   const Operator* S128Store();
@@ -705,6 +704,7 @@ class V8_EXPORT_PRIVATE MachineOperatorBuilder final
   const Operator* S128Xor();
   const Operator* S128Not();
   const Operator* S128Select();
+  const Operator* S128AndNot();
 
   const Operator* S8x16Swizzle();
   const Operator* S8x16Shuffle(const uint8_t shuffle[16]);

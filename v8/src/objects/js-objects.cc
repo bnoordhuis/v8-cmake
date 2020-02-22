@@ -118,8 +118,9 @@ Maybe<bool> JSReceiver::HasOwnProperty(Handle<JSReceiver> object,
   }
 
   if (object->IsJSObject()) {  // Shortcut.
-    LookupIterator it = LookupIterator::PropertyOrElement(
-        object->GetIsolate(), object, name, object, LookupIterator::OWN);
+    Isolate* isolate = object->GetIsolate();
+    LookupIterator::Key key(isolate, name);
+    LookupIterator it(isolate, object, key, LookupIterator::OWN);
     return HasProperty(&it);
   }
 
@@ -129,7 +130,8 @@ Maybe<bool> JSReceiver::HasOwnProperty(Handle<JSReceiver> object,
   return Just(attributes.FromJust() != ABSENT);
 }
 
-Handle<Object> JSReceiver::GetDataProperty(LookupIterator* it) {
+Handle<Object> JSReceiver::GetDataProperty(LookupIterator* it,
+                                           AllocationPolicy allocation_policy) {
   for (; it->IsFound(); it->Next()) {
     switch (it->state()) {
       case LookupIterator::INTERCEPTOR:
@@ -152,7 +154,7 @@ Handle<Object> JSReceiver::GetDataProperty(LookupIterator* it) {
       case LookupIterator::INTEGER_INDEXED_EXOTIC:
         return it->isolate()->factory()->undefined_value();
       case LookupIterator::DATA:
-        return it->GetDataValue();
+        return it->GetDataValue(allocation_policy);
     }
   }
   return it->isolate()->factory()->undefined_value();
@@ -242,16 +244,17 @@ V8_WARN_UNUSED_RESULT Maybe<bool> FastAssign(
           prop_value = JSObject::FastPropertyAt(from, representation, index);
         }
       } else {
+        LookupIterator it(isolate, from, next_key,
+                          LookupIterator::OWN_SKIP_INTERCEPTOR);
         ASSIGN_RETURN_ON_EXCEPTION_VALUE(
-            isolate, prop_value,
-            JSReceiver::GetProperty(isolate, from, next_key), Nothing<bool>());
+            isolate, prop_value, Object::GetProperty(&it), Nothing<bool>());
         stable = from->map() == *map;
         *descriptors.location() = map->instance_descriptors().ptr();
       }
     } else {
       // If the map did change, do a slower lookup. We are still guaranteed that
       // the object has a simple shape, and that the key is a name.
-      LookupIterator it(from, next_key, from,
+      LookupIterator it(isolate, from, next_key, from,
                         LookupIterator::OWN_SKIP_INTERCEPTOR);
       if (!it.IsFound()) continue;
       DCHECK(it.state() == LookupIterator::DATA ||
@@ -262,10 +265,10 @@ V8_WARN_UNUSED_RESULT Maybe<bool> FastAssign(
     }
 
     if (use_set) {
-      bool success;
-      LookupIterator it = LookupIterator::PropertyOrElement(isolate, target,
-                                                            next_key, &success);
-      CHECK(success);
+      // The lookup will walk the prototype chain, so we have to be careful
+      // to treat any key correctly for any receiver/holder.
+      LookupIterator::Key key(isolate, next_key);
+      LookupIterator it(isolate, target, key);
       Maybe<bool> result =
           Object::SetProperty(&it, prop_value, StoreOrigin::kNamed,
                               Just(ShouldThrow::kThrowOnError));
@@ -281,10 +284,9 @@ V8_WARN_UNUSED_RESULT Maybe<bool> FastAssign(
       }
 
       // 4a ii 2. Perform ? CreateDataProperty(target, nextKey, propValue).
-      bool success;
-      LookupIterator it = LookupIterator::PropertyOrElement(
-          isolate, target, next_key, &success, LookupIterator::OWN);
-      CHECK(success);
+      // This is an OWN lookup, so constructing a named-mode LookupIterator
+      // from {next_key} is safe.
+      LookupIterator it(isolate, target, next_key, LookupIterator::OWN);
       CHECK(JSObject::CreateDataProperty(&it, prop_value, Just(kThrowOnError))
                 .FromJust());
     }
@@ -344,10 +346,8 @@ Maybe<bool> JSReceiver::SetOrCopyDataProperties(
         }
 
         // 4a ii 2. Perform ! CreateDataProperty(target, nextKey, propValue).
-        bool success;
-        LookupIterator it = LookupIterator::PropertyOrElement(
-            isolate, target, next_key, &success, LookupIterator::OWN);
-        CHECK(success);
+        LookupIterator::Key key(isolate, next_key);
+        LookupIterator it(isolate, target, key, LookupIterator::OWN);
         CHECK(JSObject::CreateDataProperty(&it, prop_value, Just(kThrowOnError))
                   .FromJust());
       }
@@ -448,11 +448,15 @@ std::pair<MaybeHandle<JSFunction>, Handle<String>> GetConstructorHelper(
     }
   }
 
+  LookupIterator it_tag(isolate, receiver,
+                        isolate->factory()->to_string_tag_symbol(), receiver,
+                        LookupIterator::PROTOTYPE_CHAIN_SKIP_INTERCEPTOR);
   Handle<Object> maybe_tag = JSReceiver::GetDataProperty(
-      receiver, isolate->factory()->to_string_tag_symbol());
-  if (maybe_tag->IsString())
+      &it_tag, AllocationPolicy::kAllocationDisallowed);
+  if (maybe_tag->IsString()) {
     return std::make_pair(MaybeHandle<JSFunction>(),
                           Handle<String>::cast(maybe_tag));
+  }
 
   PrototypeIterator iter(isolate, receiver);
   if (iter.IsAtEnd()) {
@@ -461,9 +465,10 @@ std::pair<MaybeHandle<JSFunction>, Handle<String>> GetConstructorHelper(
   }
 
   Handle<JSReceiver> start = PrototypeIterator::GetCurrent<JSReceiver>(iter);
-  LookupIterator it(receiver, isolate->factory()->constructor_string(), start,
-                    LookupIterator::PROTOTYPE_CHAIN_SKIP_INTERCEPTOR);
-  Handle<Object> maybe_constructor = JSReceiver::GetDataProperty(&it);
+  LookupIterator it(isolate, receiver, isolate->factory()->constructor_string(),
+                    start, LookupIterator::PROTOTYPE_CHAIN_SKIP_INTERCEPTOR);
+  Handle<Object> maybe_constructor =
+      JSReceiver::GetDataProperty(&it, AllocationPolicy::kAllocationDisallowed);
   if (maybe_constructor->IsJSFunction()) {
     JSFunction constructor = JSFunction::cast(*maybe_constructor);
     String name = constructor.shared().DebugName();
@@ -816,15 +821,17 @@ Maybe<bool> JSReceiver::DeleteElement(Handle<JSReceiver> object, uint32_t index,
 Maybe<bool> JSReceiver::DeleteProperty(Handle<JSReceiver> object,
                                        Handle<Name> name,
                                        LanguageMode language_mode) {
-  LookupIterator it(object, name, object, LookupIterator::OWN);
+  LookupIterator it(object->GetIsolate(), object, name, object,
+                    LookupIterator::OWN);
   return DeleteProperty(&it, language_mode);
 }
 
 Maybe<bool> JSReceiver::DeletePropertyOrElement(Handle<JSReceiver> object,
                                                 Handle<Name> name,
                                                 LanguageMode language_mode) {
-  LookupIterator it = LookupIterator::PropertyOrElement(
-      object->GetIsolate(), object, name, object, LookupIterator::OWN);
+  Isolate* isolate = object->GetIsolate();
+  LookupIterator::Key key(isolate, name);
+  LookupIterator it(isolate, object, key, object, LookupIterator::OWN);
   return DeleteProperty(&it, language_mode);
 }
 
@@ -897,10 +904,8 @@ MaybeHandle<Object> JSReceiver::DefineProperties(Isolate* isolate,
     Handle<Object> next_key(keys->get(i), isolate);
     // 7a. Let propDesc be props.[[GetOwnProperty]](nextKey).
     // 7b. ReturnIfAbrupt(propDesc).
-    bool success = false;
-    LookupIterator it = LookupIterator::PropertyOrElement(
-        isolate, props, next_key, &success, LookupIterator::OWN);
-    DCHECK(success);
+    LookupIterator::Key key(isolate, next_key);
+    LookupIterator it(isolate, props, key, LookupIterator::OWN);
     Maybe<PropertyAttributes> maybe = JSReceiver::GetPropertyAttributes(&it);
     if (maybe.IsNothing()) return MaybeHandle<Object>();
     PropertyAttributes attrs = maybe.FromJust();
@@ -913,7 +918,7 @@ MaybeHandle<Object> JSReceiver::DefineProperties(Isolate* isolate,
     ASSIGN_RETURN_ON_EXCEPTION(isolate, desc_obj, Object::GetProperty(&it),
                                Object);
     // 7c iii. Let desc be ToPropertyDescriptor(descObj).
-    success = PropertyDescriptor::ToPropertyDescriptor(
+    bool success = PropertyDescriptor::ToPropertyDescriptor(
         isolate, desc_obj, &descriptors[descriptors_index]);
     // 7c iv. ReturnIfAbrupt(desc).
     if (!success) return MaybeHandle<Object>();
@@ -969,11 +974,9 @@ Maybe<bool> JSReceiver::DefineOwnProperty(Isolate* isolate,
 Maybe<bool> JSReceiver::OrdinaryDefineOwnProperty(
     Isolate* isolate, Handle<JSObject> object, Handle<Object> key,
     PropertyDescriptor* desc, Maybe<ShouldThrow> should_throw) {
-  bool success = false;
-  DCHECK(key->IsName() || key->IsNumber());  // |key| is a PropertyKey...
-  LookupIterator it = LookupIterator::PropertyOrElement(
-      isolate, object, key, &success, LookupIterator::OWN);
-  DCHECK(success);  // ...so creating a LookupIterator can't fail.
+  DCHECK(key->IsName() || key->IsNumber());  // |key| is a PropertyKey.
+  LookupIterator::Key lookup_key(isolate, key);
+  LookupIterator it(isolate, object, lookup_key, LookupIterator::OWN);
 
   // Deal with access checks first.
   if (it.state() == LookupIterator::ACCESS_CHECK) {
@@ -1478,8 +1481,8 @@ Maybe<bool> JSReceiver::CreateDataProperty(Isolate* isolate,
                                            Handle<Name> key,
                                            Handle<Object> value,
                                            Maybe<ShouldThrow> should_throw) {
-  LookupIterator it = LookupIterator::PropertyOrElement(isolate, object, key,
-                                                        LookupIterator::OWN);
+  LookupIterator::Key lookup_key(isolate, key);
+  LookupIterator it(isolate, object, lookup_key, LookupIterator::OWN);
   return CreateDataProperty(&it, value, should_throw);
 }
 
@@ -1510,11 +1513,9 @@ Maybe<bool> JSReceiver::GetOwnPropertyDescriptor(Isolate* isolate,
                                                  Handle<JSReceiver> object,
                                                  Handle<Object> key,
                                                  PropertyDescriptor* desc) {
-  bool success = false;
-  DCHECK(key->IsName() || key->IsNumber());  // |key| is a PropertyKey...
-  LookupIterator it = LookupIterator::PropertyOrElement(
-      isolate, object, key, &success, LookupIterator::OWN);
-  DCHECK(success);  // ...so creating a LookupIterator can't fail.
+  DCHECK(key->IsName() || key->IsNumber());  // |key| is a PropertyKey.
+  LookupIterator::Key lookup_key(isolate, key);
+  LookupIterator it(isolate, object, lookup_key, LookupIterator::OWN);
   return GetOwnPropertyDescriptor(&it, desc);
 }
 
@@ -2916,7 +2917,7 @@ void MigrateFastToSlow(Isolate* isolate, Handle<JSObject> object,
   }
 
   // Copy the next enumeration index from instance descriptor.
-  dictionary->SetNextEnumerationIndex(real_size + 1);
+  dictionary->set_next_enumeration_index(real_size + 1);
 
   // From here on we cannot fail and we shouldn't GC anymore.
   DisallowHeapAllocation no_allocation;
@@ -3276,7 +3277,8 @@ MaybeHandle<Object> JSObject::SetOwnPropertyIgnoreAttributes(
     Handle<JSObject> object, Handle<Name> name, Handle<Object> value,
     PropertyAttributes attributes) {
   DCHECK(!value->IsTheHole());
-  LookupIterator it(object, name, object, LookupIterator::OWN);
+  LookupIterator it(object->GetIsolate(), object, name, object,
+                    LookupIterator::OWN);
   return DefineOwnPropertyIgnoreAttributes(&it, value, attributes);
 }
 
@@ -3293,8 +3295,8 @@ MaybeHandle<Object> JSObject::DefinePropertyOrElementIgnoreAttributes(
     Handle<JSObject> object, Handle<Name> name, Handle<Object> value,
     PropertyAttributes attributes) {
   Isolate* isolate = object->GetIsolate();
-  LookupIterator it = LookupIterator::PropertyOrElement(
-      isolate, object, name, object, LookupIterator::OWN);
+  LookupIterator::Key key(isolate, name);
+  LookupIterator it(isolate, object, key, object, LookupIterator::OWN);
   return DefineOwnPropertyIgnoreAttributes(&it, value, attributes);
 }
 
@@ -4093,8 +4095,8 @@ MaybeHandle<Object> JSObject::DefineAccessor(Handle<JSObject> object,
                                              PropertyAttributes attributes) {
   Isolate* isolate = object->GetIsolate();
 
-  LookupIterator it = LookupIterator::PropertyOrElement(
-      isolate, object, name, LookupIterator::OWN_SKIP_INTERCEPTOR);
+  LookupIterator::Key key(isolate, name);
+  LookupIterator it(isolate, object, key, LookupIterator::OWN_SKIP_INTERCEPTOR);
   return DefineAccessor(&it, getter, setter, attributes);
 }
 
@@ -4136,8 +4138,8 @@ MaybeHandle<Object> JSObject::SetAccessor(Handle<JSObject> object,
                                           PropertyAttributes attributes) {
   Isolate* isolate = object->GetIsolate();
 
-  LookupIterator it = LookupIterator::PropertyOrElement(
-      isolate, object, name, LookupIterator::OWN_SKIP_INTERCEPTOR);
+  LookupIterator::Key key(isolate, name);
+  LookupIterator it(isolate, object, key, LookupIterator::OWN_SKIP_INTERCEPTOR);
 
   // Duplicate ACCESS_CHECK outside of GetPropertyAttributes for the case that
   // the FailedAccessCheckCallbackFunction doesn't throw an exception.
@@ -4401,6 +4403,11 @@ void InvalidateOnePrototypeValidityCellInternal(Map map) {
     // Just set the value; the cell will be replaced lazily.
     Cell cell = Cell::cast(maybe_cell);
     cell.set_value(Smi::FromInt(Map::kPrototypeChainInvalid));
+  }
+  Object maybe_prototype_info = map.prototype_info();
+  if (maybe_prototype_info.IsPrototypeInfo()) {
+    PrototypeInfo prototype_info = PrototypeInfo::cast(maybe_prototype_info);
+    prototype_info.set_prototype_chain_enum_cache(Object());
   }
 }
 
@@ -4818,8 +4825,9 @@ MaybeHandle<Object> JSObject::GetPropertyWithInterceptor(LookupIterator* it,
 
 Maybe<bool> JSObject::HasRealNamedProperty(Handle<JSObject> object,
                                            Handle<Name> name) {
-  LookupIterator it = LookupIterator::PropertyOrElement(
-      object->GetIsolate(), object, name, LookupIterator::OWN_SKIP_INTERCEPTOR);
+  Isolate* isolate = object->GetIsolate();
+  LookupIterator::Key key(isolate, name);
+  LookupIterator it(isolate, object, key, LookupIterator::OWN_SKIP_INTERCEPTOR);
   return HasProperty(&it);
 }
 
@@ -4833,8 +4841,9 @@ Maybe<bool> JSObject::HasRealElementProperty(Handle<JSObject> object,
 
 Maybe<bool> JSObject::HasRealNamedCallbackProperty(Handle<JSObject> object,
                                                    Handle<Name> name) {
-  LookupIterator it = LookupIterator::PropertyOrElement(
-      object->GetIsolate(), object, name, LookupIterator::OWN_SKIP_INTERCEPTOR);
+  Isolate* isolate = object->GetIsolate();
+  LookupIterator::Key key(isolate, name);
+  LookupIterator it(isolate, object, key, LookupIterator::OWN_SKIP_INTERCEPTOR);
   Maybe<PropertyAttributes> maybe_result = GetPropertyAttributes(&it);
   return maybe_result.IsJust() ? Just(it.state() == LookupIterator::ACCESSOR)
                                : Nothing<bool>();
@@ -5530,6 +5539,23 @@ Handle<String> JSFunction::ToString(Handle<JSFunction> function) {
   // Check if we have source code for the {function}.
   if (!shared_info->HasSourceCode()) {
     return NativeCodeFunctionSourceString(shared_info);
+  }
+
+  // If this function was compiled from asm.js, use the recorded offset
+  // information.
+  if (shared_info->HasWasmExportedFunctionData()) {
+    Handle<WasmExportedFunctionData> function_data(
+        shared_info->wasm_exported_function_data(), isolate);
+    const wasm::WasmModule* module = function_data->instance().module();
+    if (is_asmjs_module(module)) {
+      std::pair<int, int> offsets =
+          module->asm_js_offset_information->GetFunctionOffsets(
+              declared_function_index(module, function_data->function_index()));
+      Handle<String> source(
+          String::cast(Script::cast(shared_info->script()).source()), isolate);
+      return isolate->factory()->NewSubString(source, offsets.first,
+                                              offsets.second);
+    }
   }
 
   if (shared_info->function_token_position() == kNoSourcePosition) {

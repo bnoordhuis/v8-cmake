@@ -71,7 +71,7 @@ MaybeHandle<Object> JSReceiver::GetElement(Isolate* isolate,
 
 Handle<Object> JSReceiver::GetDataProperty(Handle<JSReceiver> object,
                                            Handle<Name> name) {
-  LookupIterator it(object, name, object,
+  LookupIterator it(object->GetIsolate(), object, name, object,
                     LookupIterator::PROTOTYPE_CHAIN_SKIP_INTERCEPTOR);
   if (!it.IsFound()) return it.factory()->undefined_value();
   return GetDataProperty(&it);
@@ -456,6 +456,10 @@ ACCESSORS(JSFunction, raw_feedback_cell, FeedbackCell, kFeedbackCellOffset)
 ACCESSORS(JSGlobalObject, native_context, NativeContext, kNativeContextOffset)
 ACCESSORS(JSGlobalObject, global_proxy, JSGlobalProxy, kGlobalProxyOffset)
 
+DEF_GETTER(JSGlobalObject, native_context_unchecked, Object) {
+  return TaggedField<Object, kNativeContextOffset>::load(isolate, *this);
+}
+
 FeedbackVector JSFunction::feedback_vector() const {
   DCHECK(has_feedback_vector());
   return FeedbackVector::cast(raw_feedback_cell().value());
@@ -701,12 +705,15 @@ bool JSFunction::NeedsResetDueToFlushedBytecode() {
          code.builtin_index() != Builtins::kCompileLazy;
 }
 
-void JSFunction::ResetIfBytecodeFlushed() {
+void JSFunction::ResetIfBytecodeFlushed(
+    base::Optional<std::function<void(HeapObject object, ObjectSlot slot,
+                                      HeapObject target)>>
+        gc_notify_updated_slot) {
   if (FLAG_flush_bytecode && NeedsResetDueToFlushedBytecode()) {
     // Bytecode was flushed and function is now uncompiled, reset JSFunction
     // by setting code to CompileLazy and clearing the feedback vector.
     set_code(GetIsolate()->builtins()->builtin(i::Builtins::kCompileLazy));
-    raw_feedback_cell().reset();
+    raw_feedback_cell().reset_feedback_vector(gc_notify_updated_slot);
   }
 }
 
@@ -935,8 +942,9 @@ DEF_GETTER(JSReceiver, property_array, PropertyArray) {
 
 Maybe<bool> JSReceiver::HasProperty(Handle<JSReceiver> object,
                                     Handle<Name> name) {
-  LookupIterator it = LookupIterator::PropertyOrElement(object->GetIsolate(),
-                                                        object, name, object);
+  Isolate* isolate = object->GetIsolate();
+  LookupIterator::Key key(isolate, name);
+  LookupIterator it(isolate, object, key, object);
   return HasProperty(&it);
 }
 
@@ -958,15 +966,17 @@ Maybe<bool> JSReceiver::HasOwnProperty(Handle<JSReceiver> object,
 
 Maybe<PropertyAttributes> JSReceiver::GetPropertyAttributes(
     Handle<JSReceiver> object, Handle<Name> name) {
-  LookupIterator it = LookupIterator::PropertyOrElement(object->GetIsolate(),
-                                                        object, name, object);
+  Isolate* isolate = object->GetIsolate();
+  LookupIterator::Key key(isolate, name);
+  LookupIterator it(isolate, object, key, object);
   return GetPropertyAttributes(&it);
 }
 
 Maybe<PropertyAttributes> JSReceiver::GetOwnPropertyAttributes(
     Handle<JSReceiver> object, Handle<Name> name) {
-  LookupIterator it = LookupIterator::PropertyOrElement(
-      object->GetIsolate(), object, name, object, LookupIterator::OWN);
+  Isolate* isolate = object->GetIsolate();
+  LookupIterator::Key key(isolate, name);
+  LookupIterator it(isolate, object, key, object, LookupIterator::OWN);
   return GetPropertyAttributes(&it);
 }
 

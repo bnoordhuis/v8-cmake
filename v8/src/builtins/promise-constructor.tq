@@ -22,33 +22,22 @@ namespace promise {
   extern runtime IncrementUseCounter(Context, Smi): void;
   type UseCounterFeature extends int31
   constexpr 'v8::Isolate::UseCounterFeature';
-  const kNotAPromise: constexpr MessageTemplate
-  generates 'MessageTemplate::kNotAPromise';
-  const kResolverNotAFunction: constexpr MessageTemplate
-  generates 'MessageTemplate::kResolverNotAFunction';
   const kPromiseConstructorReturnedUndefined: constexpr UseCounterFeature
   generates 'v8::Isolate::kPromiseConstructorReturnedUndefined';
-
-  extern macro
-  PromiseBuiltinsAssembler::BranchIfAccessCheckFailed(
-      Context, Context, Object, Object): void labels NoAccess;
 
   extern macro
   IsDebugActive(): bool;
 
   transitioning macro
-  HasAccessCheckFailed(
-      context: Context, nativeContext: Context, promiseFun: Object,
-      executor: Object): bool {
-    BranchIfAccessCheckFailed(context, nativeContext, promiseFun, executor)
+  HasAccessCheckFailed(implicit context: Context)(
+      nativeContext: NativeContext, promiseFun: JSAny, executor: JSAny): bool {
+    BranchIfAccessCheckFailed(nativeContext, promiseFun, executor)
         otherwise return true;
     return false;
   }
 
   extern macro ConstructorBuiltinsAssembler::EmitFastNewObject(
       Context, JSFunction, JSReceiver): JSObject;
-
-  extern macro PromiseBuiltinsAssembler::PromiseInit(Object): void;
 
   extern macro
   PromiseBuiltinsAssembler::IsPromiseHookEnabledOrHasAsyncEventDelegate(): bool;
@@ -60,18 +49,19 @@ namespace promise {
       newTarget: JSAny)(executor: JSAny): JSAny {
     // 1. If NewTarget is undefined, throw a TypeError exception.
     if (newTarget == Undefined) {
-      ThrowTypeError(kNotAPromise, newTarget);
+      ThrowTypeError(MessageTemplate::kNotAPromise, newTarget);
     }
 
     // 2. If IsCallable(executor) is false, throw a TypeError exception.
     if (!TaggedIsCallable(executor)) {
-      ThrowTypeError(kResolverNotAFunction, executor);
+      ThrowTypeError(MessageTemplate::kResolverNotAFunction, executor);
     }
 
-    const promiseFun = UnsafeCast<JSFunction>(context[PROMISE_FUNCTION_INDEX]);
+    const promiseFun = UnsafeCast<JSFunction>(
+        context[NativeContextSlot::PROMISE_FUNCTION_INDEX]);
 
     // Silently fail if the stack looks fishy.
-    if (HasAccessCheckFailed(context, context, promiseFun, executor)) {
+    if (HasAccessCheckFailed(context, promiseFun, executor)) {
       IncrementUseCounter(
           context, SmiConstant(kPromiseConstructorReturnedUndefined));
       return Undefined;
@@ -79,12 +69,11 @@ namespace promise {
 
     let result: JSPromise;
     if (promiseFun == newTarget) {
-      result = AllocateAndInitJSPromise(context);
+      result = NewJSPromise();
     } else {
-      const resultObject = EmitFastNewObject(
-          context, promiseFun, UnsafeCast<JSReceiver>(newTarget));
-      PromiseInit(resultObject);
-      result = UnsafeCast<JSPromise>(resultObject);
+      result = UnsafeCast<JSPromise>(EmitFastNewObject(
+          context, promiseFun, UnsafeCast<JSReceiver>(newTarget)));
+      PromiseInit(result);
       if (IsPromiseHookEnabledOrHasAsyncEventDelegate()) {
         runtime::PromiseHookInit(result, Undefined);
       }
@@ -104,5 +93,17 @@ namespace promise {
 
     if (isDebugActive) runtime::DebugPopPromise();
     return result;
+  }
+
+  // Promise.prototype.catch ( onRejected )
+  // https://tc39.es/ecma262/#sec-promise.prototype.catch
+  transitioning javascript builtin
+  PromisePrototypeCatch(js-implicit context: Context, receiver: JSAny)(
+      onRejected: JSAny): JSAny {
+    // 1. Let promise be the this value.
+    // 2. Return ? Invoke(promise, "then", « undefined, onRejected »).
+    const nativeContext = LoadNativeContext(context);
+    return UnsafeCast<JSAny>(
+        InvokeThen(nativeContext, receiver, Undefined, onRejected));
   }
 }

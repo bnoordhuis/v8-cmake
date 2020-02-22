@@ -23,7 +23,7 @@ namespace typed_array {
   @export
   struct TypedArrayElementsInfo {
     // Calculates the number of bytes required for specified number of elements.
-    CalculateByteLength(length: uintptr): uintptr labels IfInvalid {
+    macro CalculateByteLength(length: uintptr): uintptr labels IfInvalid {
       if (length > kTypedArrayMaxLength) goto IfInvalid;
       const maxArrayLength = kArrayBufferMaxByteLength >>> this.sizeLog2;
       if (length > maxArrayLength) goto IfInvalid;
@@ -33,7 +33,7 @@ namespace typed_array {
 
     // Calculates the maximum number of elements supported by a specified number
     // of bytes.
-    CalculateLength(byteLength: uintptr): uintptr labels IfInvalid {
+    macro CalculateLength(byteLength: uintptr): uintptr labels IfInvalid {
       const length = byteLength >>> this.sizeLog2;
       if (length > kTypedArrayMaxLength) goto IfInvalid;
       return length;
@@ -41,7 +41,7 @@ namespace typed_array {
 
     // Determines if `bytes` (byte offset or length) cannot be evenly divided by
     // element size.
-    IsUnaligned(bytes: uintptr): bool {
+    macro IsUnaligned(bytes: uintptr): bool {
       // Exploits the fact the element size is a power of 2. Determining whether
       // there is remainder (not aligned) can be achieved efficiently with bit
       // masking. Shift is safe as sizeLog2 can be 3 at most (see
@@ -90,20 +90,20 @@ namespace typed_array {
   const kStoreFailureArrayDetached: Smi = 1;
 
   struct TypedArrayAccessor {
-    LoadNumeric(
+    macro LoadNumeric(
         context: Context, array: JSTypedArray, index: uintptr): Numeric {
       const loadfn: LoadNumericFn = this.loadNumericFn;
       return loadfn(context, array, index);
     }
 
-    StoreNumeric(
+    macro StoreNumeric(
         context: Context, array: JSTypedArray, index: uintptr, value: Numeric) {
       const storefn: StoreNumericFn = this.storeNumericFn;
       const result = storefn(context, array, index, value);
       assert(result == kStoreSucceded);
     }
 
-    StoreJSAny(
+    macro StoreJSAny(
         context: Context, array: JSTypedArray, index: uintptr, value: JSAny)
         labels IfDetached {
       const storefn: StoreJSAnyFn = this.storeJSAnyFn;
@@ -128,30 +128,31 @@ namespace typed_array {
   }
 
   macro GetTypedArrayAccessor(elementsKind: ElementsKind): TypedArrayAccessor {
-    if (IsElementsKindGreaterThan(elementsKind, UINT32_ELEMENTS)) {
-      if (elementsKind == INT32_ELEMENTS) {
+    if (IsElementsKindGreaterThan(
+            elementsKind, ElementsKind::UINT32_ELEMENTS)) {
+      if (elementsKind == ElementsKind::INT32_ELEMENTS) {
         return GetTypedArrayAccessor<Int32Elements>();
-      } else if (elementsKind == FLOAT32_ELEMENTS) {
+      } else if (elementsKind == ElementsKind::FLOAT32_ELEMENTS) {
         return GetTypedArrayAccessor<Float32Elements>();
-      } else if (elementsKind == FLOAT64_ELEMENTS) {
+      } else if (elementsKind == ElementsKind::FLOAT64_ELEMENTS) {
         return GetTypedArrayAccessor<Float64Elements>();
-      } else if (elementsKind == UINT8_CLAMPED_ELEMENTS) {
+      } else if (elementsKind == ElementsKind::UINT8_CLAMPED_ELEMENTS) {
         return GetTypedArrayAccessor<Uint8ClampedElements>();
-      } else if (elementsKind == BIGUINT64_ELEMENTS) {
+      } else if (elementsKind == ElementsKind::BIGUINT64_ELEMENTS) {
         return GetTypedArrayAccessor<BigUint64Elements>();
-      } else if (elementsKind == BIGINT64_ELEMENTS) {
+      } else if (elementsKind == ElementsKind::BIGINT64_ELEMENTS) {
         return GetTypedArrayAccessor<BigInt64Elements>();
       }
     } else {
-      if (elementsKind == UINT8_ELEMENTS) {
+      if (elementsKind == ElementsKind::UINT8_ELEMENTS) {
         return GetTypedArrayAccessor<Uint8Elements>();
-      } else if (elementsKind == INT8_ELEMENTS) {
+      } else if (elementsKind == ElementsKind::INT8_ELEMENTS) {
         return GetTypedArrayAccessor<Int8Elements>();
-      } else if (elementsKind == UINT16_ELEMENTS) {
+      } else if (elementsKind == ElementsKind::UINT16_ELEMENTS) {
         return GetTypedArrayAccessor<Uint16Elements>();
-      } else if (elementsKind == INT16_ELEMENTS) {
+      } else if (elementsKind == ElementsKind::INT16_ELEMENTS) {
         return GetTypedArrayAccessor<Int16Elements>();
-      } else if (elementsKind == UINT32_ELEMENTS) {
+      } else if (elementsKind == ElementsKind::UINT32_ELEMENTS) {
         return GetTypedArrayAccessor<Uint32Elements>();
       }
     }
@@ -173,20 +174,20 @@ namespace typed_array {
   }
 
   struct AttachedJSTypedArrayWitness {
-    Get(): AttachedJSTypedArray {
+    macro Get(): AttachedJSTypedArray {
       return this.unstable;
     }
 
-    GetStable(): JSTypedArray {
+    macro GetStable(): JSTypedArray {
       return this.stable;
     }
 
-    Recheck() labels Detached {
+    macro Recheck() labels Detached {
       if (IsDetachedBuffer(this.stable.buffer)) goto Detached;
       this.unstable = %RawDownCast<AttachedJSTypedArray>(this.stable);
     }
 
-    Load(implicit context: Context)(k: uintptr): JSAny {
+    macro Load(implicit context: Context)(k: uintptr): JSAny {
       const lf: LoadNumericFn = this.loadfn;
       return lf(context, this.unstable, k);
     }
@@ -210,37 +211,37 @@ namespace typed_array {
   macro KindForArrayType<T : type extends ElementsKind>():
       constexpr ElementsKind;
   KindForArrayType<Uint8Elements>(): constexpr ElementsKind {
-    return UINT8_ELEMENTS;
+    return ElementsKind::UINT8_ELEMENTS;
   }
   KindForArrayType<Int8Elements>(): constexpr ElementsKind {
-    return INT8_ELEMENTS;
+    return ElementsKind::INT8_ELEMENTS;
   }
   KindForArrayType<Uint16Elements>(): constexpr ElementsKind {
-    return UINT16_ELEMENTS;
+    return ElementsKind::UINT16_ELEMENTS;
   }
   KindForArrayType<Int16Elements>(): constexpr ElementsKind {
-    return INT16_ELEMENTS;
+    return ElementsKind::INT16_ELEMENTS;
   }
   KindForArrayType<Uint32Elements>(): constexpr ElementsKind {
-    return UINT32_ELEMENTS;
+    return ElementsKind::UINT32_ELEMENTS;
   }
   KindForArrayType<Int32Elements>(): constexpr ElementsKind {
-    return INT32_ELEMENTS;
+    return ElementsKind::INT32_ELEMENTS;
   }
   KindForArrayType<Float32Elements>(): constexpr ElementsKind {
-    return FLOAT32_ELEMENTS;
+    return ElementsKind::FLOAT32_ELEMENTS;
   }
   KindForArrayType<Float64Elements>(): constexpr ElementsKind {
-    return FLOAT64_ELEMENTS;
+    return ElementsKind::FLOAT64_ELEMENTS;
   }
   KindForArrayType<Uint8ClampedElements>(): constexpr ElementsKind {
-    return UINT8_CLAMPED_ELEMENTS;
+    return ElementsKind::UINT8_CLAMPED_ELEMENTS;
   }
   KindForArrayType<BigUint64Elements>(): constexpr ElementsKind {
-    return BIGUINT64_ELEMENTS;
+    return ElementsKind::BIGUINT64_ELEMENTS;
   }
   KindForArrayType<BigInt64Elements>(): constexpr ElementsKind {
-    return BIGINT64_ELEMENTS;
+    return ElementsKind::BIGINT64_ELEMENTS;
   }
 
   builtin LoadTypedElement<T : type extends ElementsKind>(

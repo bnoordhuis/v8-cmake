@@ -19,60 +19,21 @@
 namespace v8 {
 namespace internal {
 
-// static
-LookupIterator LookupIterator::PropertyOrElement(
-    Isolate* isolate, Handle<Object> receiver, Handle<Object> key,
-    bool* success, Handle<JSReceiver> holder, Configuration configuration) {
-  size_t index = 0;
-  if (key->ToIntegerIndex(&index)) {
+LookupIterator::Key::Key(Isolate* isolate, Handle<Object> key, bool* success) {
+  if (key->ToIntegerIndex(&index_)) {
     *success = true;
-    return LookupIterator(isolate, receiver, index, holder, configuration);
+    return;
   }
-
-  Handle<Name> name;
-  *success = Object::ToName(isolate, key).ToHandle(&name);
+  *success = Object::ToName(isolate, key).ToHandle(&name_);
   if (!*success) {
     DCHECK(isolate->has_pending_exception());
-    // Return an unusable dummy.
-    return LookupIterator(isolate, receiver,
-                          isolate->factory()->empty_string());
+    index_ = kInvalidIndex;
+    return;
   }
-
-  if (name->AsIntegerIndex(&index)) {
-    return LookupIterator(isolate, receiver, index, holder, configuration,
-                          name);
+  if (!name_->AsIntegerIndex(&index_)) {
+    // {AsIntegerIndex} may modify {index_} before deciding to fail.
+    index_ = LookupIterator::kInvalidIndex;
   }
-
-  return LookupIterator(receiver, name, holder, configuration);
-}
-
-// static
-LookupIterator LookupIterator::PropertyOrElement(Isolate* isolate,
-                                                 Handle<Object> receiver,
-                                                 Handle<Object> key,
-                                                 bool* success,
-                                                 Configuration configuration) {
-  // TODO(mslekova): come up with better way to avoid duplication
-  size_t index = 0;
-  if (key->ToIntegerIndex(&index)) {
-    *success = true;
-    return LookupIterator(isolate, receiver, index, configuration);
-  }
-
-  Handle<Name> name;
-  *success = Object::ToName(isolate, key).ToHandle(&name);
-  if (!*success) {
-    DCHECK(isolate->has_pending_exception());
-    // Return an unusable dummy.
-    return LookupIterator(isolate, receiver,
-                          isolate->factory()->empty_string());
-  }
-
-  if (name->AsIntegerIndex(&index)) {
-    return LookupIterator(isolate, receiver, index, configuration, name);
-  }
-
-  return LookupIterator(isolate, receiver, name, configuration);
 }
 
 LookupIterator::LookupIterator(Isolate* isolate, Handle<Object> receiver,
@@ -628,8 +589,8 @@ void LookupIterator::PrepareTransitionToDataProperty(
       transition_ = cell;
       // Assign an enumeration index to the property and update
       // SetNextEnumerationIndex.
-      int index = dictionary->NextEnumerationIndex();
-      dictionary->SetNextEnumerationIndex(index + 1);
+      int index = GlobalDictionary::NextEnumerationIndex(isolate_, dictionary);
+      dictionary->set_next_enumeration_index(index + 1);
       property_details_ = PropertyDetails(
           kData, attributes, PropertyCellType::kUninitialized, index);
       PropertyCellType new_type =
@@ -879,7 +840,8 @@ bool LookupIterator::HolderIsReceiverOrHiddenPrototype() const {
              isolate_) == *holder_;
 }
 
-Handle<Object> LookupIterator::FetchValue() const {
+Handle<Object> LookupIterator::FetchValue(
+    AllocationPolicy allocation_policy) const {
   Object result;
   if (IsElement(*holder_)) {
     Handle<JSObject> holder = GetHolder<JSObject>();
@@ -897,6 +859,10 @@ Handle<Object> LookupIterator::FetchValue() const {
     Handle<JSObject> holder = GetHolder<JSObject>();
     FieldIndex field_index =
         FieldIndex::ForDescriptor(holder->map(isolate_), descriptor_number());
+    if (allocation_policy == AllocationPolicy::kAllocationDisallowed &&
+        field_index.is_inobject() && field_index.is_double()) {
+      return isolate_->factory()->undefined_value();
+    }
     return JSObject::FastPropertyAt(holder, property_details_.representation(),
                                     field_index);
   } else {
@@ -912,6 +878,12 @@ bool LookupIterator::IsConstFieldValueEqualTo(Object value) const {
   DCHECK(holder_->HasFastProperties(isolate_));
   DCHECK_EQ(kField, property_details_.location());
   DCHECK_EQ(PropertyConstness::kConst, property_details_.constness());
+  if (value.IsUninitialized(isolate())) {
+    // Storing uninitialized value means that we are preparing for a computed
+    // property value in an object literal. The initializing store will follow
+    // and it will properly update constness based on the actual value.
+    return true;
+  }
   Handle<JSObject> holder = GetHolder<JSObject>();
   FieldIndex field_index =
       FieldIndex::ForDescriptor(holder->map(isolate_), descriptor_number());
@@ -925,7 +897,7 @@ bool LookupIterator::IsConstFieldValueEqualTo(Object value) const {
       DCHECK(current_value.IsHeapNumber(isolate_));
       bits = HeapNumber::cast(current_value).value_as_bits();
     }
-    // Use bit representation of double to to check for hole double, since
+    // Use bit representation of double to check for hole double, since
     // manipulating the signaling NaN used for the hole in C++, e.g. with
     // bit_cast or value(), will change its value on ia32 (the x87 stack is
     // used to return values and stores to the stack silently clear the
@@ -1008,9 +980,10 @@ Handle<Object> LookupIterator::GetAccessors() const {
   return FetchValue();
 }
 
-Handle<Object> LookupIterator::GetDataValue() const {
+Handle<Object> LookupIterator::GetDataValue(
+    AllocationPolicy allocation_policy) const {
   DCHECK_EQ(DATA, state_);
-  Handle<Object> value = FetchValue();
+  Handle<Object> value = FetchValue(allocation_policy);
   return value;
 }
 

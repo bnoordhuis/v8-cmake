@@ -460,11 +460,13 @@ UNINITIALIZED_TEST(Issue539892) {
         : CodeEventLogger(isolate) {}
 
     void CodeMoveEvent(i::AbstractCode from, i::AbstractCode to) override {}
-    void CodeDisableOptEvent(i::AbstractCode code,
-                             i::SharedFunctionInfo shared) override {}
+    void CodeDisableOptEvent(i::Handle<i::AbstractCode> code,
+                             i::Handle<i::SharedFunctionInfo> shared) override {
+    }
 
    private:
-    void LogRecordedBuffer(i::AbstractCode code, i::SharedFunctionInfo shared,
+    void LogRecordedBuffer(i::Handle<i::AbstractCode> code,
+                           i::MaybeHandle<i::SharedFunctionInfo> maybe_shared,
                            const char* name, int length) override {}
     void LogRecordedBuffer(const i::wasm::WasmCode* code, const char* name,
                            int length) override {}

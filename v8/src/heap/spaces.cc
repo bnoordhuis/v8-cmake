@@ -4,6 +4,7 @@
 
 #include "src/heap/spaces.h"
 
+#include <algorithm>
 #include <cinttypes>
 #include <utility>
 
@@ -52,11 +53,10 @@ PagedSpaceObjectIterator::PagedSpaceObjectIterator(Heap* heap,
                                                    PagedSpace* space)
     : cur_addr_(kNullAddress),
       cur_end_(kNullAddress),
-      heap_(heap),
       space_(space),
       page_range_(space->first_page(), nullptr),
       current_page_(page_range_.begin()) {
-  heap_->mark_compact_collector()->EnsureSweepingCompleted();
+  heap->mark_compact_collector()->EnsureSweepingCompleted();
 }
 
 PagedSpaceObjectIterator::PagedSpaceObjectIterator(Heap* heap,
@@ -64,17 +64,23 @@ PagedSpaceObjectIterator::PagedSpaceObjectIterator(Heap* heap,
                                                    Page* page)
     : cur_addr_(kNullAddress),
       cur_end_(kNullAddress),
-      heap_(heap),
       space_(space),
       page_range_(page),
       current_page_(page_range_.begin()) {
-  heap_->mark_compact_collector()->EnsureSweepingCompleted();
+  heap->mark_compact_collector()->EnsureSweepingCompleted();
 #ifdef DEBUG
   AllocationSpace owner = page->owner_identity();
   DCHECK(owner == RO_SPACE || owner == OLD_SPACE || owner == MAP_SPACE ||
          owner == CODE_SPACE);
 #endif  // DEBUG
 }
+
+PagedSpaceObjectIterator::PagedSpaceObjectIterator(OffThreadSpace* space)
+    : cur_addr_(kNullAddress),
+      cur_end_(kNullAddress),
+      space_(space),
+      page_range_(space->first_page(), nullptr),
+      current_page_(page_range_.begin()) {}
 
 // We have hit the end of the page and should advance to the next block of
 // objects.  This happens at the end of the page.
@@ -179,6 +185,7 @@ void MemoryAllocator::InitializeCodePageAllocator(
                                 "CodeRange setup: allocate virtual memory");
   }
   code_range_ = reservation.region();
+  isolate_->AddCodeRange(code_range_.begin(), code_range_.size());
 
   // We are sure that we have mapped a block of requested addresses.
   DCHECK_GE(reservation.size(), requested);
@@ -741,6 +748,8 @@ MemoryChunk* MemoryChunk::Initialize(Heap* heap, Address base, size_t size,
   } else {
     chunk->code_object_registry_ = nullptr;
   }
+
+  chunk->possibly_empty_buckets_.Initialize();
 
   return chunk;
 }
@@ -1386,6 +1395,7 @@ void MemoryChunk::ReleaseAllocatedMemoryNeededForWritableChunk() {
     code_object_registry_ = nullptr;
   }
 
+  possibly_empty_buckets_.Release();
   ReleaseSlotSet<OLD_TO_NEW>();
   ReleaseSweepingSlotSet();
   ReleaseSlotSet<OLD_TO_OLD>();
@@ -1606,6 +1616,19 @@ void Space::AllocationStep(int bytes_since_last, Address soon_object,
   heap()->set_allocation_step_in_progress(false);
 }
 
+void Space::AllocationStepAfterMerge(Address first_object_in_chunk, int size) {
+  if (!AllocationObserversActive()) {
+    return;
+  }
+
+  DCHECK(!heap()->allocation_step_in_progress());
+  heap()->set_allocation_step_in_progress(true);
+  for (AllocationObserver* observer : allocation_observers_) {
+    observer->AllocationStep(size, first_object_in_chunk, size);
+  }
+  heap()->set_allocation_step_in_progress(false);
+}
+
 intptr_t Space::GetNextInlineAllocationStepSize() {
   intptr_t next_step = 0;
   for (AllocationObserver* observer : allocation_observers_) {
@@ -1698,6 +1721,7 @@ void PagedSpace::MergeLocalSpace(LocalSpace* other) {
   base::MutexGuard guard(mutex());
 
   DCHECK(identity() == other->identity());
+
   // Unmerged fields:
   //   area_size_
   other->FreeLinearAllocationArea();
@@ -1711,19 +1735,44 @@ void PagedSpace::MergeLocalSpace(LocalSpace* other) {
   DCHECK_EQ(kNullAddress, other->top());
   DCHECK_EQ(kNullAddress, other->limit());
 
+  bool merging_from_off_thread = other->is_off_thread_space();
+
   // Move over pages.
   for (auto it = other->begin(); it != other->end();) {
     Page* p = *(it++);
 
-    p->MergeOldToNewRememberedSets();
+    if (merging_from_off_thread) {
+      DCHECK_NULL(p->sweeping_slot_set());
+      if (heap()->incremental_marking()->black_allocation()) {
+        p->CreateBlackArea(p->area_start(), p->HighWaterMark());
+      }
+    } else {
+      p->MergeOldToNewRememberedSets();
+    }
 
     // Relinking requires the category to be unlinked.
     other->RemovePage(p);
     AddPage(p);
+    // These code pages were allocated by the CompactionSpace.
+    if (identity() == CODE_SPACE) heap()->isolate()->AddCodeMemoryChunk(p);
     DCHECK_IMPLIES(
         !p->IsFlagSet(Page::NEVER_ALLOCATE_ON_PAGE),
         p->AvailableInFreeList() == p->AvailableInFreeListFromAllocatedBytes());
+
+    if (merging_from_off_thread) {
+      // TODO(leszeks): Allocation groups are currently not handled properly by
+      // the sampling allocation profiler. We'll have to come up with a better
+      // solution for allocation stepping before shipping.
+      AllocationStepAfterMerge(
+          p->area_start(),
+          static_cast<int>(p->HighWaterMark() - p->area_start()));
+    }
   }
+
+  if (merging_from_off_thread) {
+    heap()->NotifyOffThreadSpaceMerged();
+  }
+
   DCHECK_EQ(0u, other->Size());
   DCHECK_EQ(0u, other->Capacity());
 }
@@ -1840,6 +1889,10 @@ bool PagedSpace::Expand() {
   // Pages created during bootstrapping may contain immortal immovable objects.
   if (!heap()->deserialization_complete()) page->MarkNeverEvacuate();
   AddPage(page);
+  // If this is a non-compaction code space, this is a previously unseen page.
+  if (identity() == CODE_SPACE && !is_compaction_space()) {
+    heap()->isolate()->AddCodeMemoryChunk(page);
+  }
   Free(page->area_start(), page->area_size(),
        SpaceAccountingMode::kSpaceAccounted);
   heap()->NotifyOldGenerationExpansion();
@@ -1983,6 +2036,8 @@ void PagedSpace::ReleasePage(Page* page) {
     DCHECK(!top_on_previous_step_);
     allocation_info_.Reset(kNullAddress, kNullAddress);
   }
+
+  heap()->isolate()->RemoveCodeMemoryChunk(page);
 
   AccountUncommitted(page->size());
   accounting_stats_.DecreaseCapacity(page->area_size());
@@ -2242,8 +2297,6 @@ NewSpace::NewSpace(Heap* heap, v8::PageAllocator* page_allocator,
       to_space_(heap, kToSpace),
       from_space_(heap, kFromSpace) {
   DCHECK(initial_semispace_capacity <= max_semispace_capacity);
-  DCHECK(
-      base::bits::IsPowerOfTwo(static_cast<uint32_t>(max_semispace_capacity)));
 
   to_space_.SetUp(initial_semispace_capacity, max_semispace_capacity);
   from_space_.SetUp(initial_semispace_capacity, max_semispace_capacity);
@@ -4122,10 +4175,9 @@ void OldLargeObjectSpace::PromoteNewLargeObject(LargePage* page) {
   DCHECK(!page->IsFlagSet(MemoryChunk::TO_PAGE));
   size_t object_size = static_cast<size_t>(page->GetObject().Size());
   static_cast<LargeObjectSpace*>(page->owner())->RemovePage(page, object_size);
-  AddPage(page, object_size);
   page->ClearFlag(MemoryChunk::FROM_PAGE);
   page->SetOldGenerationPageFlags(heap()->incremental_marking()->IsMarking());
-  page->set_owner(this);
+  AddPage(page, object_size);
 }
 
 void LargeObjectSpace::AddPage(LargePage* page, size_t object_size) {
@@ -4134,6 +4186,7 @@ void LargeObjectSpace::AddPage(LargePage* page, size_t object_size) {
   objects_size_ += object_size;
   page_count_++;
   memory_chunk_list_.PushBack(page);
+  page->set_owner(this);
 }
 
 void LargeObjectSpace::RemovePage(LargePage* page, size_t object_size) {
@@ -4142,6 +4195,7 @@ void LargeObjectSpace::RemovePage(LargePage* page, size_t object_size) {
   objects_size_ -= object_size;
   page_count_--;
   memory_chunk_list_.Remove(page);
+  page->set_owner(nullptr);
 }
 
 void LargeObjectSpace::FreeUnmarkedObjects() {
@@ -4309,10 +4363,21 @@ void OldLargeObjectSpace::MergeOffThreadSpace(
 
   while (!other->memory_chunk_list().Empty()) {
     LargePage* page = other->first_page();
-    int size = page->GetObject().Size();
+    HeapObject object = page->GetObject();
+    int size = object.Size();
     other->RemovePage(page, size);
     AddPage(page, size);
+
+    AllocationStepAfterMerge(object.address(), size);
+    if (heap()->incremental_marking()->black_allocation()) {
+      heap()->incremental_marking()->marking_state()->WhiteToBlack(object);
+    }
+    DCHECK_IMPLIES(
+        heap()->incremental_marking()->black_allocation(),
+        heap()->incremental_marking()->marking_state()->IsBlack(object));
   }
+
+  heap()->NotifyOffThreadSpaceMerged();
 }
 
 NewLargeObjectSpace::NewLargeObjectSpace(Heap* heap, size_t capacity)
@@ -4412,10 +4477,12 @@ AllocationResult CodeLargeObjectSpace::AllocateRaw(int object_size) {
 void CodeLargeObjectSpace::AddPage(LargePage* page, size_t object_size) {
   OldLargeObjectSpace::AddPage(page, object_size);
   InsertChunkMapEntries(page);
+  heap()->isolate()->AddCodeMemoryChunk(page);
 }
 
 void CodeLargeObjectSpace::RemovePage(LargePage* page, size_t object_size) {
   RemoveChunkMapEntries(page);
+  heap()->isolate()->RemoveCodeMemoryChunk(page);
   OldLargeObjectSpace::RemovePage(page, object_size);
 }
 

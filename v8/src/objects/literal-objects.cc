@@ -365,7 +365,7 @@ class ObjectDescriptor {
 
   void Finalize(Isolate* isolate) {
     if (HasDictionaryProperties()) {
-      properties_dictionary_template_->SetNextEnumerationIndex(
+      properties_dictionary_template_->set_next_enumeration_index(
           next_enumeration_index_);
       computed_properties_ = FixedArray::ShrinkOrEmpty(
           isolate, computed_properties_, current_computed_index_);
@@ -516,7 +516,8 @@ Handle<ClassBoilerplate> ClassBoilerplate::BuildClassBoilerplate(
       desc.AddIndexedProperty(isolate, index, value_kind, value_index);
 
     } else {
-      Handle<String> name = key_literal->AsRawPropertyName()->string();
+      Handle<String> name =
+          key_literal->AsRawPropertyName()->string().get<Factory>();
       DCHECK(name->IsInternalizedString());
       desc.AddNamedProperty(isolate, name, value_kind, value_index);
     }

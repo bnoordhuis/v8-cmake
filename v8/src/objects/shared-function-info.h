@@ -17,7 +17,9 @@
 #include "src/objects/slots.h"
 #include "src/objects/smi.h"
 #include "src/objects/struct.h"
+#include "src/roots/roots.h"
 #include "testing/gtest/include/gtest/gtest_prod.h"
+#include "torque-generated/bit-fields-tq.h"
 #include "torque-generated/field-offsets-tq.h"
 
 // Has to be the last include (doesn't have include guards):
@@ -165,7 +167,8 @@ class InterpreterData : public Struct {
 
 // SharedFunctionInfo describes the JSFunction information that can be
 // shared by multiple instances of the function.
-class SharedFunctionInfo : public HeapObject {
+class SharedFunctionInfo : public HeapObject,
+                           public TorqueGeneratedSharedFunctionInfoFlagsFields {
  public:
   NEVER_READ_ONLY_SPACE
 
@@ -199,9 +202,10 @@ class SharedFunctionInfo : public HeapObject {
 
   // Set up the link between shared function info and the script. The shared
   // function info is added to the list on the script.
-  V8_EXPORT_PRIVATE static void SetScript(
-      Handle<SharedFunctionInfo> shared, Handle<HeapObject> script_object,
-      int function_literal_id, bool reset_preparsed_scope_data = true);
+  V8_EXPORT_PRIVATE void SetScript(ReadOnlyRoots roots,
+                                   HeapObject script_object,
+                                   int function_literal_id,
+                                   bool reset_preparsed_scope_data = true);
 
   // Layout description of the optimized code map.
   static const int kEntriesStart = 0;
@@ -218,6 +222,9 @@ class SharedFunctionInfo : public HeapObject {
   // Set scope_info without moving the existing name onto the ScopeInfo.
   inline void set_raw_scope_info(ScopeInfo scope_info,
                                  WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+
+  inline bool is_script() const;
+  inline bool needs_script_context() const;
 
   // End position of this function in the script source.
   V8_EXPORT_PRIVATE int EndPosition() const;
@@ -546,7 +553,8 @@ class SharedFunctionInfo : public HeapObject {
   inline bool has_simple_parameters();
 
   // Initialize a SharedFunctionInfo from a parsed function literal.
-  static void InitFromFunctionLiteral(Handle<SharedFunctionInfo> shared_info,
+  static void InitFromFunctionLiteral(Isolate* isolate,
+                                      Handle<SharedFunctionInfo> shared_info,
                                       FunctionLiteral* lit, bool is_toplevel);
 
   // Updates the expected number of properties based on estimate from parser.
@@ -615,31 +623,6 @@ class SharedFunctionInfo : public HeapObject {
   static const int kAlignedSize = POINTER_SIZE_ALIGN(kSize);
 
   class BodyDescriptor;
-
-// Bit positions in |flags|.
-#define FLAGS_BIT_FIELDS(V, _)                               \
-  /* Have FunctionKind first to make it cheaper to access */ \
-  V(FunctionKindBits, FunctionKind, 5, _)                    \
-  V(IsNativeBit, bool, 1, _)                                 \
-  V(IsStrictBit, bool, 1, _)                                 \
-  V(FunctionSyntaxKindBits, FunctionSyntaxKind, 3, _)        \
-  V(IsClassConstructorBit, bool, 1, _)                       \
-  V(HasDuplicateParametersBit, bool, 1, _)                   \
-  V(AllowLazyCompilationBit, bool, 1, _)                     \
-  V(NeedsHomeObjectBit, bool, 1, _)                          \
-  V(IsAsmWasmBrokenBit, bool, 1, _)                          \
-  V(FunctionMapIndexBits, int, 5, _)                         \
-  V(DisabledOptimizationReasonBits, BailoutReason, 4, _)     \
-  V(RequiresInstanceMembersInitializer, bool, 1, _)          \
-  V(ConstructAsBuiltinBit, bool, 1, _)                       \
-  V(NameShouldPrintAsAnonymousBit, bool, 1, _)               \
-  V(HasReportedBinaryCoverageBit, bool, 1, _)                \
-  V(IsTopLevelBit, bool, 1, _)                               \
-  V(IsOneshotIIFEOrPropertiesAreFinalBit, bool, 1, _)        \
-  V(IsSafeToSkipArgumentsAdaptorBit, bool, 1, _)             \
-  V(PrivateNameLookupSkipsOuterClassBit, bool, 1, _)
-  DEFINE_BIT_FIELDS(FLAGS_BIT_FIELDS)
-#undef FLAGS_BIT_FIELDS
 
   // Bailout reasons must fit in the DisabledOptimizationReason bitfield.
   STATIC_ASSERT(BailoutReason::kLastErrorMessage <=

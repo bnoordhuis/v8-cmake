@@ -47,133 +47,6 @@
 #include "gmock/gmock-actions.h"
 #include "gmock/internal/gmock-port.h"
 
-namespace testing {
-namespace internal {
-
-// A macro from the ACTION* family (defined later in this file)
-// defines an action that can be used in a mock function.  Typically,
-// these actions only care about a subset of the arguments of the mock
-// function.  For example, if such an action only uses the second
-// argument, it can be used in any mock function that takes >= 2
-// arguments where the type of the second argument is compatible.
-//
-// Therefore, the action implementation must be prepared to take more
-// arguments than it needs.  The ExcessiveArg type is used to
-// represent those excessive arguments.  In order to keep the compiler
-// error messages tractable, we define it in the testing namespace
-// instead of testing::internal.  However, this is an INTERNAL TYPE
-// and subject to change without notice, so a user MUST NOT USE THIS
-// TYPE DIRECTLY.
-struct ExcessiveArg {};
-
-// A helper class needed for implementing the ACTION* macros.
-template <typename Result, class Impl>
-class ActionHelper {
- public:
-  static Result Perform(Impl* impl, const ::std::tuple<>& args) {
-    return impl->template gmock_PerformImpl<>(args, ExcessiveArg(),
-        ExcessiveArg(), ExcessiveArg(), ExcessiveArg(), ExcessiveArg(),
-        ExcessiveArg(), ExcessiveArg(), ExcessiveArg(), ExcessiveArg(),
-        ExcessiveArg());
-  }
-
-  template <typename A0>
-  static Result Perform(Impl* impl, const ::std::tuple<A0>& args) {
-    return impl->template gmock_PerformImpl<A0>(args, std::get<0>(args),
-        ExcessiveArg(), ExcessiveArg(), ExcessiveArg(), ExcessiveArg(),
-        ExcessiveArg(), ExcessiveArg(), ExcessiveArg(), ExcessiveArg(),
-        ExcessiveArg());
-  }
-
-  template <typename A0, typename A1>
-  static Result Perform(Impl* impl, const ::std::tuple<A0, A1>& args) {
-    return impl->template gmock_PerformImpl<A0, A1>(args, std::get<0>(args),
-        std::get<1>(args), ExcessiveArg(), ExcessiveArg(), ExcessiveArg(),
-        ExcessiveArg(), ExcessiveArg(), ExcessiveArg(), ExcessiveArg(),
-        ExcessiveArg());
-  }
-
-  template <typename A0, typename A1, typename A2>
-  static Result Perform(Impl* impl, const ::std::tuple<A0, A1, A2>& args) {
-    return impl->template gmock_PerformImpl<A0, A1, A2>(args,
-        std::get<0>(args), std::get<1>(args), std::get<2>(args),
-        ExcessiveArg(), ExcessiveArg(), ExcessiveArg(), ExcessiveArg(),
-        ExcessiveArg(), ExcessiveArg(), ExcessiveArg());
-  }
-
-  template <typename A0, typename A1, typename A2, typename A3>
-  static Result Perform(Impl* impl, const ::std::tuple<A0, A1, A2, A3>& args) {
-    return impl->template gmock_PerformImpl<A0, A1, A2, A3>(args,
-        std::get<0>(args), std::get<1>(args), std::get<2>(args),
-        std::get<3>(args), ExcessiveArg(), ExcessiveArg(), ExcessiveArg(),
-        ExcessiveArg(), ExcessiveArg(), ExcessiveArg());
-  }
-
-  template <typename A0, typename A1, typename A2, typename A3, typename A4>
-  static Result Perform(Impl* impl, const ::std::tuple<A0, A1, A2, A3,
-      A4>& args) {
-    return impl->template gmock_PerformImpl<A0, A1, A2, A3, A4>(args,
-        std::get<0>(args), std::get<1>(args), std::get<2>(args),
-        std::get<3>(args), std::get<4>(args), ExcessiveArg(), ExcessiveArg(),
-        ExcessiveArg(), ExcessiveArg(), ExcessiveArg());
-  }
-
-  template <typename A0, typename A1, typename A2, typename A3, typename A4,
-      typename A5>
-  static Result Perform(Impl* impl, const ::std::tuple<A0, A1, A2, A3, A4,
-      A5>& args) {
-    return impl->template gmock_PerformImpl<A0, A1, A2, A3, A4, A5>(args,
-        std::get<0>(args), std::get<1>(args), std::get<2>(args),
-        std::get<3>(args), std::get<4>(args), std::get<5>(args),
-        ExcessiveArg(), ExcessiveArg(), ExcessiveArg(), ExcessiveArg());
-  }
-
-  template <typename A0, typename A1, typename A2, typename A3, typename A4,
-      typename A5, typename A6>
-  static Result Perform(Impl* impl, const ::std::tuple<A0, A1, A2, A3, A4, A5,
-      A6>& args) {
-    return impl->template gmock_PerformImpl<A0, A1, A2, A3, A4, A5, A6>(args,
-        std::get<0>(args), std::get<1>(args), std::get<2>(args),
-        std::get<3>(args), std::get<4>(args), std::get<5>(args),
-        std::get<6>(args), ExcessiveArg(), ExcessiveArg(), ExcessiveArg());
-  }
-
-  template <typename A0, typename A1, typename A2, typename A3, typename A4,
-      typename A5, typename A6, typename A7>
-  static Result Perform(Impl* impl, const ::std::tuple<A0, A1, A2, A3, A4, A5,
-      A6, A7>& args) {
-    return impl->template gmock_PerformImpl<A0, A1, A2, A3, A4, A5, A6,
-        A7>(args, std::get<0>(args), std::get<1>(args), std::get<2>(args),
-        std::get<3>(args), std::get<4>(args), std::get<5>(args),
-        std::get<6>(args), std::get<7>(args), ExcessiveArg(), ExcessiveArg());
-  }
-
-  template <typename A0, typename A1, typename A2, typename A3, typename A4,
-      typename A5, typename A6, typename A7, typename A8>
-  static Result Perform(Impl* impl, const ::std::tuple<A0, A1, A2, A3, A4, A5,
-      A6, A7, A8>& args) {
-    return impl->template gmock_PerformImpl<A0, A1, A2, A3, A4, A5, A6, A7,
-        A8>(args, std::get<0>(args), std::get<1>(args), std::get<2>(args),
-        std::get<3>(args), std::get<4>(args), std::get<5>(args),
-        std::get<6>(args), std::get<7>(args), std::get<8>(args),
-        ExcessiveArg());
-  }
-
-  template <typename A0, typename A1, typename A2, typename A3, typename A4,
-      typename A5, typename A6, typename A7, typename A8, typename A9>
-  static Result Perform(Impl* impl, const ::std::tuple<A0, A1, A2, A3, A4, A5,
-      A6, A7, A8, A9>& args) {
-    return impl->template gmock_PerformImpl<A0, A1, A2, A3, A4, A5, A6, A7, A8,
-        A9>(args, std::get<0>(args), std::get<1>(args), std::get<2>(args),
-        std::get<3>(args), std::get<4>(args), std::get<5>(args),
-        std::get<6>(args), std::get<7>(args), std::get<8>(args),
-        std::get<9>(args));
-  }
-};
-
-}  // namespace internal
-}  // namespace testing
-
 // The ACTION* family of macros can be used in a namespace scope to
 // define custom actions easily.  The syntax:
 //
@@ -663,7 +536,7 @@ class ActionHelper {
       typedef typename ::testing::internal::Function<F>::ArgumentTuple\
           args_type;\
       explicit gmock_Impl GMOCK_INTERNAL_INIT_##value_params {}\
-      virtual return_type Perform(const args_type& args) {\
+      return_type Perform(const args_type& args) override {\
         return ::testing::internal::ActionHelper<return_type, gmock_Impl>::\
             Perform(this, args);\
       }\
@@ -726,7 +599,7 @@ class ActionHelper {
       typedef typename ::testing::internal::Function<F>::ArgumentTuple\
           args_type;\
       gmock_Impl() {}\
-      virtual return_type Perform(const args_type& args) {\
+      return_type Perform(const args_type& args) override {\
         return ::testing::internal::ActionHelper<return_type, gmock_Impl>::\
             Perform(this, args);\
       }\
@@ -776,7 +649,7 @@ class ActionHelper {
           args_type;\
       explicit gmock_Impl(p0##_type gmock_p0) : \
           p0(::std::forward<p0##_type>(gmock_p0)) {}\
-      virtual return_type Perform(const args_type& args) {\
+      return_type Perform(const args_type& args) override {\
         return ::testing::internal::ActionHelper<return_type, gmock_Impl>::\
             Perform(this, args);\
       }\
@@ -832,7 +705,7 @@ class ActionHelper {
       gmock_Impl(p0##_type gmock_p0, \
           p1##_type gmock_p1) : p0(::std::forward<p0##_type>(gmock_p0)), \
           p1(::std::forward<p1##_type>(gmock_p1)) {}\
-      virtual return_type Perform(const args_type& args) {\
+      return_type Perform(const args_type& args) override {\
         return ::testing::internal::ActionHelper<return_type, gmock_Impl>::\
             Perform(this, args);\
       }\
@@ -893,7 +766,7 @@ class ActionHelper {
           p2##_type gmock_p2) : p0(::std::forward<p0##_type>(gmock_p0)), \
           p1(::std::forward<p1##_type>(gmock_p1)), \
           p2(::std::forward<p2##_type>(gmock_p2)) {}\
-      virtual return_type Perform(const args_type& args) {\
+      return_type Perform(const args_type& args) override {\
         return ::testing::internal::ActionHelper<return_type, gmock_Impl>::\
             Perform(this, args);\
       }\
@@ -961,7 +834,7 @@ class ActionHelper {
           p1(::std::forward<p1##_type>(gmock_p1)), \
           p2(::std::forward<p2##_type>(gmock_p2)), \
           p3(::std::forward<p3##_type>(gmock_p3)) {}\
-      virtual return_type Perform(const args_type& args) {\
+      return_type Perform(const args_type& args) override {\
         return ::testing::internal::ActionHelper<return_type, gmock_Impl>::\
             Perform(this, args);\
       }\
@@ -1038,7 +911,7 @@ class ActionHelper {
           p2(::std::forward<p2##_type>(gmock_p2)), \
           p3(::std::forward<p3##_type>(gmock_p3)), \
           p4(::std::forward<p4##_type>(gmock_p4)) {}\
-      virtual return_type Perform(const args_type& args) {\
+      return_type Perform(const args_type& args) override {\
         return ::testing::internal::ActionHelper<return_type, gmock_Impl>::\
             Perform(this, args);\
       }\
@@ -1119,7 +992,7 @@ class ActionHelper {
           p3(::std::forward<p3##_type>(gmock_p3)), \
           p4(::std::forward<p4##_type>(gmock_p4)), \
           p5(::std::forward<p5##_type>(gmock_p5)) {}\
-      virtual return_type Perform(const args_type& args) {\
+      return_type Perform(const args_type& args) override {\
         return ::testing::internal::ActionHelper<return_type, gmock_Impl>::\
             Perform(this, args);\
       }\
@@ -1206,7 +1079,7 @@ class ActionHelper {
           p4(::std::forward<p4##_type>(gmock_p4)), \
           p5(::std::forward<p5##_type>(gmock_p5)), \
           p6(::std::forward<p6##_type>(gmock_p6)) {}\
-      virtual return_type Perform(const args_type& args) {\
+      return_type Perform(const args_type& args) override {\
         return ::testing::internal::ActionHelper<return_type, gmock_Impl>::\
             Perform(this, args);\
       }\
@@ -1302,7 +1175,7 @@ class ActionHelper {
           p5(::std::forward<p5##_type>(gmock_p5)), \
           p6(::std::forward<p6##_type>(gmock_p6)), \
           p7(::std::forward<p7##_type>(gmock_p7)) {}\
-      virtual return_type Perform(const args_type& args) {\
+      return_type Perform(const args_type& args) override {\
         return ::testing::internal::ActionHelper<return_type, gmock_Impl>::\
             Perform(this, args);\
       }\
@@ -1404,7 +1277,7 @@ class ActionHelper {
           p6(::std::forward<p6##_type>(gmock_p6)), \
           p7(::std::forward<p7##_type>(gmock_p7)), \
           p8(::std::forward<p8##_type>(gmock_p8)) {}\
-      virtual return_type Perform(const args_type& args) {\
+      return_type Perform(const args_type& args) override {\
         return ::testing::internal::ActionHelper<return_type, gmock_Impl>::\
             Perform(this, args);\
       }\
@@ -1513,7 +1386,7 @@ class ActionHelper {
           p7(::std::forward<p7##_type>(gmock_p7)), \
           p8(::std::forward<p8##_type>(gmock_p8)), \
           p9(::std::forward<p9##_type>(gmock_p9)) {}\
-      virtual return_type Perform(const args_type& args) {\
+      return_type Perform(const args_type& args) override {\
         return ::testing::internal::ActionHelper<return_type, gmock_Impl>::\
             Perform(this, args);\
       }\
@@ -1638,7 +1511,7 @@ struct AdlTag {};
 // InvokeArgumentAdl - a helper for InvokeArgument.
 // The basic overloads are provided here for generic functors.
 // Overloads for other custom-callables are provided in the
-// internal/custom/callback-actions.h header.
+// internal/custom/gmock-generated-actions.h header.
 
 template <typename R, typename F>
 R InvokeArgumentAdl(AdlTag, F f) {

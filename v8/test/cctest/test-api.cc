@@ -2586,7 +2586,7 @@ THREADED_TEST(AccessorIsPreservedOnAttributeChange) {
   CompileRun("Object.defineProperty(a, 'length', { writable: false });");
   CHECK_EQ(0, a->map().instance_descriptors().number_of_descriptors());
   // But we should still have an AccessorInfo.
-  i::Handle<i::String> name(v8::Utils::OpenHandle(*v8_str("length")));
+  i::Handle<i::String> name = CcTest::i_isolate()->factory()->length_string();
   i::LookupIterator it(CcTest::i_isolate(), a, name,
                        i::LookupIterator::OWN_SKIP_INTERCEPTOR);
   CHECK_EQ(i::LookupIterator::ACCESSOR, it.state());
@@ -4357,6 +4357,15 @@ THREADED_TEST(HandleEquality) {
   global2.Reset();
 }
 
+THREADED_TEST(HandleEqualityPrimitives) {
+  v8::HandleScope scope(CcTest::isolate());
+  // Local::operator== works like strict equality except for primitives.
+  CHECK_NE(v8_str("str"), v8_str("str"));
+  CHECK_NE(v8::Number::New(CcTest::isolate(), 0.5),
+           v8::Number::New(CcTest::isolate(), 0.5));
+  CHECK_EQ(v8::Number::New(CcTest::isolate(), 1),
+           v8::Number::New(CcTest::isolate(), 1));
+}
 
 THREADED_TEST(LocalHandle) {
   v8::HandleScope scope(CcTest::isolate());
@@ -9639,38 +9648,6 @@ TEST(DetachedAccesses) {
                        results->Get(env1.local(), i + 3).ToLocalChecked())
               .FromJust());
   }
-}
-
-
-TEST(DetachedWindow) {
-  LocalContext env1;
-  v8::HandleScope scope(env1->GetIsolate());
-
-  // Create second environment.
-  Local<ObjectTemplate> inner_global_template =
-      FunctionTemplate::New(env1->GetIsolate())->InstanceTemplate();
-  v8::Local<Context> env2 =
-      Context::New(env1->GetIsolate(), nullptr, inner_global_template);
-
-  Local<Value> foo = v8_str("foo");
-
-  // Set same security token for env1 and env2.
-  env1->SetSecurityToken(foo);
-  env2->SetSecurityToken(foo);
-
-  {
-    v8::Context::Scope scope(env2);
-    CompileRun("function fun() { }");
-    CHECK(env1->Global()
-              ->Set(env1.local(), v8_str("fun"), CompileRun("fun"))
-              .FromJust());
-  }
-
-  env2->SetDetachedWindowReason(v8::Context::kDetachedWindowByNavigation);
-
-  CompileRun("fun()");
-  // This merely tests for not crashing, because currently
-  // Runtime_ReportDetachedWindowAccess does nothing.
 }
 
 
@@ -19300,19 +19277,21 @@ void CheckCodeGenerationDisallowed() {
 
 char first_fourty_bytes[41];
 
-bool CodeGenerationAllowed(Local<Context> context, Local<String> source) {
+v8::ModifyCodeGenerationFromStringsResult CodeGenerationAllowed(
+    Local<Context> context, Local<Value> source) {
   String::Utf8Value str(CcTest::isolate(), source);
   size_t len = std::min(sizeof(first_fourty_bytes) - 1,
                         static_cast<size_t>(str.length()));
   strncpy(first_fourty_bytes, *str, len);
   first_fourty_bytes[len] = 0;
   ApiTestFuzzer::Fuzz();
-  return true;
+  return {true, {}};
 }
 
-bool CodeGenerationDisallowed(Local<Context> context, Local<String> source) {
+v8::ModifyCodeGenerationFromStringsResult CodeGenerationDisallowed(
+    Local<Context> context, Local<Value> source) {
   ApiTestFuzzer::Fuzz();
-  return false;
+  return {false, {}};
 }
 
 v8::ModifyCodeGenerationFromStringsResult ModifyCodeGeneration(
@@ -19364,13 +19343,13 @@ THREADED_TEST(AllowCodeGenFromStrings) {
 
   // Disallow but setting a global callback that will allow the calls.
   context->AllowCodeGenerationFromStrings(false);
-  context->GetIsolate()->SetAllowCodeGenerationFromStringsCallback(
+  context->GetIsolate()->SetModifyCodeGenerationFromStringsCallback(
       &CodeGenerationAllowed);
   CHECK(!context->IsCodeGenerationFromStringsAllowed());
   CheckCodeGenerationAllowed();
 
   // Set a callback that disallows the code generation.
-  context->GetIsolate()->SetAllowCodeGenerationFromStringsCallback(
+  context->GetIsolate()->SetModifyCodeGenerationFromStringsCallback(
       &CodeGenerationDisallowed);
   CHECK(!context->IsCodeGenerationFromStringsAllowed());
   CheckCodeGenerationDisallowed();
@@ -19420,7 +19399,7 @@ TEST(SetErrorMessageForCodeGenFromStrings) {
 
   Local<String> message = v8_str("Message");
   Local<String> expected_message = v8_str("Uncaught EvalError: Message");
-  context->GetIsolate()->SetAllowCodeGenerationFromStringsCallback(
+  context->GetIsolate()->SetModifyCodeGenerationFromStringsCallback(
       &CodeGenerationDisallowed);
   context->AllowCodeGenerationFromStrings(false);
   context->SetErrorMessageForCodeGenerationFromStrings(message);
@@ -19436,7 +19415,7 @@ TEST(CaptureSourceForCodeGenFromStrings) {
   v8::HandleScope scope(context->GetIsolate());
   TryCatch try_catch(context->GetIsolate());
 
-  context->GetIsolate()->SetAllowCodeGenerationFromStringsCallback(
+  context->GetIsolate()->SetModifyCodeGenerationFromStringsCallback(
       &CodeGenerationAllowed);
   context->AllowCodeGenerationFromStrings(false);
   CompileRun("eval('42')");
@@ -24004,6 +23983,34 @@ TEST(CreateSyntheticModuleGC) {
   }
 }
 
+TEST(CreateSyntheticModuleGCName) {
+  LocalContext env;
+  v8::Isolate* isolate = env->GetIsolate();
+  v8::Isolate::Scope iscope(isolate);
+  v8::HandleScope scope(isolate);
+  v8::Local<v8::Context> context = v8::Context::New(isolate);
+  v8::Context::Scope cscope(context);
+
+  Local<Module> module;
+
+  {
+    v8::EscapableHandleScope inner_scope(isolate);
+    std::vector<v8::Local<v8::String>> export_names{v8_str("default")};
+    v8::Local<v8::String> module_name =
+        v8_str("CreateSyntheticModuleGCName-TestSyntheticModule");
+    module = inner_scope.Escape(v8::Module::CreateSyntheticModule(
+        isolate, module_name, export_names,
+        UnexpectedSyntheticModuleEvaluationStepsCallback));
+  }
+
+  CcTest::CollectAllGarbage();
+#ifdef VERIFY_HEAP
+  i::Handle<i::HeapObject> i_module =
+      i::Handle<i::HeapObject>::cast(v8::Utils::OpenHandle(*module));
+  i_module->HeapObjectVerify(reinterpret_cast<i::Isolate*>(isolate));
+#endif
+}
+
 TEST(SyntheticModuleSetExports) {
   LocalContext env;
   v8::Isolate* isolate = env->GetIsolate();
@@ -26345,7 +26352,16 @@ TEST(TestGetUnwindState) {
   v8::Isolate* isolate = env->GetIsolate();
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
 
+// Ignore deprecation warnings so that we can keep the tests for now.
+// TODO(petermarshall): Remove this once the deprecated API is gone.
+#if __clang__
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated"
+#endif
   v8::UnwindState unwind_state = isolate->GetUnwindState();
+#if __clang__
+#pragma clang diagnostic pop
+#endif
   v8::MemoryRange builtins_range = unwind_state.embedded_code_range;
 
   // Check that each off-heap builtin is within the builtins code range.
@@ -26365,6 +26381,30 @@ TEST(TestGetUnwindState) {
 
   CHECK_EQ(i_isolate->heap()->builtin(i::Builtins::kJSEntry).InstructionStart(),
            reinterpret_cast<i::Address>(js_entry_stub.code.start));
+}
+
+TEST(GetJSEntryStubs) {
+  LocalContext env;
+  v8::Isolate* isolate = env->GetIsolate();
+  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
+
+  v8::JSEntryStubs entry_stubs = isolate->GetJSEntryStubs();
+
+  v8::JSEntryStub entry_stub = entry_stubs.js_entry_stub;
+  CHECK_EQ(i_isolate->heap()->builtin(i::Builtins::kJSEntry).InstructionStart(),
+           reinterpret_cast<i::Address>(entry_stub.code.start));
+
+  v8::JSEntryStub construct_stub = entry_stubs.js_construct_entry_stub;
+  CHECK_EQ(i_isolate->heap()
+               ->builtin(i::Builtins::kJSConstructEntry)
+               .InstructionStart(),
+           reinterpret_cast<i::Address>(construct_stub.code.start));
+
+  v8::JSEntryStub microtask_stub = entry_stubs.js_run_microtasks_entry_stub;
+  CHECK_EQ(i_isolate->heap()
+               ->builtin(i::Builtins::kJSRunMicrotasksEntry)
+               .InstructionStart(),
+           reinterpret_cast<i::Address>(microtask_stub.code.start));
 }
 
 TEST(MicrotaskContextShouldBeNativeContext) {

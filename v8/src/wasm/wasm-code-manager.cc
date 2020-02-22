@@ -24,6 +24,7 @@
 #include "src/wasm/compilation-environment.h"
 #include "src/wasm/function-compiler.h"
 #include "src/wasm/jump-table-assembler.h"
+#include "src/wasm/wasm-debug.h"
 #include "src/wasm/wasm-import-wrapper-cache.h"
 #include "src/wasm/wasm-module-sourcemap.h"
 #include "src/wasm/wasm-module.h"
@@ -179,8 +180,8 @@ void WasmCode::LogCode(Isolate* isolate) const {
 
   ModuleWireBytes wire_bytes(native_module()->wire_bytes());
   WireBytesRef name_ref =
-      native_module()->module()->LookupFunctionName(wire_bytes, index());
-  WasmName name_vec = wire_bytes.GetNameOrNull(name_ref);
+      native_module()->module()->function_names.Lookup(wire_bytes, index());
+  WasmName name = wire_bytes.GetNameOrNull(name_ref);
 
   const std::string& source_map_url = native_module()->module()->source_map_url;
   auto load_wasm_source_map = isolate->wasm_load_source_map_callback();
@@ -195,34 +196,27 @@ void WasmCode::LogCode(Isolate* isolate) const {
   }
 
   std::unique_ptr<char[]> name_buffer;
-  Vector<const char> name;
   if (kind_ == kWasmToJsWrapper) {
-    DCHECK(name_vec.empty());
     constexpr size_t kNameBufferLen = 128;
     constexpr size_t kNamePrefixLen = 11;
     name_buffer = std::make_unique<char[]>(kNameBufferLen);
     memcpy(name_buffer.get(), "wasm-to-js:", kNamePrefixLen);
-    Vector<char> sig_buf =
+    Vector<char> remaining_buf =
         VectorOf(name_buffer.get(), kNameBufferLen) + kNamePrefixLen;
     FunctionSig* sig = native_module()->module()->functions[index_].sig;
-    size_t name_len = kNamePrefixLen + PrintSignature(sig_buf, sig);
-    name = VectorOf(name_buffer.get(), name_len);
-  } else if (name_vec.empty()) {
-    name = CStrVector("<wasm-unnamed>");
-  } else {
-    HandleScope scope(isolate);
-    MaybeHandle<String> maybe_name = isolate->factory()->NewStringFromUtf8(
-        Vector<const char>::cast(name_vec));
-    Handle<String> name_string;
-    if (maybe_name.ToHandle(&name_string)) {
-      int name_len = 0;
-      name_buffer = name_string->ToCString(
-          AllowNullsFlag::DISALLOW_NULLS,
-          RobustnessFlag::ROBUST_STRING_TRAVERSAL, &name_len);
-      name = VectorOf(name_buffer.get(), name_len);
-    } else {
-      name = CStrVector("<name too long>");
+    remaining_buf += PrintSignature(remaining_buf, sig);
+    // If the import has a name, also append that (separated by "-").
+    if (!name.empty() && remaining_buf.length() > 1) {
+      remaining_buf[0] = '-';
+      remaining_buf += 1;
+      size_t suffix_len = std::min(name.size(), remaining_buf.size());
+      memcpy(remaining_buf.begin(), name.begin(), suffix_len);
+      remaining_buf += suffix_len;
     }
+    size_t name_len = remaining_buf.begin() - name_buffer.get();
+    name = VectorOf(name_buffer.get(), name_len);
+  } else if (name.empty()) {
+    name = CStrVector("<wasm-unnamed>");
   }
   PROFILE(isolate,
           CodeCreateEvent(CodeEventListener::FUNCTION_TAG, this, name));
@@ -923,7 +917,7 @@ void NativeModule::UseLazyStub(uint32_t func_index) {
   }
 
   // Add jump table entry for jump to the lazy compile stub.
-  uint32_t slot_index = func_index - module_->num_imported_functions;
+  uint32_t slot_index = declared_function_index(module(), func_index);
   DCHECK_NULL(code_table_[slot_index]);
   Address lazy_compile_target =
       lazy_compile_table_->instruction_start() +
@@ -1053,11 +1047,14 @@ WasmCode* NativeModule::PublishCodeLocked(std::unique_ptr<WasmCode> code) {
                       ExecutionTier::kLiftoff < ExecutionTier::kTurbofan,
                   "Assume an order on execution tiers");
 
-    // Update code table but avoid to fall back to less optimized code. We use
-    // the new code if it was compiled with a higher tier.
-    uint32_t slot_idx = code->index() - module_->num_imported_functions;
+    // Unless tier down to Liftoff: update code table but avoid to fall back to
+    // less optimized code. We use the new code if it was compiled with a higher
+    // tier.
+    uint32_t slot_idx = declared_function_index(module(), code->index());
     WasmCode* prior_code = code_table_[slot_idx];
-    bool update_code_table = !prior_code || prior_code->tier() < code->tier();
+    bool update_code_table =
+        tier_down_ ? !prior_code || code->tier() == ExecutionTier::kLiftoff
+                   : !prior_code || prior_code->tier() < code->tier();
     if (update_code_table) {
       code_table_[slot_idx] = code.get();
       if (prior_code) {
@@ -1125,18 +1122,14 @@ std::vector<WasmCode*> NativeModule::SnapshotCodeTable() const {
 
 WasmCode* NativeModule::GetCode(uint32_t index) const {
   base::MutexGuard guard(&allocation_mutex_);
-  DCHECK_LT(index, num_functions());
-  DCHECK_LE(module_->num_imported_functions, index);
-  WasmCode* code = code_table_[index - module_->num_imported_functions];
+  WasmCode* code = code_table_[declared_function_index(module(), index)];
   if (code) WasmCodeRefScope::AddRef(code);
   return code;
 }
 
 bool NativeModule::HasCode(uint32_t index) const {
   base::MutexGuard guard(&allocation_mutex_);
-  DCHECK_LT(index, num_functions());
-  DCHECK_LE(module_->num_imported_functions, index);
-  return code_table_[index - module_->num_imported_functions] != nullptr;
+  return code_table_[declared_function_index(module(), index)] != nullptr;
 }
 
 void NativeModule::SetWasmSourceMap(
@@ -1349,8 +1342,7 @@ WasmCode* NativeModule::Lookup(Address pc) const {
 }
 
 uint32_t NativeModule::GetJumpTableOffset(uint32_t func_index) const {
-  uint32_t slot_idx = func_index - module_->num_imported_functions;
-  DCHECK_GT(module_->num_declared_functions, slot_idx);
+  uint32_t slot_idx = declared_function_index(module(), func_index);
   return JumpTableAssembler::JumpSlotIndexToOffset(slot_idx);
 }
 
@@ -1814,6 +1806,34 @@ bool NativeModule::IsRedirectedToInterpreter(uint32_t func_index) {
   return has_interpreter_redirection(func_index);
 }
 
+void NativeModule::TierDown(Isolate* isolate) {
+  // Set the flag.
+  {
+    base::MutexGuard lock(&allocation_mutex_);
+    tier_down_ = true;
+  }
+  // Tier down all functions.
+  isolate->wasm_engine()->RecompileAllFunctions(isolate, this,
+                                                ExecutionTier::kLiftoff);
+}
+
+void NativeModule::TierUp(Isolate* isolate) {
+  // Set the flag.
+  {
+    base::MutexGuard lock(&allocation_mutex_);
+    tier_down_ = false;
+  }
+
+  // Tier up all functions.
+  // TODO(duongn): parallelize this eventually.
+  for (uint32_t index = module_->num_imported_functions;
+       index < num_functions(); index++) {
+    isolate->wasm_engine()->CompileFunction(isolate, this, index,
+                                            ExecutionTier::kTurbofan);
+    DCHECK(!compilation_state()->failed());
+  }
+}
+
 void NativeModule::FreeCode(Vector<WasmCode* const> codes) {
   // Free the code space.
   code_allocator_.FreeCode(codes);
@@ -1828,6 +1848,12 @@ void NativeModule::FreeCode(Vector<WasmCode* const> codes) {
 
 size_t NativeModule::GetNumberOfCodeSpacesForTesting() const {
   return code_allocator_.GetNumCodeSpaces();
+}
+
+DebugInfo* NativeModule::GetDebugInfo() {
+  base::MutexGuard guard(&allocation_mutex_);
+  if (!debug_info_) debug_info_ = std::make_unique<DebugInfo>(this);
+  return debug_info_.get();
 }
 
 void WasmCodeManager::FreeNativeModule(Vector<VirtualMemory> owned_code_space,
@@ -1852,9 +1878,13 @@ void WasmCodeManager::FreeNativeModule(Vector<VirtualMemory> owned_code_space,
   }
 
   DCHECK(IsAligned(committed_size, CommitPageSize()));
-  size_t old_committed = total_committed_code_space_.fetch_sub(committed_size);
-  DCHECK_LE(committed_size, old_committed);
-  USE(old_committed);
+  // TODO(v8:8462): Remove this once perf supports remapping.
+  if (!FLAG_perf_prof) {
+    size_t old_committed =
+        total_committed_code_space_.fetch_sub(committed_size);
+    DCHECK_LE(committed_size, old_committed);
+    USE(old_committed);
+  }
 }
 
 NativeModule* WasmCodeManager::LookupNativeModule(Address pc) const {

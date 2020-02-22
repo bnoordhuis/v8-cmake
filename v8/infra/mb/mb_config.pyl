@@ -90,8 +90,8 @@
           'release_x64_pointer_compression_without_dchecks',
       'V8 Linux64 - arm64 - sim - pointer compression - builder':
           'release_simulate_arm64_pointer_compression',
-      'V8 Fuchsia': 'release_x64_fuchsia',
-      'V8 Fuchsia - debug': 'debug_x64_fuchsia',
+      'V8 Fuchsia - builder': 'release_x64_fuchsia',
+      'V8 Fuchsia - debug builder': 'debug_x64_fuchsia',
       'V8 Linux64 - cfi': 'release_x64_cfi',
       'V8 Linux64 UBSan': 'release_x64_ubsan',
       'V8 Linux - vtunejit': 'debug_x86_vtunejit',
@@ -227,6 +227,7 @@
           'release_x64_tsan_minimal_symbols',
       'v8_linux64_ubsan_rel_ng': 'release_x64_ubsan_minimal_symbols',
       'v8_odroid_arm_rel_ng': 'release_arm',
+      'v8_linux_torque_compare': 'torque_compare',
       # TODO(machenbach): Remove after switching to x64 on infra side.
       'v8_win_dbg': 'debug_x86_trybot',
       'v8_win_compile_dbg': 'debug_x86_trybot',
@@ -546,6 +547,10 @@
     # Official configs for x86.
     'official_x86': [
         'release_bot', 'x86', 'official'],
+
+    # Torque compare test
+    'torque_compare': [
+        'release_bot', 'verify_torque']
   },
 
   'mixins': {
@@ -782,7 +787,7 @@
     },
 
     'v8_enable_vtunejit': {
-      'gn_args': 'v8_enable_vtunejit=true',
+      'gn_args': 'v8_enable_vtunejit=true v8_enable_vtunetracemark=true',
     },
 
     'v8_full_debug': {
@@ -828,6 +833,10 @@
 
     'x86': {
       'gn_args': 'target_cpu="x86"',
+    },
+
+    'verify_torque': {
+      'gn_args': 'v8_verify_torque_generation_invariance=true',
     },
 
     'sample': {

@@ -809,7 +809,7 @@ class V8_EXPORT_PRIVATE Instruction final {
     DCHECK(output_count == 0 || outputs != nullptr);
     DCHECK(input_count == 0 || inputs != nullptr);
     DCHECK(temp_count == 0 || temps != nullptr);
-    // TODO(jarin/mstarzinger): Handle this gracefully. See crbug.com/582702.
+    // TODO(turbofan): Handle this gracefully. See crbug.com/582702.
     CHECK(InputCountField::is_valid(input_count));
 
     size_t total_extra_ops = output_count + input_count + temp_count;
@@ -861,10 +861,7 @@ class V8_EXPORT_PRIVATE Instruction final {
   bool IsJump() const { return arch_opcode() == ArchOpcode::kArchJmp; }
   bool IsRet() const { return arch_opcode() == ArchOpcode::kArchRet; }
   bool IsTailCall() const {
-    return arch_opcode() == ArchOpcode::kArchTailCallCodeObject ||
-           arch_opcode() == ArchOpcode::kArchTailCallCodeObjectFromJSFunction ||
-           arch_opcode() == ArchOpcode::kArchTailCallAddress ||
-           arch_opcode() == ArchOpcode::kArchTailCallWasm;
+    return arch_opcode() <= ArchOpcode::kArchTailCallWasm;
   }
   bool IsThrow() const {
     return arch_opcode() == ArchOpcode::kArchThrowTerminator;

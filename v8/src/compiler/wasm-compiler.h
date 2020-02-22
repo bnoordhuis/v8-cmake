@@ -33,6 +33,7 @@ class NodeOriginTable;
 class Operator;
 class SourcePositionTable;
 class WasmDecorator;
+class WasmGraphAssembler;
 enum class TrapId : uint32_t;
 struct Int64LoweringSpecialCase;
 }  // namespace compiler
@@ -175,6 +176,8 @@ class WasmGraphBuilder {
       wasm::CompilationEnv* env, Zone* zone, MachineGraph* mcgraph,
       wasm::FunctionSig* sig, compiler::SourcePositionTable* spt = nullptr);
 
+  V8_EXPORT_PRIVATE ~WasmGraphBuilder();
+
   //-----------------------------------------------------------------------
   // Operations independent of {control} or {effect}.
   //-----------------------------------------------------------------------
@@ -217,8 +220,7 @@ class WasmGraphBuilder {
   void AppendToMerge(Node* merge, Node* from);
   void AppendToPhi(Node* phi, Node* from);
 
-  void StackCheck(wasm::WasmCodePosition position, Node** effect = nullptr,
-                  Node** control = nullptr);
+  void StackCheck(wasm::WasmCodePosition);
 
   void PatchInStackCheckIfNeeded();
 
@@ -294,26 +296,15 @@ class WasmGraphBuilder {
     this->instance_node_ = instance_node;
   }
 
-  Node* Control() {
-    DCHECK_NOT_NULL(*control_);
-    return *control_;
+  Node* effect();
+  Node* control();
+  Node* SetEffect(Node* node);
+  Node* SetControl(Node* node);
+  void SetEffectControl(Node* effect, Node* control);
+  Node* SetEffectControl(Node* effect_and_control) {
+    SetEffectControl(effect_and_control, effect_and_control);
+    return effect_and_control;
   }
-  Node* Effect() {
-    DCHECK_NOT_NULL(*effect_);
-    return *effect_;
-  }
-  Node* SetControl(Node* node) {
-    *control_ = node;
-    return node;
-  }
-  Node* SetEffect(Node* node) {
-    *effect_ = node;
-    return node;
-  }
-
-  void set_control_ptr(Node** control) { this->control_ = control; }
-
-  void set_effect_ptr(Node** effect) { this->effect_ = effect; }
 
   Node* GetImportedMutableGlobals();
 
@@ -402,33 +393,6 @@ class WasmGraphBuilder {
   void RemoveBytecodePositionDecorator();
 
  protected:
-  Zone* const zone_;
-  MachineGraph* const mcgraph_;
-  wasm::CompilationEnv* const env_;
-
-  Node** control_ = nullptr;
-  Node** effect_ = nullptr;
-  WasmInstanceCacheNodes* instance_cache_ = nullptr;
-
-  SetOncePointer<Node> instance_node_;
-  SetOncePointer<Node> globals_start_;
-  SetOncePointer<Node> imported_mutable_globals_;
-  SetOncePointer<Node> stack_check_code_node_;
-  SetOncePointer<Node> isolate_root_node_;
-  SetOncePointer<const Operator> stack_check_call_operator_;
-
-  bool has_simd_ = false;
-  bool needs_stack_check_ = false;
-  const bool untrusted_code_mitigations_ = true;
-
-  wasm::FunctionSig* const sig_;
-
-  compiler::WasmDecorator* decorator_ = nullptr;
-
-  compiler::SourcePositionTable* const source_position_table_ = nullptr;
-
-  std::unique_ptr<Int64LoweringSpecialCase> lowering_special_case_;
-
   Node* NoContextConstant();
 
   Node* BuildLoadIsolateRoot();
@@ -584,9 +548,34 @@ class WasmGraphBuilder {
                            int parameter_count);
 
   Node* BuildCallToRuntimeWithContext(Runtime::FunctionId f, Node* js_context,
-                                      Node** parameters, int parameter_count,
-                                      Node** effect, Node* control);
+                                      Node** parameters, int parameter_count);
   TrapId GetTrapIdForTrap(wasm::TrapReason reason);
+
+  std::unique_ptr<WasmGraphAssembler> gasm_;
+  Zone* const zone_;
+  MachineGraph* const mcgraph_;
+  wasm::CompilationEnv* const env_;
+
+  WasmInstanceCacheNodes* instance_cache_ = nullptr;
+
+  SetOncePointer<Node> instance_node_;
+  SetOncePointer<Node> globals_start_;
+  SetOncePointer<Node> imported_mutable_globals_;
+  SetOncePointer<Node> stack_check_code_node_;
+  SetOncePointer<Node> isolate_root_node_;
+  SetOncePointer<const Operator> stack_check_call_operator_;
+
+  bool has_simd_ = false;
+  bool needs_stack_check_ = false;
+  const bool untrusted_code_mitigations_ = true;
+
+  wasm::FunctionSig* const sig_;
+
+  compiler::WasmDecorator* decorator_ = nullptr;
+
+  compiler::SourcePositionTable* const source_position_table_ = nullptr;
+
+  std::unique_ptr<Int64LoweringSpecialCase> lowering_special_case_;
 };
 
 enum WasmCallKind { kWasmFunction, kWasmImportWrapper, kWasmCapiFunction };

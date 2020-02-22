@@ -65,13 +65,13 @@ BaseNameDictionary<Derived, Shape>::BaseNameDictionary(Address ptr)
     : Dictionary<Derived, Shape>(ptr) {}
 
 template <typename Derived, typename Shape>
-void BaseNameDictionary<Derived, Shape>::SetNextEnumerationIndex(int index) {
-  DCHECK_NE(0, index);
+void BaseNameDictionary<Derived, Shape>::set_next_enumeration_index(int index) {
+  DCHECK_LT(0, index);
   this->set(kNextEnumerationIndexIndex, Smi::FromInt(index));
 }
 
 template <typename Derived, typename Shape>
-int BaseNameDictionary<Derived, Shape>::NextEnumerationIndex() {
+int BaseNameDictionary<Derived, Shape>::next_enumeration_index() {
   return Smi::ToInt(this->get(kNextEnumerationIndexIndex));
 }
 
@@ -147,6 +147,12 @@ void Dictionary<Derived, Shape>::SetEntry(Isolate* isolate, InternalIndex entry,
   this->set(index + Derived::kEntryKeyIndex, key, mode);
   this->set(index + Derived::kEntryValueIndex, value, mode);
   if (Shape::kHasDetails) DetailsAtPut(isolate, entry, details);
+}
+
+template <typename Derived, typename Shape>
+ObjectSlot Dictionary<Derived, Shape>::RawFieldOfValueAt(InternalIndex entry) {
+  return this->RawFieldOfElementAt(DerivedHashTable::EntryToIndex(entry) +
+                                   Derived::kEntryValueIndex);
 }
 
 template <typename Key>

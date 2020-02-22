@@ -34,6 +34,7 @@
 #include "src/objects/oddball-inl.h"
 #include "src/objects/ordered-hash-table.h"
 #include "src/objects/promise.h"
+#include "src/objects/property-descriptor-object.h"
 #include "src/objects/script.h"
 #include "src/objects/shared-function-info.h"
 #include "src/objects/smi.h"
@@ -154,9 +155,10 @@ AllocationResult Heap::AllocatePartialMap(InstanceType instance_type,
   map.SetInObjectUnusedPropertyFields(0);
   map.set_bit_field(0);
   map.set_bit_field2(0);
-  int bit_field3 = Map::EnumLengthBits::encode(kInvalidEnumCacheSentinel) |
-                   Map::OwnsDescriptorsBit::encode(true) |
-                   Map::ConstructionCounterBits::encode(Map::kNoSlackTracking);
+  int bit_field3 =
+      Map::Bits3::EnumLengthBits::encode(kInvalidEnumCacheSentinel) |
+      Map::Bits3::OwnsDescriptorsBit::encode(true) |
+      Map::Bits3::ConstructionCounterBits::encode(Map::kNoSlackTracking);
   map.set_bit_field3(bit_field3);
   DCHECK(!map.is_in_retained_map_list());
   map.clear_padding();

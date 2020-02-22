@@ -224,7 +224,6 @@ namespace internal {
   F(NewTypeError, 2, 1)                              \
   F(OrdinaryHasInstance, 2, 1)                       \
   F(PromoteScheduledException, 0, 1)                 \
-  F(ReportDetachedWindowAccess, 0, 1)                \
   F(ReportMessage, 1, 1)                             \
   F(ReThrow, 1, 1)                                   \
   F(RunMicrotaskCallback, 2, 1)                      \
@@ -282,7 +281,7 @@ namespace internal {
 #define FOR_EACH_INTRINSIC_OBJECT(F, I)                         \
   F(AddDictionaryProperty, 3, 1)                                \
   F(AddPrivateField, 3, 1)                                      \
-  F(AddPrivateBrand, 2, 1)                                      \
+  F(AddPrivateBrand, 3, 1)                                      \
   F(AllocateHeapNumber, 0, 1)                                   \
   F(ClassOf, 1, 1)                                              \
   F(CollectTypeProfile, 3, 1)                                   \
@@ -387,7 +386,7 @@ namespace internal {
 #define FOR_EACH_INTRINSIC_SCOPES(F, I)     \
   F(DeclareEvalFunction, 2, 1)              \
   F(DeclareEvalVar, 1, 1)                   \
-  F(DeclareGlobals, 3, 1)                   \
+  F(DeclareGlobals, 2, 1)                   \
   F(DeleteLookupSlot, 1, 1)                 \
   F(LoadLookupSlot, 1, 1)                   \
   F(LoadLookupSlotInsideTypeof, 1, 1)       \
@@ -397,7 +396,6 @@ namespace internal {
   F(NewClosure_Tenured, 2, 1)               \
   F(NewFunctionContext, 1, 1)               \
   F(NewRestParameter, 1, 1)                 \
-  F(NewScriptContext, 1, 1)                 \
   F(NewSloppyArguments, 3, 1)               \
   F(NewSloppyArguments_Generic, 1, 1)       \
   F(NewStrictArguments, 1, 1)               \
@@ -536,7 +534,9 @@ namespace internal {
   F(WasmGetNumberOfInstances, 1, 1)           \
   F(WasmNumInterpretedCalls, 1, 1)            \
   F(WasmNumCodeSpaces, 1, 1)                  \
+  F(WasmTierDownModule, 1, 1)                 \
   F(WasmTierUpFunction, 2, 1)                 \
+  F(WasmTierUpModule, 1, 1)                   \
   F(WasmTraceMemory, 1, 1)                    \
   I(DeoptimizeNow, 0, 1)
 
@@ -791,8 +791,6 @@ V8_EXPORT_PRIVATE std::ostream& operator<<(std::ostream&, Runtime::FunctionId);
 using AllocateDoubleAlignFlag = base::BitField<bool, 0, 1>;
 
 using AllowLargeObjectAllocationFlag = base::BitField<bool, 1, 1>;
-
-using DeclareGlobalsEvalFlag = base::BitField<bool, 0, 1>;
 
 // A set of bits returned by Runtime_GetOptimizationStatus.
 // These bits must be in sync with bits defined in test/mjsunit/mjsunit.js

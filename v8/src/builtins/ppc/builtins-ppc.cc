@@ -67,7 +67,7 @@ void LoadRealStackLimit(MacroAssembler* masm, Register destination) {
   intptr_t offset =
       TurboAssembler::RootRegisterOffsetForExternalReference(isolate, limit);
   CHECK(is_int32(offset));
-  __ LoadP(destination, MemOperand(kRootRegister, offset));
+  __ LoadP(destination, MemOperand(kRootRegister, offset), r0);
 }
 
 void Generate_StackOverflowCheck(MacroAssembler* masm, Register num_args,
@@ -1874,7 +1874,7 @@ void Builtins::Generate_CallOrConstructForwardVarargs(MacroAssembler* masm,
     __ JumpIfSmi(r6, &new_target_not_constructor);
     __ LoadP(scratch, FieldMemOperand(r6, HeapObject::kMapOffset));
     __ lbz(scratch, FieldMemOperand(scratch, Map::kBitFieldOffset));
-    __ TestBit(scratch, Map::IsConstructorBit::kShift, r0);
+    __ TestBit(scratch, Map::Bits1::IsConstructorBit::kShift, r0);
     __ bne(&new_target_constructor, cr0);
     __ bind(&new_target_not_constructor);
     {
@@ -1971,14 +1971,6 @@ void Builtins::Generate_CallFunction(MacroAssembler* masm,
           Operand(SharedFunctionInfo::IsStrictBit::kMask |
                   SharedFunctionInfo::IsNativeBit::kMask));
   __ bne(&done_convert, cr0);
-
-  // Check if the window is marked as detached.
-  Label detached_window, after_detached_window;
-  __ LoadNativeContextSlot(Context::DETACHED_WINDOW_REASON_INDEX, r6);
-  __ CmpSmiLiteral(r6, Smi::zero(), r0);
-  __ bne(&detached_window);
-  __ bind(&after_detached_window);
-
   {
     // ----------- S t a t e -------------
     //  -- r3 : the number of arguments (not including the receiver)
@@ -2052,15 +2044,6 @@ void Builtins::Generate_CallFunction(MacroAssembler* masm,
     __ push(r4);
     __ CallRuntime(Runtime::kThrowConstructorNonCallableError);
   }
-
-  __ bind(&detached_window);
-  {
-    FrameScope frame(masm, StackFrame::INTERNAL);
-    __ PushCallerSaved(kDontSaveFPRegs, r6);
-    __ CallRuntime(Runtime::kReportDetachedWindowAccess);
-    __ PopCallerSaved(kDontSaveFPRegs, r6);
-  }
-  __ jmp(&after_detached_window);
 }
 
 namespace {
@@ -2193,7 +2176,7 @@ void Builtins::Generate_Call(MacroAssembler* masm, ConvertReceiverMode mode) {
 
   // Check if target has a [[Call]] internal method.
   __ lbz(r7, FieldMemOperand(r7, Map::kBitFieldOffset));
-  __ TestBit(r7, Map::IsCallableBit::kShift, r0);
+  __ TestBit(r7, Map::Bits1::IsCallableBit::kShift, r0);
   __ beq(&non_callable, cr0);
 
   // Check if target is a proxy and call CallProxy external builtin
@@ -2294,7 +2277,7 @@ void Builtins::Generate_Construct(MacroAssembler* masm) {
   // Check if target has a [[Construct]] internal method.
   __ LoadP(r7, FieldMemOperand(r4, HeapObject::kMapOffset));
   __ lbz(r5, FieldMemOperand(r7, Map::kBitFieldOffset));
-  __ TestBit(r5, Map::IsConstructorBit::kShift, r0);
+  __ TestBit(r5, Map::Bits1::IsConstructorBit::kShift, r0);
   __ beq(&non_constructor, cr0);
 
   // Dispatch based on instance type.

@@ -348,6 +348,9 @@ bool IntrinsicHasNoSideEffect(Runtime::FunctionId id) {
   V(NewObject)                                \
   V(StringMaxLength)                          \
   V(StringToArray)                            \
+  V(AsyncFunctionEnter)                       \
+  V(AsyncFunctionReject)                      \
+  V(AsyncFunctionResolve)                     \
   /* Test */                                  \
   V(GetOptimizationStatus)                    \
   V(OptimizeFunctionOnNextCall)               \
@@ -357,7 +360,10 @@ bool IntrinsicHasNoSideEffect(Runtime::FunctionId id) {
 // Intrinsics with inline versions have to be whitelisted here a second time.
 #define INLINE_INTRINSIC_WHITELIST(V) \
   V(Call)                             \
-  V(IsJSReceiver)
+  V(IsJSReceiver)                     \
+  V(AsyncFunctionEnter)               \
+  V(AsyncFunctionReject)              \
+  V(AsyncFunctionResolve)
 
 #define CASE(Name) case Runtime::k##Name:
 #define INLINE_CASE(Name) case Runtime::kInline##Name:
@@ -859,6 +865,7 @@ DebugInfo::SideEffectState DebugEvaluate::FunctionGetSideEffectState(
   }
 
   DCHECK(info->is_compiled());
+  DCHECK(!info->needs_script_context());
   if (info->HasBytecodeArray()) {
     // Check bytecodes against whitelist.
     Handle<BytecodeArray> bytecode_array(info->GetBytecodeArray(), isolate);

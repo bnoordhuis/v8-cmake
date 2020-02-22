@@ -9,7 +9,7 @@
  * This set of documents provides reference material generated from the
  * V8 header file, include/v8.h.
  *
- * For other documentation see http://code.google.com/apis/v8/
+ * For other documentation see https://v8.dev/.
  */
 
 #ifndef INCLUDE_V8_H_
@@ -216,9 +216,13 @@ class Local {
 
   /**
    * Checks whether two handles are the same.
-   * Returns true if both are empty, or if the objects
-   * to which they refer are identical.
-   * The handles' references are not checked.
+   * Returns true if both are empty, or if the objects to which they refer
+   * are identical.
+   *
+   * If both handles refer to JS objects, this is the same as strict equality.
+   * For primitives, such as numbers or strings, a `false` return value does not
+   * indicate that the values aren't equal in the JavaScript sense.
+   * Use `Value::StrictEquals()` to check primitives for equality.
    */
   template <class S>
   V8_INLINE bool operator==(const Local<S>& that) const {
@@ -242,7 +246,11 @@ class Local {
    * Checks whether two handles are different.
    * Returns true if only one of the handles is empty, or if
    * the objects to which they refer are different.
-   * The handles' references are not checked.
+   *
+   * If both handles refer to JS objects, this is the same as strict
+   * non-equality. For primitives, such as numbers or strings, a `true` return
+   * value does not indicate that the values aren't equal in the JavaScript
+   * sense. Use `Value::StrictEquals()` to check primitives for equality.
    */
   template <class S>
   V8_INLINE bool operator!=(const Local<S>& that) const {
@@ -1040,6 +1048,11 @@ class TracedGlobal : public TracedReferenceBase<T> {
  * to ensure that the handle is not accessed once the V8 object has been
  * reclaimed. This can happen when the handle is not passed through the
  * EmbedderHeapTracer. For more details see TracedReferenceBase.
+ *
+ * The reference assumes the embedder has precise knowledge about references at
+ * all times. In case V8 needs to separately handle on-stack references, the
+ * embedder is required to set the stack start through
+ * |EmbedderHeapTracer::SetStackStart|.
  */
 template <typename T>
 class TracedReference : public TracedReferenceBase<T> {
@@ -1153,7 +1166,7 @@ class TracedReference : public TracedReferenceBase<T> {
    * involving V8 needs to be done, a second callback can be scheduled using
    * WeakCallbackInfo<void>::SetSecondPassCallback.
    */
-  V8_DEPRECATE_SOON("Use TracedGlobal<> if callbacks are required.")
+  V8_DEPRECATED("Use TracedGlobal<> if callbacks are required.")
   V8_INLINE void SetFinalizationCallback(
       void* parameter, WeakCallbackInfo<void>::Callback callback);
 };
@@ -2225,6 +2238,12 @@ struct UnwindState {
   JSEntryStub js_run_microtasks_entry_stub;
 };
 
+struct JSEntryStubs {
+  JSEntryStub js_entry_stub;
+  JSEntryStub js_construct_entry_stub;
+  JSEntryStub js_run_microtasks_entry_stub;
+};
+
 /**
  * A JSON Parser and Stringifier.
  */
@@ -2448,7 +2467,10 @@ class V8_EXPORT ValueDeserializer {
   /**
    * Expect inline wasm in the data stream (rather than in-memory transfer)
    */
-  void SetExpectInlineWasm(bool allow_inline_wasm);
+  V8_DEPRECATED(
+      "Wasm module serialization is only supported via explicit methods, e.g. "
+      "CompiledWasmModule::Serialize()")
+  void SetExpectInlineWasm(bool allow_inline_wasm) {}
 
   /**
    * Reads the underlying wire format version. Likely mostly to be useful to
@@ -2487,12 +2509,16 @@ class V8_EXPORT Value : public Data {
   /**
    * Returns true if this value is the undefined value.  See ECMA-262
    * 4.3.10.
+   *
+   * This is equivalent to `value === undefined` in JS.
    */
   V8_INLINE bool IsUndefined() const;
 
   /**
    * Returns true if this value is the null value.  See ECMA-262
    * 4.3.11.
+   *
+   * This is equivalent to `value === null` in JS.
    */
   V8_INLINE bool IsNull() const;
 
@@ -2500,37 +2526,56 @@ class V8_EXPORT Value : public Data {
    * Returns true if this value is either the null or the undefined value.
    * See ECMA-262
    * 4.3.11. and 4.3.12
+   *
+   * This is equivalent to `value == null` in JS.
    */
   V8_INLINE bool IsNullOrUndefined() const;
 
   /**
-  * Returns true if this value is true.
-  */
+   * Returns true if this value is true.
+   *
+   * This is not the same as `BooleanValue()`. The latter performs a
+   * conversion to boolean, i.e. the result of `Boolean(value)` in JS, whereas
+   * this checks `value === true`.
+   */
   bool IsTrue() const;
 
   /**
    * Returns true if this value is false.
+   *
+   * This is not the same as `!BooleanValue()`. The latter performs a
+   * conversion to boolean, i.e. the result of `!Boolean(value)` in JS, whereas
+   * this checks `value === false`.
    */
   bool IsFalse() const;
 
   /**
    * Returns true if this value is a symbol or a string.
+   *
+   * This is equivalent to
+   * `typeof value === 'string' || typeof value === 'symbol'` in JS.
    */
   bool IsName() const;
 
   /**
    * Returns true if this value is an instance of the String type.
    * See ECMA-262 8.4.
+   *
+   * This is equivalent to `typeof value === 'string'` in JS.
    */
   V8_INLINE bool IsString() const;
 
   /**
    * Returns true if this value is a symbol.
+   *
+   * This is equivalent to `typeof value === 'symbol'` in JS.
    */
   bool IsSymbol() const;
 
   /**
    * Returns true if this value is a function.
+   *
+   * This is equivalent to `typeof value === 'function'` in JS.
    */
   bool IsFunction() const;
 
@@ -2547,21 +2592,27 @@ class V8_EXPORT Value : public Data {
 
   /**
    * Returns true if this value is a bigint.
+   *
+   * This is equivalent to `typeof value === 'bigint'` in JS.
    */
   bool IsBigInt() const;
 
   /**
    * Returns true if this value is boolean.
+   *
+   * This is equivalent to `typeof value === 'boolean'` in JS.
    */
   bool IsBoolean() const;
 
   /**
    * Returns true if this value is a number.
+   *
+   * This is equivalent to `typeof value === 'number'` in JS.
    */
   bool IsNumber() const;
 
   /**
-   * Returns true if this value is external.
+   * Returns true if this value is an `External` object.
    */
   bool IsExternal() const;
 
@@ -2747,7 +2798,6 @@ class V8_EXPORT Value : public Data {
 
   /**
    * Returns true if this value is a SharedArrayBuffer.
-   * This is an experimental feature.
    */
   bool IsSharedArrayBuffer() const;
 
@@ -2756,6 +2806,12 @@ class V8_EXPORT Value : public Data {
    */
   bool IsProxy() const;
 
+  /**
+   * Returns true if this value is a WasmModuleObject.
+   */
+  bool IsWasmModuleObject() const;
+
+  V8_DEPRECATED("Use IsWasmModuleObject")
   bool IsWebAssemblyCompiledModule() const;
 
   /**
@@ -2763,22 +2819,57 @@ class V8_EXPORT Value : public Data {
    */
   bool IsModuleNamespaceObject() const;
 
+  /**
+   * Perform the equivalent of `BigInt(value)` in JS.
+   */
   V8_WARN_UNUSED_RESULT MaybeLocal<BigInt> ToBigInt(
       Local<Context> context) const;
+  /**
+   * Perform the equivalent of `Number(value)` in JS.
+   */
   V8_WARN_UNUSED_RESULT MaybeLocal<Number> ToNumber(
       Local<Context> context) const;
+  /**
+   * Perform the equivalent of `String(value)` in JS.
+   */
   V8_WARN_UNUSED_RESULT MaybeLocal<String> ToString(
       Local<Context> context) const;
+  /**
+   * Provide a string representation of this value usable for debugging.
+   * This operation has no observable side effects and will succeed
+   * unless e.g. execution is being terminated.
+   */
   V8_WARN_UNUSED_RESULT MaybeLocal<String> ToDetailString(
       Local<Context> context) const;
+  /**
+   * Perform the equivalent of `Object(value)` in JS.
+   */
   V8_WARN_UNUSED_RESULT MaybeLocal<Object> ToObject(
       Local<Context> context) const;
+  /**
+   * Perform the equivalent of `Number(value)` in JS and convert the result
+   * to an integer. Negative values are rounded up, positive values are rounded
+   * down. NaN is converted to 0. Infinite values yield undefined results.
+   */
   V8_WARN_UNUSED_RESULT MaybeLocal<Integer> ToInteger(
       Local<Context> context) const;
+  /**
+   * Perform the equivalent of `Number(value)` in JS and convert the result
+   * to an unsigned 32-bit integer by performing the steps in
+   * https://tc39.es/ecma262/#sec-touint32.
+   */
   V8_WARN_UNUSED_RESULT MaybeLocal<Uint32> ToUint32(
       Local<Context> context) const;
+  /**
+   * Perform the equivalent of `Number(value)` in JS and convert the result
+   * to a signed 32-bit integer by performing the steps in
+   * https://tc39.es/ecma262/#sec-toint32.
+   */
   V8_WARN_UNUSED_RESULT MaybeLocal<Int32> ToInt32(Local<Context> context) const;
 
+  /**
+   * Perform the equivalent of `Boolean(value)` in JS. This can never fail.
+   */
   Local<Boolean> ToBoolean(Isolate* isolate) const;
 
   /**
@@ -2788,13 +2879,18 @@ class V8_EXPORT Value : public Data {
   V8_WARN_UNUSED_RESULT MaybeLocal<Uint32> ToArrayIndex(
       Local<Context> context) const;
 
+  /** Returns the equivalent of `ToBoolean()->Value()`. */
   bool BooleanValue(Isolate* isolate) const;
 
+  /** Returns the equivalent of `ToNumber()->Value()`. */
   V8_WARN_UNUSED_RESULT Maybe<double> NumberValue(Local<Context> context) const;
+  /** Returns the equivalent of `ToInteger()->Value()`. */
   V8_WARN_UNUSED_RESULT Maybe<int64_t> IntegerValue(
       Local<Context> context) const;
+  /** Returns the equivalent of `ToUint32()->Value()`. */
   V8_WARN_UNUSED_RESULT Maybe<uint32_t> Uint32Value(
       Local<Context> context) const;
+  /** Returns the equivalent of `ToInt32()->Value()`. */
   V8_WARN_UNUSED_RESULT Maybe<int32_t> Int32Value(Local<Context> context) const;
 
   /** JS == */
@@ -4161,7 +4257,10 @@ class FunctionCallbackInfo {
  public:
   /** The number of available arguments. */
   V8_INLINE int Length() const;
-  /** Accessor for the available arguments. */
+  /**
+   * Accessor for the available arguments. Returns `undefined` if the index
+   * is out of bounds.
+   */
   V8_INLINE Local<Value> operator[](int i) const;
   /** Returns the receiver. This corresponds to the "this" value. */
   V8_INLINE Local<Object> This() const;
@@ -4688,9 +4787,13 @@ class V8_EXPORT WasmModuleObject : public Object {
    * If possible, deserialize the module, otherwise compile it from the provided
    * uncompiled bytes.
    */
+  V8_DEPRECATED(
+      "Use WasmStreaming for deserialization from cache or the "
+      "CompiledWasmModule to transfer between isolates")
   static MaybeLocal<WasmModuleObject> DeserializeOrCompile(
       Isolate* isolate, MemorySpan<const uint8_t> serialized_module,
       MemorySpan<const uint8_t> wire_bytes);
+
   V8_INLINE static WasmModuleObject* Cast(Value* obj);
 
  private:
@@ -4765,6 +4868,12 @@ class V8_EXPORT WasmStreaming final {
    * This must be called before {OnBytesReceived}, {Finish}, or {Abort}.
    */
   void SetClient(std::shared_ptr<Client> client);
+
+  /*
+   * Sets the UTF-8 encoded source URL for the {Script} object. This must be
+   * called before {Finish}.
+   */
+  void SetUrl(const char* url, size_t length);
 
   /**
    * Unpacks a {WasmStreaming} object wrapped in a  {Managed} for the embedder.
@@ -5204,7 +5313,7 @@ class V8_EXPORT TypedArray : public ArrayBufferView {
    */
   static constexpr size_t kMaxLength = internal::kApiSystemPointerSize == 4
                                            ? internal::kSmiMaxValue
-                                           : 0x7FFFFFFF;  // kMaxInt32
+                                           : 0xFFFFFFFF;
 
   /**
    * Number of elements in this typed array
@@ -5423,7 +5532,6 @@ class V8_EXPORT DataView : public ArrayBufferView {
 
 /**
  * An instance of the built-in SharedArrayBuffer constructor.
- * This API is experimental and may change significantly.
  */
 class V8_EXPORT SharedArrayBuffer : public Object {
  public:
@@ -5435,8 +5543,6 @@ class V8_EXPORT SharedArrayBuffer : public Object {
    * The Data pointer of ArrayBuffer::Contents must be freed using the provided
    * deleter, which will call ArrayBuffer::Allocator::Free if the buffer
    * was allocated with ArraryBuffer::Allocator::Allocate.
-   *
-   * This API is experimental and may change significantly.
    */
   class V8_EXPORT Contents {  // NOLINT
    public:
@@ -7778,6 +7884,17 @@ class V8_EXPORT EmbedderHeapTracer {
   void IterateTracedGlobalHandles(TracedGlobalHandleVisitor* visitor);
 
   /**
+   * Called by the embedder to set the start of the stack which is e.g. used by
+   * V8 to determine whether handles are used from stack or heap.
+   */
+  void SetStackStart(void* stack_start);
+
+  /**
+   * Called by the embedder to notify V8 of an empty execution stack.
+   */
+  void NotifyEmptyEmbedderStack();
+
+  /**
    * Called by v8 to register internal fields of found wrappers.
    *
    * The embedder is expected to store them somewhere and trace reachable
@@ -7786,8 +7903,6 @@ class V8_EXPORT EmbedderHeapTracer {
   virtual void RegisterV8References(
       const std::vector<std::pair<void*, void*> >& embedder_fields) = 0;
 
-  V8_DEPRECATED("Use version taking TracedReferenceBase<v8::Data> argument")
-  void RegisterEmbedderReference(const TracedReferenceBase<v8::Value>& ref);
   void RegisterEmbedderReference(const TracedReferenceBase<v8::Data>& ref);
 
   /**
@@ -7871,9 +7986,6 @@ class V8_EXPORT EmbedderHeapTracer {
    */
   virtual void ResetHandleInNonTracingGC(
       const v8::TracedReference<v8::Value>& handle);
-  V8_DEPRECATED("Use TracedReference version when not requiring destructors.")
-  virtual void ResetHandleInNonTracingGC(
-      const v8::TracedGlobal<v8::Value>& handle);
 
   /*
    * Called by the embedder to immediately perform a full garbage collection.
@@ -7940,7 +8052,65 @@ struct DeserializeInternalFieldsCallback {
 };
 typedef DeserializeInternalFieldsCallback DeserializeEmbedderFieldsCallback;
 
+/**
+ * Controls how the default MeasureMemoryDelegate reports the result of
+ * the memory measurement to JS. With kSummary only the total size is reported.
+ * With kDetailed the result includes the size of each native context.
+ */
 enum class MeasureMemoryMode { kSummary, kDetailed };
+
+/**
+ * Controls how promptly a memory measurement request is executed.
+ * By default the measurement is folded with the next scheduled GC which may
+ * happen after a while. The kEager starts increment GC right away and
+ * is useful for testing.
+ */
+enum class MeasureMemoryExecution { kDefault, kEager };
+
+/**
+ * The delegate is used in Isolate::MeasureMemory API.
+ *
+ * It specifies the contexts that need to be measured and gets called when
+ * the measurement is completed to report the results.
+ */
+class V8_EXPORT MeasureMemoryDelegate {
+ public:
+  virtual ~MeasureMemoryDelegate() = default;
+
+  /**
+   * Returns true if the size of the given context needs to be measured.
+   */
+  virtual bool ShouldMeasure(Local<Context> context) = 0;
+
+  /**
+   * This function is called when memory measurement finishes.
+   *
+   * \param context_sizes_in_bytes a vector of (context, size) pairs that
+   *   includes each context for which ShouldMeasure returned true and that
+   *   was not garbage collected while the memory measurement was in progress.
+   *
+   * \param unattributed_size_in_bytes total size of objects that were not
+   *   attributed to any context (i.e. are likely shared objects).
+   */
+  virtual void MeasurementComplete(
+      const std::vector<std::pair<Local<Context>, size_t>>&
+          context_sizes_in_bytes,
+      size_t unattributed_size_in_bytes) = 0;
+
+  /**
+   * Returns a default delegate that resolves the given promise when
+   * the memory measurement completes.
+   *
+   * \param isolate the current isolate
+   * \param context the current context
+   * \param promise_resolver the promise resolver that is given the
+   *   result of the memory measurement.
+   * \param mode the detail level of the result.
+   */
+  static std::unique_ptr<MeasureMemoryDelegate> Default(
+      Isolate* isolate, Local<Context> context,
+      Local<Promise::Resolver> promise_resolver, MeasureMemoryMode mode);
+};
 
 /**
  * Isolate represents an isolated instance of the V8 engine.  V8 isolates have
@@ -8236,18 +8406,6 @@ class V8_EXPORT Isolate {
     kRegExpReplaceCalledOnSlowRegExp = 80,
     kDisplayNames = 81,
     kSharedArrayBufferConstructed = 82,
-    // Temporary kCallInDetachedWindowBy* counters are for reporting function
-    // calls within contexts marked using |SetDetachedWindowReason|.
-    // TODO(bartekn,chromium:1018156): Remove once not needed.
-    kCallInDetachedWindowByNavigation = 83,
-    kCallInDetachedWindowByNavigationAfter10s = 84,
-    kCallInDetachedWindowByNavigationAfter1min = 85,
-    kCallInDetachedWindowByClosing = 86,
-    kCallInDetachedWindowByClosingAfter10s = 87,
-    kCallInDetachedWindowByClosingAfter1min = 88,
-    kCallInDetachedWindowByOtherReason = 89,
-    kCallInDetachedWindowByOtherReasonAfter10s = 90,
-    kCallInDetachedWindowByOtherReasonAfter1min = 91,
 
     // If you add new values here, you'll also need to update Chromium's:
     // web_feature.mojom, use_counter_callback.cc, and enums.xml. V8 changes to
@@ -8486,15 +8644,24 @@ class V8_EXPORT Isolate {
   bool GetHeapCodeAndMetadataStatistics(HeapCodeStatistics* object_statistics);
 
   /**
-   * Enqueues a memory measurement request for the given context and mode.
    * This API is experimental and may change significantly.
    *
-   * \param mode Indicates whether the result should include per-context
-   *   memory usage or just the total memory usage.
-   * \returns a promise that will be resolved with memory usage estimate.
+   * Enqueues a memory measurement request and invokes the delegate with the
+   * results.
+   *
+   * \param delegate the delegate that defines which contexts to measure and
+   *   reports the results.
+   *
+   * \param execution promptness executing the memory measurement.
+   *   The kEager value is expected to be used only in tests.
    */
-  v8::MaybeLocal<v8::Promise> MeasureMemory(v8::Local<v8::Context> context,
-                                            MeasureMemoryMode mode);
+  bool MeasureMemory(
+      std::unique_ptr<MeasureMemoryDelegate> delegate,
+      MeasureMemoryExecution execution = MeasureMemoryExecution::kDefault);
+
+  V8_DEPRECATE_SOON("Use the version with a delegate")
+  MaybeLocal<Promise> MeasureMemory(Local<Context> context,
+                                    MeasureMemoryMode mode);
 
   /**
    * Get a call stack sample from the isolate.
@@ -9049,7 +9216,31 @@ class V8_EXPORT Isolate {
   /**
    * Returns the UnwindState necessary for use with the Unwinder API.
    */
+  // TODO(petermarshall): Remove this API.
+  V8_DEPRECATE_SOON("Use entry_stubs + code_pages version.")
   UnwindState GetUnwindState();
+
+  /**
+   * Returns the JSEntryStubs necessary for use with the Unwinder API.
+   */
+  JSEntryStubs GetJSEntryStubs();
+
+  static constexpr size_t kMinCodePagesBufferSize = 32;
+
+  /**
+   * Copies the code heap pages currently in use by V8 into |code_pages_out|.
+   * |code_pages_out| must have at least kMinCodePagesBufferSize capacity and
+   * must be empty.
+   *
+   * Signal-safe, does not allocate, does not access the V8 heap.
+   * No code on the stack can rely on pages that might be missing.
+   *
+   * Returns the number of pages available to be copied, which might be greater
+   * than |capacity|. In this case, only |capacity| pages will be copied into
+   * |code_pages_out|. The caller should provide a bigger buffer on the next
+   * call in order to get all available code pages, but this is not required.
+   */
+  size_t CopyCodePages(size_t capacity, MemoryRange* code_pages_out);
 
   /** Set the callback to invoke in case of fatal errors. */
   void SetFatalErrorHandler(FatalErrorCallback that);
@@ -9086,6 +9277,9 @@ class V8_EXPORT Isolate {
    * Set the callback to invoke to check if code generation from
    * strings should be allowed.
    */
+  V8_DEPRECATED(
+      "Use Isolate::SetModifyCodeGenerationFromStringsCallback instead. "
+      "See http://crbug.com/v8/10096.")
   void SetAllowCodeGenerationFromStringsCallback(
       AllowCodeGenerationFromStringsCallback callback);
   void SetModifyCodeGenerationFromStringsCallback(
@@ -9810,8 +10004,16 @@ class V8_EXPORT TryCatch {
   Local<Value> Exception() const;
 
   /**
-   * Returns the .stack property of the thrown object.  If no .stack
+   * Returns the .stack property of an object.  If no .stack
    * property is present an empty handle is returned.
+   */
+  V8_WARN_UNUSED_RESULT static MaybeLocal<Value> StackTrace(
+      Local<Context> context, Local<Value> exception);
+
+  /**
+   * Returns the .stack property of the thrown object.  If no .stack property is
+   * present or if this try/catch block has not caught an exception, an empty
+   * handle is returned.
    */
   V8_WARN_UNUSED_RESULT MaybeLocal<Value> StackTrace(
       Local<Context> context) const;
@@ -9948,32 +10150,6 @@ class V8_EXPORT Context {
    * the global object can be reused to create a new context.
    */
   void DetachGlobal();
-
-  /**
-   * Reason for detaching a window.
-   */
-  enum DetachedWindowReason {
-    kWindowNotDetached = 0,
-    kDetachedWindowByNavigation,
-    kDetachedWindowByClosing,
-    kDetachedWindowByOtherReason
-  };
-
-  /**
-   * Sets a reason for detaching window, for reporting purposes.
-   *
-   * This API is experimental and may change or be deleted. Do not use!
-   *
-   * A window is a Blink concept. This API marks the context as backing
-   * a detached window. This doesn't necessarily mean that the context is
-   * detached.
-   *
-   * Every time a JS function is called within a context that has a non-zero
-   * DetachedWindowReason, Runtime::kReportDetachedWindowAccess is invoked,
-   * which will report this call to Blink via a callback, which in turn can
-   * report number of such calls via UKM metrics.
-   */
-  void SetDetachedWindowReason(DetachedWindowReason reason);
 
   /**
    * Creates a new context and returns a handle to the newly allocated
@@ -10353,7 +10529,7 @@ class V8_EXPORT Locker {
 /**
  * Various helpers for skipping over V8 frames in a given stack.
  *
- * The unwinder API is only supported on the x64 architecture.
+ * The unwinder API is only supported on the x64, ARM64 and ARM32 architectures.
  */
 class V8_EXPORT Unwinder {
  public:
@@ -10385,7 +10561,23 @@ class V8_EXPORT Unwinder {
    *
    * \return True on success.
    */
+  // TODO(petermarshall): Remove this API
+  V8_DEPRECATE_SOON("Use entry_stubs + code_pages version.")
   static bool TryUnwindV8Frames(const UnwindState& unwind_state,
+                                RegisterState* register_state,
+                                const void* stack_base);
+
+  /**
+   * The same as above, but is available on x64, ARM64 and ARM32.
+   *
+   * \param code_pages A list of all of the ranges in which V8 has allocated
+   * executable code. The caller should obtain this list by calling
+   * Isolate::CopyCodePages() during the same interrupt/thread suspension that
+   * captures the stack.
+   */
+  static bool TryUnwindV8Frames(const JSEntryStubs& entry_stubs,
+                                size_t code_pages_length,
+                                const MemoryRange* code_pages,
                                 RegisterState* register_state,
                                 const void* stack_base);
 
@@ -10397,7 +10589,16 @@ class V8_EXPORT Unwinder {
    * and unwind_state will always fail. If it returns true, then unwinding may
    * (but not necessarily) be successful.
    */
+  // TODO(petermarshall): Remove this API
+  V8_DEPRECATE_SOON("Use code_pages version.")
   static bool PCIsInV8(const UnwindState& unwind_state, void* pc);
+
+  /**
+   * The same as above, but is available on x64, ARM64 and ARM32. See the
+   * comment on TryUnwindV8Frames.
+   */
+  static bool PCIsInV8(size_t code_pages_length, const MemoryRange* code_pages,
+                       void* pc);
 };
 
 // --- Implementation ---
@@ -10640,14 +10841,9 @@ TracedGlobal<T>& TracedGlobal<T>::operator=(const TracedGlobal<S>& rhs) {
 template <class T>
 TracedGlobal<T>& TracedGlobal<T>::operator=(TracedGlobal&& rhs) {
   if (this != &rhs) {
-    this->Reset();
-    if (rhs.val_ != nullptr) {
-      this->val_ = rhs.val_;
       V8::MoveTracedGlobalReference(
           reinterpret_cast<internal::Address**>(&rhs.val_),
           reinterpret_cast<internal::Address**>(&this->val_));
-      rhs.val_ = nullptr;
-    }
   }
   return *this;
 }
@@ -10695,14 +10891,9 @@ TracedReference<T>& TracedReference<T>::operator=(
 template <class T>
 TracedReference<T>& TracedReference<T>::operator=(TracedReference&& rhs) {
   if (this != &rhs) {
-    this->Reset();
-    if (rhs.val_ != nullptr) {
-      this->val_ = rhs.val_;
-      V8::MoveTracedGlobalReference(
-          reinterpret_cast<internal::Address**>(&rhs.val_),
-          reinterpret_cast<internal::Address**>(&this->val_));
-      rhs.val_ = nullptr;
-    }
+    V8::MoveTracedGlobalReference(
+        reinterpret_cast<internal::Address**>(&rhs.val_),
+        reinterpret_cast<internal::Address**>(&this->val_));
   }
   return *this;
 }

@@ -563,12 +563,19 @@ void AdjustStackPointerForTailCall(TurboAssembler* tasm,
 #ifdef DEBUG
 bool VerifyOutputOfAtomicPairInstr(IA32OperandConverter* converter,
                                    const Instruction* instr) {
-  if (instr->OutputCount() > 0) {
-    if (converter->OutputRegister(0) != eax) return false;
-    if (instr->OutputCount() == 2 && converter->OutputRegister(1) != edx)
-      return false;
+  if (instr->OutputCount() == 2) {
+    return (converter->OutputRegister(0) == eax &&
+            converter->OutputRegister(1) == edx);
   }
-  return true;
+  if (instr->OutputCount() == 1) {
+    return (converter->OutputRegister(0) == eax &&
+            converter->TempRegister(0) == edx) ||
+           (converter->OutputRegister(0) == edx &&
+            converter->TempRegister(0) == eax);
+  }
+  DCHECK_EQ(instr->OutputCount(), 0);
+  return (converter->TempRegister(0) == eax &&
+          converter->TempRegister(1) == edx);
 }
 #endif
 
@@ -848,7 +855,9 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         __ CallCFunction(func, num_parameters);
       }
       __ bind(&return_location);
-      RecordSafepoint(instr->reference_map(), Safepoint::kNoLazyDeopt);
+      if (linkage()->GetIncomingDescriptor()->IsWasmCapiFunction()) {
+        RecordSafepoint(instr->reference_map(), Safepoint::kNoLazyDeopt);
+      }
       frame_access_state()->SetFrameAccessToDefault();
       // Ideally, we should decrement SP delta to match the change of stack
       // pointer in CallCFunction. However, for certain architectures (e.g.
@@ -2043,12 +2052,12 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     }
     case kIA32I64x2Add: {
       __ Paddq(i.OutputSimd128Register(), i.InputSimd128Register(0),
-               i.InputSimd128Register(1));
+               i.InputOperand(1));
       break;
     }
     case kIA32I64x2Sub: {
       __ Psubq(i.OutputSimd128Register(), i.InputSimd128Register(0),
-               i.InputSimd128Register(1));
+               i.InputOperand(1));
       break;
     }
     case kIA32I64x2Mul: {
@@ -3164,6 +3173,11 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ vpcmpeqw(i.OutputSimd128Register(), kScratchDoubleReg, src2);
       break;
     }
+    case kIA32I16x8RoundingAverageU: {
+      __ Pavgw(i.OutputSimd128Register(), i.InputSimd128Register(0),
+               i.InputOperand(1));
+      break;
+    }
     case kIA32I8x16Splat: {
       XMMRegister dst = i.OutputSimd128Register();
       __ Movd(dst, i.InputOperand(0));
@@ -3592,6 +3606,11 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ vpcmpeqb(i.OutputSimd128Register(), kScratchDoubleReg, src2);
       break;
     }
+    case kIA32I8x16RoundingAverageU: {
+      __ Pavgb(i.OutputSimd128Register(), i.InputSimd128Register(0),
+               i.InputOperand(1));
+      break;
+    }
     case kIA32S128Zero: {
       XMMRegister dst = i.OutputSimd128Register();
       __ Pxor(dst, dst);
@@ -3667,6 +3686,15 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ vxorps(dst, kScratchDoubleReg, i.InputSimd128Register(2));
       break;
     }
+    case kIA32S128AndNot: {
+      XMMRegister dst = i.OutputSimd128Register();
+      DCHECK_EQ(dst, i.InputSimd128Register(0));
+      // The inputs have been inverted by instruction selector, so we can call
+      // andnps here without any modifications.
+      XMMRegister src1 = i.InputSimd128Register(1);
+      __ Andnps(dst, src1);
+      break;
+    }
     case kIA32S8x16Swizzle: {
       DCHECK_EQ(i.OutputSimd128Register(), i.InputSimd128Register(0));
       XMMRegister dst = i.OutputSimd128Register();
@@ -3722,6 +3750,51 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         __ por(dst, kScratchDoubleReg);
       }
       __ mov(esp, tmp);
+      break;
+    }
+    case kIA32S8x16LoadSplat: {
+      __ Pinsrb(i.OutputSimd128Register(), i.MemoryOperand(), 0);
+      __ Pxor(kScratchDoubleReg, kScratchDoubleReg);
+      __ Pshufb(i.OutputSimd128Register(), kScratchDoubleReg);
+      break;
+    }
+    case kIA32S16x8LoadSplat: {
+      __ Pinsrw(i.OutputSimd128Register(), i.MemoryOperand(), 0);
+      __ Pshuflw(i.OutputSimd128Register(), i.OutputSimd128Register(),
+                 static_cast<uint8_t>(0));
+      __ Punpcklqdq(i.OutputSimd128Register(), i.OutputSimd128Register());
+      break;
+    }
+    case kIA32S32x4LoadSplat: {
+      __ Vbroadcastss(i.OutputSimd128Register(), i.MemoryOperand());
+      break;
+    }
+    case kIA32S64x2LoadSplat: {
+      __ Movddup(i.OutputSimd128Register(), i.MemoryOperand());
+      break;
+    }
+    case kIA32I16x8Load8x8S: {
+      __ Pmovsxbw(i.OutputSimd128Register(), i.MemoryOperand());
+      break;
+    }
+    case kIA32I16x8Load8x8U: {
+      __ Pmovzxbw(i.OutputSimd128Register(), i.MemoryOperand());
+      break;
+    }
+    case kIA32I32x4Load16x4S: {
+      __ Pmovsxwd(i.OutputSimd128Register(), i.MemoryOperand());
+      break;
+    }
+    case kIA32I32x4Load16x4U: {
+      __ Pmovzxwd(i.OutputSimd128Register(), i.MemoryOperand());
+      break;
+    }
+    case kIA32I64x2Load32x2S: {
+      __ Pmovsxdq(i.OutputSimd128Register(), i.MemoryOperand());
+      break;
+    }
+    case kIA32I64x2Load32x2U: {
+      __ Pmovzxdq(i.OutputSimd128Register(), i.MemoryOperand());
       break;
     }
     case kIA32S32x4Swizzle: {
@@ -4065,13 +4138,8 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kIA32Word32AtomicPairLoad: {
       XMMRegister tmp = i.ToDoubleRegister(instr->TempAt(0));
       __ movq(tmp, i.MemoryOperand());
-      if (instr->OutputCount() == 2) {
-        __ Pextrd(i.OutputRegister(0), tmp, 0);
-        __ Pextrd(i.OutputRegister(1), tmp, 1);
-      } else if (instr->OutputCount() == 1) {
-        __ Pextrd(i.OutputRegister(0), tmp, 0);
-        __ Pextrd(i.TempRegister(1), tmp, 1);
-      }
+      __ Pextrd(i.OutputRegister(0), tmp, 0);
+      __ Pextrd(i.OutputRegister(1), tmp, 1);
       break;
     }
     case kIA32Word32AtomicPairStore: {

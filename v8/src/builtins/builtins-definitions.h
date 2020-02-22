@@ -304,8 +304,6 @@ namespace internal {
   CPP(ArrayConcat)                                                             \
   /* ES6 #sec-array.prototype.fill */                                          \
   CPP(ArrayPrototypeFill)                                                      \
-  /* ES6 #sec-array.from */                                                    \
-  TFJ(ArrayFrom, SharedFunctionInfo::kDontAdaptArgumentsSentinel)              \
   /* ES7 #sec-array.prototype.includes */                                      \
   TFS(ArrayIncludesSmiOrObject, kElements, kSearchElement, kLength,            \
       kFromIndex)                                                              \
@@ -711,42 +709,7 @@ namespace internal {
   TFS(ForInFilter, kKey, kObject)                                              \
                                                                                \
   /* Promise */                                                                \
-  /* ES #sec-promise-resolve-functions */                                      \
-  /* Starting at step 6 of "Promise Resolve Functions" */                      \
-  TFS(ResolvePromise, kPromise, kResolution)                                   \
-  TFJ(PromiseGetCapabilitiesExecutor, 2, kReceiver, kResolve, kReject)         \
-  TFJ(PromiseConstructorLazyDeoptContinuation, 4, kReceiver, kPromise,         \
-      kReject, kException, kResult)                                            \
   CPP(IsPromise)                                                               \
-  /* ES #sec-promise.prototype.then */                                         \
-  TFJ(PromisePrototypeThen, 2, kReceiver, kOnFulfilled, kOnRejected)           \
-  /* ES #sec-promise.prototype.catch */                                        \
-  TFJ(PromisePrototypeCatch, 1, kReceiver, kOnRejected)                        \
-  /* ES #sec-promisereactionjob */                                             \
-  TFS(PromiseRejectReactionJob, kReason, kHandler, kPromiseOrCapability)       \
-  TFS(PromiseFulfillReactionJob, kValue, kHandler, kPromiseOrCapability)       \
-  /* ES #sec-promiseresolvethenablejob */                                      \
-  TFS(PromiseResolveThenableJob, kPromiseToResolve, kThenable, kThen)          \
-  /* ES #sec-promise.resolve */                                                \
-  TFJ(PromiseResolveTrampoline, 1, kReceiver, kValue)                          \
-  /* ES #sec-promise-resolve */                                                \
-  TFS(PromiseResolve, kConstructor, kValue)                                    \
-  /* ES #sec-promise.reject */                                                 \
-  TFJ(PromiseReject, 1, kReceiver, kReason)                                    \
-  TFJ(PromisePrototypeFinally, 1, kReceiver, kOnFinally)                       \
-  TFJ(PromiseThenFinally, 1, kReceiver, kValue)                                \
-  TFJ(PromiseCatchFinally, 1, kReceiver, kReason)                              \
-  TFJ(PromiseValueThunkFinally, 0, kReceiver)                                  \
-  TFJ(PromiseThrowerFinally, 0, kReceiver)                                     \
-  /* ES #sec-promise.all */                                                    \
-  TFJ(PromiseAll, 1, kReceiver, kIterable)                                     \
-  TFJ(PromiseAllResolveElementClosure, 1, kReceiver, kValue)                   \
-  /* ES #sec-promise.race */                                                   \
-  TFJ(PromiseRace, 1, kReceiver, kIterable)                                    \
-  /* ES #sec-promise.allsettled */                                             \
-  TFJ(PromiseAllSettled, 1, kReceiver, kIterable)                              \
-  TFJ(PromiseAllSettledResolveElementClosure, 1, kReceiver, kValue)            \
-  TFJ(PromiseAllSettledRejectElementClosure, 1, kReceiver, kValue)             \
                                                                                \
   /* Reflect */                                                                \
   ASM(ReflectApply, JSTrampoline)                                              \

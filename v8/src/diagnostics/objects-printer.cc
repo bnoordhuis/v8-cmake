@@ -58,6 +58,7 @@
 #include "src/objects/module-inl.h"
 #include "src/objects/oddball-inl.h"
 #include "src/objects/promise-inl.h"
+#include "src/objects/property-descriptor-object-inl.h"
 #include "src/objects/stack-frame-info-inl.h"
 #include "src/objects/struct-inl.h"
 #include "src/objects/template-objects-inl.h"
@@ -244,9 +245,6 @@ void HeapObject::HeapObjectPrint(std::ostream& os) {  // NOLINT
     case THIN_ONE_BYTE_STRING_TYPE:
     case UNCACHED_EXTERNAL_STRING_TYPE:
     case UNCACHED_EXTERNAL_ONE_BYTE_STRING_TYPE:
-    case SMALL_ORDERED_HASH_MAP_TYPE:
-    case SMALL_ORDERED_HASH_SET_TYPE:
-    case SMALL_ORDERED_NAME_DICTIONARY_TYPE:
       // TODO(all): Handle these types too.
       os << "UNKNOWN TYPE " << map().instance_type();
       UNREACHABLE();
@@ -1157,7 +1155,7 @@ void WeakCell::WeakCellPrint(std::ostream& os) {
   os << "\n - holdings: " << Brief(holdings());
   os << "\n - prev: " << Brief(prev());
   os << "\n - next: " << Brief(next());
-  os << "\n - key: " << Brief(key());
+  os << "\n - unregister_token: " << Brief(unregister_token());
   os << "\n - key_list_prev: " << Brief(key_list_prev());
   os << "\n - key_list_next: " << Brief(key_list_next());
 }
@@ -1339,6 +1337,22 @@ void SharedFunctionInfo::PrintSourceCode(std::ostream& os) {
   }
 }
 
+void SmallOrderedHashSet::SmallOrderedHashSetPrint(std::ostream& os) {
+  PrintHeader(os, "SmallOrderedHashSet");
+  // TODO(tebbi): Print all fields.
+}
+
+void SmallOrderedHashMap::SmallOrderedHashMapPrint(std::ostream& os) {
+  PrintHeader(os, "SmallOrderedHashMap");
+  // TODO(tebbi): Print all fields.
+}
+
+void SmallOrderedNameDictionary::SmallOrderedNameDictionaryPrint(
+    std::ostream& os) {
+  PrintHeader(os, "SmallOrderedNameDictionary");
+  // TODO(tebbi): Print all fields.
+}
+
 void SharedFunctionInfo::SharedFunctionInfoPrint(std::ostream& os) {  // NOLINT
   PrintHeader(os, "SharedFunctionInfo");
   os << "\n - name: ";
@@ -1365,9 +1379,8 @@ void SharedFunctionInfo::SharedFunctionInfoPrint(std::ostream& os) {  // NOLINT
   os << "\n - data: " << Brief(function_data());
   os << "\n - code (from data): " << Brief(GetCode());
   PrintSourceCode(os);
-  // Script files are often large, hard to read.
-  // os << "\n - script =";
-  // script()->Print(os);
+  // Script files are often large, thus only print their {Brief} representation.
+  os << "\n - script: " << Brief(script());
   os << "\n - function token position: " << function_token_position();
   os << "\n - start position: " << StartPosition();
   os << "\n - end position: " << EndPosition();
@@ -1660,7 +1673,6 @@ void AsmWasmData::AsmWasmDataPrint(std::ostream& os) {  // NOLINT
   PrintHeader(os, "AsmWasmData");
   os << "\n - native module: " << Brief(managed_native_module());
   os << "\n - export_wrappers: " << Brief(export_wrappers());
-  os << "\n - offset table: " << Brief(asm_js_offset_table());
   os << "\n - uses bitset: " << uses_bitset().value();
   os << "\n";
 }
@@ -1749,9 +1761,6 @@ void WasmModuleObject::WasmModuleObjectPrint(std::ostream& os) {  // NOLINT
   os << "\n - native module: " << native_module();
   os << "\n - export wrappers: " << Brief(export_wrappers());
   os << "\n - script: " << Brief(script());
-  if (has_asm_js_offset_table()) {
-    os << "\n - asm_js_offset_table: " << Brief(asm_js_offset_table());
-  }
   os << "\n";
 }
 
@@ -2129,14 +2138,13 @@ void ScopeInfo::ScopeInfoPrint(std::ostream& os) {  // NOLINT
   os << "\n - language mode: " << language_mode();
   if (is_declaration_scope()) os << "\n - declaration scope";
   if (HasReceiver()) {
-    os << "\n - receiver: " << ReceiverVariableField::decode(flags);
+    os << "\n - receiver: " << ReceiverVariableBits::decode(flags);
   }
   if (HasClassBrand()) os << "\n - has class brand";
   if (HasSavedClassVariableIndex()) os << "\n - has saved class variable index";
   if (HasNewTarget()) os << "\n - needs new target";
   if (HasFunctionName()) {
-    os << "\n - function name(" << FunctionVariableField::decode(flags)
-       << "): ";
+    os << "\n - function name(" << FunctionVariableBits::decode(flags) << "): ";
     FunctionName().ShortPrint(os);
   }
   if (IsAsmModule()) os << "\n - asm module";
@@ -2144,6 +2152,9 @@ void ScopeInfo::ScopeInfoPrint(std::ostream& os) {  // NOLINT
   os << "\n - function kind: " << function_kind();
   if (HasOuterScopeInfo()) {
     os << "\n - outer scope info: " << Brief(OuterScopeInfo());
+  }
+  if (HasLocalsBlackList()) {
+    os << "\n - locals blacklist: " << Brief(LocalsBlackList());
   }
   if (HasFunctionName()) {
     os << "\n - function name: " << Brief(FunctionName());

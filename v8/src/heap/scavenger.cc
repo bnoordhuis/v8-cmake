@@ -5,6 +5,7 @@
 #include "src/heap/scavenger.h"
 
 #include "src/heap/array-buffer-collector.h"
+#include "src/heap/array-buffer-sweeper.h"
 #include "src/heap/barrier.h"
 #include "src/heap/gc-tracer.h"
 #include "src/heap/heap-inl.h"
@@ -236,6 +237,13 @@ class ScopedFullHeapCrashKey {
 
 void ScavengerCollector::CollectGarbage() {
   ScopedFullHeapCrashKey collect_full_heap_dump_if_crash(isolate_);
+
+  {
+    TRACE_GC(heap_->tracer(),
+             GCTracer::Scope::SCAVENGER_COMPLETE_SWEEP_ARRAY_BUFFERS);
+    heap_->array_buffer_sweeper()->EnsureFinished();
+  }
+
   DCHECK(surviving_new_large_objects_.empty());
   ItemParallelJob job(isolate_->cancelable_task_manager(),
                       &parallel_scavenge_semaphore_);
@@ -373,15 +381,22 @@ void ScavengerCollector::CollectGarbage() {
 #ifdef DEBUG
     RememberedSet<OLD_TO_NEW>::IterateMemoryChunks(
         heap_, [](MemoryChunk* chunk) {
-          SlotSet* slot_set = chunk->slot_set<OLD_TO_NEW>();
-          DCHECK_IMPLIES(slot_set != nullptr,
-                         slot_set->IsPossiblyEmptyCleared());
+          DCHECK(chunk->possibly_empty_buckets()->IsEmpty());
         });
 #endif
   }
 
+  {
+    TRACE_GC(heap_->tracer(), GCTracer::Scope::SCAVENGER_SWEEP_ARRAY_BUFFERS);
+    SweepArrayBufferExtensions();
+  }
+
   // Update how much has survived scavenge.
   heap_->IncrementYoungSurvivorsCounter(heap_->SurvivedYoungObjectSize());
+}
+
+void ScavengerCollector::SweepArrayBufferExtensions() {
+  heap_->array_buffer_sweeper()->RequestSweepYoung();
 }
 
 void ScavengerCollector::HandleSurvivingNewLargeObjects() {
@@ -451,8 +466,14 @@ void Scavenger::IterateAndScavengePromotedObject(HeapObject target, Map map,
   const bool record_slots =
       is_compacting_ &&
       heap()->incremental_marking()->atomic_marking_state()->IsBlack(target);
+
   IterateAndScavengePromotedObjectsVisitor visitor(this, record_slots);
   target.IterateBodyFast(map, size, &visitor);
+
+  if (map.IsJSArrayBufferMap()) {
+    DCHECK(!MemoryChunk::FromHeapObject(target)->IsLargePage());
+    JSArrayBuffer::cast(target).YoungMarkExtensionPromoted();
+  }
 }
 
 void Scavenger::RememberPromotedEphemeron(EphemeronHashTable table, int entry) {

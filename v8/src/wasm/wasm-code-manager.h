@@ -35,6 +35,7 @@ class Isolate;
 
 namespace wasm {
 
+class DebugInfo;
 class NativeModule;
 class WasmCodeManager;
 struct WasmCompilationResult;
@@ -551,6 +552,11 @@ class V8_EXPORT_PRIVATE NativeModule final {
   // by publishing an entry stub with the {Kind::kInterpreterEntry} code kind.
   bool IsRedirectedToInterpreter(uint32_t func_index);
 
+  // Sets the flag, triggers recompilation of all methods to tier down or up,
+  // waits for that to complete.
+  void TierDown(Isolate* isolate);
+  void TierUp(Isolate* isolate);
+
   // Free a set of functions of this module. Uncommits whole pages if possible.
   // The given vector must be ordered by the instruction start address, and all
   // {WasmCode} objects must not be used any more.
@@ -560,6 +566,9 @@ class V8_EXPORT_PRIVATE NativeModule final {
 
   // Retrieve the number of separately reserved code spaces for this module.
   size_t GetNumberOfCodeSpacesForTesting() const;
+
+  // Get or create the debug info for this NativeModule.
+  DebugInfo* GetDebugInfo();
 
  private:
   friend class WasmCode;
@@ -609,7 +618,7 @@ class V8_EXPORT_PRIVATE NativeModule final {
     DCHECK_LT(func_index, num_functions());
     DCHECK_LE(module_->num_imported_functions, func_index);
     if (!interpreter_redirections_) return false;
-    uint32_t bitset_idx = func_index - module_->num_imported_functions;
+    uint32_t bitset_idx = declared_function_index(module(), func_index);
     uint8_t byte = interpreter_redirections_[bitset_idx / kBitsPerByte];
     return byte & (1 << (bitset_idx % kBitsPerByte));
   }
@@ -623,7 +632,7 @@ class V8_EXPORT_PRIVATE NativeModule final {
           new uint8_t[RoundUp<kBitsPerByte>(module_->num_declared_functions) /
                       kBitsPerByte]{});
     }
-    uint32_t bitset_idx = func_index - module_->num_imported_functions;
+    uint32_t bitset_idx = declared_function_index(module(), func_index);
     uint8_t& byte = interpreter_redirections_[bitset_idx / kBitsPerByte];
     byte |= 1 << (bitset_idx % kBitsPerByte);
   }
@@ -686,6 +695,13 @@ class V8_EXPORT_PRIVATE NativeModule final {
   // Data (especially jump table) per code space.
   std::vector<CodeSpaceData> code_space_data_;
 
+  // Debug information for this module. You only need to hold the allocation
+  // mutex while getting the {DebugInfo} pointer, or initializing this field.
+  // Further accesses to the {DebugInfo} do not need to be protected by the
+  // mutex.
+  std::unique_ptr<DebugInfo> debug_info_;
+
+  bool tier_down_ = false;
   // End of fields protected by {allocation_mutex_}.
   //////////////////////////////////////////////////////////////////////////////
 

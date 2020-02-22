@@ -136,9 +136,16 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
     AvxHelper<Dst, Args...>{this, base::Optional<CpuFeature>(SSE4_1)}        \
         .template emit<&Assembler::v##name, &Assembler::name>(dst, args...); \
   }
+#define AVX_OP_SSE4_2(macro_name, name)                                      \
+  template <typename Dst, typename... Args>                                  \
+  void macro_name(Dst dst, Args... args) {                                   \
+    AvxHelper<Dst, Args...>{this, base::Optional<CpuFeature>(SSE4_2)}        \
+        .template emit<&Assembler::v##name, &Assembler::name>(dst, args...); \
+  }
   AVX_OP(Subsd, subsd)
   AVX_OP(Divss, divss)
   AVX_OP(Divsd, divsd)
+  AVX_OP(Orps, orps)
   AVX_OP(Xorps, xorps)
   AVX_OP(Xorpd, xorpd)
   AVX_OP(Movd, movd)
@@ -158,6 +165,7 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
   AVX_OP(Andps, andps)
   AVX_OP(Andnps, andnps)
   AVX_OP(Andpd, andpd)
+  AVX_OP(Andnpd, andnpd)
   AVX_OP(Orpd, orpd)
   AVX_OP(Cmpeqps, cmpeqps)
   AVX_OP(Cmpltps, cmpltps)
@@ -184,15 +192,24 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
   AVX_OP(Por, por)
   AVX_OP(Pxor, pxor)
   AVX_OP(Psubd, psubd)
+  AVX_OP(Psubq, psubq)
   AVX_OP(Pslld, pslld)
+  AVX_OP(Pavgb, pavgb)
+  AVX_OP(Pavgw, pavgw)
   AVX_OP(Psrad, psrad)
   AVX_OP(Psrld, psrld)
   AVX_OP(Paddd, paddd)
+  AVX_OP(Paddq, paddq)
   AVX_OP(Pcmpgtd, pcmpgtd)
+  AVX_OP(Pmuludq, pmuludq)
   AVX_OP(Addpd, addpd)
   AVX_OP(Subpd, subpd)
   AVX_OP(Mulpd, mulpd)
+  AVX_OP(Minps, minps)
+  AVX_OP(Minpd, minpd)
   AVX_OP(Divpd, divpd)
+  AVX_OP(Maxps, maxps)
+  AVX_OP(Maxpd, maxpd)
   AVX_OP(Shufps, shufps)
   AVX_OP(Cvtdq2ps, cvtdq2ps)
   AVX_OP(Rcpps, rcpps)
@@ -205,9 +222,14 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
   AVX_OP(Pshuflw, pshuflw)
   AVX_OP(Punpcklqdq, punpcklqdq)
   AVX_OP(Pshufd, pshufd)
+  AVX_OP(Cmpps, cmpps)
+  AVX_OP(Cmppd, cmppd)
+  AVX_OP(Movlhps, movlhps)
   AVX_OP_SSE3(Movddup, movddup)
   AVX_OP_SSSE3(Pshufb, pshufb)
   AVX_OP_SSSE3(Psignd, psignd)
+  AVX_OP_SSSE3(Palignr, palignr)
+  AVX_OP_SSE4_1(Pcmpeqq, pcmpeqq)
   AVX_OP_SSE4_1(Pmulld, pmulld)
   AVX_OP_SSE4_1(Pminsd, pminsd)
   AVX_OP_SSE4_1(Pminud, pminud)
@@ -215,6 +237,16 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
   AVX_OP_SSE4_1(Pmaxud, pmaxud)
   AVX_OP_SSE4_1(Extractps, extractps)
   AVX_OP_SSE4_1(Insertps, insertps)
+  AVX_OP_SSE4_1(Pinsrq, pinsrq)
+  AVX_OP_SSE4_1(Pblendw, pblendw)
+  AVX_OP_SSE4_1(Pmovsxbw, pmovsxbw)
+  AVX_OP_SSE4_1(Pmovsxwd, pmovsxwd)
+  AVX_OP_SSE4_1(Pmovsxdq, pmovsxdq)
+  AVX_OP_SSE4_1(Pmovzxbw, pmovzxbw)
+  AVX_OP_SSE4_1(Pmovzxwd, pmovzxwd)
+  AVX_OP_SSE4_1(Pmovzxdq, pmovzxdq)
+  AVX_OP_SSE4_1(Pextrq, pextrq)
+  AVX_OP_SSE4_2(Pcmpgtq, pcmpgtq)
 
 #undef AVX_OP
 
@@ -281,12 +313,6 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
   void Cvttss2si(Register dst, Operand src);
   void Cvttss2siq(Register dst, XMMRegister src);
   void Cvttss2siq(Register dst, Operand src);
-  void Cvtqsi2ss(XMMRegister dst, Register src);
-  void Cvtqsi2ss(XMMRegister dst, Operand src);
-  void Cvtqsi2sd(XMMRegister dst, Register src);
-  void Cvtqsi2sd(XMMRegister dst, Operand src);
-  void Cvtlsi2ss(XMMRegister dst, Register src);
-  void Cvtlsi2ss(XMMRegister dst, Operand src);
   void Cvtlui2ss(XMMRegister dst, Register src);
   void Cvtlui2ss(XMMRegister dst, Operand src);
   void Cvtlui2sd(XMMRegister dst, Register src);
@@ -300,9 +326,17 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
   void Cvttss2uiq(Register dst, Operand src, Label* fail = nullptr);
   void Cvttss2uiq(Register dst, XMMRegister src, Label* fail = nullptr);
 
-  // cvtsi2sd instruction only writes to the low 64-bit of dst register, which
-  // hinders register renaming and makes dependence chains longer. So we use
-  // xorpd to clear the dst register before cvtsi2sd to solve this issue.
+  // cvtsi2sd and cvtsi2ss instructions only write to the low 64/32-bit of dst
+  // register, which hinders register renaming and makes dependence chains
+  // longer. So we use xorpd to clear the dst register before cvtsi2sd for
+  // non-AVX and a scratch XMM register as first src for AVX to solve this
+  // issue.
+  void Cvtqsi2ss(XMMRegister dst, Register src);
+  void Cvtqsi2ss(XMMRegister dst, Operand src);
+  void Cvtqsi2sd(XMMRegister dst, Register src);
+  void Cvtqsi2sd(XMMRegister dst, Operand src);
+  void Cvtlsi2ss(XMMRegister dst, Register src);
+  void Cvtlsi2ss(XMMRegister dst, Operand src);
   void Cvtlsi2sd(XMMRegister dst, Register src);
   void Cvtlsi2sd(XMMRegister dst, Operand src);
 

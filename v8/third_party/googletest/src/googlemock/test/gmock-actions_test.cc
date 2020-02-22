@@ -46,6 +46,7 @@
 #include <iterator>
 #include <memory>
 #include <string>
+#include <type_traits>
 #include "gmock/gmock.h"
 #include "gmock/internal/gmock-port.h"
 #include "gtest/gtest.h"
@@ -73,13 +74,12 @@ using testing::Return;
 using testing::ReturnNull;
 using testing::ReturnRef;
 using testing::ReturnRefOfCopy;
+using testing::ReturnRoundRobin;
 using testing::SetArgPointee;
 using testing::SetArgumentPointee;
 using testing::Unused;
 using testing::WithArgs;
 using testing::internal::BuiltInDefaultValue;
-using testing::internal::Int64;
-using testing::internal::UInt64;
 
 #if !GTEST_OS_WINDOWS_MOBILE
 using testing::SetErrnoAndReturn;
@@ -121,8 +121,9 @@ TEST(BuiltInDefaultValueTest, IsZeroForNumericTypes) {
   EXPECT_EQ(0U, BuiltInDefaultValue<unsigned long>::Get());  // NOLINT
   EXPECT_EQ(0, BuiltInDefaultValue<signed long>::Get());  // NOLINT
   EXPECT_EQ(0, BuiltInDefaultValue<long>::Get());  // NOLINT
-  EXPECT_EQ(0U, BuiltInDefaultValue<UInt64>::Get());
-  EXPECT_EQ(0, BuiltInDefaultValue<Int64>::Get());
+  EXPECT_EQ(0U, BuiltInDefaultValue<unsigned long long>::Get());  // NOLINT
+  EXPECT_EQ(0, BuiltInDefaultValue<signed long long>::Get());  // NOLINT
+  EXPECT_EQ(0, BuiltInDefaultValue<long long>::Get());  // NOLINT
   EXPECT_EQ(0, BuiltInDefaultValue<float>::Get());
   EXPECT_EQ(0, BuiltInDefaultValue<double>::Get());
 }
@@ -145,8 +146,9 @@ TEST(BuiltInDefaultValueTest, ExistsForNumericTypes) {
   EXPECT_TRUE(BuiltInDefaultValue<unsigned long>::Exists());  // NOLINT
   EXPECT_TRUE(BuiltInDefaultValue<signed long>::Exists());  // NOLINT
   EXPECT_TRUE(BuiltInDefaultValue<long>::Exists());  // NOLINT
-  EXPECT_TRUE(BuiltInDefaultValue<UInt64>::Exists());
-  EXPECT_TRUE(BuiltInDefaultValue<Int64>::Exists());
+  EXPECT_TRUE(BuiltInDefaultValue<unsigned long long>::Exists());  // NOLINT
+  EXPECT_TRUE(BuiltInDefaultValue<signed long long>::Exists());  // NOLINT
+  EXPECT_TRUE(BuiltInDefaultValue<long long>::Exists());  // NOLINT
   EXPECT_TRUE(BuiltInDefaultValue<float>::Exists());
   EXPECT_TRUE(BuiltInDefaultValue<double>::Exists());
 }
@@ -646,6 +648,41 @@ TEST(ReturnRefTest, IsCovariant) {
   EXPECT_EQ(&derived, &a.Perform(std::make_tuple()));
 }
 
+template <typename T, typename = decltype(ReturnRef(std::declval<T&&>()))>
+bool CanCallReturnRef(T&&) { return true; }
+bool CanCallReturnRef(Unused) { return false; }
+
+// Tests that ReturnRef(v) is working with non-temporaries (T&)
+TEST(ReturnRefTest, WorksForNonTemporary) {
+  int scalar_value = 123;
+  EXPECT_TRUE(CanCallReturnRef(scalar_value));
+
+  std::string non_scalar_value("ABC");
+  EXPECT_TRUE(CanCallReturnRef(non_scalar_value));
+
+  const int const_scalar_value{321};
+  EXPECT_TRUE(CanCallReturnRef(const_scalar_value));
+
+  const std::string const_non_scalar_value("CBA");
+  EXPECT_TRUE(CanCallReturnRef(const_non_scalar_value));
+}
+
+// Tests that ReturnRef(v) is not working with temporaries (T&&)
+TEST(ReturnRefTest, DoesNotWorkForTemporary) {
+  auto scalar_value = []()  -> int { return 123; };
+  EXPECT_FALSE(CanCallReturnRef(scalar_value()));
+
+  auto non_scalar_value = []() -> std::string { return "ABC"; };
+  EXPECT_FALSE(CanCallReturnRef(non_scalar_value()));
+
+  // cannot use here callable returning "const scalar type",
+  // because such const for scalar return type is ignored
+  EXPECT_FALSE(CanCallReturnRef(static_cast<const int>(321)));
+
+  auto const_non_scalar_value = []() -> const std::string { return "CBA"; };
+  EXPECT_FALSE(CanCallReturnRef(const_non_scalar_value()));
+}
+
 // Tests that ReturnRefOfCopy(v) works for reference types.
 TEST(ReturnRefOfCopyTest, WorksForReference) {
   int n = 42;
@@ -668,6 +705,31 @@ TEST(ReturnRefOfCopyTest, IsCovariant) {
 
   a = ReturnRefOfCopy(derived);
   EXPECT_NE(&derived, &a.Perform(std::make_tuple()));
+}
+
+// Tests that ReturnRoundRobin(v) works with initializer lists
+TEST(ReturnRoundRobinTest, WorksForInitList) {
+  Action<int()> ret = ReturnRoundRobin({1, 2, 3});
+
+  EXPECT_EQ(1, ret.Perform(std::make_tuple()));
+  EXPECT_EQ(2, ret.Perform(std::make_tuple()));
+  EXPECT_EQ(3, ret.Perform(std::make_tuple()));
+  EXPECT_EQ(1, ret.Perform(std::make_tuple()));
+  EXPECT_EQ(2, ret.Perform(std::make_tuple()));
+  EXPECT_EQ(3, ret.Perform(std::make_tuple()));
+}
+
+// Tests that ReturnRoundRobin(v) works with vectors
+TEST(ReturnRoundRobinTest, WorksForVector) {
+  std::vector<double> v = {4.4, 5.5, 6.6};
+  Action<double()> ret = ReturnRoundRobin(v);
+
+  EXPECT_EQ(4.4, ret.Perform(std::make_tuple()));
+  EXPECT_EQ(5.5, ret.Perform(std::make_tuple()));
+  EXPECT_EQ(6.6, ret.Perform(std::make_tuple()));
+  EXPECT_EQ(4.4, ret.Perform(std::make_tuple()));
+  EXPECT_EQ(5.5, ret.Perform(std::make_tuple()));
+  EXPECT_EQ(6.6, ret.Perform(std::make_tuple()));
 }
 
 // Tests that DoDefault() does the default action for the mock method.

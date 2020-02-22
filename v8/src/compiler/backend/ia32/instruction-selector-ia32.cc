@@ -87,13 +87,10 @@ class IA32OperandGenerator final : public OperandGenerator {
   }
 
   AddressingMode GenerateMemoryOperandInputs(
-      Node* index, int scale, Node* base, Node* displacement_node,
+      Node* index, int scale, Node* base, int32_t displacement,
       DisplacementMode displacement_mode, InstructionOperand inputs[],
       size_t* input_count, RegisterMode register_mode = kRegister) {
     AddressingMode mode = kMode_MRI;
-    int32_t displacement = (displacement_node == nullptr)
-                               ? 0
-                               : OpParameter<int32_t>(displacement_node->op());
     if (displacement_mode == kNegativeDisplacement) {
       displacement = -displacement;
     }
@@ -146,6 +143,18 @@ class IA32OperandGenerator final : public OperandGenerator {
       }
     }
     return mode;
+  }
+
+  AddressingMode GenerateMemoryOperandInputs(
+      Node* index, int scale, Node* base, Node* displacement_node,
+      DisplacementMode displacement_mode, InstructionOperand inputs[],
+      size_t* input_count, RegisterMode register_mode = kRegister) {
+    int32_t displacement = (displacement_node == nullptr)
+                               ? 0
+                               : OpParameter<int32_t>(displacement_node->op());
+    return GenerateMemoryOperandInputs(index, scale, base, displacement,
+                                       displacement_mode, inputs, input_count,
+                                       register_mode);
   }
 
   AddressingMode GetEffectiveAddressMemoryOperand(
@@ -334,6 +343,60 @@ void InstructionSelector::VisitStackSlot(Node* node) {
 void InstructionSelector::VisitAbortCSAAssert(Node* node) {
   IA32OperandGenerator g(this);
   Emit(kArchAbortCSAAssert, g.NoOutput(), g.UseFixed(node->InputAt(0), edx));
+}
+
+void InstructionSelector::VisitLoadTransform(Node* node) {
+  LoadTransformParameters params = LoadTransformParametersOf(node->op());
+  InstructionCode opcode = kArchNop;
+  switch (params.transformation) {
+    case LoadTransformation::kS8x16LoadSplat:
+      opcode = kIA32S8x16LoadSplat;
+      break;
+    case LoadTransformation::kS16x8LoadSplat:
+      opcode = kIA32S16x8LoadSplat;
+      break;
+    case LoadTransformation::kS32x4LoadSplat:
+      opcode = kIA32S32x4LoadSplat;
+      break;
+    case LoadTransformation::kS64x2LoadSplat:
+      opcode = kIA32S64x2LoadSplat;
+      break;
+    case LoadTransformation::kI16x8Load8x8S:
+      opcode = kIA32I16x8Load8x8S;
+      break;
+    case LoadTransformation::kI16x8Load8x8U:
+      opcode = kIA32I16x8Load8x8U;
+      break;
+    case LoadTransformation::kI32x4Load16x4S:
+      opcode = kIA32I32x4Load16x4S;
+      break;
+    case LoadTransformation::kI32x4Load16x4U:
+      opcode = kIA32I32x4Load16x4U;
+      break;
+    case LoadTransformation::kI64x2Load32x2S:
+      opcode = kIA32I64x2Load32x2S;
+      break;
+    case LoadTransformation::kI64x2Load32x2U:
+      opcode = kIA32I64x2Load32x2U;
+      break;
+    default:
+      UNREACHABLE();
+  }
+
+  // IA32 supports unaligned loads.
+  DCHECK_NE(params.kind, LoadKind::kUnaligned);
+  // Trap handler is not supported on IA32.
+  DCHECK_NE(params.kind, LoadKind::kProtected);
+
+  IA32OperandGenerator g(this);
+  InstructionOperand outputs[1];
+  outputs[0] = g.DefineAsRegister(node);
+  InstructionOperand inputs[3];
+  size_t input_count = 0;
+  AddressingMode mode =
+      g.GetEffectiveAddressMemoryOperand(node, inputs, &input_count);
+  InstructionCode code = opcode | AddressingModeField::encode(mode);
+  Emit(code, 1, outputs, input_count, inputs);
 }
 
 void InstructionSelector::VisitLoad(Node* node) {
@@ -1451,23 +1514,22 @@ void VisitPairAtomicBinOp(InstructionSelector* selector, Node* node,
   InstructionCode code = opcode | AddressingModeField::encode(addressing_mode);
   Node* projection0 = NodeProperties::FindProjection(node, 0);
   Node* projection1 = NodeProperties::FindProjection(node, 1);
-  if (projection1) {
-    InstructionOperand outputs[] = {g.DefineAsFixed(projection0, eax),
-                                    g.DefineAsFixed(projection1, edx)};
-    selector->Emit(code, arraysize(outputs), outputs, arraysize(inputs), inputs,
-                   0, {});
-  } else if (projection0) {
-    InstructionOperand outputs[] = {g.DefineAsFixed(projection0, eax)};
-    InstructionOperand temps[] = {g.TempRegister(edx)};
-    const int num_temps = arraysize(temps);
-    selector->Emit(code, arraysize(outputs), outputs, arraysize(inputs), inputs,
-                   num_temps, temps);
+  InstructionOperand outputs[2];
+  size_t output_count = 0;
+  InstructionOperand temps[2];
+  size_t temp_count = 0;
+  if (projection0) {
+    outputs[output_count++] = g.DefineAsFixed(projection0, eax);
   } else {
-    InstructionOperand temps[] = {g.TempRegister(eax), g.TempRegister(edx)};
-    const int num_temps = arraysize(temps);
-    selector->Emit(code, 0, nullptr, arraysize(inputs), inputs, num_temps,
-                   temps);
+    temps[temp_count++] = g.TempRegister(eax);
   }
+  if (projection1) {
+    outputs[output_count++] = g.DefineAsFixed(projection1, edx);
+  } else {
+    temps[temp_count++] = g.TempRegister(edx);
+  }
+  selector->Emit(code, output_count, outputs, arraysize(inputs), inputs,
+                 temp_count, temps);
 }
 
 }  // namespace
@@ -1847,28 +1909,33 @@ void InstructionSelector::VisitWord32AtomicPairLoad(Node* node) {
   AddressingMode mode;
   Node* base = node->InputAt(0);
   Node* index = node->InputAt(1);
-  InstructionOperand inputs[] = {g.UseUniqueRegister(base),
-                                 g.GetEffectiveIndexOperand(index, &mode)};
   Node* projection0 = NodeProperties::FindProjection(node, 0);
   Node* projection1 = NodeProperties::FindProjection(node, 1);
-  InstructionCode code =
-      kIA32Word32AtomicPairLoad | AddressingModeField::encode(mode);
-
-  if (projection1) {
+  if (projection0 && projection1) {
+    InstructionOperand inputs[] = {g.UseUniqueRegister(base),
+                                   g.GetEffectiveIndexOperand(index, &mode)};
+    InstructionCode code =
+        kIA32Word32AtomicPairLoad | AddressingModeField::encode(mode);
     InstructionOperand temps[] = {g.TempDoubleRegister()};
     InstructionOperand outputs[] = {g.DefineAsRegister(projection0),
                                     g.DefineAsRegister(projection1)};
-    Emit(code, arraysize(outputs), outputs, arraysize(inputs), inputs,
-         arraysize(temps), temps);
-  } else if (projection0) {
-    InstructionOperand temps[] = {g.TempDoubleRegister(), g.TempRegister()};
-    InstructionOperand outputs[] = {g.DefineAsRegister(projection0)};
-    Emit(code, arraysize(outputs), outputs, arraysize(inputs), inputs,
-         arraysize(temps), temps);
-  } else {
-    InstructionOperand temps[] = {g.TempDoubleRegister(), g.TempRegister(),
-                                  g.TempRegister()};
-    Emit(code, 0, nullptr, arraysize(inputs), inputs, arraysize(temps), temps);
+    Emit(code, 2, outputs, 2, inputs, 1, temps);
+  } else if (projection0 || projection1) {
+    // Only one word is needed, so it's enough to load just that.
+    ArchOpcode opcode = kIA32Movl;
+
+    InstructionOperand outputs[] = {
+        g.DefineAsRegister(projection0 ? projection0 : projection1)};
+    InstructionOperand inputs[3];
+    size_t input_count = 0;
+    // TODO(ahaas): Introduce an enum for {scale} instead of an integer.
+    // {scale = 0} means *1 in the generated code.
+    int scale = 0;
+    AddressingMode mode = g.GenerateMemoryOperandInputs(
+        index, scale, base, projection0 ? 0 : 4, kPositiveDisplacement, inputs,
+        &input_count);
+    InstructionCode code = opcode | AddressingModeField::encode(mode);
+    Emit(code, 1, outputs, input_count, inputs);
   }
 }
 
@@ -2027,7 +2094,9 @@ void InstructionSelector::VisitWord32AtomicPairCompareExchange(Node* node) {
 
 #define SIMD_BINOP_UNIFIED_SSE_AVX_LIST(V) \
   V(I64x2Add)                              \
-  V(I64x2Sub)
+  V(I64x2Sub)                              \
+  V(I16x8RoundingAverageU)                 \
+  V(I8x16RoundingAverageU)
 
 #define SIMD_UNOP_LIST(V)   \
   V(F32x4SConvertI32x4)     \
@@ -2222,6 +2291,13 @@ void InstructionSelector::VisitS128Select(Node* node) {
          g.UseRegister(node->InputAt(0)), g.UseRegister(node->InputAt(1)),
          operand2);
   }
+}
+
+void InstructionSelector::VisitS128AndNot(Node* node) {
+  IA32OperandGenerator g(this);
+  // andnps a b does ~a & b, but we want a & !b, so flip the input.
+  Emit(kIA32S128AndNot, g.DefineSameAsFirst(node),
+       g.UseRegister(node->InputAt(1)), g.UseRegister(node->InputAt(0)));
 }
 
 #define VISIT_SIMD_SPLAT(Type)                               \

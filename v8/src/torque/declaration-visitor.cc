@@ -81,8 +81,10 @@ Builtin* DeclarationVisitor::CreateBuiltin(BuiltinDeclaration* decl,
     for (size_t i = signature.implicit_count;
          i < signature.parameter_types.types.size(); ++i) {
       const Type* parameter_type = signature.parameter_types.types[i];
-      if (parameter_type != TypeOracle::GetJSAnyType()) {
-        Error("Parameters of JavaScript-linkage builtins have to be JSAny.")
+      if (!TypeOracle::GetJSAnyType()->IsSubtypeOf(parameter_type)) {
+        Error(
+            "Parameters of JavaScript-linkage builtins have to be a supertype "
+            "of JSAny.")
             .Position(decl->parameters.types[i]->pos);
       }
     }
@@ -117,8 +119,12 @@ void DeclarationVisitor::Visit(ExternalBuiltinDeclaration* decl) {
 
 void DeclarationVisitor::Visit(ExternalRuntimeDeclaration* decl) {
   Signature signature = TypeVisitor::MakeSignature(decl);
-  if (signature.parameter_types.types.size() == 0 ||
-      !(signature.parameter_types.types[0] == TypeOracle::GetContextType())) {
+  if (signature.parameter_types.types.size() == 0) {
+    ReportError(
+        "Missing parameters for runtime function, at least the context "
+        "parameter is required.");
+  }
+  if (!(signature.parameter_types.types[0] == TypeOracle::GetContextType())) {
     ReportError(
         "first parameter to runtime functions has to be the context and have "
         "type Context, but found type ",

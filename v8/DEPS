@@ -27,6 +27,7 @@ vars = {
   'checkout_fuchsia_boot_images': "qemu.x64,qemu.arm64",
 
   'checkout_instrumented_libraries': False,
+  'checkout_ittapi': False,
   'chromium_url': 'https://chromium.googlesource.com',
   'android_url': 'https://android.googlesource.com',
   'download_gcmole': False,
@@ -34,10 +35,10 @@ vars = {
   'check_v8_header_includes': False,
 
   # GN CIPD package version.
-  'gn_version': 'git_revision:ad9e442d92dcd9ee73a557428cfc336b55cbd533',
+  'gn_version': 'git_revision:97cc440d84f050f99ff0161f9414bfa2ffa38f65',
 
   # luci-go CIPD package version.
-  'luci_go': 'git_revision:7d11fd9e66407c49cb6c8546a2ae45ea993a240c',
+  'luci_go': 'git_revision:37a855b64d59b7f079c9a0e5368f2757099d14d3',
 
   # Three lines of non-changing comments so that
   # the commit queue can handle CLs rolling android_sdk_build-tools_version
@@ -79,15 +80,15 @@ vars = {
 
 deps = {
   'v8/build':
-    Var('chromium_url') + '/chromium/src/build.git' + '@' + 'e35470d98289c1f82179839d7657d45b59e982c9',
+    Var('chromium_url') + '/chromium/src/build.git' + '@' + '2f17606c25956e800b6c4670c294a03620e78551',
   'v8/third_party/depot_tools':
-    Var('chromium_url') + '/chromium/tools/depot_tools.git' + '@' + '9777ab3619c7036fad3dbd49efdf10d9d9e2a18e',
+    Var('chromium_url') + '/chromium/tools/depot_tools.git' + '@' + 'ea8b58b970c0c94b4a36270b806ee307547cd77e',
   'v8/third_party/icu':
     Var('chromium_url') + '/chromium/deps/icu.git' + '@' + 'dbd3825b31041d782c5b504c59dcfb5ac7dda08c',
   'v8/third_party/instrumented_libraries':
-    Var('chromium_url') + '/chromium/src/third_party/instrumented_libraries.git' + '@' + '4dca59c6a614b08b394ed6154a8fcded9298b07e',
+    Var('chromium_url') + '/chromium/src/third_party/instrumented_libraries.git' + '@' + 'bb3f1802c237dd19105dd0f7919f99e536a39d10',
   'v8/buildtools':
-    Var('chromium_url') + '/chromium/src/buildtools.git' + '@' + '6b3e658d6fe8cd9c2588796d296f07312b776054',
+    Var('chromium_url') + '/chromium/src/buildtools.git' + '@' + 'afc5b798c72905e85f9991152be878714c579958',
   'v8/buildtools/clang_format/script':
     Var('chromium_url') + '/chromium/llvm-project/cfe/tools/clang-format.git' + '@' + '96636aa0e9f047f17447f2d45a094d0b59ed7917',
   'v8/buildtools/linux64': {
@@ -127,9 +128,13 @@ deps = {
     'condition': 'host_os == "win"',
   },
   'v8/base/trace_event/common':
-    Var('chromium_url') + '/chromium/src/base/trace_event/common.git' + '@' + '5e4fce17a9d2439c44a7b57ceecef6df9287ec2f',
+    Var('chromium_url') + '/chromium/src/base/trace_event/common.git' + '@' + 'bd79231eb1f9e7de2efb4ad79e530d9a7e70d9a5',
   'v8/third_party/android_ndk': {
     'url': Var('chromium_url') + '/android_ndk.git' + '@' + '27c0a8d090c666a50e40fceb4ee5b40b1a2d3f87',
+    'condition': 'checkout_android',
+  },
+  'v8/third_party/android_platform': {
+    'url': Var('chromium_url') + '/chromium/src/third_party/android_platform.git' + '@' + '2244b5ea295f8fda3179bef160c84ef8fa0ec9fc',
     'condition': 'checkout_android',
   },
   'v8/third_party/android_sdk/public': {
@@ -175,7 +180,7 @@ deps = {
       'dep_type': 'cipd',
   },
   'v8/third_party/catapult': {
-    'url': Var('chromium_url') + '/catapult.git' + '@' + '10bac4e42d067dad26ed43025fa0cfc3a0550d29',
+    'url': Var('chromium_url') + '/catapult.git' + '@' + '2e0a0cb9ad546be8c835e65d7537507cb7896e03',
     'condition': 'checkout_android',
   },
   'v8/third_party/colorama/src': {
@@ -183,11 +188,11 @@ deps = {
     'condition': 'checkout_android',
   },
   'v8/third_party/fuchsia-sdk': {
-    'url': Var('chromium_url') + '/chromium/src/third_party/fuchsia-sdk.git' + '@' + '4225f68a7f6a7a309ebfa4bd2a7abf1938168d8e',
+    'url': Var('chromium_url') + '/chromium/src/third_party/fuchsia-sdk.git' + '@' + '19c8ac5e150fbd147ec5987425a41aa9e97098b2',
     'condition': 'checkout_fuchsia',
   },
   'v8/third_party/googletest/src':
-    Var('chromium_url') + '/external/github.com/google/googletest.git' + '@' + '5395345ca4f0c596110188688ed990e0de5a181c',
+    Var('chromium_url') + '/external/github.com/google/googletest.git' + '@' + '306f3754a71d6d1ac644681d3544d06744914228',
   'v8/third_party/jinja2':
     Var('chromium_url') + '/chromium/src/third_party/jinja2.git' + '@' + 'b41863e42637544c2941b574c7877d3e1f663e25',
   'v8/third_party/markupsafe':
@@ -199,7 +204,7 @@ deps = {
   'v8/test/mozilla/data':
     Var('chromium_url') + '/v8/deps/third_party/mozilla-tests.git' + '@' + 'f6c578a10ea707b1a8ab0b88943fe5115ce2b9be',
   'v8/test/test262/data':
-    Var('chromium_url') + '/external/github.com/tc39/test262.git' + '@' + '3682ddd7e377388fe3715593cc1fb41a283cc23d',
+    Var('chromium_url') + '/external/github.com/tc39/test262.git' + '@' + '28b4fcca4b1b1d278dfe0cc0e69c7d9d59b31aab',
   'v8/test/test262/harness':
     Var('chromium_url') + '/external/github.com/test262-utils/test262-harness-py.git' + '@' + '4555345a943d0c99a9461182705543fb171dda4b',
   'v8/third_party/qemu-linux-x64': {
@@ -223,7 +228,7 @@ deps = {
       'dep_type': 'cipd',
   },
   'v8/tools/clang':
-    Var('chromium_url') + '/chromium/src/tools/clang.git' + '@' + 'd1940b1bfa68075a3163adfcd10423c98cb54c72',
+    Var('chromium_url') + '/chromium/src/tools/clang.git' + '@' + '535dbf16a84c7fc238f7ed11b5a75381407e38f6',
   'v8/tools/luci-go': {
       'packages': [
         {
@@ -257,7 +262,13 @@ deps = {
   'v8/third_party/protobuf':
     Var('chromium_url') + '/external/github.com/google/protobuf'+ '@' + 'b68a347f56137b4b1a746e8c7438495a6ac1bd91',
   'v8/third_party/zlib':
-    Var('chromium_url') + '/chromium/src/third_party/zlib.git'+ '@' + 'e77e1c06c8881abff0c7418368d147ff4a474d08',
+    Var('chromium_url') + '/chromium/src/third_party/zlib.git'+ '@' + 'b9b9a5af7cca2e683e5f2aead8418e5bf9d5a7d5',
+  'v8/third_party/ittapi': {
+    # Force checkout ittapi libraries to pass v8 header includes check on
+    # bots that has check_v8_header_includes enabled.
+    'url': Var('chromium_url') + '/external/github.com/intel/ittapi' + '@' + 'b4ae0122ba749163096058b4f1bb065bf4a7de94',
+    'condition': "checkout_ittapi or check_v8_header_includes",
+  },
 }
 
 include_rules = [
@@ -265,6 +276,7 @@ include_rules = [
   '+include',
   '+unicode',
   '+third_party/fdlibm',
+  '+third_party/ittapi/include'
 ]
 
 # checkdeps.py shouldn't check for includes in these directories:

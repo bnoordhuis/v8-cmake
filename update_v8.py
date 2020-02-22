@@ -4,6 +4,7 @@ from os.path import abspath, dirname, exists, join
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -105,8 +106,10 @@ def update_all():
     url_and_commit = v8_deps.get(path)
     if not url_and_commit:
       raise Exception('{} missing from DEPS'.format(path))
+    if isinstance(url_and_commit, dict):
+      url_and_commit = url_and_commit.get('url')
     if not isinstance(url_and_commit, str):
-      raise Exception('{} is not a string in DEPS'.format(path))
+      raise Exception('{} is not a string or dict in DEPS'.format(path))
     url, commit = url_and_commit.split('@', 2)
 
     if url != dep['url']:
@@ -146,6 +149,7 @@ def update_all():
   git('log', '-1', '--oneline', v8['commit'], cwd=repodir(v8))
 
   newdeps = json.dumps(deps, indent=2)
+  newdeps = re.sub(r'\s+$', '\n', newdeps)
   if dry_run:
     print(newdeps)
   else:

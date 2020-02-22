@@ -261,7 +261,6 @@ const char* WasmOpcodes::OpcodeName(WasmOpcode opcode) {
     CASE_F32x4_OP(Le, "le")
     CASE_F32x4_OP(Gt, "gt")
     CASE_F32x4_OP(Ge, "ge")
-    CASE_CONVERT_OP(Convert, F64x2, I64x2, "i64", "convert")
     CASE_CONVERT_OP(Convert, F32x4, I32x4, "i32", "convert")
     CASE_CONVERT_OP(Convert, I32x4, F32x4, "f32", "convert")
     CASE_CONVERT_OP(Convert, I32x4, I16x8Low, "i32", "convert")
@@ -308,6 +307,7 @@ const char* WasmOpcodes::OpcodeName(WasmOpcode opcode) {
     CASE_S128_OP(Xor, "xor")
     CASE_S128_OP(Not, "not")
     CASE_S128_OP(Select, "select")
+    CASE_S128_OP(AndNot, "andnot")
     CASE_S8x16_OP(Swizzle, "swizzle")
     CASE_S8x16_OP(Shuffle, "shuffle")
     CASE_S1x2_OP(AnyTrue, "any_true")
@@ -333,6 +333,9 @@ const char* WasmOpcodes::OpcodeName(WasmOpcode opcode) {
     CASE_I32x4_OP(Load16x4U, "load16x4_u")
     CASE_I64x2_OP(Load32x2S, "load32x2_s")
     CASE_I64x2_OP(Load32x2U, "load32x2_u")
+
+    CASE_I8x16_OP(RoundingAverageU, "avgr_u")
+    CASE_I16x8_OP(RoundingAverageU, "avgr_u")
 
     // Atomic operations.
     CASE_OP(AtomicNotify, "atomic.notify")
@@ -416,19 +419,6 @@ bool WasmOpcodes::IsUnconditionalJump(WasmOpcode opcode) {
     case kExprBr:
     case kExprBrTable:
     case kExprReturn:
-      return true;
-    default:
-      return false;
-  }
-}
-
-bool WasmOpcodes::IsSignExtensionOpcode(WasmOpcode opcode) {
-  switch (opcode) {
-    case kExprI32SExtendI8:
-    case kExprI32SExtendI16:
-    case kExprI64SExtendI8:
-    case kExprI64SExtendI16:
-    case kExprI64SExtendI32:
       return true;
     default:
       return false;

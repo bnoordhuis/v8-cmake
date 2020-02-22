@@ -3877,10 +3877,6 @@ void LinearScanAllocator::AllocateRegisters() {
             SpillNotLiveRanges(&to_be_live, next_block_boundary, spill_mode);
             ReloadLiveRanges(to_be_live, next_block_boundary);
           }
-
-          // TODO(herhut) Check removal.
-          // Now forward to current position
-          ForwardStateTo(next_block_boundary);
         }
         // Update block information
         last_block = current_block->rpo_number();
@@ -4263,7 +4259,7 @@ int LinearScanAllocator::PickRegisterThatIsAvailableLongest(
   // set before the call. Hence, the argument registers always get ignored,
   // as their available time is shorter.
   int reg = (hint_reg == kUnassignedRegister) ? codes[0] : hint_reg;
-  int current_free = -1;
+  int current_free = free_until_pos[reg].ToInstructionIndex();
   for (int i = 0; i < num_codes; ++i) {
     int code = codes[i];
     // Prefer registers that have no fixed uses to avoid blocking later hints.

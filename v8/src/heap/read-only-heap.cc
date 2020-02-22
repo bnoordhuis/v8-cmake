@@ -143,7 +143,13 @@ bool ReadOnlyHeap::Contains(Address address) {
 
 // static
 bool ReadOnlyHeap::Contains(HeapObject object) {
-  return MemoryChunk::FromHeapObject(object)->InReadOnlySpace();
+  if (V8_ENABLE_THIRD_PARTY_HEAP_BOOL) {
+    // read only includes both TPH and the snapshot, so need both checks
+    return third_party_heap::Heap::InReadOnlySpace(object.address()) ||
+           MemoryChunk::FromHeapObject(object)->InReadOnlySpace();
+  } else {
+    return MemoryChunk::FromHeapObject(object)->InReadOnlySpace();
+  }
 }
 
 Object* ReadOnlyHeap::ExtendReadOnlyObjectCache() {
@@ -165,10 +171,17 @@ ReadOnlyHeapObjectIterator::ReadOnlyHeapObjectIterator(ReadOnlyHeap* ro_heap)
 
 ReadOnlyHeapObjectIterator::ReadOnlyHeapObjectIterator(ReadOnlySpace* ro_space)
     : ro_space_(ro_space),
-      current_page_(ro_space->first_page()),
-      current_addr_(current_page_->area_start()) {}
+      current_page_(V8_ENABLE_THIRD_PARTY_HEAP_BOOL ? nullptr
+                                                    : ro_space->first_page()),
+      current_addr_(V8_ENABLE_THIRD_PARTY_HEAP_BOOL
+                        ? Address()
+                        : current_page_->area_start()) {}
 
 HeapObject ReadOnlyHeapObjectIterator::Next() {
+  if (V8_ENABLE_THIRD_PARTY_HEAP_BOOL) {
+    return HeapObject();  // Unsupported
+  }
+
   if (current_page_ == nullptr) {
     return HeapObject();
   }

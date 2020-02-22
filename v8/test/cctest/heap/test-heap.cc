@@ -2271,8 +2271,10 @@ TEST(IdleNotificationFinishMarking) {
   do {
     marking->V8Step(kStepSizeInMs, IncrementalMarking::NO_GC_VIA_STACK_GUARD,
                     StepOrigin::kV8);
-  } while (
-      !CcTest::heap()->mark_compact_collector()->marking_worklist()->IsEmpty());
+  } while (!CcTest::heap()
+                ->mark_compact_collector()
+                ->marking_worklists()
+                ->IsEmpty());
 
   marking->SetWeakClosureWasOverApproximatedForTesting(true);
 
@@ -6524,6 +6526,36 @@ UNINITIALIZED_TEST(OutOfMemoryIneffectiveGC) {
   isolate->Dispose();
 }
 
+UNINITIALIZED_TEST(OutOfMemoryIneffectiveGCRunningJS) {
+  if (!FLAG_detect_ineffective_gcs_near_heap_limit) return;
+  if (FLAG_stress_incremental_marking) return;
+
+  FLAG_max_old_space_size = 5;
+  v8::Isolate::CreateParams create_params;
+  create_params.array_buffer_allocator = CcTest::array_buffer_allocator();
+  v8::Isolate* isolate = v8::Isolate::New(create_params);
+  Isolate* i_isolate = reinterpret_cast<Isolate*>(isolate);
+  oom_isolate = i_isolate;
+
+  isolate->SetOOMErrorHandler(OOMCallback);
+
+  v8::Isolate::Scope isolate_scope(isolate);
+  v8::HandleScope handle_scope(isolate);
+  v8::Context::New(isolate)->Enter();
+
+  // Test that source positions are not collected as part of a failing GC, which
+  // will fail as allocation is disallowed. If the test works, this should call
+  // OOMCallback and terminate without crashing.
+  CompileRun(R"javascript(
+      var array = [];
+      for(var i = 20000; i < 40000; ++i) {
+        array.push(new Array(i));
+      }
+      )javascript");
+
+  FATAL("Should not get here as OOMCallback should be called");
+}
+
 HEAP_TEST(Regress779503) {
   // The following regression test ensures that the Scavenger does not allocate
   // over invalid slots. More specific, the Scavenger should not sweep a page
@@ -6838,6 +6870,27 @@ TEST(CodeObjectRegistry) {
   CcTest::CollectAllAvailableGarbage();
   CHECK(MemoryChunk::FromHeapObject(*code1)->Contains(code1->address()));
   CHECK(MemoryChunk::FromAddress(code2_address)->Contains(code2_address));
+}
+
+TEST(Regress9701) {
+  ManualGCScope manual_gc_scope;
+  if (!FLAG_incremental_marking) return;
+  CcTest::InitializeVM();
+  Heap* heap = CcTest::heap();
+  // Start with an empty new space.
+  CcTest::CollectGarbage(NEW_SPACE);
+  CcTest::CollectGarbage(NEW_SPACE);
+
+  int mark_sweep_count_before = heap->ms_count();
+  // Allocate many short living array buffers.
+  for (int i = 0; i < 1000; i++) {
+    HandleScope scope(heap->isolate());
+    CcTest::i_isolate()->factory()->NewJSArrayBufferAndBackingStore(
+        64 * KB, InitializedFlag::kZeroInitialized);
+  }
+  int mark_sweep_count_after = heap->ms_count();
+  // We expect only scavenges, no full GCs.
+  CHECK_EQ(mark_sweep_count_before, mark_sweep_count_after);
 }
 
 }  // namespace heap

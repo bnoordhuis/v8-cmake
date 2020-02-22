@@ -698,7 +698,6 @@
   V(ChangeInt64ToFloat64)                \
   V(ChangeUint32ToFloat64)               \
   V(ChangeUint32ToUint64)                \
-  V(ChangeTaggedToCompressed)            \
   V(TruncateFloat64ToFloat32)            \
   V(TruncateInt64ToInt32)                \
   V(RoundFloat64ToInt32)                 \
@@ -743,8 +742,6 @@
 
 #define MACHINE_SIMD_OP_LIST(V) \
   V(F64x2Splat)                 \
-  V(F64x2SConvertI64x2)         \
-  V(F64x2UConvertI64x2)         \
   V(F64x2ExtractLane)           \
   V(F64x2ReplaceLane)           \
   V(F64x2Abs)                   \
@@ -876,6 +873,7 @@
   V(I16x8LeU)                   \
   V(I16x8GtU)                   \
   V(I16x8GeU)                   \
+  V(I16x8RoundingAverageU)      \
   V(I8x16Splat)                 \
   V(I8x16ExtractLaneU)          \
   V(I8x16ExtractLaneS)          \
@@ -907,6 +905,7 @@
   V(I8x16LeU)                   \
   V(I8x16GtU)                   \
   V(I8x16GeU)                   \
+  V(I8x16RoundingAverageU)      \
   V(S128Load)                   \
   V(S128Store)                  \
   V(S128Zero)                   \
@@ -915,6 +914,7 @@
   V(S128Or)                     \
   V(S128Xor)                    \
   V(S128Select)                 \
+  V(S128AndNot)                 \
   V(S8x16Swizzle)               \
   V(S8x16Shuffle)               \
   V(S1x2AnyTrue)                \

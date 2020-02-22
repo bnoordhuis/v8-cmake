@@ -19,6 +19,9 @@
 #include "src/extensions/ignition-statistics-extension.h"
 #include "src/extensions/statistics-extension.h"
 #include "src/extensions/trigger-failure-extension.h"
+#ifdef ENABLE_VTUNE_TRACEMARK
+#include "src/extensions/vtunedomain-support-extension.h"
+#endif  // ENABLE_VTUNE_TRACEMARK
 #include "src/heap/heap-inl.h"
 #include "src/logging/counters.h"
 #include "src/numbers/math-random.h"
@@ -130,6 +133,10 @@ void Bootstrapper::InitializeOncePerProcess() {
     v8::RegisterExtension(
         std::make_unique<CpuTraceMarkExtension>(FLAG_expose_cputracemark_as));
   }
+#ifdef ENABLE_VTUNE_TRACEMARK
+  v8::RegisterExtension(
+      std::make_unique<VTuneDomainSupportExtension>("vtunedomainmark"));
+#endif  // ENABLE_VTUNE_TRACEMARK
 }
 
 void Bootstrapper::TearDown() {
@@ -605,8 +612,7 @@ Handle<JSFunction> Genesis::CreateEmptyFunction() {
   empty_function->shared().set_raw_scope_info(
       ReadOnlyRoots(isolate()).empty_function_scope_info());
   empty_function->shared().DontAdaptArguments();
-  SharedFunctionInfo::SetScript(handle(empty_function->shared(), isolate()),
-                                script, 1);
+  empty_function->shared().SetScript(ReadOnlyRoots(isolate()), *script, 1);
 
   return empty_function;
 }
@@ -1366,11 +1372,6 @@ static void InstallError(Isolate* isolate, Handle<JSObject> global,
       isolate->native_context()->set_error_to_string(*to_string_fun);
       isolate->native_context()->set_initial_error_prototype(*prototype);
     } else {
-      DCHECK(isolate->native_context()->error_to_string().IsJSFunction());
-
-      JSObject::AddProperty(isolate, prototype, factory->toString_string(),
-                            isolate->error_to_string(), DONT_ENUM);
-
       Handle<JSFunction> global_error = isolate->error_function();
       CHECK(JSReceiver::SetPrototype(error_fun, global_error, false,
                                      kThrowOnError)
@@ -4275,6 +4276,7 @@ EMPTY_INITIALIZE_GLOBAL_FOR_FEATURE(harmony_top_level_await)
 
 #ifdef V8_INTL_SUPPORT
 EMPTY_INITIALIZE_GLOBAL_FOR_FEATURE(harmony_intl_add_calendar_numbering_system)
+EMPTY_INITIALIZE_GLOBAL_FOR_FEATURE(harmony_intl_displaynames_date_types)
 EMPTY_INITIALIZE_GLOBAL_FOR_FEATURE(harmony_intl_dateformat_day_period)
 EMPTY_INITIALIZE_GLOBAL_FOR_FEATURE(
     harmony_intl_dateformat_fractional_second_digits)
@@ -5037,6 +5039,10 @@ bool Genesis::InstallExtensions(Isolate* isolate,
                            &extension_states)) &&
          (!isValidCpuTraceMarkFunctionName() ||
           InstallExtension(isolate, "v8/cpumark", &extension_states)) &&
+#ifdef ENABLE_VTUNE_TRACEMARK
+         (!FLAG_enable_vtune_domain_support ||
+          InstallExtension(isolate, "v8/vtunedomain", &extension_states)) &&
+#endif  // ENABLE_VTUNE_TRACEMARK
          InstallRequestedExtensions(isolate, extensions, &extension_states);
 }
 

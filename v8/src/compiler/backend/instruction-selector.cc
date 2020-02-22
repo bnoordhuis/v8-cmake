@@ -26,7 +26,7 @@ InstructionSelector::InstructionSelector(
     InstructionSequence* sequence, Schedule* schedule,
     SourcePositionTable* source_positions, Frame* frame,
     EnableSwitchJumpTable enable_switch_jump_table, TickCounter* tick_counter,
-    size_t* max_unoptimized_frame_height,
+    size_t* max_unoptimized_frame_height, size_t* max_pushed_argument_count,
     SourcePositionMode source_position_mode, Features features,
     EnableScheduling enable_scheduling,
     EnableRootsRelativeAddressing enable_roots_relative_addressing,
@@ -59,7 +59,8 @@ InstructionSelector::InstructionSelector(
       instr_origins_(sequence->zone()),
       trace_turbo_(trace_turbo),
       tick_counter_(tick_counter),
-      max_unoptimized_frame_height_(max_unoptimized_frame_height) {
+      max_unoptimized_frame_height_(max_unoptimized_frame_height),
+      max_pushed_argument_count_(max_pushed_argument_count) {
   DCHECK_EQ(*max_unoptimized_frame_height, 0);  // Caller-initialized.
 
   instructions_.reserve(node_count);
@@ -1576,8 +1577,6 @@ void InstructionSelector::VisitNode(Node* node) {
       return MarkAsWord64(node), VisitChangeInt32ToInt64(node);
     case IrOpcode::kChangeUint32ToUint64:
       return MarkAsWord64(node), VisitChangeUint32ToUint64(node);
-    case IrOpcode::kChangeTaggedToCompressed:
-      return MarkAsCompressed(node), VisitChangeTaggedToCompressed(node);
     case IrOpcode::kTruncateFloat64ToFloat32:
       return MarkAsFloat32(node), VisitTruncateFloat64ToFloat32(node);
     case IrOpcode::kTruncateFloat64ToWord32:
@@ -1853,10 +1852,6 @@ void InstructionSelector::VisitNode(Node* node) {
       return MarkAsFloat64(node), VisitF64x2ExtractLane(node);
     case IrOpcode::kF64x2ReplaceLane:
       return MarkAsSimd128(node), VisitF64x2ReplaceLane(node);
-    case IrOpcode::kF64x2SConvertI64x2:
-      return MarkAsSimd128(node), VisitF64x2SConvertI64x2(node);
-    case IrOpcode::kF64x2UConvertI64x2:
-      return MarkAsSimd128(node), VisitF64x2UConvertI64x2(node);
     case IrOpcode::kF64x2Abs:
       return MarkAsSimd128(node), VisitF64x2Abs(node);
     case IrOpcode::kF64x2Neg:
@@ -2095,6 +2090,8 @@ void InstructionSelector::VisitNode(Node* node) {
       return MarkAsSimd128(node), VisitI16x8GtU(node);
     case IrOpcode::kI16x8GeU:
       return MarkAsSimd128(node), VisitI16x8GeU(node);
+    case IrOpcode::kI16x8RoundingAverageU:
+      return MarkAsSimd128(node), VisitI16x8RoundingAverageU(node);
     case IrOpcode::kI8x16Splat:
       return MarkAsSimd128(node), VisitI8x16Splat(node);
     case IrOpcode::kI8x16ExtractLaneU:
@@ -2149,6 +2146,8 @@ void InstructionSelector::VisitNode(Node* node) {
       return MarkAsSimd128(node), VisitI8x16GtU(node);
     case IrOpcode::kI8x16GeU:
       return MarkAsSimd128(node), VisitI8x16GeU(node);
+    case IrOpcode::kI8x16RoundingAverageU:
+      return MarkAsSimd128(node), VisitI8x16RoundingAverageU(node);
     case IrOpcode::kS128Zero:
       return MarkAsSimd128(node), VisitS128Zero(node);
     case IrOpcode::kS128And:
@@ -2161,6 +2160,8 @@ void InstructionSelector::VisitNode(Node* node) {
       return MarkAsSimd128(node), VisitS128Not(node);
     case IrOpcode::kS128Select:
       return MarkAsSimd128(node), VisitS128Select(node);
+    case IrOpcode::kS128AndNot:
+      return MarkAsSimd128(node), VisitS128AndNot(node);
     case IrOpcode::kS8x16Swizzle:
       return MarkAsSimd128(node), VisitS8x16Swizzle(node);
     case IrOpcode::kS8x16Shuffle:
@@ -2459,10 +2460,6 @@ void InstructionSelector::VisitChangeUint32ToUint64(Node* node) {
   UNIMPLEMENTED();
 }
 
-void InstructionSelector::VisitChangeTaggedToCompressed(Node* node) {
-  UNIMPLEMENTED();
-}
-
 void InstructionSelector::VisitChangeFloat64ToInt64(Node* node) {
   UNIMPLEMENTED();
 }
@@ -2624,19 +2621,7 @@ void InstructionSelector::VisitI64x2ReplaceLaneI32Pair(Node* node) {
 #endif  // !V8_TARGET_ARCH_IA32
 
 #if !V8_TARGET_ARCH_X64
-void InstructionSelector::VisitF64x2SConvertI64x2(Node* node) {
-  UNIMPLEMENTED();
-}
-void InstructionSelector::VisitF64x2UConvertI64x2(Node* node) {
-  UNIMPLEMENTED();
-}
 #if !V8_TARGET_ARCH_ARM64
-#if !V8_TARGET_ARCH_ARM
-void InstructionSelector::VisitLoadTransform(Node* node) { UNIMPLEMENTED(); }
-#endif  // !V8_TARGET_ARCH_ARM
-#if !V8_TARGET_ARCH_IA32
-void InstructionSelector::VisitI64x2Mul(Node* node) { UNIMPLEMENTED(); }
-#endif  // !V8_TARGET_ARCH_IA32
 void InstructionSelector::VisitI64x2Splat(Node* node) { UNIMPLEMENTED(); }
 void InstructionSelector::VisitI64x2ExtractLane(Node* node) { UNIMPLEMENTED(); }
 void InstructionSelector::VisitI64x2ReplaceLane(Node* node) { UNIMPLEMENTED(); }
@@ -2750,6 +2735,10 @@ void InstructionSelector::VisitConstant(Node* node) {
   Emit(kArchNop, g.DefineAsConstant(node));
 }
 
+void InstructionSelector::UpdateMaxPushedArgumentCount(size_t count) {
+  *max_pushed_argument_count_ = std::max(count, *max_pushed_argument_count_);
+}
+
 void InstructionSelector::VisitCall(Node* node, BasicBlock* handler) {
   OperandGenerator g(this);
   auto call_descriptor = CallDescriptorOf(node->op());
@@ -2779,7 +2768,8 @@ void InstructionSelector::VisitCall(Node* node, BasicBlock* handler) {
   CallBufferFlags call_buffer_flags(kCallCodeImmediate | kCallAddressImmediate);
   InitializeCallBuffer(node, &buffer, call_buffer_flags, false);
 
-  EmitPrepareArguments(&(buffer.pushed_nodes), call_descriptor, node);
+  EmitPrepareArguments(&buffer.pushed_nodes, call_descriptor, node);
+  UpdateMaxPushedArgumentCount(buffer.pushed_nodes.size());
 
   // Pass label of exception handler block.
   if (handler) {
@@ -2859,6 +2849,7 @@ void InstructionSelector::VisitTailCall(Node* node) {
     flags |= kCallFixedTargetRegister;
   }
   InitializeCallBuffer(node, &buffer, flags, true, stack_param_delta);
+  UpdateMaxPushedArgumentCount(stack_param_delta);
 
   // Select the appropriate opcode based on the call type.
   InstructionCode opcode;

@@ -1137,7 +1137,7 @@ static void Generate_InterpreterPushArgs(MacroAssembler* masm,
   __ sub(start_address, Immediate(kSystemPointerSize));
   __ bind(&loop_check);
   __ cmp(start_address, array_limit);
-  __ j(greater, &loop_header, Label::kNear);
+  __ j(above, &loop_header, Label::kNear);
 }
 
 // static
@@ -1910,7 +1910,7 @@ void Builtins::Generate_CallOrConstructForwardVarargs(MacroAssembler* masm,
     __ JumpIfSmi(edx, &new_target_not_constructor, Label::kNear);
     __ mov(scratch, FieldOperand(edx, HeapObject::kMapOffset));
     __ test_b(FieldOperand(scratch, Map::kBitFieldOffset),
-              Immediate(Map::IsConstructorBit::kMask));
+              Immediate(Map::Bits1::IsConstructorBit::kMask));
     __ j(not_zero, &new_target_constructor, Label::kNear);
     __ bind(&new_target_not_constructor);
     {
@@ -2239,7 +2239,7 @@ void Builtins::Generate_Call(MacroAssembler* masm, ConvertReceiverMode mode) {
   // Check if target is a proxy and call CallProxy external builtin
   __ bind(&non_jsboundfunction);
   __ test_b(FieldOperand(ecx, Map::kBitFieldOffset),
-            Immediate(Map::IsCallableBit::kMask));
+            Immediate(Map::Bits1::IsCallableBit::kMask));
   __ j(zero, &non_callable);
 
   // Call CallProxy external builtin
@@ -2342,7 +2342,7 @@ void Builtins::Generate_Construct(MacroAssembler* masm) {
   // Check if target has a [[Construct]] internal method.
   __ mov(ecx, FieldOperand(edi, HeapObject::kMapOffset));
   __ test_b(FieldOperand(ecx, Map::kBitFieldOffset),
-            Immediate(Map::IsConstructorBit::kMask));
+            Immediate(Map::Bits1::IsConstructorBit::kMask));
   __ j(zero, &non_constructor);
 
   // Dispatch based on instance type.

@@ -16,6 +16,7 @@
 #include "src/common/globals.h"
 #include "src/execution/isolate.h"
 #include "src/heap/factory.h"
+#include "src/objects/elements-kind.h"
 #include "src/objects/function-syntax-kind.h"
 #include "src/objects/literal-objects.h"
 #include "src/objects/smi.h"
@@ -913,8 +914,17 @@ class TryCatchStatement final : public TryStatement {
   // (When the catch block doesn't rethrow but is guaranteed to perform an
   // ordinary throw, not clearing the old message is safe but not very
   // useful.)
+  //
+  // For scripts in repl mode there is exactly one catch block with
+  // UNCAUGHT_ASYNC_AWAIT prediction. This catch block needs to preserve
+  // the exception so it can be re-used later by the inspector.
   inline bool ShouldClearPendingException(
       HandlerTable::CatchPrediction outer_catch_prediction) const {
+    if (catch_prediction_ == HandlerTable::UNCAUGHT_ASYNC_AWAIT) {
+      DCHECK_EQ(outer_catch_prediction, HandlerTable::UNCAUGHT);
+      return false;
+    }
+
     return catch_prediction_ != HandlerTable::UNCAUGHT ||
            outer_catch_prediction != HandlerTable::UNCAUGHT;
   }
@@ -1167,7 +1177,7 @@ class MaterializedLiteral : public Expression {
 // Node for capturing a regexp literal.
 class RegExpLiteral final : public MaterializedLiteral {
  public:
-  Handle<String> pattern() const { return pattern_->string(); }
+  Handle<String> pattern() const { return pattern_->string().get<Factory>(); }
   const AstRawString* raw_pattern() const { return pattern_; }
   int flags() const { return flags_; }
 
@@ -1217,22 +1227,35 @@ class AggregateLiteral : public MaterializedLiteral {
   // constants and simple object and array literals.
   bool is_simple() const { return IsSimpleField::decode(bit_field_); }
 
+  ElementsKind boilerplate_descriptor_kind() const {
+    return BoilerplateDescriptorKindField::decode(bit_field_);
+  }
+
  private:
   int depth_ : 31;
   using NeedsInitialAllocationSiteField =
       MaterializedLiteral::NextBitField<bool, 1>;
   using IsSimpleField = NeedsInitialAllocationSiteField::Next<bool, 1>;
+  using BoilerplateDescriptorKindField =
+      IsSimpleField::Next<ElementsKind, kFastElementsKindBits>;
 
  protected:
   friend class AstNodeFactory;
   AggregateLiteral(int pos, NodeType type)
       : MaterializedLiteral(pos, type), depth_(0) {
-    bit_field_ |= NeedsInitialAllocationSiteField::encode(false) |
-                  IsSimpleField::encode(false);
+    bit_field_ |=
+        NeedsInitialAllocationSiteField::encode(false) |
+        IsSimpleField::encode(false) |
+        BoilerplateDescriptorKindField::encode(FIRST_FAST_ELEMENTS_KIND);
   }
 
   void set_is_simple(bool is_simple) {
     bit_field_ = IsSimpleField::update(bit_field_, is_simple);
+  }
+
+  void set_boilerplate_descriptor_kind(ElementsKind kind) {
+    DCHECK(IsFastElementsKind(kind));
+    bit_field_ = BoilerplateDescriptorKindField::update(bit_field_, kind);
   }
 
   void set_depth(int depth) {
@@ -1245,7 +1268,7 @@ class AggregateLiteral : public MaterializedLiteral {
   }
 
   template <class T, int size>
-  using NextBitField = IsSimpleField::Next<T, size>;
+  using NextBitField = BoilerplateDescriptorKindField::Next<T, size>;
 };
 
 // Common supertype for ObjectLiteralProperty and ClassLiteralProperty
@@ -1484,7 +1507,7 @@ class VariableProxy final : public Expression {
  public:
   bool IsValidReferenceExpression() const { return !is_new_target(); }
 
-  Handle<String> name() const { return raw_name()->string(); }
+  Handle<String> name() const { return raw_name()->string().get<Factory>(); }
   const AstRawString* raw_name() const {
     return is_resolved() ? var_->raw_name() : raw_name_;
   }
@@ -2196,9 +2219,9 @@ class FunctionLiteral final : public Expression {
   // Empty handle means that the function does not have a shared name (i.e.
   // the name will be set dynamically after creation of the function closure).
   MaybeHandle<String> name() const {
-    return raw_name_ ? raw_name_->string() : MaybeHandle<String>();
+    return raw_name_ ? raw_name_->string().get<Factory>()
+                     : MaybeHandle<String>();
   }
-  Handle<String> name(Isolate* isolate) const;
   bool has_shared_name() const { return raw_name_ != nullptr; }
   const AstConsString* raw_name() const { return raw_name_; }
   void set_raw_name(const AstConsString* name) { raw_name_ = name; }
@@ -2261,7 +2284,7 @@ class FunctionLiteral final : public Expression {
       return inferred_name_;
     }
     if (raw_inferred_name_ != nullptr) {
-      return raw_inferred_name_->string();
+      return raw_inferred_name_->string().get<Factory>();
     }
     UNREACHABLE();
   }
@@ -2546,7 +2569,7 @@ class ClassLiteral final : public Expression {
 
 class NativeFunctionLiteral final : public Expression {
  public:
-  Handle<String> name() const { return name_->string(); }
+  Handle<String> name() const { return name_->string().get<Factory>(); }
   const AstRawString* raw_name() const { return name_; }
   v8::Extension* extension() const { return extension_; }
 
@@ -2928,6 +2951,14 @@ class AstNodeFactory final {
                                                        int pos) {
     return new (zone_) TryCatchStatement(try_block, scope, catch_block,
                                          HandlerTable::ASYNC_AWAIT, pos);
+  }
+
+  TryCatchStatement* NewTryCatchStatementForReplAsyncAwait(Block* try_block,
+                                                           Scope* scope,
+                                                           Block* catch_block,
+                                                           int pos) {
+    return new (zone_) TryCatchStatement(
+        try_block, scope, catch_block, HandlerTable::UNCAUGHT_ASYNC_AWAIT, pos);
   }
 
   TryFinallyStatement* NewTryFinallyStatement(Block* try_block,

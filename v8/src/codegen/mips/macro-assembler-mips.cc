@@ -4019,6 +4019,25 @@ void TurboAssembler::CallBuiltinByIndex(Register builtin_index) {
   Call(builtin_index);
 }
 
+void TurboAssembler::PatchAndJump(Address target) {
+  if (kArchVariant != kMips32r6) {
+    UseScratchRegisterScope temps(this);
+    Register scratch = temps.Acquire();
+    mov(scratch, ra);
+    bal(1);                                  // jump to lw
+    nop();                                   // in the delay slot
+    lw(t9, MemOperand(ra, kInstrSize * 3));  // ra == pc_
+    jr(t9);
+    mov(ra, scratch);  // in delay slot
+    DCHECK_EQ(reinterpret_cast<uint32_t>(pc_) % 8, 0);
+    *reinterpret_cast<uint32_t*>(pc_) = target;
+    pc_ += sizeof(uint32_t);
+  } else {
+    // TODO(mips r6): Implement.
+    UNIMPLEMENTED();
+  }
+}
+
 void TurboAssembler::StoreReturnAddressAndCall(Register target) {
   // This generates the final instruction sequence for calls to C functions
   // once an exit frame has been constructed.
@@ -4967,7 +4986,7 @@ void MacroAssembler::AssertConstructor(Register object) {
 
     LoadMap(t8, object);
     lbu(t8, FieldMemOperand(t8, Map::kBitFieldOffset));
-    And(t8, t8, Operand(Map::IsConstructorBit::kMask));
+    And(t8, t8, Operand(Map::Bits1::IsConstructorBit::kMask));
     Check(ne, AbortReason::kOperandIsNotAConstructor, t8, Operand(zero_reg));
   }
 }

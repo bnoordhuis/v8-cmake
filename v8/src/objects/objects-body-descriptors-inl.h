@@ -18,7 +18,7 @@
 #include "src/objects/js-collection.h"
 #include "src/objects/js-weak-refs.h"
 #include "src/objects/oddball.h"
-#include "src/objects/ordered-hash-table.h"
+#include "src/objects/ordered-hash-table-inl.h"
 #include "src/objects/source-text-module.h"
 #include "src/objects/synthetic-module.h"
 #include "src/objects/transitions.h"
@@ -219,7 +219,8 @@ class WeakCell::BodyDescriptor final : public BodyDescriptorBase {
                                  ObjectVisitor* v) {
     IteratePointers(obj, HeapObject::kHeaderSize, kTargetOffset, v);
     IterateCustomWeakPointer(obj, kTargetOffset, v);
-    IteratePointers(obj, kTargetOffset + kTaggedSize, object_size, v);
+    IterateCustomWeakPointer(obj, kUnregisterTokenOffset, v);
+    IteratePointers(obj, kUnregisterTokenOffset + kTaggedSize, object_size, v);
   }
 
   static inline int SizeOf(Map map, HeapObject object) {

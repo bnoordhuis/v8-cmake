@@ -265,6 +265,7 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kAVXI16x8GtU:
     case kSSEI16x8GeU:
     case kAVXI16x8GeU:
+    case kIA32I16x8RoundingAverageU:
     case kIA32I8x16Splat:
     case kIA32I8x16ExtractLaneU:
     case kIA32I8x16ExtractLaneS:
@@ -313,6 +314,7 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kAVXI8x16GtU:
     case kSSEI8x16GeU:
     case kAVXI8x16GeU:
+    case kIA32I8x16RoundingAverageU:
     case kIA32S128Zero:
     case kSSES128Not:
     case kAVXS128Not:
@@ -324,6 +326,7 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kAVXS128Xor:
     case kSSES128Select:
     case kAVXS128Select:
+    case kIA32S128AndNot:
     case kIA32S8x16Swizzle:
     case kIA32S8x16Shuffle:
     case kIA32S32x4Swizzle:
@@ -386,7 +389,17 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kIA32Movss:
     case kIA32Movsd:
     case kIA32Movdqu:
-      // Moves are used for memory load/store operations.
+    // Moves are used for memory load/store operations.
+    case kIA32S8x16LoadSplat:
+    case kIA32S16x8LoadSplat:
+    case kIA32S32x4LoadSplat:
+    case kIA32S64x2LoadSplat:
+    case kIA32I16x8Load8x8S:
+    case kIA32I16x8Load8x8U:
+    case kIA32I32x4Load16x4S:
+    case kIA32I32x4Load16x4U:
+    case kIA32I64x2Load32x2S:
+    case kIA32I64x2Load32x2U:
       return instr->HasOutput() ? kIsLoadOperation : kHasSideEffect;
 
     case kIA32Peek:

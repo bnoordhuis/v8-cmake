@@ -278,6 +278,61 @@ void InstructionSelector::VisitAbortCSAAssert(Node* node) {
   Emit(kArchAbortCSAAssert, g.NoOutput(), g.UseFixed(node->InputAt(0), a0));
 }
 
+void InstructionSelector::VisitLoadTransform(Node* node) {
+  LoadTransformParameters params = LoadTransformParametersOf(node->op());
+  MipsOperandGenerator g(this);
+  Node* base = node->InputAt(0);
+  Node* index = node->InputAt(1);
+
+  InstructionCode opcode = kArchNop;
+  switch (params.transformation) {
+    case LoadTransformation::kS8x16LoadSplat:
+      opcode = kMipsS8x16LoadSplat;
+      break;
+    case LoadTransformation::kS16x8LoadSplat:
+      opcode = kMipsS16x8LoadSplat;
+      break;
+    case LoadTransformation::kS32x4LoadSplat:
+      opcode = kMipsS32x4LoadSplat;
+      break;
+    case LoadTransformation::kS64x2LoadSplat:
+      opcode = kMipsS64x2LoadSplat;
+      break;
+    case LoadTransformation::kI16x8Load8x8S:
+      opcode = kMipsI16x8Load8x8S;
+      break;
+    case LoadTransformation::kI16x8Load8x8U:
+      opcode = kMipsI16x8Load8x8U;
+      break;
+    case LoadTransformation::kI32x4Load16x4S:
+      opcode = kMipsI32x4Load16x4S;
+      break;
+    case LoadTransformation::kI32x4Load16x4U:
+      opcode = kMipsI32x4Load16x4U;
+      break;
+    case LoadTransformation::kI64x2Load32x2S:
+      opcode = kMipsI64x2Load32x2S;
+      break;
+    case LoadTransformation::kI64x2Load32x2U:
+      opcode = kMipsI64x2Load32x2U;
+      break;
+    default:
+      UNIMPLEMENTED();
+  }
+
+  if (g.CanBeImmediate(index, opcode)) {
+    Emit(opcode | AddressingModeField::encode(kMode_MRI),
+         g.DefineAsRegister(node), g.UseRegister(base), g.UseImmediate(index));
+  } else {
+    InstructionOperand addr_reg = g.TempRegister();
+    Emit(kMipsAdd | AddressingModeField::encode(kMode_None), addr_reg,
+         g.UseRegister(index), g.UseRegister(base));
+    // Emit desired load opcode, using temp addr_reg.
+    Emit(opcode | AddressingModeField::encode(kMode_MRI),
+         g.DefineAsRegister(node), addr_reg, g.TempImmediate(0));
+  }
+}
+
 void InstructionSelector::VisitLoad(Node* node) {
   LoadRepresentation load_rep = LoadRepresentationOf(node->op());
   MipsOperandGenerator g(this);
@@ -2076,86 +2131,90 @@ void InstructionSelector::VisitInt64AbsWithOverflow(Node* node) {
   V(I8x16ShrS)                \
   V(I8x16ShrU)
 
-#define SIMD_BINOP_LIST(V)                       \
-  V(F64x2Add, kMipsF64x2Add)                     \
-  V(F64x2Sub, kMipsF64x2Sub)                     \
-  V(F64x2Mul, kMipsF64x2Mul)                     \
-  V(F64x2Div, kMipsF64x2Div)                     \
-  V(F64x2Min, kMipsF64x2Min)                     \
-  V(F64x2Max, kMipsF64x2Max)                     \
-  V(F64x2Eq, kMipsF64x2Eq)                       \
-  V(F64x2Ne, kMipsF64x2Ne)                       \
-  V(F64x2Lt, kMipsF64x2Lt)                       \
-  V(F64x2Le, kMipsF64x2Le)                       \
-  V(I64x2Add, kMipsI64x2Add)                     \
-  V(I64x2Sub, kMipsI64x2Sub)                     \
-  V(F32x4Add, kMipsF32x4Add)                     \
-  V(F32x4AddHoriz, kMipsF32x4AddHoriz)           \
-  V(F32x4Sub, kMipsF32x4Sub)                     \
-  V(F32x4Mul, kMipsF32x4Mul)                     \
-  V(F32x4Div, kMipsF32x4Div)                     \
-  V(F32x4Max, kMipsF32x4Max)                     \
-  V(F32x4Min, kMipsF32x4Min)                     \
-  V(F32x4Eq, kMipsF32x4Eq)                       \
-  V(F32x4Ne, kMipsF32x4Ne)                       \
-  V(F32x4Lt, kMipsF32x4Lt)                       \
-  V(F32x4Le, kMipsF32x4Le)                       \
-  V(I32x4Add, kMipsI32x4Add)                     \
-  V(I32x4AddHoriz, kMipsI32x4AddHoriz)           \
-  V(I32x4Sub, kMipsI32x4Sub)                     \
-  V(I32x4Mul, kMipsI32x4Mul)                     \
-  V(I32x4MaxS, kMipsI32x4MaxS)                   \
-  V(I32x4MinS, kMipsI32x4MinS)                   \
-  V(I32x4MaxU, kMipsI32x4MaxU)                   \
-  V(I32x4MinU, kMipsI32x4MinU)                   \
-  V(I32x4Eq, kMipsI32x4Eq)                       \
-  V(I32x4Ne, kMipsI32x4Ne)                       \
-  V(I32x4GtS, kMipsI32x4GtS)                     \
-  V(I32x4GeS, kMipsI32x4GeS)                     \
-  V(I32x4GtU, kMipsI32x4GtU)                     \
-  V(I32x4GeU, kMipsI32x4GeU)                     \
-  V(I16x8Add, kMipsI16x8Add)                     \
-  V(I16x8AddSaturateS, kMipsI16x8AddSaturateS)   \
-  V(I16x8AddSaturateU, kMipsI16x8AddSaturateU)   \
-  V(I16x8AddHoriz, kMipsI16x8AddHoriz)           \
-  V(I16x8Sub, kMipsI16x8Sub)                     \
-  V(I16x8SubSaturateS, kMipsI16x8SubSaturateS)   \
-  V(I16x8SubSaturateU, kMipsI16x8SubSaturateU)   \
-  V(I16x8Mul, kMipsI16x8Mul)                     \
-  V(I16x8MaxS, kMipsI16x8MaxS)                   \
-  V(I16x8MinS, kMipsI16x8MinS)                   \
-  V(I16x8MaxU, kMipsI16x8MaxU)                   \
-  V(I16x8MinU, kMipsI16x8MinU)                   \
-  V(I16x8Eq, kMipsI16x8Eq)                       \
-  V(I16x8Ne, kMipsI16x8Ne)                       \
-  V(I16x8GtS, kMipsI16x8GtS)                     \
-  V(I16x8GeS, kMipsI16x8GeS)                     \
-  V(I16x8GtU, kMipsI16x8GtU)                     \
-  V(I16x8GeU, kMipsI16x8GeU)                     \
-  V(I16x8SConvertI32x4, kMipsI16x8SConvertI32x4) \
-  V(I16x8UConvertI32x4, kMipsI16x8UConvertI32x4) \
-  V(I8x16Add, kMipsI8x16Add)                     \
-  V(I8x16AddSaturateS, kMipsI8x16AddSaturateS)   \
-  V(I8x16AddSaturateU, kMipsI8x16AddSaturateU)   \
-  V(I8x16Sub, kMipsI8x16Sub)                     \
-  V(I8x16SubSaturateS, kMipsI8x16SubSaturateS)   \
-  V(I8x16SubSaturateU, kMipsI8x16SubSaturateU)   \
-  V(I8x16Mul, kMipsI8x16Mul)                     \
-  V(I8x16MaxS, kMipsI8x16MaxS)                   \
-  V(I8x16MinS, kMipsI8x16MinS)                   \
-  V(I8x16MaxU, kMipsI8x16MaxU)                   \
-  V(I8x16MinU, kMipsI8x16MinU)                   \
-  V(I8x16Eq, kMipsI8x16Eq)                       \
-  V(I8x16Ne, kMipsI8x16Ne)                       \
-  V(I8x16GtS, kMipsI8x16GtS)                     \
-  V(I8x16GeS, kMipsI8x16GeS)                     \
-  V(I8x16GtU, kMipsI8x16GtU)                     \
-  V(I8x16GeU, kMipsI8x16GeU)                     \
-  V(I8x16SConvertI16x8, kMipsI8x16SConvertI16x8) \
-  V(I8x16UConvertI16x8, kMipsI8x16UConvertI16x8) \
-  V(S128And, kMipsS128And)                       \
-  V(S128Or, kMipsS128Or)                         \
-  V(S128Xor, kMipsS128Xor)
+#define SIMD_BINOP_LIST(V)                             \
+  V(F64x2Add, kMipsF64x2Add)                           \
+  V(F64x2Sub, kMipsF64x2Sub)                           \
+  V(F64x2Mul, kMipsF64x2Mul)                           \
+  V(F64x2Div, kMipsF64x2Div)                           \
+  V(F64x2Min, kMipsF64x2Min)                           \
+  V(F64x2Max, kMipsF64x2Max)                           \
+  V(F64x2Eq, kMipsF64x2Eq)                             \
+  V(F64x2Ne, kMipsF64x2Ne)                             \
+  V(F64x2Lt, kMipsF64x2Lt)                             \
+  V(F64x2Le, kMipsF64x2Le)                             \
+  V(I64x2Add, kMipsI64x2Add)                           \
+  V(I64x2Sub, kMipsI64x2Sub)                           \
+  V(I64x2Mul, kMipsI64x2Mul)                           \
+  V(F32x4Add, kMipsF32x4Add)                           \
+  V(F32x4AddHoriz, kMipsF32x4AddHoriz)                 \
+  V(F32x4Sub, kMipsF32x4Sub)                           \
+  V(F32x4Mul, kMipsF32x4Mul)                           \
+  V(F32x4Div, kMipsF32x4Div)                           \
+  V(F32x4Max, kMipsF32x4Max)                           \
+  V(F32x4Min, kMipsF32x4Min)                           \
+  V(F32x4Eq, kMipsF32x4Eq)                             \
+  V(F32x4Ne, kMipsF32x4Ne)                             \
+  V(F32x4Lt, kMipsF32x4Lt)                             \
+  V(F32x4Le, kMipsF32x4Le)                             \
+  V(I32x4Add, kMipsI32x4Add)                           \
+  V(I32x4AddHoriz, kMipsI32x4AddHoriz)                 \
+  V(I32x4Sub, kMipsI32x4Sub)                           \
+  V(I32x4Mul, kMipsI32x4Mul)                           \
+  V(I32x4MaxS, kMipsI32x4MaxS)                         \
+  V(I32x4MinS, kMipsI32x4MinS)                         \
+  V(I32x4MaxU, kMipsI32x4MaxU)                         \
+  V(I32x4MinU, kMipsI32x4MinU)                         \
+  V(I32x4Eq, kMipsI32x4Eq)                             \
+  V(I32x4Ne, kMipsI32x4Ne)                             \
+  V(I32x4GtS, kMipsI32x4GtS)                           \
+  V(I32x4GeS, kMipsI32x4GeS)                           \
+  V(I32x4GtU, kMipsI32x4GtU)                           \
+  V(I32x4GeU, kMipsI32x4GeU)                           \
+  V(I16x8Add, kMipsI16x8Add)                           \
+  V(I16x8AddSaturateS, kMipsI16x8AddSaturateS)         \
+  V(I16x8AddSaturateU, kMipsI16x8AddSaturateU)         \
+  V(I16x8AddHoriz, kMipsI16x8AddHoriz)                 \
+  V(I16x8Sub, kMipsI16x8Sub)                           \
+  V(I16x8SubSaturateS, kMipsI16x8SubSaturateS)         \
+  V(I16x8SubSaturateU, kMipsI16x8SubSaturateU)         \
+  V(I16x8Mul, kMipsI16x8Mul)                           \
+  V(I16x8MaxS, kMipsI16x8MaxS)                         \
+  V(I16x8MinS, kMipsI16x8MinS)                         \
+  V(I16x8MaxU, kMipsI16x8MaxU)                         \
+  V(I16x8MinU, kMipsI16x8MinU)                         \
+  V(I16x8Eq, kMipsI16x8Eq)                             \
+  V(I16x8Ne, kMipsI16x8Ne)                             \
+  V(I16x8GtS, kMipsI16x8GtS)                           \
+  V(I16x8GeS, kMipsI16x8GeS)                           \
+  V(I16x8GtU, kMipsI16x8GtU)                           \
+  V(I16x8GeU, kMipsI16x8GeU)                           \
+  V(I16x8SConvertI32x4, kMipsI16x8SConvertI32x4)       \
+  V(I16x8UConvertI32x4, kMipsI16x8UConvertI32x4)       \
+  V(I16x8RoundingAverageU, kMipsI16x8RoundingAverageU) \
+  V(I8x16Add, kMipsI8x16Add)                           \
+  V(I8x16AddSaturateS, kMipsI8x16AddSaturateS)         \
+  V(I8x16AddSaturateU, kMipsI8x16AddSaturateU)         \
+  V(I8x16Sub, kMipsI8x16Sub)                           \
+  V(I8x16SubSaturateS, kMipsI8x16SubSaturateS)         \
+  V(I8x16SubSaturateU, kMipsI8x16SubSaturateU)         \
+  V(I8x16Mul, kMipsI8x16Mul)                           \
+  V(I8x16MaxS, kMipsI8x16MaxS)                         \
+  V(I8x16MinS, kMipsI8x16MinS)                         \
+  V(I8x16MaxU, kMipsI8x16MaxU)                         \
+  V(I8x16MinU, kMipsI8x16MinU)                         \
+  V(I8x16Eq, kMipsI8x16Eq)                             \
+  V(I8x16Ne, kMipsI8x16Ne)                             \
+  V(I8x16GtS, kMipsI8x16GtS)                           \
+  V(I8x16GeS, kMipsI8x16GeS)                           \
+  V(I8x16GtU, kMipsI8x16GtU)                           \
+  V(I8x16GeU, kMipsI8x16GeU)                           \
+  V(I8x16RoundingAverageU, kMipsI8x16RoundingAverageU) \
+  V(I8x16SConvertI16x8, kMipsI8x16SConvertI16x8)       \
+  V(I8x16UConvertI16x8, kMipsI8x16UConvertI16x8)       \
+  V(S128And, kMipsS128And)                             \
+  V(S128Or, kMipsS128Or)                               \
+  V(S128Xor, kMipsS128Xor)                             \
+  V(S128AndNot, kMipsS128AndNot)
 
 void InstructionSelector::VisitS128Zero(Node* node) {
   MipsOperandGenerator g(this);

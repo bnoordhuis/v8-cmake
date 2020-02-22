@@ -291,14 +291,15 @@ class ModuleDecoderImpl : public Decoder {
     size_t hash = base::hash_range(module_bytes.begin(), module_bytes.end());
     EmbeddedVector<char, 32> buf;
     SNPrintF(buf, "%016zx.%s.wasm", hash, ok() ? "ok" : "failed");
-    std::string name(buf.begin());
-    if (FILE* wasm_file = base::OS::FOpen((path + name).c_str(), "wb")) {
-      if (fwrite(module_bytes.begin(), module_bytes.length(), 1, wasm_file) !=
-          1) {
-        OFStream os(stderr);
-        os << "Error while dumping wasm file" << std::endl;
-      }
-      fclose(wasm_file);
+    path += buf.begin();
+    size_t rv = 0;
+    if (FILE* file = base::OS::FOpen(path.c_str(), "wb")) {
+      rv = fwrite(module_bytes.begin(), module_bytes.length(), 1, file);
+      fclose(file);
+    }
+    if (rv != 1) {
+      OFStream os(stderr);
+      os << "Error while dumping wasm file to " << path << std::endl;
     }
   }
 
@@ -868,6 +869,8 @@ class ModuleDecoderImpl : public Decoder {
       if (failed()) break;
       DecodeFunctionBody(i, size, offset, verify_functions);
     }
+    DCHECK_GE(pc_offset(), pos);
+    set_code_section(pos, pc_offset() - pos);
   }
 
   bool CheckFunctionsCount(uint32_t functions_count, uint32_t offset) {
@@ -1123,6 +1126,10 @@ class ModuleDecoderImpl : public Decoder {
       return ModuleResult{std::move(intermediate_error_)};
     }
     return result;
+  }
+
+  void set_code_section(uint32_t offset, uint32_t size) {
+    module_->code = {offset, size};
   }
 
   // Decodes an entire module.
@@ -1616,6 +1623,9 @@ class ModuleDecoderImpl : public Decoder {
             case kLocalAnyRef:
               if (enabled_features_.has_anyref()) return kWasmAnyRef;
               break;
+            case kLocalNullRef:
+              if (enabled_features_.has_anyref()) return kWasmNullRef;
+              break;
             case kLocalExnRef:
               if (enabled_features_.has_eh()) return kWasmExnRef;
               break;
@@ -1641,6 +1651,13 @@ class ModuleDecoderImpl : public Decoder {
                 "Invalid type. Set --experimental-wasm-anyref to use 'AnyRef'");
         }
         return kWasmAnyRef;
+      case kLocalNullRef:
+        if (!enabled_features_.has_anyref()) {
+          error(
+              pc_ - 1,
+              "Invalid type. Set --experimental-wasm-anyref to use 'NullRef'");
+        }
+        return kWasmNullRef;
       case kLocalExnRef:
         if (!enabled_features_.has_eh()) {
           error(pc_ - 1,
@@ -1947,6 +1964,10 @@ ModuleResult ModuleDecoder::FinishDecoding(bool verify_functions) {
   return impl_->FinishDecoding(verify_functions);
 }
 
+void ModuleDecoder::set_code_section(uint32_t offset, uint32_t size) {
+  return impl_->set_code_section(offset, size);
+}
+
 SectionCode ModuleDecoder::IdentifyUnknownSection(Decoder* decoder,
                                                   const byte* end) {
   WireBytesRef string = consume_string(decoder, true, "section name");
@@ -2019,29 +2040,26 @@ FunctionResult DecodeWasmFunctionForTesting(
                                       std::make_unique<WasmFunction>());
 }
 
-AsmJsOffsetsResult DecodeAsmJsOffsets(const byte* tables_start,
-                                      const byte* tables_end) {
-  AsmJsOffsets table;
+AsmJsOffsetsResult DecodeAsmJsOffsets(Vector<const uint8_t> encoded_offsets) {
+  std::vector<AsmJsOffsetFunctionEntries> functions;
 
-  Decoder decoder(tables_start, tables_end);
+  Decoder decoder(encoded_offsets);
   uint32_t functions_count = decoder.consume_u32v("functions count");
-  // Reserve space for the entries, taking care of invalid input.
-  if (functions_count < static_cast<uint32_t>(tables_end - tables_start)) {
-    table.reserve(functions_count);
-  }
+  // Sanity check.
+  DCHECK_GE(encoded_offsets.size(), functions_count);
+  functions.reserve(functions_count);
 
-  for (uint32_t i = 0; i < functions_count && decoder.ok(); ++i) {
+  for (uint32_t i = 0; i < functions_count; ++i) {
     uint32_t size = decoder.consume_u32v("table size");
     if (size == 0) {
-      table.emplace_back();
+      functions.emplace_back();
       continue;
     }
-    if (!decoder.checkAvailable(size)) {
-      decoder.error("illegal asm function offset table size");
-    }
+    DCHECK(decoder.checkAvailable(size));
     const byte* table_end = decoder.pc() + size;
     uint32_t locals_size = decoder.consume_u32v("locals size");
     int function_start_position = decoder.consume_u32v("function start pos");
+    int function_end_position = function_start_position;
     int last_byte_offset = locals_size;
     int last_asm_position = function_start_position;
     std::vector<AsmJsOffsetEntry> func_asm_offsets;
@@ -2049,24 +2067,32 @@ AsmJsOffsetsResult DecodeAsmJsOffsets(const byte* tables_start,
     // Add an entry for the stack check, associated with position 0.
     func_asm_offsets.push_back(
         {0, function_start_position, function_start_position});
-    while (decoder.ok() && decoder.pc() < table_end) {
+    while (decoder.pc() < table_end) {
+      DCHECK(decoder.ok());
       last_byte_offset += decoder.consume_u32v("byte offset delta");
       int call_position =
           last_asm_position + decoder.consume_i32v("call position delta");
       int to_number_position =
           call_position + decoder.consume_i32v("to_number position delta");
       last_asm_position = to_number_position;
-      func_asm_offsets.push_back(
-          {last_byte_offset, call_position, to_number_position});
+      if (decoder.pc() == table_end) {
+        // The last entry is the function end marker.
+        DCHECK_EQ(call_position, to_number_position);
+        function_end_position = call_position;
+      } else {
+        func_asm_offsets.push_back(
+            {last_byte_offset, call_position, to_number_position});
+      }
     }
-    if (decoder.pc() != table_end) {
-      decoder.error("broken asm offset table");
-    }
-    table.push_back(std::move(func_asm_offsets));
+    DCHECK_EQ(decoder.pc(), table_end);
+    functions.emplace_back(AsmJsOffsetFunctionEntries{
+        function_start_position, function_end_position,
+        std::move(func_asm_offsets)});
   }
-  if (decoder.more()) decoder.error("unexpected additional bytes");
+  DCHECK(decoder.ok());
+  DCHECK(!decoder.more());
 
-  return decoder.toResult(std::move(table));
+  return decoder.toResult(AsmJsOffsets{std::move(functions)});
 }
 
 std::vector<CustomSectionOffset> DecodeCustomSections(const byte* start,
@@ -2161,14 +2187,11 @@ void DecodeFunctionNames(const byte* module_start, const byte* module_end,
   }
 }
 
-void DecodeLocalNames(const byte* module_start, const byte* module_end,
-                      LocalNames* result) {
-  DCHECK_NOT_NULL(result);
-  DCHECK(result->names.empty());
+LocalNames DecodeLocalNames(Vector<const uint8_t> module_bytes) {
+  Decoder decoder(module_bytes);
+  if (!FindNameSection(&decoder)) return LocalNames{{}};
 
-  Decoder decoder(module_start, module_end);
-  if (!FindNameSection(&decoder)) return;
-
+  std::vector<LocalNamesPerFunction> functions;
   while (decoder.ok() && decoder.more()) {
     uint8_t name_type = decoder.consume_u8("name type");
     if (name_type & 0x80) break;  // no varuint7
@@ -2185,22 +2208,26 @@ void DecodeLocalNames(const byte* module_start, const byte* module_end,
     for (uint32_t i = 0; i < local_names_count; ++i) {
       uint32_t func_index = decoder.consume_u32v("function index");
       if (func_index > kMaxInt) continue;
-      result->names.emplace_back(static_cast<int>(func_index));
-      LocalNamesPerFunction& func_names = result->names.back();
-      result->max_function_index =
-          std::max(result->max_function_index, func_names.function_index);
+      std::vector<LocalName> names;
       uint32_t num_names = decoder.consume_u32v("namings count");
       for (uint32_t k = 0; k < num_names; ++k) {
         uint32_t local_index = decoder.consume_u32v("local index");
-        WireBytesRef name = consume_string(&decoder, true, "local name");
+        WireBytesRef name = consume_string(&decoder, false, "local name");
         if (!decoder.ok()) break;
         if (local_index > kMaxInt) continue;
-        func_names.max_local_index =
-            std::max(func_names.max_local_index, static_cast<int>(local_index));
-        func_names.names.emplace_back(static_cast<int>(local_index), name);
+        // Ignore non-utf8 names.
+        if (!validate_utf8(&decoder, name)) continue;
+        names.emplace_back(static_cast<int>(local_index), name);
       }
+      // Use stable sort to get deterministic names (the first one declared)
+      // even in the presence of duplicates.
+      std::stable_sort(names.begin(), names.end(), LocalName::IndexLess{});
+      functions.emplace_back(static_cast<int>(func_index), std::move(names));
     }
   }
+  std::stable_sort(functions.begin(), functions.end(),
+                   LocalNamesPerFunction::FunctionIndexLess{});
+  return LocalNames{std::move(functions)};
 }
 
 #undef TRACE

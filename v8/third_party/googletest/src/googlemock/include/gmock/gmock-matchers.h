@@ -42,8 +42,8 @@
 #ifndef GMOCK_INCLUDE_GMOCK_GMOCK_MATCHERS_H_
 #define GMOCK_INCLUDE_GMOCK_GMOCK_MATCHERS_H_
 
-#include <math.h>
 #include <algorithm>
+#include <cmath>
 #include <initializer_list>
 #include <iterator>
 #include <limits>
@@ -54,6 +54,7 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
+
 #include "gmock/internal/gmock-internal-utils.h"
 #include "gmock/internal/gmock-port.h"
 #include "gtest/gtest.h"
@@ -141,7 +142,7 @@ class MatcherCastImpl {
   template <bool Ignore>
   static Matcher<T> CastImpl(const M& polymorphic_matcher_or_value,
                              std::true_type /* convertible_to_matcher */,
-                             bool_constant<Ignore>) {
+                             std::integral_constant<bool, Ignore>) {
     // M is implicitly convertible to Matcher<T>, which means that either
     // M is a polymorphic matcher or Matcher<T> has an implicit constructor
     // from M.  In both cases using the implicit conversion will produce a
@@ -246,56 +247,43 @@ inline Matcher<T> MatcherCast(const M& matcher) {
   return internal::MatcherCastImpl<T, M>::Cast(matcher);
 }
 
-// Implements SafeMatcherCast().
-//
-// FIXME: The intermediate SafeMatcherCastImpl class was introduced as a
-// workaround for a compiler bug, and can now be removed.
-template <typename T>
-class SafeMatcherCastImpl {
- public:
-  // This overload handles polymorphic matchers and values only since
-  // monomorphic matchers are handled by the next one.
-  template <typename M>
-  static inline Matcher<T> Cast(const M& polymorphic_matcher_or_value) {
-    return internal::MatcherCastImpl<T, M>::Cast(polymorphic_matcher_or_value);
-  }
-
-  // This overload handles monomorphic matchers.
-  //
-  // In general, if type T can be implicitly converted to type U, we can
-  // safely convert a Matcher<U> to a Matcher<T> (i.e. Matcher is
-  // contravariant): just keep a copy of the original Matcher<U>, convert the
-  // argument from type T to U, and then pass it to the underlying Matcher<U>.
-  // The only exception is when U is a reference and T is not, as the
-  // underlying Matcher<U> may be interested in the argument's address, which
-  // is not preserved in the conversion from T to U.
-  template <typename U>
-  static inline Matcher<T> Cast(const Matcher<U>& matcher) {
-    // Enforce that T can be implicitly converted to U.
-    GTEST_COMPILE_ASSERT_((std::is_convertible<T, U>::value),
-                          "T must be implicitly convertible to U");
-    // Enforce that we are not converting a non-reference type T to a reference
-    // type U.
-    GTEST_COMPILE_ASSERT_(
-        std::is_reference<T>::value || !std::is_reference<U>::value,
-        cannot_convert_non_reference_arg_to_reference);
-    // In case both T and U are arithmetic types, enforce that the
-    // conversion is not lossy.
-    typedef GTEST_REMOVE_REFERENCE_AND_CONST_(T) RawT;
-    typedef GTEST_REMOVE_REFERENCE_AND_CONST_(U) RawU;
-    const bool kTIsOther = GMOCK_KIND_OF_(RawT) == internal::kOther;
-    const bool kUIsOther = GMOCK_KIND_OF_(RawU) == internal::kOther;
-    GTEST_COMPILE_ASSERT_(
-        kTIsOther || kUIsOther ||
-        (internal::LosslessArithmeticConvertible<RawT, RawU>::value),
-        conversion_of_arithmetic_types_must_be_lossless);
-    return MatcherCast<T>(matcher);
-  }
-};
-
+// This overload handles polymorphic matchers and values only since
+// monomorphic matchers are handled by the next one.
 template <typename T, typename M>
-inline Matcher<T> SafeMatcherCast(const M& polymorphic_matcher) {
-  return SafeMatcherCastImpl<T>::Cast(polymorphic_matcher);
+inline Matcher<T> SafeMatcherCast(const M& polymorphic_matcher_or_value) {
+  return MatcherCast<T>(polymorphic_matcher_or_value);
+}
+
+// This overload handles monomorphic matchers.
+//
+// In general, if type T can be implicitly converted to type U, we can
+// safely convert a Matcher<U> to a Matcher<T> (i.e. Matcher is
+// contravariant): just keep a copy of the original Matcher<U>, convert the
+// argument from type T to U, and then pass it to the underlying Matcher<U>.
+// The only exception is when U is a reference and T is not, as the
+// underlying Matcher<U> may be interested in the argument's address, which
+// is not preserved in the conversion from T to U.
+template <typename T, typename U>
+inline Matcher<T> SafeMatcherCast(const Matcher<U>& matcher) {
+  // Enforce that T can be implicitly converted to U.
+  GTEST_COMPILE_ASSERT_((std::is_convertible<T, U>::value),
+                        "T must be implicitly convertible to U");
+  // Enforce that we are not converting a non-reference type T to a reference
+  // type U.
+  GTEST_COMPILE_ASSERT_(
+      std::is_reference<T>::value || !std::is_reference<U>::value,
+      cannot_convert_non_reference_arg_to_reference);
+  // In case both T and U are arithmetic types, enforce that the
+  // conversion is not lossy.
+  typedef GTEST_REMOVE_REFERENCE_AND_CONST_(T) RawT;
+  typedef GTEST_REMOVE_REFERENCE_AND_CONST_(U) RawU;
+  constexpr bool kTIsOther = GMOCK_KIND_OF_(RawT) == internal::kOther;
+  constexpr bool kUIsOther = GMOCK_KIND_OF_(RawU) == internal::kOther;
+  GTEST_COMPILE_ASSERT_(
+      kTIsOther || kUIsOther ||
+      (internal::LosslessArithmeticConvertible<RawT, RawU>::value),
+      conversion_of_arithmetic_types_must_be_lossless);
+  return MatcherCast<T>(matcher);
 }
 
 // A<T>() returns a matcher that matches any value of type T.
@@ -757,8 +745,7 @@ class HasSubstrMatcher {
   template <typename MatcheeStringType>
   bool MatchAndExplain(const MatcheeStringType& s,
                        MatchResultListener* /* listener */) const {
-    const StringType& s2(s);
-    return s2.find(substring_) != StringType::npos;
+    return StringType(s).find(substring_) != StringType::npos;
   }
 
   // Describes what this matcher matches.
@@ -1323,7 +1310,7 @@ class PredicateFormatterFromMatcher {
        << "Expected: ";
     matcher.DescribeTo(&ss);
 
-    // Rerun the matcher to "PrintAndExain" the failure.
+    // Rerun the matcher to "PrintAndExplain" the failure.
     StringMatchResultListener listener;
     if (MatchPrintAndExplain(x, matcher, &listener)) {
       ss << "\n  The matcher failed on the initial attempt; but passed when "
@@ -1348,6 +1335,22 @@ inline PredicateFormatterFromMatcher<M>
 MakePredicateFormatterFromMatcher(M matcher) {
   return PredicateFormatterFromMatcher<M>(std::move(matcher));
 }
+
+// Implements the polymorphic IsNan() matcher, which matches any floating type
+// value that is Nan.
+class IsNanMatcher {
+ public:
+  template <typename FloatType>
+  bool MatchAndExplain(const FloatType& f,
+                       MatchResultListener* /* listener */) const {
+    return (::std::isnan)(f);
+  }
+
+  void DescribeTo(::std::ostream* os) const { *os << "is NaN"; }
+  void DescribeNegationTo(::std::ostream* os) const {
+    *os << "isn't NaN";
+  }
+};
 
 // Implements the polymorphic floating point equality matcher, which matches
 // two float values using ULP-based approximation or, optionally, a
@@ -1409,7 +1412,7 @@ class FloatingEqMatcher {
         }
 
         const FloatType diff = value - expected_;
-        if (fabs(diff) <= max_abs_error_) {
+        if (::std::fabs(diff) <= max_abs_error_) {
           return true;
         }
 
@@ -3011,12 +3014,14 @@ class UnorderedElementsAreMatcherImpl
     element_printouts->clear();
     ::std::vector<char> did_match;
     size_t num_elements = 0;
+    DummyMatchResultListener dummy;
     for (; elem_first != elem_last; ++num_elements, ++elem_first) {
       if (listener->IsInterested()) {
         element_printouts->push_back(PrintToString(*elem_first));
       }
       for (size_t irhs = 0; irhs != matchers_.size(); ++irhs) {
-        did_match.push_back(Matches(matchers_[irhs])(*elem_first));
+        did_match.push_back(
+            matchers_[irhs].MatchAndExplain(*elem_first, &dummy));
       }
     }
 
@@ -3163,6 +3168,8 @@ class BoundSecondMatcher {
  public:
   BoundSecondMatcher(const Tuple2Matcher& tm, const Second& second)
       : tuple2_matcher_(tm), second_value_(second) {}
+
+  BoundSecondMatcher(const BoundSecondMatcher& other) = default;
 
   template <typename T>
   operator Matcher<T>() const {
@@ -3626,6 +3633,11 @@ inline internal::RefMatcher<T&> Ref(T& x) {  // NOLINT
   return internal::RefMatcher<T&>(x);
 }
 
+// Creates a polymorphic matcher that matches any NaN floating point.
+inline PolymorphicMatcher<internal::IsNanMatcher> IsNan() {
+  return MakePolymorphicMatcher(internal::IsNanMatcher());
+}
+
 // Creates a matcher that matches any double argument approximately
 // equal to rhs, where two NANs are considered unequal.
 inline internal::FloatingEqMatcher<double> DoubleEq(double rhs) {
@@ -4034,11 +4046,7 @@ template <typename Container>
 inline PolymorphicMatcher<internal::ContainerEqMatcher<
     typename std::remove_const<Container>::type>>
 ContainerEq(const Container& rhs) {
-  // This following line is for working around a bug in MSVC 8.0,
-  // which causes Container to be a const type sometimes.
-  typedef typename std::remove_const<Container>::type RawContainer;
-  return MakePolymorphicMatcher(
-      internal::ContainerEqMatcher<RawContainer>(rhs));
+  return MakePolymorphicMatcher(internal::ContainerEqMatcher<Container>(rhs));
 }
 
 // Returns a matcher that matches a container that, when sorted using
@@ -4071,12 +4079,8 @@ template <typename TupleMatcher, typename Container>
 inline internal::PointwiseMatcher<TupleMatcher,
                                   typename std::remove_const<Container>::type>
 Pointwise(const TupleMatcher& tuple_matcher, const Container& rhs) {
-  // This following line is for working around a bug in MSVC 8.0,
-  // which causes Container to be a const type sometimes (e.g. when
-  // rhs is a const int[])..
-  typedef typename std::remove_const<Container>::type RawContainer;
-  return internal::PointwiseMatcher<TupleMatcher, RawContainer>(
-      tuple_matcher, rhs);
+  return internal::PointwiseMatcher<TupleMatcher, Container>(tuple_matcher,
+                                                             rhs);
 }
 
 
@@ -4107,14 +4111,9 @@ inline internal::UnorderedElementsAreArrayMatcher<
             typename std::remove_const<RhsContainer>::type>::type::value_type>>
 UnorderedPointwise(const Tuple2Matcher& tuple2_matcher,
                    const RhsContainer& rhs_container) {
-  // This following line is for working around a bug in MSVC 8.0,
-  // which causes RhsContainer to be a const type sometimes (e.g. when
-  // rhs_container is a const int[]).
-  typedef typename std::remove_const<RhsContainer>::type RawRhsContainer;
-
   // RhsView allows the same code to handle RhsContainer being a
   // STL-style container and it being a native C-style array.
-  typedef typename internal::StlContainerView<RawRhsContainer> RhsView;
+  typedef typename internal::StlContainerView<RhsContainer> RhsView;
   typedef typename RhsView::type RhsStlContainer;
   typedef typename RhsStlContainer::value_type Second;
   const RhsStlContainer& rhs_stl_container =

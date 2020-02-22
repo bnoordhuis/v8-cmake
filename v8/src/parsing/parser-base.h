@@ -658,8 +658,9 @@ class ParserBase {
     return ast_value_factory->GetOneByteString(name.c_str());
   }
 
-  DeclarationScope* NewScriptScope() const {
-    return new (zone()) DeclarationScope(zone(), ast_value_factory());
+  DeclarationScope* NewScriptScope(REPLMode repl_mode) const {
+    return new (zone())
+        DeclarationScope(zone(), ast_value_factory(), repl_mode);
   }
 
   DeclarationScope* NewVarblockScope() const {
@@ -2088,6 +2089,14 @@ typename ParserBase<Impl>::ExpressionT ParserBase<Impl>::ParseProperty(
       is_array_index = impl()->IsArrayIndex(prop_info->name, &index);
       break;
     }
+
+    case Token::BIGINT: {
+      Consume(Token::BIGINT);
+      prop_info->name = impl()->GetNumberAsSymbol();
+      is_array_index = impl()->IsArrayIndex(prop_info->name, &index);
+      break;
+    }
+
     case Token::LBRACK: {
       prop_info->name = impl()->NullIdentifier();
       prop_info->is_computed_name = true;
@@ -2299,6 +2308,7 @@ ParserBase<Impl>::ParseClassPropertyDefinition(ClassInfo* class_info,
 template <typename Impl>
 typename ParserBase<Impl>::ExpressionT ParserBase<Impl>::ParseMemberInitializer(
     ClassInfo* class_info, int beg_pos, bool is_static) {
+  FunctionBodyParsingScope body_parsing_scope(impl());
   DeclarationScope* initializer_scope =
       is_static ? class_info->static_fields_scope
                 : class_info->instance_members_scope;

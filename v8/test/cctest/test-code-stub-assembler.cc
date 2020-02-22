@@ -500,7 +500,8 @@ TEST(ComputeIntegerHash) {
   CodeAssemblerTester asm_tester(isolate, kNumParams);
   CodeStubAssembler m(asm_tester.state());
 
-  m.Return(m.SmiFromInt32(m.ComputeSeededHash(m.SmiUntag(m.Parameter(0)))));
+  m.Return(m.SmiFromInt32(m.UncheckedCast<Int32T>(
+      m.ComputeSeededHash(m.SmiUntag(m.Parameter(0))))));
 
   FunctionTester ft(asm_tester.GenerateCode(), kNumParams);
 
@@ -1396,11 +1397,11 @@ TEST(TryGetOwnProperty) {
   Handle<Symbol> not_found_symbol = factory->NewSymbol();
   Handle<Symbol> bailout_symbol = factory->NewSymbol();
   {
-    Node* object = m.Parameter(0);
-    Node* unique_name = m.Parameter(1);
-    Node* context = m.Parameter(kNumParams + 2);
+    TNode<JSReceiver> object = m.CAST(m.Parameter(0));
+    TNode<Name> unique_name = m.CAST(m.Parameter(1));
+    TNode<Context> context = m.CAST(m.Parameter(kNumParams + 2));
 
-    Variable var_value(&m, MachineRepresentation::kTagged);
+    TVariable<Object> var_value(&m);
     Label if_found(&m), if_not_found(&m), if_bailout(&m);
 
     TNode<Map> map = m.LoadMap(object);
@@ -1616,7 +1617,7 @@ TEST(TryLookupElement) {
 
   enum Result { kFound, kAbsent, kNotFound, kBailout };
   {
-    Node* object = m.Parameter(0);
+    TNode<HeapObject> object = m.CAST(m.Parameter(0));
     TNode<IntPtrT> index = m.SmiUntag(m.Parameter(1));
     TNode<MaybeObject> expected_result =
         m.UncheckedCast<MaybeObject>(m.Parameter(2));
@@ -1679,15 +1680,13 @@ TEST(TryLookupElement) {
   CHECK(!JSReceiver::HasElement(object, index).FromJust()); \
   ft.CheckTrue(object, smi##index, expect_not_found);
 
-#define CHECK_ABSENT(object, index)                                        \
-  {                                                                        \
-    bool success;                                                          \
-    Handle<Smi> smi(Smi::FromInt(index), isolate);                         \
-    LookupIterator it =                                                    \
-        LookupIterator::PropertyOrElement(isolate, object, smi, &success); \
-    CHECK(success);                                                        \
-    CHECK(!JSReceiver::HasProperty(&it).FromJust());                       \
-    ft.CheckTrue(object, smi, expect_absent);                              \
+#define CHECK_ABSENT(object, index)                  \
+  {                                                  \
+    Handle<Smi> smi(Smi::FromInt(index), isolate);   \
+    LookupIterator::Key key(isolate, smi);           \
+    LookupIterator it(isolate, object, key);         \
+    CHECK(!JSReceiver::HasProperty(&it).FromJust()); \
+    ft.CheckTrue(object, smi, expect_absent);        \
   }
 
   {
@@ -1815,6 +1814,7 @@ TEST(TryLookupElement) {
 
 #undef CHECK_FOUND
 #undef CHECK_NOT_FOUND
+#undef CHECK_ABSENT
 
   {
     Handle<JSArray> handler = factory->NewJSArray(0);
@@ -1910,7 +1910,6 @@ TEST(AllocateJSObjectFromMap) {
     isolate->heap()->Verify();
 #endif
   }
-#undef VERIFY
 }
 
 TEST(AllocateNameDictionary) {
@@ -2450,7 +2449,7 @@ TEST(IsPromiseHookEnabled) {
   CHECK_EQ(ReadOnlyRoots(isolate).false_value(), *result);
 }
 
-TEST(AllocateAndInitJSPromise) {
+TEST(NewJSPromise) {
   Isolate* isolate(CcTest::InitIsolateOnce());
 
   const int kNumParams = 1;
@@ -2458,7 +2457,7 @@ TEST(AllocateAndInitJSPromise) {
   PromiseBuiltinsAssembler m(asm_tester.state());
 
   Node* const context = m.Parameter(kNumParams + 2);
-  const TNode<JSPromise> promise = m.AllocateAndInitJSPromise(m.CAST(context));
+  const TNode<JSPromise> promise = m.NewJSPromise(m.CAST(context));
   m.Return(promise);
 
   FunctionTester ft(asm_tester.GenerateCode(), kNumParams);
@@ -2467,7 +2466,7 @@ TEST(AllocateAndInitJSPromise) {
   CHECK(result->IsJSPromise());
 }
 
-TEST(AllocateAndSetJSPromise) {
+TEST(NewJSPromise2) {
   Isolate* isolate(CcTest::InitIsolateOnce());
 
   const int kNumParams = 1;
@@ -2475,8 +2474,8 @@ TEST(AllocateAndSetJSPromise) {
   PromiseBuiltinsAssembler m(asm_tester.state());
 
   Node* const context = m.Parameter(kNumParams + 2);
-  const TNode<JSPromise> promise = m.AllocateAndSetJSPromise(
-      m.CAST(context), v8::Promise::kRejected, m.SmiConstant(1));
+  const TNode<JSPromise> promise =
+      m.NewJSPromise(m.CAST(context), v8::Promise::kRejected, m.SmiConstant(1));
   m.Return(promise);
 
   FunctionTester ft(asm_tester.GenerateCode(), kNumParams);
@@ -2539,7 +2538,7 @@ TEST(PromiseHasHandler) {
 
   Node* const context = m.Parameter(kNumParams + 2);
   const TNode<JSPromise> promise =
-      m.AllocateAndInitJSPromise(m.CAST(context), m.UndefinedConstant());
+      m.NewJSPromise(m.CAST(context), m.UndefinedConstant());
   m.Return(m.SelectBooleanConstant(m.PromiseHasHandler(promise)));
 
   FunctionTester ft(asm_tester.GenerateCode(), kNumParams);
@@ -2555,13 +2554,13 @@ TEST(CreatePromiseResolvingFunctionsContext) {
   CodeAssemblerTester asm_tester(isolate, kNumParams);
   PromiseBuiltinsAssembler m(asm_tester.state());
 
-  Node* const context = m.Parameter(kNumParams + 2);
+  const TNode<Context> context = m.CAST(m.Parameter(kNumParams + 2));
   const TNode<NativeContext> native_context = m.LoadNativeContext(context);
   const TNode<JSPromise> promise =
-      m.AllocateAndInitJSPromise(m.CAST(context), m.UndefinedConstant());
+      m.NewJSPromise(context, m.UndefinedConstant());
   const TNode<Context> promise_context =
       m.CreatePromiseResolvingFunctionsContext(
-          promise, m.BooleanConstant(false), native_context);
+          context, promise, m.BooleanConstant(false), native_context);
   m.Return(promise_context);
 
   FunctionTester ft(asm_tester.GenerateCode(), kNumParams);
@@ -2586,7 +2585,7 @@ TEST(CreatePromiseResolvingFunctions) {
   Node* const context = m.Parameter(kNumParams + 2);
   const TNode<NativeContext> native_context = m.LoadNativeContext(context);
   const TNode<JSPromise> promise =
-      m.AllocateAndInitJSPromise(m.CAST(context), m.UndefinedConstant());
+      m.NewJSPromise(m.CAST(context), m.UndefinedConstant());
   PromiseResolvingFunctions funcs = m.CreatePromiseResolvingFunctions(
       m.CAST(context), promise, m.BooleanConstant(false), native_context);
   Node *resolve = funcs.resolve, *reject = funcs.reject;
@@ -2673,12 +2672,12 @@ TEST(AllocateFunctionWithMapAndContext) {
   CodeAssemblerTester asm_tester(isolate, kNumParams);
   PromiseBuiltinsAssembler m(asm_tester.state());
 
-  Node* const context = m.Parameter(kNumParams + 2);
+  const TNode<Context> context = m.CAST(m.Parameter(kNumParams + 2));
   const TNode<NativeContext> native_context = m.LoadNativeContext(context);
   const TNode<JSPromise> promise =
-      m.AllocateAndInitJSPromise(m.CAST(context), m.UndefinedConstant());
+      m.NewJSPromise(context, m.UndefinedConstant());
   TNode<Context> promise_context = m.CreatePromiseResolvingFunctionsContext(
-      promise, m.BooleanConstant(false), native_context);
+      context, promise, m.BooleanConstant(false), native_context);
   TNode<Object> resolve_info = m.LoadContextElement(
       native_context,
       Context::PROMISE_CAPABILITY_DEFAULT_RESOLVE_SHARED_FUN_INDEX);
@@ -2854,12 +2853,11 @@ TEST(DirectMemoryTest8BitWord32Immediate) {
   const int element_count = 8;
   Label bad(&m);
 
-  TNode<IntPtrT> buffer_node =
-      m.IntPtrConstant(reinterpret_cast<intptr_t>(buffer));
+  TNode<RawPtrT> buffer_node = m.PointerConstant(buffer);
   for (size_t i = 0; i < element_count; ++i) {
     for (size_t j = 0; j < element_count; ++j) {
-      Node* loaded = m.LoadBufferObject(buffer_node, static_cast<int>(i),
-                                        MachineType::Uint8());
+      TNode<Uint8T> loaded =
+          m.LoadBufferData<Uint8T>(buffer_node, static_cast<int>(i));
       TNode<Word32T> masked = m.Word32And(loaded, m.Int32Constant(buffer[j]));
       if ((buffer[j] & buffer[i]) != 0) {
         m.GotoIf(m.Word32Equal(masked, m.Int32Constant(0)), &bad);
@@ -2887,13 +2885,11 @@ TEST(DirectMemoryTest16BitWord32Immediate) {
   const int element_count = 8;
   Label bad(&m);
 
-  TNode<IntPtrT> buffer_node =
-      m.IntPtrConstant(reinterpret_cast<intptr_t>(buffer));
+  TNode<RawPtrT> buffer_node = m.PointerConstant(buffer);
   for (size_t i = 0; i < element_count; ++i) {
     for (size_t j = 0; j < element_count; ++j) {
-      Node* loaded =
-          m.LoadBufferObject(buffer_node, static_cast<int>(i * sizeof(int16_t)),
-                             MachineType::Uint16());
+      TNode<Uint16T> loaded = m.LoadBufferData<Uint16T>(
+          buffer_node, static_cast<int>(i * sizeof(int16_t)));
       TNode<Word32T> masked = m.Word32And(loaded, m.Int32Constant(buffer[j]));
       if ((buffer[j] & buffer[i]) != 0) {
         m.GotoIf(m.Word32Equal(masked, m.Int32Constant(0)), &bad);
@@ -2920,19 +2916,17 @@ TEST(DirectMemoryTest8BitWord32) {
   int8_t buffer[] = {1, 2, 4, 8, 17, 33, 65, 127, 67, 38};
   const int element_count = 10;
   Label bad(&m);
-  Node* constants[element_count];
+  TNode<Uint32T> constants[element_count];
 
-  TNode<IntPtrT> buffer_node =
-      m.IntPtrConstant(reinterpret_cast<intptr_t>(buffer));
+  TNode<RawPtrT> buffer_node = m.PointerConstant(buffer);
   for (size_t i = 0; i < element_count; ++i) {
-    constants[i] = m.LoadBufferObject(buffer_node, static_cast<int>(i),
-                                      MachineType::Uint8());
+    constants[i] = m.LoadBufferData<Uint8T>(buffer_node, static_cast<int>(i));
   }
 
   for (size_t i = 0; i < element_count; ++i) {
     for (size_t j = 0; j < element_count; ++j) {
-      Node* loaded = m.LoadBufferObject(buffer_node, static_cast<int>(i),
-                                        MachineType::Uint8());
+      TNode<Uint8T> loaded =
+          m.LoadBufferData<Uint8T>(buffer_node, static_cast<int>(i));
       TNode<Word32T> masked = m.Word32And(loaded, constants[j]);
       if ((buffer[j] & buffer[i]) != 0) {
         m.GotoIf(m.Word32Equal(masked, m.Int32Constant(0)), &bad);
@@ -2966,23 +2960,19 @@ TEST(DirectMemoryTest16BitWord32) {
   int16_t buffer[] = {1, 2, 4, 8, 12345, 33, 65, 255, 67, 3823};
   const int element_count = 10;
   Label bad(&m);
-  Node* constants[element_count];
+  TNode<Uint32T> constants[element_count];
 
-  TNode<IntPtrT> buffer_node1 =
-      m.IntPtrConstant(reinterpret_cast<intptr_t>(buffer));
+  TNode<RawPtrT> buffer_node1 = m.PointerConstant(buffer);
   for (size_t i = 0; i < element_count; ++i) {
-    constants[i] =
-        m.LoadBufferObject(buffer_node1, static_cast<int>(i * sizeof(int16_t)),
-                           MachineType::Uint16());
+    constants[i] = m.LoadBufferData<Uint16T>(
+        buffer_node1, static_cast<int>(i * sizeof(int16_t)));
   }
-  TNode<IntPtrT> buffer_node2 =
-      m.IntPtrConstant(reinterpret_cast<intptr_t>(buffer));
+  TNode<RawPtrT> buffer_node2 = m.PointerConstant(buffer);
 
   for (size_t i = 0; i < element_count; ++i) {
     for (size_t j = 0; j < element_count; ++j) {
-      Node* loaded = m.LoadBufferObject(buffer_node1,
-                                        static_cast<int>(i * sizeof(int16_t)),
-                                        MachineType::Uint16());
+      Node* loaded = m.LoadBufferData<Uint16T>(
+          buffer_node1, static_cast<int>(i * sizeof(int16_t)));
       TNode<Word32T> masked = m.Word32And(loaded, constants[j]);
       if ((buffer[j] & buffer[i]) != 0) {
         m.GotoIf(m.Word32Equal(masked, m.Int32Constant(0)), &bad);
@@ -2991,9 +2981,8 @@ TEST(DirectMemoryTest16BitWord32) {
       }
 
       // Force a memory access relative to a high-number register.
-      loaded = m.LoadBufferObject(buffer_node2,
-                                  static_cast<int>(i * sizeof(int16_t)),
-                                  MachineType::Uint16());
+      loaded = m.LoadBufferData<Uint16T>(buffer_node2,
+                                         static_cast<int>(i * sizeof(int16_t)));
       masked = m.Word32And(loaded, constants[j]);
       if ((buffer[j] & buffer[i]) != 0) {
         m.GotoIf(m.Word32Equal(masked, m.Int32Constant(0)), &bad);
@@ -3507,8 +3496,7 @@ TEST(SmallOrderedHashMapAllocate) {
   {
     CodeStubAssembler m(asm_tester.state());
     TNode<Smi> capacity = m.CAST(m.Parameter(0));
-    m.Return(m.AllocateSmallOrderedHashTable<SmallOrderedHashMap>(
-        m.SmiToIntPtr(capacity)));
+    m.Return(m.AllocateSmallOrderedHashMap(m.SmiToIntPtr(capacity)));
   }
   FunctionTester ft(asm_tester.GenerateCode(), kNumParams);
 
@@ -3546,8 +3534,7 @@ TEST(SmallOrderedHashSetAllocate) {
   {
     CodeStubAssembler m(asm_tester.state());
     TNode<Smi> capacity = m.CAST(m.Parameter(0));
-    m.Return(m.AllocateSmallOrderedHashTable<SmallOrderedHashSet>(
-        m.SmiToIntPtr(capacity)));
+    m.Return(m.AllocateSmallOrderedHashSet(m.SmiToIntPtr(capacity)));
   }
   FunctionTester ft(asm_tester.GenerateCode(), kNumParams);
 

@@ -53,6 +53,10 @@ bool HasOnlyJSArrayMaps(JSHeapBroker* broker,
 
 }  // namespace
 
+bool JSNativeContextSpecialization::should_disallow_heap_access() const {
+  return broker()->is_concurrent_inlining();
+}
+
 JSNativeContextSpecialization::JSNativeContextSpecialization(
     Editor* editor, JSGraph* jsgraph, JSHeapBroker* broker, Flags flags,
     CompilationDependencies* dependencies, Zone* zone, Zone* shared_zone)
@@ -69,7 +73,7 @@ JSNativeContextSpecialization::JSNativeContextSpecialization(
       type_cache_(TypeCache::Get()) {}
 
 Reduction JSNativeContextSpecialization::Reduce(Node* node) {
-  DisallowHeapAccessIf disallow_heap_access(FLAG_concurrent_inlining);
+  DisallowHeapAccessIf disallow_heap_access(should_disallow_heap_access());
 
   switch (node->opcode()) {
     case IrOpcode::kJSAdd:
@@ -351,7 +355,7 @@ Reduction JSNativeContextSpecialization::ReduceJSGetSuperConstructor(
   if (!m.HasValue()) return NoChange();
   JSFunctionRef function = m.Ref(broker()).AsJSFunction();
   MapRef function_map = function.map();
-  if (FLAG_concurrent_inlining && !function_map.serialized_prototype()) {
+  if (should_disallow_heap_access() && !function_map.serialized_prototype()) {
     TRACE_BROKER_MISSING(broker(), "data for map " << function_map);
     return NoChange();
   }
@@ -403,7 +407,7 @@ Reduction JSNativeContextSpecialization::ReduceJSInstanceOf(Node* node) {
   MapRef receiver_map = receiver_ref.map();
 
   PropertyAccessInfo access_info = PropertyAccessInfo::Invalid(graph()->zone());
-  if (FLAG_concurrent_inlining) {
+  if (should_disallow_heap_access()) {
     access_info = broker()->GetPropertyAccessInfo(
         receiver_map,
         NameRef(broker(), isolate()->factory()->has_instance_symbol()),
@@ -529,7 +533,7 @@ JSNativeContextSpecialization::InferHasInPrototypeChain(
         all = false;
         break;
       }
-      if (FLAG_concurrent_inlining && !map.serialized_prototype()) {
+      if (should_disallow_heap_access() && !map.serialized_prototype()) {
         TRACE_BROKER_MISSING(broker(), "prototype data for map " << map);
         return kMayBeInPrototypeChain;
       }
@@ -608,7 +612,7 @@ Reduction JSNativeContextSpecialization::ReduceJSOrdinaryHasInstance(
     // OrdinaryHasInstance on bound functions turns into a recursive invocation
     // of the instanceof operator again.
     JSBoundFunctionRef function = m.Ref(broker()).AsJSBoundFunction();
-    if (FLAG_concurrent_inlining && !function.serialized()) {
+    if (should_disallow_heap_access() && !function.serialized()) {
       TRACE_BROKER_MISSING(broker(), "data for JSBoundFunction " << function);
       return NoChange();
     }
@@ -627,7 +631,7 @@ Reduction JSNativeContextSpecialization::ReduceJSOrdinaryHasInstance(
     // Optimize if we currently know the "prototype" property.
 
     JSFunctionRef function = m.Ref(broker()).AsJSFunction();
-    if (FLAG_concurrent_inlining && !function.serialized()) {
+    if (should_disallow_heap_access() && !function.serialized()) {
       TRACE_BROKER_MISSING(broker(), "data for JSFunction " << function);
       return NoChange();
     }
@@ -706,7 +710,7 @@ Reduction JSNativeContextSpecialization::ReduceJSResolvePromise(Node* node) {
   ZoneVector<PropertyAccessInfo> access_infos(graph()->zone());
   AccessInfoFactory access_info_factory(broker(), dependencies(),
                                         graph()->zone());
-  if (!FLAG_concurrent_inlining) {
+  if (!should_disallow_heap_access()) {
     access_info_factory.ComputePropertyAccessInfos(
         resolution_maps, factory()->then_string(), AccessMode::kLoad,
         &access_infos);
@@ -1078,8 +1082,9 @@ Reduction JSNativeContextSpecialization::ReduceNamedAccess(
       if (map.is_deprecated()) continue;
       PropertyAccessInfo access_info = broker()->GetPropertyAccessInfo(
           map, feedback.name(), access_mode, dependencies(),
-          FLAG_concurrent_inlining ? SerializationPolicy::kAssumeSerialized
-                                   : SerializationPolicy::kSerializeIfNeeded);
+          should_disallow_heap_access()
+              ? SerializationPolicy::kAssumeSerialized
+              : SerializationPolicy::kSerializeIfNeeded);
       access_infos_for_feedback.push_back(access_info);
     }
 
@@ -1326,7 +1331,7 @@ Reduction JSNativeContextSpecialization::ReduceJSLoadNamed(Node* node) {
         name.equals(ObjectRef(broker(), factory()->prototype_string()))) {
       // Optimize "prototype" property of functions.
       JSFunctionRef function = object.AsJSFunction();
-      if (FLAG_concurrent_inlining && !function.serialized()) {
+      if (should_disallow_heap_access() && !function.serialized()) {
         TRACE_BROKER_MISSING(broker(), "data for function " << function);
         return NoChange();
       }
@@ -1364,35 +1369,6 @@ Reduction JSNativeContextSpecialization::ReduceJSGetIterator(Node* node) {
   Node* effect = NodeProperties::GetEffectInput(node);
   Node* control = NodeProperties::GetControlInput(node);
 
-  Node* iterator_exception_node = nullptr;
-  Node* if_exception_merge = nullptr;
-  Node* if_exception_effect_phi = nullptr;
-  Node* if_exception_phi = nullptr;
-  bool has_exception_node =
-      NodeProperties::IsExceptionalCall(node, &iterator_exception_node);
-  if (has_exception_node) {
-    // If there exists an IfException node for the current {node}, we need
-    // exception handling for all the desugared nodes. Create a combination
-    // of Merge+Phi+EffectPhi nodes that consumes the exception paths from
-    // from all the desugared nodes including the original exception node.
-    // Usages of the original exception node are then rewired to the newly
-    // created combination of Merge+Phi+EffectPhi. Here, use dead_node as a
-    // placeholder for the original exception node until its uses are rewired.
-
-    Node* dead_node = jsgraph()->Dead();
-    if_exception_merge = graph()->NewNode(common()->Merge(1), dead_node);
-    if_exception_effect_phi =
-        graph()->NewNode(common()->EffectPhi(1), dead_node, if_exception_merge);
-    if_exception_phi =
-        graph()->NewNode(common()->Phi(MachineRepresentation::kTagged, 1),
-                         dead_node, if_exception_merge);
-    ReplaceWithValue(iterator_exception_node, if_exception_phi,
-                     if_exception_effect_phi, if_exception_merge);
-    if_exception_merge->ReplaceInput(0, iterator_exception_node);
-    if_exception_effect_phi->ReplaceInput(0, iterator_exception_node);
-    if_exception_phi->ReplaceInput(0, iterator_exception_node);
-  }
-
   // Load iterator property operator
   Handle<Name> iterator_symbol = factory()->iterator_symbol();
   const Operator* load_op =
@@ -1412,10 +1388,31 @@ Reduction JSNativeContextSpecialization::ReduceJSGetIterator(Node* node) {
   control = load_property;
 
   // Handle exception path for the load named property
-  if (has_exception_node) {
-    control =
-        AppendExceptionHandling(effect, control, if_exception_merge,
-                                if_exception_phi, if_exception_effect_phi);
+  Node* iterator_exception_node = nullptr;
+  if (NodeProperties::IsExceptionalCall(node, &iterator_exception_node)) {
+    // If there exists an exception node for the given iterator_node, create a
+    // pair of IfException/IfSuccess nodes on the current control path. The uses
+    // of new exception node are merged with the original exception node. The
+    // IfSuccess node is returned as a control path for further reduction.
+    Node* exception_node =
+        graph()->NewNode(common()->IfException(), effect, control);
+    Node* if_success = graph()->NewNode(common()->IfSuccess(), control);
+
+    // Use dead_node as a placeholder for the original exception node until
+    // its uses are rewired to the nodes merging the exceptions
+    Node* dead_node = jsgraph()->Dead();
+    Node* merge_node =
+        graph()->NewNode(common()->Merge(2), dead_node, exception_node);
+    Node* effect_phi = graph()->NewNode(common()->EffectPhi(2), dead_node,
+                                        exception_node, merge_node);
+    Node* phi =
+        graph()->NewNode(common()->Phi(MachineRepresentation::kTagged, 2),
+                         dead_node, exception_node, merge_node);
+    ReplaceWithValue(iterator_exception_node, phi, effect_phi, merge_node);
+    phi->ReplaceInput(0, iterator_exception_node);
+    effect_phi->ReplaceInput(0, iterator_exception_node);
+    merge_node->ReplaceInput(0, iterator_exception_node);
+    control = if_success;
   }
 
   // Eager deopt of call iterator property
@@ -1439,46 +1436,8 @@ Reduction JSNativeContextSpecialization::ReduceJSGetIterator(Node* node) {
                          CallFeedbackRelation::kRelated);
   Node* call_property = graph()->NewNode(call_op, load_property, receiver,
                                          context, frame_state, effect, control);
-  effect = call_property;
-  control = call_property;
-  if (has_exception_node) {
-    control =
-        AppendExceptionHandling(effect, control, if_exception_merge,
-                                if_exception_phi, if_exception_effect_phi);
-  }
 
-  // Check if the call property returns a valid JSReceiver else throw an invalid
-  // iterator runtime exception
-  Node* is_receiver =
-      graph()->NewNode(simplified()->ObjectIsReceiver(), call_property);
-  Node* branch_node = graph()->NewNode(
-      common()->Branch(BranchHint::kNone, IsSafetyCheck::kNoSafetyCheck),
-      is_receiver, control);
-  {
-    // Create a version of effect and control for the false path of the branch
-    Node* effect = call_property;
-    Node* control = call_property;
-    Node* if_not_receiver = graph()->NewNode(common()->IfFalse(), branch_node);
-    control = if_not_receiver;
-    const Operator* call_runtime_op =
-        javascript()->CallRuntime(Runtime::kThrowSymbolIteratorInvalid, 0);
-    Node* call_runtime = graph()->NewNode(call_runtime_op, context, frame_state,
-                                          effect, control);
-    control = call_runtime;
-    effect = call_runtime;
-    if (has_exception_node) {
-      control =
-          AppendExceptionHandling(effect, control, if_exception_merge,
-                                  if_exception_phi, if_exception_effect_phi);
-    }
-    Node* throw_node =
-        graph()->NewNode(common()->Throw(), call_runtime, control);
-    NodeProperties::MergeControlToEnd(graph(), common(), throw_node);
-  }
-
-  Node* if_receiver = graph()->NewNode(common()->IfTrue(), branch_node);
-  ReplaceWithValue(node, call_property, effect, if_receiver);
-  return Replace(if_receiver);
+  return Replace(call_property);
 }
 
 Reduction JSNativeContextSpecialization::ReduceJSStoreNamed(Node* node) {
@@ -1668,7 +1627,7 @@ Reduction JSNativeContextSpecialization::ReduceElementAccess(
     base::Optional<JSTypedArrayRef> typed_array =
         GetTypedArrayConstant(broker(), receiver);
     if (typed_array.has_value()) {
-      if (FLAG_concurrent_inlining && !typed_array->serialized()) {
+      if (should_disallow_heap_access() && !typed_array->serialized()) {
         TRACE_BROKER_MISSING(broker(), "data for typed array " << *typed_array);
         return NoChange();
       }
@@ -1885,7 +1844,7 @@ Reduction JSNativeContextSpecialization::ReduceElementLoadFromHeapConstant(
 Reduction JSNativeContextSpecialization::ReducePropertyAccess(
     Node* node, Node* key, base::Optional<NameRef> static_name, Node* value,
     FeedbackSource const& source, AccessMode access_mode) {
-  DisallowHeapAccessIf disallow_heap_access(FLAG_concurrent_inlining);
+  DisallowHeapAccessIf disallow_heap_access(should_disallow_heap_access());
 
   DCHECK_EQ(key == nullptr, static_name.has_value());
   DCHECK(node->opcode() == IrOpcode::kJSLoadProperty ||
@@ -2633,6 +2592,8 @@ JSNativeContextSpecialization::BuildElementAccess(
       buffer_or_receiver = buffer;
     }
 
+    enum Situation { kBoundsCheckDone, kHandleOOB_SmiCheckDone };
+    Situation situation;
     if ((keyed_mode.IsLoad() &&
          keyed_mode.load_mode() == LOAD_IGNORE_OUT_OF_BOUNDS) ||
         (keyed_mode.IsStore() &&
@@ -2647,11 +2608,13 @@ JSNativeContextSpecialization::BuildElementAccess(
       // below are performed on unsigned values, which means that all the
       // Negative32 values are treated as out-of-bounds.
       index = graph()->NewNode(simplified()->NumberToUint32(), index);
+      situation = kHandleOOB_SmiCheckDone;
     } else {
       // Check that the {index} is in the valid range for the {receiver}.
       index = effect =
           graph()->NewNode(simplified()->CheckBounds(FeedbackSource()), index,
                            length, effect, control);
+      situation = kBoundsCheckDone;
     }
 
     // Access the actual element.
@@ -2660,7 +2623,7 @@ JSNativeContextSpecialization::BuildElementAccess(
     switch (keyed_mode.access_mode()) {
       case AccessMode::kLoad: {
         // Check if we can return undefined for out-of-bounds loads.
-        if (keyed_mode.load_mode() == LOAD_IGNORE_OUT_OF_BOUNDS) {
+        if (situation == kHandleOOB_SmiCheckDone) {
           Node* check =
               graph()->NewNode(simplified()->NumberLessThan(), index, length);
           Node* branch = graph()->NewNode(
@@ -2695,6 +2658,7 @@ JSNativeContextSpecialization::BuildElementAccess(
                                vtrue, vfalse, control);
         } else {
           // Perform the actual load.
+          DCHECK_EQ(kBoundsCheckDone, situation);
           value = effect = graph()->NewNode(
               simplified()->LoadTypedElement(external_array_type),
               buffer_or_receiver, base_pointer, external_pointer, index, effect,
@@ -2721,8 +2685,9 @@ JSNativeContextSpecialization::BuildElementAccess(
           value = graph()->NewNode(simplified()->NumberToUint8Clamped(), value);
         }
 
-        // Check if we can skip the out-of-bounds store.
-        if (keyed_mode.store_mode() == STORE_IGNORE_OUT_OF_BOUNDS) {
+        if (situation == kHandleOOB_SmiCheckDone) {
+          // We have to detect OOB stores and handle them without deopt (by
+          // simply not performing them).
           Node* check =
               graph()->NewNode(simplified()->NumberLessThan(), index, length);
           Node* branch = graph()->NewNode(common()->Branch(BranchHint::kTrue),
@@ -2749,6 +2714,7 @@ JSNativeContextSpecialization::BuildElementAccess(
               graph()->NewNode(common()->EffectPhi(2), etrue, efalse, control);
         } else {
           // Perform the actual store
+          DCHECK_EQ(kBoundsCheckDone, situation);
           effect = graph()->NewNode(
               simplified()->StoreTypedElement(external_array_type),
               buffer_or_receiver, base_pointer, external_pointer, index, value,
@@ -2757,11 +2723,16 @@ JSNativeContextSpecialization::BuildElementAccess(
         break;
       }
       case AccessMode::kHas:
-        // For has property on a typed array, all we need is a bounds check.
-        value = effect =
-            graph()->NewNode(simplified()->SpeculativeNumberLessThan(
-                                 NumberOperationHint::kSignedSmall),
-                             index, length, effect, control);
+        if (situation == kHandleOOB_SmiCheckDone) {
+          value = effect =
+              graph()->NewNode(simplified()->SpeculativeNumberLessThan(
+                                   NumberOperationHint::kSignedSmall),
+                               index, length, effect, control);
+        } else {
+          DCHECK_EQ(kBoundsCheckDone, situation);
+          // For has-property on a typed array, all we need is a bounds check.
+          value = jsgraph()->TrueConstant();
+        }
         break;
     }
   } else {
@@ -3237,22 +3208,6 @@ Node* JSNativeContextSpecialization::BuildCheckEqualsName(NameRef const& name,
                       : simplified()->CheckEqualsInternalizedString();
   return graph()->NewNode(op, jsgraph()->Constant(name), value, effect,
                           control);
-}
-
-Node* JSNativeContextSpecialization::AppendExceptionHandling(
-    Node* effect, Node* control, Node* merge, Node* phi, Node* effect_phi) {
-  DCHECK_EQ(effect, control);
-  int input_count = merge->InputCount() + 1;
-  Node* if_exception =
-      graph()->NewNode(common()->IfException(), effect, control);
-  merge->InsertInput(graph()->zone(), 0, if_exception);
-  NodeProperties::ChangeOp(merge, common()->Merge(input_count));
-  phi->InsertInput(graph()->zone(), 0, if_exception);
-  NodeProperties::ChangeOp(
-      phi, common()->Phi(MachineRepresentation::kTagged, input_count));
-  effect_phi->InsertInput(graph()->zone(), 0, if_exception);
-  NodeProperties::ChangeOp(effect_phi, common()->EffectPhi(input_count));
-  return graph()->NewNode(common()->IfSuccess(), control);
 }
 
 bool JSNativeContextSpecialization::CanTreatHoleAsUndefined(

@@ -51,25 +51,26 @@ TNode<JSArrayBuffer> TypedArrayBuiltinsAssembler::AllocateEmptyOnHeapBuffer(
   //  - Set IsExternal and IsDetachable bits of BitFieldSlot.
   //  - Set the byte_length field to byte_length.
   //  - Set backing_store to null/Smi(0).
+  //  - Set extension to null.
   //  - Set all embedder fields to Smi(0).
   if (FIELD_SIZE(JSArrayBuffer::kOptionalPaddingOffset) != 0) {
     DCHECK_EQ(4, FIELD_SIZE(JSArrayBuffer::kOptionalPaddingOffset));
     StoreObjectFieldNoWriteBarrier(
-        buffer, JSArrayBuffer::kOptionalPaddingOffset, Int32Constant(0),
-        MachineRepresentation::kWord32);
+        buffer, JSArrayBuffer::kOptionalPaddingOffset, Int32Constant(0));
   }
   int32_t bitfield_value = (1 << JSArrayBuffer::IsExternalBit::kShift) |
                            (1 << JSArrayBuffer::IsDetachableBit::kShift);
   StoreObjectFieldNoWriteBarrier(buffer, JSArrayBuffer::kBitFieldOffset,
-                                 Int32Constant(bitfield_value),
-                                 MachineRepresentation::kWord32);
+                                 Int32Constant(bitfield_value));
 
   StoreObjectFieldNoWriteBarrier(buffer, JSArrayBuffer::kByteLengthOffset,
-                                 byte_length,
-                                 MachineType::PointerRepresentation());
+                                 byte_length);
   StoreObjectFieldNoWriteBarrier(buffer, JSArrayBuffer::kBackingStoreOffset,
-                                 IntPtrConstant(0),
-                                 MachineType::PointerRepresentation());
+                                 IntPtrConstant(0));
+  if (V8_ARRAY_BUFFER_EXTENSION_BOOL) {
+    StoreObjectFieldNoWriteBarrier(buffer, JSArrayBuffer::kExtensionOffset,
+                                   IntPtrConstant(0));
+  }
   for (int offset = JSArrayBuffer::kHeaderSize;
        offset < JSArrayBuffer::kSizeWithEmbedderFields; offset += kTaggedSize) {
     StoreObjectFieldNoWriteBarrier(buffer, offset, SmiConstant(0));

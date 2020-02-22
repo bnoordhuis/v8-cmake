@@ -17,6 +17,7 @@
 #include "src/base/export-template.h"
 #include "src/base/iterator.h"
 #include "src/base/list.h"
+#include "src/base/macros.h"
 #include "src/base/platform/mutex.h"
 #include "src/common/globals.h"
 #include "src/flags/flags.h"
@@ -24,6 +25,7 @@
 #include "src/heap/heap.h"
 #include "src/heap/invalidated-slots.h"
 #include "src/heap/marking.h"
+#include "src/heap/slot-set.h"
 #include "src/objects/free-space.h"
 #include "src/objects/heap-object.h"
 #include "src/objects/map.h"
@@ -53,6 +55,7 @@ class LocalSpace;
 class MemoryAllocator;
 class MemoryChunk;
 class MemoryChunkLayout;
+class OffThreadSpace;
 class Page;
 class PagedSpace;
 class SemiSpace;
@@ -428,6 +431,11 @@ class V8_EXPORT_PRIVATE Space : public Malloced {
 
   void AllocationStep(int bytes_since_last, Address soon_object, int size);
 
+  // An AllocationStep equivalent to be called after merging a contiguous
+  // chunk of an off-thread space into this space. The chunk is treated as a
+  // single allocation-folding group.
+  void AllocationStepAfterMerge(Address first_object_in_chunk, int size);
+
   // Return the total amount committed memory for this space, i.e., allocatable
   // memory and page headers.
   virtual size_t CommittedMemory() { return committed_; }
@@ -622,7 +630,8 @@ class MemoryChunk : public BasicMemoryChunk {
       + kSystemPointerSize      // LocalArrayBufferTracker* local_tracker_
       + kIntptrSize  // std::atomic<intptr_t> young_generation_live_byte_count_
       + kSystemPointerSize   // Bitmap* young_generation_bitmap_
-      + kSystemPointerSize;  // CodeObjectRegistry* code_object_registry_
+      + kSystemPointerSize   // CodeObjectRegistry* code_object_registry_
+      + kSystemPointerSize;  // PossiblyEmptyBuckets possibly_empty_buckets_
 
   // Page size in bytes.  This must be a multiple of the OS page size.
   static const int kPageSize = 1 << kPageSizeBits;
@@ -871,6 +880,10 @@ class MemoryChunk : public BasicMemoryChunk {
 
   FreeList* free_list() { return owner()->free_list(); }
 
+  PossiblyEmptyBuckets* possibly_empty_buckets() {
+    return &possibly_empty_buckets_;
+  }
+
  protected:
   static MemoryChunk* Initialize(Heap* heap, Address base, size_t size,
                                  Address area_start, Address area_end,
@@ -965,6 +978,8 @@ class MemoryChunk : public BasicMemoryChunk {
   Bitmap* young_generation_bitmap_;
 
   CodeObjectRegistry* code_object_registry_;
+
+  PossiblyEmptyBuckets possibly_empty_buckets_;
 
  private:
   void InitializeReservedMemory() { reservation_.Reset(); }
@@ -1611,6 +1626,9 @@ class V8_EXPORT_PRIVATE PagedSpaceObjectIterator : public ObjectIterator {
   PagedSpaceObjectIterator(Heap* heap, PagedSpace* space);
   PagedSpaceObjectIterator(Heap* heap, PagedSpace* space, Page* page);
 
+  // Creates a new object iterator in a given off-thread space.
+  explicit PagedSpaceObjectIterator(OffThreadSpace* space);
+
   // Advance to the next object, skipping free spaces and other fillers and
   // skipping the special garbage section of which there is one per space.
   // Returns nullptr when the iteration has ended.
@@ -1626,7 +1644,6 @@ class V8_EXPORT_PRIVATE PagedSpaceObjectIterator : public ObjectIterator {
 
   Address cur_addr_;  // Current iteration point.
   Address cur_end_;   // End iteration point.
-  Heap* heap_;
   PagedSpace* space_;
   PageRange page_range_;
   PageRange::iterator current_page_;
@@ -2452,6 +2469,10 @@ class V8_EXPORT_PRIVATE PagedSpace
 
   bool is_local_space() { return local_space_kind_ != LocalSpaceKind::kNone; }
 
+  bool is_off_thread_space() {
+    return local_space_kind_ == LocalSpaceKind::kOffThreadSpace;
+  }
+
   bool is_compaction_space() {
     return base::IsInRange(local_space_kind_,
                            LocalSpaceKind::kFirstCompactionSpace,
@@ -2804,14 +2825,14 @@ class V8_EXPORT_PRIVATE NewSpace
   void Shrink();
 
   // Return the allocated bytes in the active semispace.
-  size_t Size() override {
+  size_t Size() final {
     DCHECK_GE(top(), to_space_.page_low());
     return to_space_.pages_used() *
                MemoryChunkLayout::AllocatableMemoryInDataPage() +
            static_cast<size_t>(top() - to_space_.page_low());
   }
 
-  size_t SizeOfObjects() override { return Size(); }
+  size_t SizeOfObjects() final { return Size(); }
 
   // Return the allocatable capacity of a semispace.
   size_t Capacity() {
@@ -2829,28 +2850,36 @@ class V8_EXPORT_PRIVATE NewSpace
 
   // Committed memory for NewSpace is the committed memory of both semi-spaces
   // combined.
-  size_t CommittedMemory() override {
+  size_t CommittedMemory() final {
     return from_space_.CommittedMemory() + to_space_.CommittedMemory();
   }
 
-  size_t MaximumCommittedMemory() override {
+  size_t MaximumCommittedMemory() final {
     return from_space_.MaximumCommittedMemory() +
            to_space_.MaximumCommittedMemory();
   }
 
   // Approximate amount of physical memory committed for this space.
-  size_t CommittedPhysicalMemory() override;
+  size_t CommittedPhysicalMemory() final;
 
   // Return the available bytes without growing.
-  size_t Available() override {
+  size_t Available() final {
     DCHECK_GE(Capacity(), Size());
     return Capacity() - Size();
   }
 
-  size_t ExternalBackingStoreBytes(
-      ExternalBackingStoreType type) const override {
+  size_t ExternalBackingStoreBytes(ExternalBackingStoreType type) const final {
     DCHECK_EQ(0, from_space_.ExternalBackingStoreBytes(type));
     return to_space_.ExternalBackingStoreBytes(type);
+  }
+
+  size_t ExternalBackingStoreBytes() {
+    size_t result = 0;
+    for (int i = 0; i < ExternalBackingStoreType::kNumTypes; i++) {
+      result +=
+          ExternalBackingStoreBytes(static_cast<ExternalBackingStoreType>(i));
+    }
+    return result;
   }
 
   size_t AllocatedSinceLastGC() {
@@ -3216,7 +3245,7 @@ class ReadOnlySpace : public PagedSpace {
 // managed by the large object space.
 // Large objects do not move during garbage collections.
 
-class LargeObjectSpace : public Space {
+class V8_EXPORT_PRIVATE LargeObjectSpace : public Space {
  public:
   using iterator = LargePageIterator;
 
@@ -3240,7 +3269,7 @@ class LargeObjectSpace : public Space {
   virtual void FreeUnmarkedObjects();
 
   // Checks whether a heap object is in this space; O(1).
-  V8_EXPORT_PRIVATE bool Contains(HeapObject obj);
+  bool Contains(HeapObject obj);
   // Checks whether an address is in the object area in this space. Iterates
   // all objects in the space. May be slow.
   bool ContainsSlow(Address addr);

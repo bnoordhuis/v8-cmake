@@ -121,28 +121,11 @@ void TurboAssembler::LoadFromConstantsTable(Register destination,
                                             int constant_index) {
   DCHECK(RootsTable::IsImmortalImmovable(RootIndex::kBuiltinsConstantsTable));
 
-  // The ldr call below could end up clobbering ip when the offset does not fit
-  // into 12 bits (and thus needs to be loaded from the constant pool). In that
-  // case, we need to be extra-careful and temporarily use another register as
-  // the target.
-
   const uint32_t offset =
       FixedArray::kHeaderSize + constant_index * kPointerSize - kHeapObjectTag;
-  const bool could_clobber_ip = !is_uint12(offset);
 
-  Register reg = destination;
-  if (could_clobber_ip) {
-    Push(r7);
-    reg = r7;
-  }
-
-  LoadRoot(reg, RootIndex::kBuiltinsConstantsTable);
-  ldr(destination, MemOperand(reg, offset));
-
-  if (could_clobber_ip) {
-    DCHECK_EQ(reg, r7);
-    Pop(r7);
-  }
+  LoadRoot(destination, RootIndex::kBuiltinsConstantsTable);
+  ldr(destination, MemOperand(destination, offset));
 }
 
 void TurboAssembler::LoadRootRelative(Register destination, int32_t offset) {
@@ -2039,7 +2022,7 @@ void MacroAssembler::AssertConstructor(Register object) {
     push(object);
     LoadMap(object, object);
     ldrb(object, FieldMemOperand(object, Map::kBitFieldOffset));
-    tst(object, Operand(Map::IsConstructorBit::kMask));
+    tst(object, Operand(Map::Bits1::IsConstructorBit::kMask));
     pop(object);
     Check(ne, AbortReason::kOperandIsNotAConstructor);
   }

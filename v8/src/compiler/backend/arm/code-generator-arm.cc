@@ -9,6 +9,7 @@
 #include "src/codegen/optimized-compilation-info.h"
 #include "src/compiler/backend/code-generator-impl.h"
 #include "src/compiler/backend/gap-resolver.h"
+#include "src/compiler/backend/instruction-codes.h"
 #include "src/compiler/node-matchers.h"
 #include "src/compiler/osr.h"
 #include "src/heap/heap-inl.h"  // crbug.com/v8/8499
@@ -54,6 +55,7 @@ class ArmOperandConverter final : public InstructionOperandConverter {
       case kMode_None:
       case kMode_Offset_RI:
       case kMode_Offset_RR:
+      case kMode_Root:
         break;
       case kMode_Operand2_I:
         return InputImmediate(index + 0);
@@ -103,6 +105,9 @@ class ArmOperandConverter final : public InstructionOperandConverter {
       case kMode_Offset_RR:
         *first_index += 2;
         return MemOperand(InputRegister(index + 0), InputRegister(index + 1));
+      case kMode_Root:
+        *first_index += 1;
+        return MemOperand(kRootRegister, InputInt32(index));
     }
     UNREACHABLE();
   }
@@ -509,8 +514,7 @@ void CodeGenerator::AssembleDeconstructFrame() {
 
 void CodeGenerator::AssemblePrepareTailCall() {
   if (frame_access_state()->has_frame()) {
-    __ ldr(lr, MemOperand(fp, StandardFrameConstants::kCallerPCOffset));
-    __ ldr(fp, MemOperand(fp, StandardFrameConstants::kCallerFPOffset));
+    __ ldm(ia, fp, lr.bit() | fp.bit());
   }
   frame_access_state()->SetFrameAccessToSP();
 }
@@ -590,12 +594,20 @@ void AdjustStackPointerForTailCall(
 bool VerifyOutputOfAtomicPairInstr(ArmOperandConverter* converter,
                                    const Instruction* instr, Register low,
                                    Register high) {
-  if (instr->OutputCount() > 0) {
-    if (converter->OutputRegister(0) != low) return false;
-    if (instr->OutputCount() == 2 && converter->OutputRegister(1) != high)
-      return false;
+  DCHECK_GE(instr->OutputCount() + instr->TempCount(), 2);
+  if (instr->OutputCount() == 2) {
+    return (converter->OutputRegister(0) == low &&
+            converter->OutputRegister(1) == high);
   }
-  return true;
+  if (instr->OutputCount() == 1) {
+    return (converter->OutputRegister(0) == low &&
+            converter->TempRegister(instr->TempCount() - 1) == high) ||
+           (converter->OutputRegister(0) == high &&
+            converter->TempRegister(instr->TempCount() - 1) == low);
+  }
+  DCHECK_EQ(instr->OutputCount(), 0);
+  return (converter->TempRegister(instr->TempCount() - 2) == low &&
+          converter->TempRegister(instr->TempCount() - 1) == high);
 }
 #endif
 
@@ -849,7 +861,9 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         Register func = i.InputRegister(0);
         __ CallCFunction(func, num_parameters);
       }
-      RecordSafepoint(instr->reference_map(), Safepoint::kNoLazyDeopt);
+      if (linkage()->GetIncomingDescriptor()->IsWasmCapiFunction()) {
+        RecordSafepoint(instr->reference_map(), Safepoint::kNoLazyDeopt);
+      }
       frame_access_state()->SetFrameAccessToDefault();
       // Ideally, we should decrement SP delta to match the change of stack
       // pointer in CallCFunction. However, for certain architectures (e.g.
@@ -1973,6 +1987,51 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
               i.InputSimd128Register(1));
       break;
     }
+    case kArmI64x2Mul: {
+      QwNeonRegister dst = i.OutputSimd128Register();
+      QwNeonRegister left = i.InputSimd128Register(0);
+      QwNeonRegister right = i.InputSimd128Register(1);
+      QwNeonRegister tmp1 = i.TempSimd128Register(0);
+      QwNeonRegister tmp2 = i.TempSimd128Register(1);
+
+      // This algorithm uses vector operations to perform 64-bit integer
+      // multiplication by splitting it into a high and low 32-bit integers.
+      // The tricky part is getting the low and high integers in the correct
+      // place inside a NEON register, so that we can use as little vmull and
+      // vmlal as possible.
+
+      // Move left and right into temporaries, they will be modified by vtrn.
+      __ vmov(tmp1, left);
+      __ vmov(tmp2, right);
+
+      // This diagram shows how the 64-bit integers fit into NEON registers.
+      //
+      //             [q.high()| q.low()]
+      // left/tmp1:  [ a3, a2 | a1, a0 ]
+      // right/tmp2: [ b3, b2 | b1, b0 ]
+      //
+      // We want to multiply the low 32 bits of left with high 32 bits of right,
+      // for each lane, i.e. a2 * b3, a0 * b1. However, vmull takes two input d
+      // registers, and multiply the corresponding low/high 32 bits, to get a
+      // 64-bit integer: a1 * b1, a0 * b0. In order to make it work we transpose
+      // the vectors, so that we get the low 32 bits of each 64-bit integer into
+      // the same lane, similarly for high 32 bits.
+      __ vtrn(Neon32, tmp1.low(), tmp1.high());
+      // tmp1: [ a3, a1 | a2, a0 ]
+      __ vtrn(Neon32, tmp2.low(), tmp2.high());
+      // tmp2: [ b3, b1 | b2, b0 ]
+
+      __ vmull(NeonU32, dst, tmp1.low(), tmp2.high());
+      // dst: [ a2*b3 | a0*b1 ]
+      __ vmlal(NeonU32, dst, tmp1.high(), tmp2.low());
+      // dst: [ a2*b3 + a3*b2 | a0*b1 + a1*b0 ]
+      __ vshl(NeonU64, dst, dst, 32);
+      // dst: [ (a2*b3 + a3*b2) << 32 | (a0*b1 + a1*b0) << 32 ]
+
+      __ vmlal(NeonU32, dst, tmp1.low(), tmp2.low());
+      // dst: [ (a2*b3 + a3*b2)<<32 + (a2*b2) | (a0*b1 + a1*b0)<<32 + (a0*b0) ]
+      break;
+    }
     case kArmI64x2Neg: {
       Simd128Register dst = i.OutputSimd128Register();
       __ vmov(dst, static_cast<uint64_t>(0));
@@ -2465,6 +2524,11 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
               i.InputSimd128Register(1));
       break;
     }
+    case kArmI16x8RoundingAverageU: {
+      __ vrhadd(NeonU16, i.OutputSimd128Register(), i.InputSimd128Register(0),
+                i.InputSimd128Register(1));
+      break;
+    }
     case kArmI8x16Splat: {
       __ vdup(Neon8, i.OutputSimd128Register(), i.InputRegister(0));
       break;
@@ -2612,6 +2676,11 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
               i.InputSimd128Register(1));
       break;
     }
+    case kArmI8x16RoundingAverageU: {
+      __ vrhadd(NeonU8, i.OutputSimd128Register(), i.InputSimd128Register(0),
+                i.InputSimd128Register(1));
+      break;
+    }
     case kArmS128Zero: {
       __ veor(i.OutputSimd128Register(), i.OutputSimd128Register(),
               i.OutputSimd128Register());
@@ -2652,6 +2721,11 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       Simd128Register dst = i.OutputSimd128Register();
       DCHECK(dst == i.InputSimd128Register(0));
       __ vbsl(dst, i.InputSimd128Register(1), i.InputSimd128Register(2));
+      break;
+    }
+    case kArmS128AndNot: {
+      __ vbic(i.OutputSimd128Register(), i.InputSimd128Register(0),
+              i.InputSimd128Register(1));
       break;
     }
     case kArmS32x4ZipLeft: {
@@ -3161,10 +3235,27 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       ATOMIC_BINOP_CASE(Xor, eor)
 #undef ATOMIC_BINOP_CASE
     case kArmWord32AtomicPairLoad: {
-      DCHECK(VerifyOutputOfAtomicPairInstr(&i, instr, r0, r1));
-      __ add(i.TempRegister(0), i.InputRegister(0), i.InputRegister(1));
-      __ ldrexd(r0, r1, i.TempRegister(0));
-      __ dmb(ISH);
+      if (instr->OutputCount() == 2) {
+        DCHECK(VerifyOutputOfAtomicPairInstr(&i, instr, r0, r1));
+        __ add(i.TempRegister(0), i.InputRegister(0), i.InputRegister(1));
+        __ ldrexd(r0, r1, i.TempRegister(0));
+        __ dmb(ISH);
+      } else {
+        // A special case of this instruction: even though this is a pair load,
+        // we only need one of the two words. We emit a normal atomic load.
+        DCHECK_EQ(instr->OutputCount(), 1);
+        Register base = i.InputRegister(0);
+        Register offset = i.InputRegister(1);
+        DCHECK(instr->InputAt(2)->IsImmediate());
+        int32_t offset_imm = i.InputInt32(2);
+        if (offset_imm != 0) {
+          Register temp = i.TempRegister(0);
+          __ add(temp, offset, Operand(offset_imm));
+          offset = temp;
+        }
+        __ ldr(i.OutputRegister(), MemOperand(base, offset));
+        __ dmb(ISH);
+      }
       break;
     }
     case kArmWord32AtomicPairStore: {

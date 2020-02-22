@@ -15,7 +15,7 @@
   'elem': [FAIL],
   'data': [FAIL],
 
-  # TODO(mstarzinger): Roll newest tests into "js-types" repository.
+  # TODO(wasm): Roll newest tests into "js-types" repository.
   'proposals/js-types/exports': [FAIL],
   'proposals/js-types/globals': [FAIL],
   'proposals/js-types/linking': [FAIL],
@@ -24,6 +24,15 @@
   'proposals/multi-value/call': [FAIL],
   'proposals/multi-value/if': [FAIL],
   'proposals/multi-value/func': [FAIL],
+
+  # TODO(v8:10156): Spec tests are failing after rebasing the reference-types
+  # proposal on the bulk-operations proposal.
+  'proposals/reference-types/elem': [FAIL],
+  'proposals/reference-types/ref_func': [FAIL],
+  'proposals/reference-types/table_fill': [FAIL],
+  'proposals/reference-types/table_grow': [FAIL],
+  'proposals/reference-types/select': [FAIL],
+  'proposals/reference-types/br_table': [FAIL],
 }],  # ALWAYS
 
 ['arch == mipsel or arch == mips64el or arch == mips or arch == mips64', {
@@ -43,6 +52,18 @@
   'proposals/js-types/float_exprs': [SKIP],
   'proposals/js-types/float_misc': [SKIP],
   'proposals/js-types/conversions': [SKIP],
+  'proposals/JS-BigInt-integration/f32': [SKIP],
+  'proposals/JS-BigInt-integration/f64': [SKIP],
+  'proposals/bulk-memory-operations/f32': [SKIP],
+  'proposals/bulk-memory-operations/f64': [SKIP],
+  'proposals/multi-value/f32': [SKIP],
+  'proposals/multi-value/f64': [SKIP],
+  'proposals/reference-types/f32': [SKIP],
+  'proposals/reference-types/f64': [SKIP],
+  'proposals/JS-BigInt-integration/float_misc': [SKIP],
+  'proposals/bulk-memory-operations/float_misc': [SKIP],
+  'proposals/multi-value/float_misc': [SKIP],
+  'proposals/reference-types/float_misc': [SKIP],
 }],  # 'arch == mipsel or arch == mips64el or arch == mips or arch == mips64'
 
 ['(arch == mipsel or arch == mips64el or arch == mips or arch == mips64) and not simulator_run', {
@@ -57,11 +78,21 @@
   'f64': [SKIP],
   'proposals/js-types/f32': [SKIP],
   'proposals/js-types/f64': [SKIP],
+  'proposals/JS-BigInt-integration/f32': [SKIP],
+  'proposals/JS-BigInt-integration/f64': [SKIP],
+  'proposals/bulk-memory-operations/f32': [SKIP],
+  'proposals/bulk-memory-operations/f64': [SKIP],
+  'proposals/multi-value/f32': [SKIP],
+  'proposals/multi-value/f64': [SKIP],
+  'proposals/reference-types/f32': [SKIP],
+  'proposals/reference-types/f64': [SKIP],
   # This test fails because ppc float to double doesn't convert sNaN to qNaN.
   'conversions': [SKIP],
-  'proposals/reference-types/conversions':  [SKIP],
-  'proposals/bulk-memory-operations/conversions': [SKIP],
   'proposals/js-types/conversions': [SKIP],
+  'proposals/JS-BigInt-integration/conversions': [SKIP],
+  'proposals/bulk-memory-operations/conversions': [SKIP],
+  'proposals/multi-value/conversions': [SKIP],
+  'proposals/reference-types/conversions':  [SKIP],
 }],  # 'arch == ppc or arch == ppc64'
 
 ['arch == s390 or arch == s390x', {
@@ -70,6 +101,14 @@
   'f64': [SKIP],
   'proposals/js-types/f32': [SKIP],
   'proposals/js-types/f64': [SKIP],
+  'proposals/JS-BigInt-integration/f32': [SKIP],
+  'proposals/JS-BigInt-integration/f64': [SKIP],
+  'proposals/bulk-memory-operations/f32': [SKIP],
+  'proposals/bulk-memory-operations/f64': [SKIP],
+  'proposals/multi-value/f32': [SKIP],
+  'proposals/multi-value/f64': [SKIP],
+  'proposals/reference-types/f32': [SKIP],
+  'proposals/reference-types/f64': [SKIP],
 }],  # 'arch == s390 or arch == s390x'
 
 ##############################################################################

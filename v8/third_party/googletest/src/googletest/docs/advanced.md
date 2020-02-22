@@ -106,7 +106,7 @@ assertion* to get the function arguments printed for free:
 | Fatal assertion                   | Nonfatal assertion                | Verifies                    |
 | --------------------------------- | --------------------------------- | --------------------------- |
 | `ASSERT_PRED1(pred1, val1)`       | `EXPECT_PRED1(pred1, val1)`       | `pred1(val1)` is true       |
-| `ASSERT_PRED2(pred2, val1, val2)` | `EXPECT_PRED2(pred2, val1, val2)` | `pred1(val1, val2)` is true |
+| `ASSERT_PRED2(pred2, val1, val2)` | `EXPECT_PRED2(pred2, val1, val2)` | `pred2(val1, val2)` is true |
 | `...`                             | `...`                             | `...`                       |
 
 <!-- mdformat on-->
@@ -918,6 +918,8 @@ the `SCOPED_TRACE` macro or the `ScopedTrace` utility:
 
 ```c++
 SCOPED_TRACE(message);
+```
+```c++
 ScopedTrace trace("file_path", line_number, message);
 ```
 
@@ -1229,7 +1231,7 @@ environment, which knows how to set-up and tear-down:
 ```c++
 class Environment : public ::testing::Environment {
  public:
-  virtual ~Environment() {}
+  ~Environment() override {}
 
   // Override this to define how to set up the environment.
   void SetUp() override {}
@@ -1803,7 +1805,7 @@ For technical reasons, there are some caveats:
 ## Registering tests programmatically
 
 The `TEST` macros handle the vast majority of all use cases, but there are few
-were runtime registration logic is required. For those cases, the framework
+where runtime registration logic is required. For those cases, the framework
 provides the `::testing::RegisterTest` that allows callers to register arbitrary
 tests dynamically.
 

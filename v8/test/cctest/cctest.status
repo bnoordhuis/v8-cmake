@@ -202,7 +202,6 @@
 ['is_full_debug', {
   # Tests too slow in non-optimized debug mode.
   'test-api/InternalFieldsSubclassing': [SKIP],
-  'test-cpu-profiler/Inlining2': [SKIP],
   'test-heap/TestInternalWeakLists': [SKIP],
 }],  # 'is_full_debug'
 
@@ -231,8 +230,9 @@
   # BUG(5920): Flaky crash.
   'test-serialize/PartialSerializerContext': [PASS, ['arch == x64 and mode == debug', SKIP]],
 
-  # Test is just big and quite slow.
-  'test-cpu-profiler/Inlining2': [PASS, SLOW],
+  # BUG(10107): Failing flakily
+  'test-cpu-profiler/Inlining2': ['arch == ia32 and mode == debug', SKIP],
+  'test-cpu-profiler/CrossScriptInliningCallerLineNumbers2': ['arch == ia32 and mode == debug', SKIP],
 }],  # 'system == windows'
 
 ##############################################################################
@@ -321,6 +321,7 @@
   'test-run-wasm-simd/RunWasm_ReductionTest4_compiled': [SKIP],
   'test-run-wasm-simd/RunWasm_ReductionTest8_compiled': [SKIP],
   'test-run-wasm-simd/RunWasm_ReductionTest16_compiled': [SKIP],
+  'test-run-wasm-simd-liftoff/*': [SKIP],
 }],  # '(arch == mipsel or arch == mips64el or arch == mips or arch == mips64) and not simd_mips'
 
 ##############################################################################
@@ -328,12 +329,6 @@
   # TODO(mips-team): Implement I64Atomic operations on MIPS
   'test-run-wasm-atomics64/*': [SKIP],
 }],  # 'arch == mipsel or arch == mips64el or arch == mips or arch == mips64'
-
-##############################################################################
-['arch == mips64el or arch == mipsel', {
-  # TODO(mips-team): support concurrent patching of jump table.
-  'test-jump-table-assembler/*': [SKIP],
-}],  # 'arch == mips64el or arch == mipsel'
 
 ##############################################################################
 ['mips_arch_variant == r6', {
@@ -391,6 +386,9 @@
   # Liftoff is not currently supported on ppc and s390
   'test-liftoff-*': [SKIP],
 
+  # SIMD not fully implemented yet
+  'test-run-wasm-simd-liftoff/*': [SKIP],
+
 }],  # 'arch == ppc or arch == ppc64 or arch == s390 or arch == s390x'
 
 ['arch == ppc64', {
@@ -436,9 +434,13 @@
 }],  # variant == no_wasm_traps
 
 ##############################################################################
-# The stack unwinder API is only supported on x64 and arm64.
+# The stack unwinder API is only supported on x64, arm64 and arm.
 ['arch != x64 and arch != arm64', {
   'test-unwinder/*': [SKIP]
+}],
+
+['arch != x64 and arch != arm64 and arch != arm', {
+  'test-unwinder-code-pages/*': [SKIP]
 }],
 
 ##############################################################################
@@ -453,6 +455,7 @@
   'test-api-wasm/WasmStreaming*': [SKIP],
   'test-backing-store/Run_WasmModule_Buffer_Externalized_Regression_UseAfterFree': [SKIP],
   'test-c-wasm-entry/*': [SKIP],
+  'test-compilation-cache/TestAsyncCache': [SKIP],
   'test-jump-table-assembler/*': [SKIP],
   'test-grow-memory/*': [SKIP],
   'test-run-wasm-64/*': [SKIP],
@@ -466,6 +469,7 @@
   'test-run-wasm-js/*': [SKIP],
   'test-run-wasm-module/*': [SKIP],
   'test-run-wasm-sign-extension/*': [SKIP],
+  'test-run-wasm-simd-liftoff/*': [SKIP],
   'test-run-wasm-simd/*': [SKIP],
   'test-streaming-compilation/*': [SKIP],
   'test-wasm-breakpoints/*': [SKIP],
@@ -486,6 +490,7 @@
   'test-branch-combine/*': [SKIP],
   'test-code-assembler/*': [SKIP],
   'test-code-generator/*': [SKIP],
+  'test-code-pages/*': [SKIP],
   'test-code-stub-assembler/*': [SKIP],
   'test-js-context-specialization/*': [SKIP],
   'test-multiple-return/*': [SKIP],

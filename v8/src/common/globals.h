@@ -757,7 +757,12 @@ inline std::ostream& operator<<(std::ostream& os, AllocationType kind) {
 }
 
 // TODO(ishell): review and rename kWordAligned to kTaggedAligned.
-enum AllocationAlignment { kWordAligned, kDoubleAligned, kDoubleUnaligned };
+enum AllocationAlignment {
+  kWordAligned,
+  kDoubleAligned,
+  kDoubleUnaligned,
+  kCodeAligned
+};
 
 enum class AccessMode { ATOMIC, NON_ATOMIC };
 
@@ -790,6 +795,7 @@ enum VisitMode {
   VISIT_ALL_IN_SCAVENGE,
   VISIT_ALL_IN_SWEEP_NEWSPACE,
   VISIT_ONLY_STRONG,
+  VISIT_ONLY_STRONG_IGNORE_STACK,
   VISIT_FOR_SERIALIZATION,
 };
 
@@ -1628,6 +1634,11 @@ V8_INLINE bool operator!(ExceptionStatus status) {
 }
 
 enum class TraceRetainingPathMode { kEnabled, kDisabled };
+
+// Used in the ScopeInfo flags fields for the function name variable for named
+// function expressions, and for the receiver. Must be declared here so that it
+// can be used in Torque.
+enum class VariableAllocationInfo { NONE, STACK, CONTEXT, UNUSED };
 
 }  // namespace internal
 }  // namespace v8

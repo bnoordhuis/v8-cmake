@@ -609,10 +609,6 @@ void Generate_JSEntryVariant(MacroAssembler* masm, StackFrame::Type type,
   {
     NoRootArrayScope no_root_array(masm);
 
-    // Enable instruction instrumentation. This only works on the simulator, and
-    // will have no effect on the model or real hardware.
-    __ EnableInstrumentation();
-
 #if defined(V8_OS_WIN)
     // Windows ARM64 relies on a frame pointer (fp/x29 which are aliases to each
     // other) chain to do stack unwinding, but JSEntry breaks that by setting fp
@@ -1481,8 +1477,8 @@ static void Generate_InterpreterEnterBytecode(MacroAssembler* masm) {
                        INTERPRETER_DATA_TYPE);
   __ B(ne, &builtin_trampoline);
 
-  __ Ldr(x1,
-         FieldMemOperand(x1, InterpreterData::kInterpreterTrampolineOffset));
+  __ LoadTaggedPointerField(
+      x1, FieldMemOperand(x1, InterpreterData::kInterpreterTrampolineOffset));
   __ Add(x1, x1, Operand(Code::kHeaderSize - kHeapObjectTag));
   __ B(&trampoline_loaded);
 
@@ -2170,7 +2166,7 @@ void Builtins::Generate_CallOrConstructForwardVarargs(MacroAssembler* masm,
     __ JumpIfSmi(x3, &new_target_not_constructor);
     __ LoadTaggedPointerField(x5, FieldMemOperand(x3, HeapObject::kMapOffset));
     __ Ldrb(x5, FieldMemOperand(x5, Map::kBitFieldOffset));
-    __ TestAndBranchIfAnySet(x5, Map::IsConstructorBit::kMask,
+    __ TestAndBranchIfAnySet(x5, Map::Bits1::IsConstructorBit::kMask,
                              &new_target_constructor);
     __ Bind(&new_target_not_constructor);
     {
@@ -2271,14 +2267,6 @@ void Builtins::Generate_CallFunction(MacroAssembler* masm,
                            SharedFunctionInfo::IsNativeBit::kMask |
                                SharedFunctionInfo::IsStrictBit::kMask,
                            &done_convert);
-
-  // Check if the window is marked as detached.
-  Label detached_window, after_detached_window;
-  __ LoadNativeContextSlot(Context::DETACHED_WINDOW_REASON_INDEX, x3);
-  __ CmpTagged(x3, Immediate(Smi::zero()));
-  __ B(ne, &detached_window);
-  __ bind(&after_detached_window);
-
   {
     // ----------- S t a t e -------------
     //  -- x0 : the number of arguments (not including the receiver)
@@ -2349,15 +2337,6 @@ void Builtins::Generate_CallFunction(MacroAssembler* masm,
     __ PushArgument(x1);
     __ CallRuntime(Runtime::kThrowConstructorNonCallableError);
   }
-
-  __ bind(&detached_window);
-  {
-    FrameScope frame(masm, StackFrame::INTERNAL);
-    __ PushCallerSaved(kDontSaveFPRegs, x3);
-    __ CallRuntime(Runtime::kReportDetachedWindowAccess);
-    __ PopCallerSaved(kDontSaveFPRegs, x3);
-  }
-  __ jmp(&after_detached_window);
 }
 
 namespace {
@@ -2527,7 +2506,8 @@ void Builtins::Generate_Call(MacroAssembler* masm, ConvertReceiverMode mode) {
 
   // Check if target has a [[Call]] internal method.
   __ Ldrb(x4, FieldMemOperand(x4, Map::kBitFieldOffset));
-  __ TestAndBranchIfAllClear(x4, Map::IsCallableBit::kMask, &non_callable);
+  __ TestAndBranchIfAllClear(x4, Map::Bits1::IsCallableBit::kMask,
+                             &non_callable);
 
   // Check if target is a proxy and call CallProxy external builtin
   __ Cmp(x5, JS_PROXY_TYPE);
@@ -2628,7 +2608,7 @@ void Builtins::Generate_Construct(MacroAssembler* masm) {
   // Check if target has a [[Construct]] internal method.
   __ LoadTaggedPointerField(x4, FieldMemOperand(x1, HeapObject::kMapOffset));
   __ Ldrb(x2, FieldMemOperand(x4, Map::kBitFieldOffset));
-  __ TestAndBranchIfAllClear(x2, Map::IsConstructorBit::kMask,
+  __ TestAndBranchIfAllClear(x2, Map::Bits1::IsConstructorBit::kMask,
                              &non_constructor);
 
   // Dispatch based on instance type.

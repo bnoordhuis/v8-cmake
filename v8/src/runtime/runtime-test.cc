@@ -77,7 +77,7 @@ bool IsWasmInstantiateAllowed(v8::Isolate* isolate,
   DCHECK_GT(GetPerIsolateWasmControls()->count(isolate), 0);
   const WasmCompileControls& ctrls = GetPerIsolateWasmControls()->at(isolate);
   if (is_async && ctrls.AllowAnySizeForAsync) return true;
-  if (!module_or_bytes->IsWebAssemblyCompiledModule()) {
+  if (!module_or_bytes->IsWasmModuleObject()) {
     return IsWasmCompileAllowed(isolate, module_or_bytes, is_async);
   }
   v8::Local<v8::WasmModuleObject> module =
@@ -1013,18 +1013,25 @@ RUNTIME_FUNCTION(Runtime_IsAsmWasmCode) {
 }
 
 namespace {
-bool DisallowCodegenFromStringsCallback(v8::Local<v8::Context> context,
-                                        v8::Local<v8::String> source) {
+
+v8::ModifyCodeGenerationFromStringsResult DisallowCodegenFromStringsCallback(
+    v8::Local<v8::Context> context, v8::Local<v8::Value> source) {
+  return {false, {}};
+}
+
+bool DisallowWasmCodegenFromStringsCallback(v8::Local<v8::Context> context,
+                                            v8::Local<v8::String> source) {
   return false;
 }
-}
+
+}  // namespace
 
 RUNTIME_FUNCTION(Runtime_DisallowCodegenFromStrings) {
   SealHandleScope shs(isolate);
   DCHECK_EQ(1, args.length());
   CONVERT_BOOLEAN_ARG_CHECKED(flag, 0);
   v8::Isolate* v8_isolate = reinterpret_cast<v8::Isolate*>(isolate);
-  v8_isolate->SetAllowCodeGenerationFromStringsCallback(
+  v8_isolate->SetModifyCodeGenerationFromStringsCallback(
       flag ? DisallowCodegenFromStringsCallback : nullptr);
   return ReadOnlyRoots(isolate).undefined_value();
 }
@@ -1035,7 +1042,7 @@ RUNTIME_FUNCTION(Runtime_DisallowWasmCodegen) {
   CONVERT_BOOLEAN_ARG_CHECKED(flag, 0);
   v8::Isolate* v8_isolate = reinterpret_cast<v8::Isolate*>(isolate);
   v8_isolate->SetAllowWasmCodeGenerationCallback(
-      flag ? DisallowCodegenFromStringsCallback : nullptr);
+      flag ? DisallowWasmCodegenFromStringsCallback : nullptr);
   return ReadOnlyRoots(isolate).undefined_value();
 }
 
@@ -1115,8 +1122,13 @@ RUNTIME_FUNCTION(Runtime_RegexpHasBytecode) {
   DCHECK_EQ(2, args.length());
   CONVERT_ARG_CHECKED(JSRegExp, regexp, 0);
   CONVERT_BOOLEAN_ARG_CHECKED(is_latin1, 1);
-  bool is_irregexp_bytecode = regexp.Bytecode(is_latin1).IsByteArray();
-  return isolate->heap()->ToBoolean(is_irregexp_bytecode);
+  bool result;
+  if (regexp.TypeTag() == JSRegExp::IRREGEXP) {
+    result = regexp.Bytecode(is_latin1).IsByteArray();
+  } else {
+    result = false;
+  }
+  return isolate->heap()->ToBoolean(result);
 }
 
 RUNTIME_FUNCTION(Runtime_RegexpHasNativeCode) {
@@ -1124,8 +1136,13 @@ RUNTIME_FUNCTION(Runtime_RegexpHasNativeCode) {
   DCHECK_EQ(2, args.length());
   CONVERT_ARG_CHECKED(JSRegExp, regexp, 0);
   CONVERT_BOOLEAN_ARG_CHECKED(is_latin1, 1);
-  bool is_irregexp_native_code = regexp.Code(is_latin1).IsCode();
-  return isolate->heap()->ToBoolean(is_irregexp_native_code);
+  bool result;
+  if (regexp.TypeTag() == JSRegExp::IRREGEXP) {
+    result = regexp.Code(is_latin1).IsCode();
+  } else {
+    result = false;
+  }
+  return isolate->heap()->ToBoolean(result);
 }
 
 #define ELEMENTS_KIND_CHECK_RUNTIME_FUNCTION(Name)      \
@@ -1235,7 +1252,7 @@ RUNTIME_FUNCTION(Runtime_DeserializeWasmModule) {
   // Note that {wasm::DeserializeNativeModule} will allocate. We assume the
   // JSArrayBuffer backing store doesn't get relocated.
   MaybeHandle<WasmModuleObject> maybe_module_object =
-      wasm::DeserializeNativeModule(isolate, buffer_vec, wire_bytes_vec);
+      wasm::DeserializeNativeModule(isolate, buffer_vec, wire_bytes_vec, {});
   Handle<WasmModuleObject> module_object;
   if (!maybe_module_object.ToHandle(&module_object)) {
     return ReadOnlyRoots(isolate).undefined_value();
@@ -1377,6 +1394,26 @@ RUNTIME_FUNCTION(Runtime_WasmTierUpFunction) {
   return ReadOnlyRoots(isolate).undefined_value();
 }
 
+RUNTIME_FUNCTION(Runtime_WasmTierDownModule) {
+  HandleScope scope(isolate);
+  DCHECK_EQ(1, args.length());
+  CONVERT_ARG_HANDLE_CHECKED(WasmInstanceObject, instance, 0);
+  auto* native_module = instance->module_object().native_module();
+  native_module->TierDown(isolate);
+  CHECK(!native_module->compilation_state()->failed());
+  return ReadOnlyRoots(isolate).undefined_value();
+}
+
+RUNTIME_FUNCTION(Runtime_WasmTierUpModule) {
+  HandleScope scope(isolate);
+  DCHECK_EQ(1, args.length());
+  CONVERT_ARG_HANDLE_CHECKED(WasmInstanceObject, instance, 0);
+  auto* native_module = instance->module_object().native_module();
+  native_module->TierUp(isolate);
+  CHECK(!native_module->compilation_state()->failed());
+  return ReadOnlyRoots(isolate).undefined_value();
+}
+
 RUNTIME_FUNCTION(Runtime_IsLiftoffFunction) {
   HandleScope scope(isolate);
   DCHECK_EQ(1, args.length());
@@ -1429,28 +1466,32 @@ RUNTIME_FUNCTION(Runtime_EnableCodeLoggingForTesting) {
   // {true} on {is_listening_to_code_events()}. Feel free to add assertions to
   // any method to further test the code logging callbacks.
   class NoopListener final : public CodeEventListener {
-    void CodeCreateEvent(LogEventsAndTags tag, AbstractCode code,
-                         const char* comment) final {}
-    void CodeCreateEvent(LogEventsAndTags tag, AbstractCode code,
-                         Name name) final {}
-    void CodeCreateEvent(LogEventsAndTags tag, AbstractCode code,
-                         SharedFunctionInfo shared, Name source) final {}
-    void CodeCreateEvent(LogEventsAndTags tag, AbstractCode code,
-                         SharedFunctionInfo shared, Name source, int line,
-                         int column) final {}
+    void CodeCreateEvent(LogEventsAndTags tag, Handle<AbstractCode> code,
+                         const char* name) final {}
+    void CodeCreateEvent(LogEventsAndTags tag, Handle<AbstractCode> code,
+                         Handle<Name> name) final {}
+    void CodeCreateEvent(LogEventsAndTags tag, Handle<AbstractCode> code,
+                         Handle<SharedFunctionInfo> shared,
+                         Handle<Name> script_name) final {}
+    void CodeCreateEvent(LogEventsAndTags tag, Handle<AbstractCode> code,
+                         Handle<SharedFunctionInfo> shared,
+                         Handle<Name> script_name, int line, int column) final {
+    }
     void CodeCreateEvent(LogEventsAndTags tag, const wasm::WasmCode* code,
                          wasm::WasmName name) final {}
-    void CallbackEvent(Name name, Address entry_point) final {}
-    void GetterCallbackEvent(Name name, Address entry_point) final {}
-    void SetterCallbackEvent(Name name, Address entry_point) final {}
-    void RegExpCodeCreateEvent(AbstractCode code, String source) final {}
+
+    void CallbackEvent(Handle<Name> name, Address entry_point) final {}
+    void GetterCallbackEvent(Handle<Name> name, Address entry_point) final {}
+    void SetterCallbackEvent(Handle<Name> name, Address entry_point) final {}
+    void RegExpCodeCreateEvent(Handle<AbstractCode> code,
+                               Handle<String> source) final {}
     void CodeMoveEvent(AbstractCode from, AbstractCode to) final {}
     void SharedFunctionInfoMoveEvent(Address from, Address to) final {}
     void NativeContextMoveEvent(Address from, Address to) final {}
     void CodeMovingGCEvent() final {}
-    void CodeDisableOptEvent(AbstractCode code,
-                             SharedFunctionInfo shared) final {}
-    void CodeDeoptEvent(Code code, DeoptimizeKind kind, Address pc,
+    void CodeDisableOptEvent(Handle<AbstractCode> code,
+                             Handle<SharedFunctionInfo> shared) final {}
+    void CodeDeoptEvent(Handle<Code> code, DeoptimizeKind kind, Address pc,
                         int fp_to_sp_delta) final {}
 
     bool is_listening_to_code_events() final { return true; }

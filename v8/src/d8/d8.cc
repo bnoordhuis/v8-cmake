@@ -21,6 +21,7 @@
 #include "include/libplatform/libplatform.h"
 #include "include/libplatform/v8-tracing.h"
 #include "include/v8-inspector.h"
+#include "include/v8-profiler.h"
 #include "src/api/api-inl.h"
 #include "src/base/cpu.h"
 #include "src/base/logging.h"
@@ -43,6 +44,7 @@
 #include "src/parsing/parse-info.h"
 #include "src/parsing/parsing.h"
 #include "src/parsing/scanner-character-streams.h"
+#include "src/profiler/profile-generator.h"
 #include "src/sanitizer/msan.h"
 #include "src/trap-handler/trap-handler.h"
 #include "src/utils/ostreams.h"
@@ -56,6 +58,10 @@
 #ifdef V8_INTL_SUPPORT
 #include "unicode/locid.h"
 #endif  // V8_INTL_SUPPORT
+
+#ifdef V8_OS_LINUX
+#include <sys/mman.h>  // For MultiMappedAllocator.
+#endif
 
 #if !defined(_WIN32) && !defined(_WIN64)
 #include <unistd.h>  // NOLINT
@@ -201,6 +207,101 @@ class MockArrayBufferAllocatiorWithLimit : public MockArrayBufferAllocator {
  private:
   std::atomic<size_t> space_left_;
 };
+
+#ifdef V8_OS_LINUX
+
+// This is a mock allocator variant that provides a huge virtual allocation
+// backed by a small real allocation that is repeatedly mapped. If you create an
+// array on memory allocated by this allocator, you will observe that elements
+// will alias each other as if their indices were modulo-divided by the real
+// allocation length.
+// The purpose is to allow stability-testing of huge (typed) arrays without
+// actually consuming huge amounts of physical memory.
+// This is currently only available on Linux because it relies on {mremap}.
+class MultiMappedAllocator : public ArrayBufferAllocatorBase {
+ protected:
+  void* Allocate(size_t length) override {
+    if (length < kChunkSize) {
+      return ArrayBufferAllocatorBase::Allocate(length);
+    }
+    // We use mmap, which initializes pages to zero anyway.
+    return AllocateUninitialized(length);
+  }
+
+  void* AllocateUninitialized(size_t length) override {
+    if (length < kChunkSize) {
+      return ArrayBufferAllocatorBase::AllocateUninitialized(length);
+    }
+    size_t rounded_length = RoundUp(length, kChunkSize);
+    int prot = PROT_READ | PROT_WRITE;
+    // We have to specify MAP_SHARED to make {mremap} below do what we want.
+    int flags = MAP_SHARED | MAP_ANONYMOUS;
+    void* real_alloc = mmap(nullptr, kChunkSize, prot, flags, -1, 0);
+    if (reinterpret_cast<intptr_t>(real_alloc) == -1) {
+      // If we ran into some limit (physical or virtual memory, or number
+      // of mappings, etc), return {nullptr}, which callers can handle.
+      if (errno == ENOMEM) {
+        return nullptr;
+      }
+      // Other errors may be bugs which we want to learn about.
+      FATAL("mmap (real) failed with error %d: %s", errno, strerror(errno));
+    }
+    void* virtual_alloc =
+        mmap(nullptr, rounded_length, prot, flags | MAP_NORESERVE, -1, 0);
+    if (reinterpret_cast<intptr_t>(virtual_alloc) == -1) {
+      if (errno == ENOMEM) {
+        // Undo earlier, successful mappings.
+        munmap(real_alloc, kChunkSize);
+        return nullptr;
+      }
+      FATAL("mmap (virtual) failed with error %d: %s", errno, strerror(errno));
+    }
+    i::Address virtual_base = reinterpret_cast<i::Address>(virtual_alloc);
+    i::Address virtual_end = virtual_base + rounded_length;
+    for (i::Address to_map = virtual_base; to_map < virtual_end;
+         to_map += kChunkSize) {
+      // Specifying 0 as the "old size" causes the existing map entry to not
+      // get deleted, which is important so that we can remap it again in the
+      // next iteration of this loop.
+      void* result =
+          mremap(real_alloc, 0, kChunkSize, MREMAP_MAYMOVE | MREMAP_FIXED,
+                 reinterpret_cast<void*>(to_map));
+      if (reinterpret_cast<intptr_t>(result) == -1) {
+        if (errno == ENOMEM) {
+          // Undo earlier, successful mappings.
+          munmap(real_alloc, kChunkSize);
+          munmap(virtual_alloc, (to_map - virtual_base));
+          return nullptr;
+        }
+        FATAL("mremap failed with error %d: %s", errno, strerror(errno));
+      }
+    }
+    base::MutexGuard lock_guard(&regions_mutex_);
+    regions_[virtual_alloc] = real_alloc;
+    return virtual_alloc;
+  }
+
+  void Free(void* data, size_t length) override {
+    if (length < kChunkSize) {
+      return ArrayBufferAllocatorBase::Free(data, length);
+    }
+    base::MutexGuard lock_guard(&regions_mutex_);
+    void* real_alloc = regions_[data];
+    munmap(real_alloc, kChunkSize);
+    size_t rounded_length = RoundUp(length, kChunkSize);
+    munmap(data, rounded_length);
+    regions_.erase(data);
+  }
+
+ private:
+  // Aiming for a "Huge Page" (2M on Linux x64) to go easy on the TLB.
+  static constexpr size_t kChunkSize = 2 * 1024 * 1024;
+
+  std::unordered_map<void*, void*> regions_;
+  base::Mutex regions_mutex_;
+};
+
+#endif  // V8_OS_LINUX
 
 v8::Platform* g_default_platform;
 std::unique_ptr<v8::Platform> g_platform;
@@ -448,10 +549,10 @@ bool Shell::ExecuteString(Isolate* isolate, Local<String> source,
     parse_info.set_allow_lazy_parsing();
     parse_info.set_language_mode(
         i::construct_language_mode(i::FLAG_use_strict));
-    parse_info.set_script(
-        parse_info.CreateScript(i_isolate, str, options.compile_options));
 
-    if (!i::parsing::ParseProgram(&parse_info, i_isolate)) {
+    i::Handle<i::Script> script =
+        parse_info.CreateScript(i_isolate, str, options.compile_options);
+    if (!i::parsing::ParseProgram(&parse_info, script, i_isolate)) {
       fprintf(stderr, "Failed parsing\n");
       return false;
     }
@@ -460,7 +561,7 @@ bool Shell::ExecuteString(Isolate* isolate, Local<String> source,
 
   HandleScope handle_scope(isolate);
   TryCatch try_catch(isolate);
-  try_catch.SetVerbose(true);
+  try_catch.SetVerbose(report_exceptions == kReportExceptions);
 
   MaybeLocal<Value> maybe_result;
   bool success = true;
@@ -511,8 +612,6 @@ bool Shell::ExecuteString(Isolate* isolate, Local<String> source,
 
     Local<Script> script;
     if (!maybe_script.ToLocal(&script)) {
-      // Print errors that happened during compilation.
-      if (report_exceptions) ReportException(isolate, &try_catch);
       return false;
     }
 
@@ -539,11 +638,10 @@ bool Shell::ExecuteString(Isolate* isolate, Local<String> source,
   Local<Value> result;
   if (!maybe_result.ToLocal(&result)) {
     DCHECK(try_catch.HasCaught());
-    // Print errors that happened during execution.
-    if (report_exceptions) ReportException(isolate, &try_catch);
     return false;
   }
-  DCHECK(!try_catch.HasCaught());
+  // It's possible that a FinalizationGroup cleanup task threw an error.
+  if (try_catch.HasCaught()) success = false;
   if (print_result) {
     if (options.test_shell) {
       if (!result->IsUndefined()) {
@@ -935,8 +1033,11 @@ bool Shell::ExecuteModule(Isolate* isolate, const char* file_name) {
 
   std::string absolute_path = NormalizePath(file_name, GetWorkingDirectory());
 
+  // Use a non-verbose TryCatch and report exceptions manually using
+  // Shell::ReportException, because some errors (such as file errors) are
+  // thrown without entering JS and thus do not trigger
+  // isolate->ReportPendingMessages().
   TryCatch try_catch(isolate);
-  try_catch.SetVerbose(true);
 
   Local<Module> root_module;
 
@@ -956,7 +1057,6 @@ bool Shell::ExecuteModule(Isolate* isolate, const char* file_name) {
   Local<Value> result;
   if (!maybe_result.ToLocal(&result)) {
     DCHECK(try_catch.HasCaught());
-    // Print errors that happened during execution.
     ReportException(isolate, &try_catch);
     return false;
   }
@@ -1106,9 +1206,13 @@ void Shell::PerformanceMeasureMemory(
       mode = v8::MeasureMemoryMode::kDetailed;
     }
   }
-  v8::MaybeLocal<v8::Promise> result =
-      args.GetIsolate()->MeasureMemory(context, mode);
-  args.GetReturnValue().Set(result.FromMaybe(v8::Local<v8::Promise>()));
+  Local<v8::Promise::Resolver> promise_resolver =
+      v8::Promise::Resolver::New(context).ToLocalChecked();
+  args.GetIsolate()->MeasureMemory(
+      v8::MeasureMemoryDelegate::Default(isolate, context, promise_resolver,
+                                         mode),
+      v8::MeasureMemoryExecution::kEager);
+  args.GetReturnValue().Set(promise_resolver->GetPromise());
 }
 
 // Realm.current() returns the index of the currently active realm.
@@ -1652,7 +1756,8 @@ void Shell::Version(const v8::FunctionCallbackInfo<v8::Value>& args) {
                                 .ToLocalChecked());
 }
 
-void Shell::ReportException(Isolate* isolate, v8::TryCatch* try_catch) {
+void Shell::ReportException(Isolate* isolate, Local<v8::Message> message,
+                            Local<v8::Value> exception_obj) {
   HandleScope handle_scope(isolate);
   Local<Context> context = isolate->GetCurrentContext();
   bool enter_context = context.IsEmpty();
@@ -1665,9 +1770,8 @@ void Shell::ReportException(Isolate* isolate, v8::TryCatch* try_catch) {
     return *value ? *value : "<string conversion failed>";
   };
 
-  v8::String::Utf8Value exception(isolate, try_catch->Exception());
+  v8::String::Utf8Value exception(isolate, exception_obj);
   const char* exception_string = ToCString(exception);
-  Local<Message> message = try_catch->Message();
   if (message.IsEmpty()) {
     // V8 didn't provide any extra information about this error; just
     // print the exception.
@@ -1704,7 +1808,8 @@ void Shell::ReportException(Isolate* isolate, v8::TryCatch* try_catch) {
     }
   }
   Local<Value> stack_trace_string;
-  if (try_catch->StackTrace(context).ToLocal(&stack_trace_string) &&
+  if (v8::TryCatch::StackTrace(context, exception_obj)
+          .ToLocal(&stack_trace_string) &&
       stack_trace_string->IsString()) {
     v8::String::Utf8Value stack_trace(isolate,
                                       Local<String>::Cast(stack_trace_string));
@@ -1712,6 +1817,10 @@ void Shell::ReportException(Isolate* isolate, v8::TryCatch* try_catch) {
   }
   printf("\n");
   if (enter_context) context->Exit();
+}
+
+void Shell::ReportException(v8::Isolate* isolate, v8::TryCatch* try_catch) {
+  ReportException(isolate, try_catch->Message(), try_catch->Exception());
 }
 
 int32_t* Counter::Bind(const char* name, bool is_histogram) {
@@ -2015,12 +2124,7 @@ Local<ObjectTemplate> Shell::CreateGlobalTemplate(Isolate* isolate) {
   return global_template;
 }
 
-static void PrintNonErrorsMessageCallback(Local<Message> message,
-                                          Local<Value> error) {
-  // Nothing to do here for errors, exceptions thrown up to the shell will be
-  // reported
-  // separately by {Shell::ReportException} after they are caught.
-  // Do print other kinds of messages.
+static void PrintMessageCallback(Local<Message> message, Local<Value> error) {
   switch (message->ErrorLevel()) {
     case v8::Isolate::kMessageWarning:
     case v8::Isolate::kMessageLog:
@@ -2030,7 +2134,7 @@ static void PrintNonErrorsMessageCallback(Local<Message> message,
     }
 
     case v8::Isolate::kMessageError: {
-      // Ignore errors, printed elsewhere.
+      Shell::ReportException(message->GetIsolate(), message, error);
       return;
     }
 
@@ -2061,7 +2165,7 @@ void Shell::Initialize(Isolate* isolate) {
   }
   // Disable default message reporting.
   isolate->AddMessageListenerWithErrorLevel(
-      PrintNonErrorsMessageCallback,
+      PrintMessageCallback,
       v8::Isolate::kMessageError | v8::Isolate::kMessageWarning |
           v8::Isolate::kMessageInfo | v8::Isolate::kMessageDebug |
           v8::Isolate::kMessageLog);
@@ -2492,13 +2596,13 @@ class InspectorClient : public v8_inspector::V8InspectorClient {
     if (!callback->IsFunction()) return;
 
     v8::TryCatch try_catch(isolate_);
+    try_catch.SetVerbose(true);
     is_paused = true;
 
     while (is_paused) {
       USE(Local<Function>::Cast(callback)->Call(context, Undefined(isolate_), 0,
                                                 {}));
       if (try_catch.HasCaught()) {
-        Shell::ReportException(isolate_, &try_catch);
         is_paused = false;
       }
     }
@@ -2849,6 +2953,7 @@ void Worker::ExecuteInThread() {
                 break;
               }
               v8::TryCatch try_catch(isolate);
+              try_catch.SetVerbose(true);
               HandleScope scope(isolate);
               Local<Value> value;
               if (Shell::DeserializeValue(isolate, std::move(data))
@@ -2857,9 +2962,6 @@ void Worker::ExecuteInThread() {
                 MaybeLocal<Value> result =
                     onmessage_fun->Call(context, global, 1, argv);
                 USE(result);
-              }
-              if (try_catch.HasCaught()) {
-                Shell::ReportException(isolate, &try_catch);
               }
             }
           }
@@ -3038,6 +3140,13 @@ bool Shell::SetOptions(int argc, char* argv[]) {
       // Delay execution of tasks by 0-100ms randomly (based on --random-seed).
       options.stress_delay_tasks = true;
       argv[i] = nullptr;
+    } else if (strcmp(argv[i], "--cpu-profiler") == 0) {
+      options.cpu_profiler = true;
+      argv[i] = nullptr;
+    } else if (strcmp(argv[i], "--cpu-profiler-print") == 0) {
+      options.cpu_profiler = true;
+      options.cpu_profiler_print = true;
+      argv[i] = nullptr;
     }
   }
 
@@ -3045,6 +3154,9 @@ bool Shell::SetOptions(int argc, char* argv[]) {
   options.mock_arraybuffer_allocator = i::FLAG_mock_arraybuffer_allocator;
   options.mock_arraybuffer_allocator_limit =
       i::FLAG_mock_arraybuffer_allocator_limit;
+#if V8_OS_LINUX
+  options.multi_mapped_mock_allocator = i::FLAG_multi_mapped_mock_allocator;
+#endif
 
   // Set up isolated source groups.
   options.isolate_sources = new SourceGroup[options.num_isolates];
@@ -3154,7 +3266,6 @@ bool RunSetTimeoutCallback(Isolate* isolate, bool* did_run) {
   try_catch.SetVerbose(true);
   Context::Scope context_scope(context);
   if (callback->Call(context, Undefined(isolate), 0, nullptr).IsEmpty()) {
-    Shell::ReportException(isolate, &try_catch);
     return false;
   }
   *did_run = true;
@@ -3171,7 +3282,6 @@ bool RunCleanupFinalizationGroupCallback(Isolate* isolate, bool* did_run) {
     TryCatch try_catch(isolate);
     try_catch.SetVerbose(true);
     if (FinalizationGroup::Cleanup(fg).IsNothing()) {
-      Shell::ReportException(isolate, &try_catch);
       return false;
     }
   }
@@ -3618,12 +3728,19 @@ int Shell::Main(int argc, char* argv[]) {
       memory_limit >= options.mock_arraybuffer_allocator_limit
           ? memory_limit
           : std::numeric_limits<size_t>::max());
+#if V8_OS_LINUX
+  MultiMappedAllocator multi_mapped_mock_allocator;
+#endif  // V8_OS_LINUX
   if (options.mock_arraybuffer_allocator) {
     if (memory_limit) {
       Shell::array_buffer_allocator = &mock_arraybuffer_allocator_with_limit;
     } else {
       Shell::array_buffer_allocator = &mock_arraybuffer_allocator;
     }
+#if V8_OS_LINUX
+  } else if (options.multi_mapped_mock_allocator) {
+    Shell::array_buffer_allocator = &multi_mapped_mock_allocator;
+#endif  // V8_OS_LINUX
   } else {
     Shell::array_buffer_allocator = &shell_array_buffer_allocator;
   }
@@ -3678,6 +3795,13 @@ int Shell::Main(int argc, char* argv[]) {
             platform::tracing::TraceConfig::CreateDefaultTraceConfig();
       }
       tracing_controller->StartTracing(trace_config);
+    }
+
+    CpuProfiler* cpu_profiler;
+    if (options.cpu_profiler) {
+      cpu_profiler = CpuProfiler::New(isolate);
+      CpuProfilingOptions profile_options;
+      cpu_profiler->StartProfiling(String::Empty(isolate), profile_options);
     }
 
     if (options.stress_opt) {
@@ -3750,6 +3874,18 @@ int Shell::Main(int argc, char* argv[]) {
     if (i::FLAG_trace_ignition_dispatches &&
         i::FLAG_trace_ignition_dispatches_output_file != nullptr) {
       WriteIgnitionDispatchCountersFile(isolate);
+    }
+
+    if (options.cpu_profiler) {
+      CpuProfile* profile = cpu_profiler->StopProfiling(String::Empty(isolate));
+      if (options.cpu_profiler_print) {
+        const internal::ProfileNode* root =
+            reinterpret_cast<const internal::ProfileNode*>(
+                profile->GetTopDownRoot());
+        root->Print(0);
+      }
+      profile->Delete();
+      cpu_profiler->Dispose();
     }
 
     // Shut down contexts and collect garbage.

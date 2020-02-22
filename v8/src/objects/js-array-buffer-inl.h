@@ -40,8 +40,30 @@ void* JSArrayBuffer::backing_store() const {
   return reinterpret_cast<void*>(ReadField<Address>(kBackingStoreOffset));
 }
 
-void JSArrayBuffer::set_backing_store(void* value, WriteBarrierMode mode) {
+void JSArrayBuffer::set_backing_store(void* value) {
   WriteField<Address>(kBackingStoreOffset, reinterpret_cast<Address>(value));
+}
+
+ArrayBufferExtension* JSArrayBuffer::extension() const {
+  if (V8_ARRAY_BUFFER_EXTENSION_BOOL) {
+    return base::AsAtomicPointer::Acquire_Load(extension_location());
+  } else {
+    return nullptr;
+  }
+}
+
+ArrayBufferExtension** JSArrayBuffer::extension_location() const {
+  Address location = field_address(kExtensionOffset);
+  return reinterpret_cast<ArrayBufferExtension**>(location);
+}
+
+void JSArrayBuffer::set_extension(ArrayBufferExtension* value) {
+  if (V8_ARRAY_BUFFER_EXTENSION_BOOL) {
+    base::AsAtomicPointer::Release_Store(extension_location(), value);
+    MarkingBarrierForArrayBufferExtension(*this, value);
+  } else {
+    CHECK_EQ(value, nullptr);
+  }
 }
 
 size_t JSArrayBuffer::allocation_length() const {

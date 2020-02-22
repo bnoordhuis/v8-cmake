@@ -1067,7 +1067,7 @@ auto Module::deserialize(Store* store_abs, const vec<byte_t>& serialized)
   if (!i::wasm::DeserializeNativeModule(
            isolate,
            {reinterpret_cast<const uint8_t*>(ptr + data_size), serial_size},
-           {reinterpret_cast<const uint8_t*>(ptr), data_size})
+           {reinterpret_cast<const uint8_t*>(ptr), data_size}, {})
            .ToHandle(&module_obj)) {
     return nullptr;
   }
@@ -1412,6 +1412,7 @@ void PushArgs(i::wasm::FunctionSig* sig, const Val args[],
         break;
       case i::wasm::kWasmAnyRef:
       case i::wasm::kWasmFuncRef:
+      case i::wasm::kWasmNullRef:
         packer->Push(WasmRefToV8(store->i_isolate(), args[i].ref())->ptr());
         break;
       case i::wasm::kWasmExnRef:
@@ -1443,9 +1444,11 @@ void PopArgs(i::wasm::FunctionSig* sig, Val results[],
         results[i] = Val(packer->Pop<double>());
         break;
       case i::wasm::kWasmAnyRef:
-      case i::wasm::kWasmFuncRef: {
+      case i::wasm::kWasmFuncRef:
+      case i::wasm::kWasmNullRef: {
         i::Address raw = packer->Pop<i::Address>();
         i::Handle<i::Object> obj(i::Object(raw), store->i_isolate());
+        DCHECK_IMPLIES(type == i::wasm::kWasmNullRef, obj->IsNull());
         results[i] = Val(V8RefValueToWasm(store, obj));
         break;
       }

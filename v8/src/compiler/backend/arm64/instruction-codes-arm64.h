@@ -284,6 +284,7 @@ namespace compiler {
   V(Arm64I16x8MaxU)                         \
   V(Arm64I16x8GtU)                          \
   V(Arm64I16x8GeU)                          \
+  V(Arm64I16x8RoundingAverageU)             \
   V(Arm64I8x16Splat)                        \
   V(Arm64I8x16ExtractLaneU)                 \
   V(Arm64I8x16ExtractLaneS)                 \
@@ -311,6 +312,7 @@ namespace compiler {
   V(Arm64I8x16MaxU)                         \
   V(Arm64I8x16GtU)                          \
   V(Arm64I8x16GeU)                          \
+  V(Arm64I8x16RoundingAverageU)             \
   V(Arm64S128Zero)                          \
   V(Arm64S128Dup)                           \
   V(Arm64S128And)                           \
@@ -318,6 +320,7 @@ namespace compiler {
   V(Arm64S128Xor)                           \
   V(Arm64S128Not)                           \
   V(Arm64S128Select)                        \
+  V(Arm64S128AndNot)                        \
   V(Arm64S32x4ZipLeft)                      \
   V(Arm64S32x4ZipRight)                     \
   V(Arm64S32x4UnzipLeft)                    \

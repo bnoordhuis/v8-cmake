@@ -583,7 +583,6 @@ bool InstanceBuilder::ExecuteStartFunction() {
 // Look up an import value in the {ffi_} object.
 MaybeHandle<Object> InstanceBuilder::LookupImport(uint32_t index,
                                                   Handle<String> module_name,
-
                                                   Handle<String> import_name) {
   // We pre-validated in the js-api layer that the ffi object is present, and
   // a JSObject, if the module has imports.
@@ -627,8 +626,8 @@ MaybeHandle<Object> InstanceBuilder::LookupImportAsm(
   // side-effect. We only accept accesses that resolve to data properties,
   // which is indicated by the asm.js spec in section 7 ("Linking") as well.
   Handle<Object> result;
-  LookupIterator it = LookupIterator::PropertyOrElement(
-      isolate_, ffi_.ToHandleChecked(), import_name);
+  LookupIterator::Key key(isolate_, Handle<Name>::cast(import_name));
+  LookupIterator it(isolate_, ffi_.ToHandleChecked(), key);
   switch (it.state()) {
     case LookupIterator::ACCESS_CHECK:
     case LookupIterator::INTEGER_INDEXED_EXOTIC:
@@ -754,7 +753,9 @@ void InstanceBuilder::WriteGlobalValue(const WasmGlobal& global,
     }
     case kWasmAnyRef:
     case kWasmFuncRef:
+    case kWasmNullRef:
     case kWasmExnRef: {
+      DCHECK_IMPLIES(global.type == kWasmNullRef, value->GetRef()->IsNull());
       tagged_globals_->set(global.offset, *value->GetRef());
       break;
     }
@@ -776,25 +777,13 @@ void InstanceBuilder::SanitizeImports() {
   for (size_t index = 0; index < module_->import_table.size(); ++index) {
     const WasmImport& import = module_->import_table[index];
 
-    Handle<String> module_name;
-    MaybeHandle<String> maybe_module_name =
-        WasmModuleObject::ExtractUtf8StringFromModuleBytes(isolate_, wire_bytes,
-                                                           import.module_name);
-    if (!maybe_module_name.ToHandle(&module_name)) {
-      thrower_->LinkError("Could not resolve module name for import %zu",
-                          index);
-      return;
-    }
+    Handle<String> module_name =
+        WasmModuleObject::ExtractUtf8StringFromModuleBytes(
+            isolate_, wire_bytes, import.module_name, kInternalize);
 
-    Handle<String> import_name;
-    MaybeHandle<String> maybe_import_name =
-        WasmModuleObject::ExtractUtf8StringFromModuleBytes(isolate_, wire_bytes,
-                                                           import.field_name);
-    if (!maybe_import_name.ToHandle(&import_name)) {
-      thrower_->LinkError("Could not resolve import name for import %zu",
-                          index);
-      return;
-    }
+    Handle<String> import_name =
+        WasmModuleObject::ExtractUtf8StringFromModuleBytes(
+            isolate_, wire_bytes, import.field_name, kInternalize);
 
     int int_index = static_cast<int>(index);
     MaybeHandle<Object> result =
@@ -1142,8 +1131,8 @@ bool InstanceBuilder::ProcessImportedGlobal(Handle<WasmInstanceObject> instance,
     // workaround to support legacy asm.js code with broken binding. Note
     // that using {NaN} (or Smi::zero()) here is what using the observable
     // conversion via {ToPrimitive} would produce as well.
-    // TODO(mstarzinger): Still observable if Function.prototype.valueOf
-    // or friends are patched, we might need to check for that as well.
+    // TODO(wasm): Still observable if Function.prototype.valueOf or friends
+    // are patched, we might need to check for that as well.
     if (value->IsJSFunction()) value = isolate_->factory()->nan_value();
     if (value->IsPrimitive() && !value->IsSymbol()) {
       if (global.type == kWasmI32) {
@@ -1168,14 +1157,18 @@ bool InstanceBuilder::ProcessImportedGlobal(Handle<WasmInstanceObject> instance,
   }
 
   if (ValueTypes::IsReferenceType(global.type)) {
-    // There shouldn't be any null-ref globals.
-    DCHECK_NE(ValueType::kWasmNullRef, global.type);
     if (global.type == ValueType::kWasmFuncRef) {
       if (!value->IsNull(isolate_) &&
           !WasmExportedFunction::IsWasmExportedFunction(*value)) {
         ReportLinkError(
             "imported funcref global must be null or an exported function",
             import_index, module_name, import_name);
+        return false;
+      }
+    } else if (global.type == ValueType::kWasmNullRef) {
+      if (!value->IsNull(isolate_)) {
+        ReportLinkError("imported nullref global must be null", import_index,
+                        module_name, import_name);
         return false;
       }
     }
@@ -1463,25 +1456,15 @@ void InstanceBuilder::ProcessExports(Handle<WasmInstanceObject> instance) {
 
   Handle<JSObject> exports_object;
   MaybeHandle<String> single_function_name;
-  bool is_asm_js = false;
-  switch (module_->origin) {
-    case kWasmOrigin: {
-      // Create the "exports" object.
-      exports_object = isolate_->factory()->NewJSObjectWithNullProto();
-      break;
-    }
-    case kAsmJsSloppyOrigin:
-    case kAsmJsStrictOrigin: {
-      Handle<JSFunction> object_function = Handle<JSFunction>(
-          isolate_->native_context()->object_function(), isolate_);
-      exports_object = isolate_->factory()->NewJSObject(object_function);
-      single_function_name = isolate_->factory()->InternalizeUtf8String(
-          AsmJs::kSingleFunctionName);
-      is_asm_js = true;
-      break;
-    }
-    default:
-      UNREACHABLE();
+  bool is_asm_js = is_asmjs_module(module_);
+  if (is_asm_js) {
+    Handle<JSFunction> object_function = Handle<JSFunction>(
+        isolate_->native_context()->object_function(), isolate_);
+    exports_object = isolate_->factory()->NewJSObject(object_function);
+    single_function_name =
+        isolate_->factory()->InternalizeUtf8String(AsmJs::kSingleFunctionName);
+  } else {
+    exports_object = isolate_->factory()->NewJSObjectWithNullProto();
   }
   instance->set_exports_object(*exports_object);
 
@@ -1493,8 +1476,7 @@ void InstanceBuilder::ProcessExports(Handle<WasmInstanceObject> instance) {
   // Process each export in the export table.
   for (const WasmExport& exp : module_->export_table) {
     Handle<String> name = WasmModuleObject::ExtractUtf8StringFromModuleBytes(
-                              isolate_, module_object_, exp.name)
-                              .ToHandleChecked();
+        isolate_, module_object_, exp.name, kInternalize);
     Handle<JSObject> export_to = exports_object;
     switch (exp.kind) {
       case kExternalFunction: {

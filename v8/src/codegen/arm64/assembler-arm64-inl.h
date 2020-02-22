@@ -476,14 +476,7 @@ Operand MemOperand::OffsetAsOperand() const {
   }
 }
 
-void Assembler::Unreachable() {
-#ifdef USE_SIMULATOR
-  debug("UNREACHABLE", __LINE__, BREAK);
-#else
-  // Crash by branching to 0. lr now points near the fault.
-  Emit(BLR | Rn(xzr));
-#endif
-}
+void Assembler::Unreachable() { debug("UNREACHABLE", __LINE__, BREAK); }
 
 Address Assembler::target_pointer_address_at(Address pc) {
   Instruction* instr = reinterpret_cast<Instruction*>(pc);
@@ -1013,7 +1006,8 @@ Instr Assembler::ImmLS(int imm9) {
 }
 
 Instr Assembler::ImmLSPair(int imm7, unsigned size) {
-  DCHECK_EQ((imm7 >> size) << size, imm7);
+  DCHECK_EQ(imm7,
+            static_cast<int>(static_cast<uint32_t>(imm7 >> size) << size));
   int scaled_imm7 = imm7 >> size;
   DCHECK(is_int7(scaled_imm7));
   return truncate_to_int7(scaled_imm7) << ImmLSPair_offset;

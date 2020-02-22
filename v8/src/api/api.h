@@ -7,7 +7,6 @@
 
 #include <memory>
 
-#include "include/v8-testing.h"
 #include "src/execution/isolate.h"
 #include "src/heap/factory.h"
 #include "src/objects/bigint.h"
@@ -30,6 +29,7 @@ class JSArrayBufferView;
 }  // namespace internal
 
 namespace debug {
+class AccessorPair;
 class GeneratorObject;
 class Script;
 class WeakMap;
@@ -127,6 +127,7 @@ class RegisteredExtension {
   V(debug::GeneratorObject, JSGeneratorObject) \
   V(debug::Script, Script)                     \
   V(debug::WeakMap, JSWeakMap)                 \
+  V(debug::AccessorPair, AccessorPair)         \
   V(Promise, JSPromise)                        \
   V(Primitive, Object)                         \
   V(PrimitiveArray, FixedArray)                \
@@ -143,6 +144,8 @@ class Utils {
   static void ReportOOMFailure(v8::internal::Isolate* isolate,
                                const char* location, bool is_heap_oom);
 
+  static inline Local<debug::AccessorPair> ToLocal(
+      v8::internal::Handle<v8::internal::AccessorPair> obj);
   static inline Local<Context> ToLocal(
       v8::internal::Handle<v8::internal::Context> obj);
   static inline Local<Value> ToLocal(

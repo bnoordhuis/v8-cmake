@@ -1342,9 +1342,9 @@ class ThreadImpl {
   // Safety wrapper for values on the operand stack represented as {WasmValue}.
   // Most values are stored directly on the stack, only reference values are
   // kept in a separate on-heap reference stack to make the GC trace them.
-  // TODO(mstarzinger): Optimize simple stack operations (like "get_local",
+  // TODO(wasm): Optimize simple stack operations (like "get_local",
   // "set_local", and "tee_local") so that they don't require a handle scope.
-  // TODO(mstarzinger): Consider optimizing activations that use no reference
+  // TODO(wasm): Consider optimizing activations that use no reference
   // values to avoid allocating the reference stack entirely.
   class StackValue {
    public:
@@ -1464,6 +1464,7 @@ class ThreadImpl {
 #undef CASE_TYPE
         case kWasmAnyRef:
         case kWasmFuncRef:
+        case kWasmNullRef:
         case kWasmExnRef: {
           val = WasmValue(isolate_->factory()->null_value());
           break;
@@ -1735,8 +1736,45 @@ class ThreadImpl {
     if (val) *val = static_cast<type>(Pop().to<op_type>());
     uint32_t index = Pop().to<uint32_t>();
     *address = BoundsCheckMem<type>(imm.offset, index);
+    if (!*address) {
+      DoTrap(kTrapMemOutOfBounds, pc);
+      return false;
+    }
+    if (!IsAligned(*address, sizeof(type))) {
+      DoTrap(kTrapUnalignedAccess, pc);
+      return false;
+    }
+    *len = 2 + imm.length;
+    return true;
+  }
+
+  template <typename type>
+  bool ExtractAtomicWaitNotifyParams(Decoder* decoder, InterpreterCode* code,
+                                     pc_t pc, int* const len,
+                                     uint32_t* buffer_offset, type* val,
+                                     double* timeout = nullptr) {
+    MemoryAccessImmediate<Decoder::kValidate> imm(decoder, code->at(pc + 1),
+                                                  sizeof(type));
+    if (timeout) {
+      double timeout_ns = Pop().to<int64_t>();
+      *timeout = (timeout_ns < 0)
+                     ? V8_INFINITY
+                     : timeout_ns / (base::Time::kNanosecondsPerMicrosecond *
+                                     base::Time::kMicrosecondsPerMillisecond);
+    }
+    *val = Pop().to<type>();
+    auto index = Pop().to<uint32_t>();
+    // Check bounds.
+    Address address = BoundsCheckMem<uint32_t>(imm.offset, index);
+    *buffer_offset = index + imm.offset;
     if (!address) {
       DoTrap(kTrapMemOutOfBounds, pc);
+      return false;
+    }
+    // Check alignment.
+    const uint32_t align_mask = sizeof(type) - 1;
+    if ((*buffer_offset & align_mask) != 0) {
+      DoTrap(kTrapUnalignedAccess, pc);
       return false;
     }
     *len = 2 + imm.length;
@@ -2129,6 +2167,52 @@ class ThreadImpl {
         std::atomic_thread_fence(std::memory_order_seq_cst);
         *len += 2;
         break;
+      case kExprI32AtomicWait: {
+        int32_t val;
+        double timeout;
+        uint32_t buffer_offset;
+        if (!ExtractAtomicWaitNotifyParams<int32_t>(
+                decoder, code, pc, len, &buffer_offset, &val, &timeout)) {
+          return false;
+        }
+        HandleScope handle_scope(isolate_);
+        Handle<JSArrayBuffer> array_buffer(
+            instance_object_->memory_object().array_buffer(), isolate_);
+        auto result = FutexEmulation::Wait32(isolate_, array_buffer,
+                                             buffer_offset, val, timeout);
+        Push(WasmValue(result.ToSmi().value()));
+        break;
+      }
+      case kExprI64AtomicWait: {
+        int64_t val;
+        double timeout;
+        uint32_t buffer_offset;
+        if (!ExtractAtomicWaitNotifyParams<int64_t>(
+                decoder, code, pc, len, &buffer_offset, &val, &timeout)) {
+          return false;
+        }
+        HandleScope handle_scope(isolate_);
+        Handle<JSArrayBuffer> array_buffer(
+            instance_object_->memory_object().array_buffer(), isolate_);
+        auto result = FutexEmulation::Wait64(isolate_, array_buffer,
+                                             buffer_offset, val, timeout);
+        Push(WasmValue(result.ToSmi().value()));
+        break;
+      }
+      case kExprAtomicNotify: {
+        int32_t val;
+        uint32_t buffer_offset;
+        if (!ExtractAtomicWaitNotifyParams<int32_t>(decoder, code, pc, len,
+                                                    &buffer_offset, &val)) {
+          return false;
+        }
+        HandleScope handle_scope(isolate_);
+        Handle<JSArrayBuffer> array_buffer(
+            instance_object_->memory_object().array_buffer(), isolate_);
+        auto result = FutexEmulation::Wake(array_buffer, buffer_offset, val);
+        Push(WasmValue(result.ToSmi().value()));
+        break;
+      }
       default:
         UNREACHABLE();
         return false;
@@ -2233,6 +2317,7 @@ class ThreadImpl {
       BINOP_CASE(S128And, i32x4, int4, 4, a & b)
       BINOP_CASE(S128Or, i32x4, int4, 4, a | b)
       BINOP_CASE(S128Xor, i32x4, int4, 4, a ^ b)
+      BINOP_CASE(S128AndNot, i32x4, int4, 4, a & ~b)
       BINOP_CASE(I16x8Add, i16x8, int8, 8, base::AddWithWraparound(a, b))
       BINOP_CASE(I16x8Sub, i16x8, int8, 8, base::SubWithWraparound(a, b))
       BINOP_CASE(I16x8Mul, i16x8, int8, 8, base::MulWithWraparound(a, b))
@@ -2246,6 +2331,8 @@ class ThreadImpl {
       BINOP_CASE(I16x8AddSaturateU, i16x8, int8, 8, SaturateAdd<uint16_t>(a, b))
       BINOP_CASE(I16x8SubSaturateS, i16x8, int8, 8, SaturateSub<int16_t>(a, b))
       BINOP_CASE(I16x8SubSaturateU, i16x8, int8, 8, SaturateSub<uint16_t>(a, b))
+      BINOP_CASE(I16x8RoundingAverageU, i16x8, int8, 8,
+                 base::RoundingAverageUnsigned<uint16_t>(a, b))
       BINOP_CASE(I8x16Add, i8x16, int16, 16, base::AddWithWraparound(a, b))
       BINOP_CASE(I8x16Sub, i8x16, int16, 16, base::SubWithWraparound(a, b))
       BINOP_CASE(I8x16Mul, i8x16, int16, 16, base::MulWithWraparound(a, b))
@@ -2261,6 +2348,8 @@ class ThreadImpl {
       BINOP_CASE(I8x16SubSaturateS, i8x16, int16, 16, SaturateSub<int8_t>(a, b))
       BINOP_CASE(I8x16SubSaturateU, i8x16, int16, 16,
                  SaturateSub<uint8_t>(a, b))
+      BINOP_CASE(I8x16RoundingAverageU, i8x16, int16, 16,
+                 base::RoundingAverageUnsigned<uint8_t>(a, b))
 #undef BINOP_CASE
 #define UNOP_CASE(op, name, stype, count, expr) \
   case kExpr##op: {                             \
@@ -2445,10 +2534,6 @@ class ThreadImpl {
     Push(WasmValue(Simd128(res)));                                            \
     return true;                                                              \
   }
-        CONVERT_CASE(F64x2SConvertI64x2, int2, i64x2, float2, 2, 0, int64_t,
-                     static_cast<double>(a))
-        CONVERT_CASE(F64x2UConvertI64x2, int2, i64x2, float2, 2, 0, uint64_t,
-                     static_cast<double>(a))
         CONVERT_CASE(F32x4SConvertI32x4, int4, i32x4, float4, 4, 0, int32_t,
                      static_cast<float>(a))
         CONVERT_CASE(F32x4UConvertI32x4, int4, i32x4, float4, 4, 0, uint32_t,
@@ -2773,8 +2858,10 @@ class ThreadImpl {
         }
         case kWasmAnyRef:
         case kWasmFuncRef:
+        case kWasmNullRef:
         case kWasmExnRef: {
           Handle<Object> anyref = value.to_anyref();
+          DCHECK_IMPLIES(sig->GetParam(i) == kWasmNullRef, anyref->IsNull());
           encoded_values->set(encoded_index++, *anyref);
           break;
         }
@@ -2875,8 +2962,10 @@ class ThreadImpl {
         }
         case kWasmAnyRef:
         case kWasmFuncRef:
+        case kWasmNullRef:
         case kWasmExnRef: {
           Handle<Object> anyref(encoded_values->get(encoded_index++), isolate_);
+          DCHECK_IMPLIES(sig->GetParam(i) == kWasmNullRef, anyref->IsNull());
           value = WasmValue(anyref);
           break;
         }
@@ -3034,6 +3123,7 @@ class ThreadImpl {
           V8_FALLTHROUGH;
         }
         case kExprSelect: {
+          HandleScope scope(isolate_);  // Avoid leaking handles.
           WasmValue cond = Pop();
           WasmValue fval = Pop();
           WasmValue tval = Pop();
@@ -3331,6 +3421,7 @@ class ThreadImpl {
 #undef CASE_TYPE
             case kWasmAnyRef:
             case kWasmFuncRef:
+            case kWasmNullRef:
             case kWasmExnRef: {
               HandleScope handle_scope(isolate_);  // Avoid leaking handles.
               Handle<FixedArray> global_buffer;    // The buffer of the global.
@@ -3338,7 +3429,9 @@ class ThreadImpl {
               std::tie(global_buffer, global_index) =
                   WasmInstanceObject::GetGlobalBufferAndIndex(instance_object_,
                                                               global);
-              global_buffer->set(global_index, *Pop().to_anyref());
+              Handle<Object> ref = Pop().to_anyref();
+              DCHECK_IMPLIES(global.type == kWasmNullRef, ref->IsNull());
+              global_buffer->set(global_index, *ref);
               break;
             }
             default:
@@ -3794,7 +3887,10 @@ class ThreadImpl {
           break;
         case kWasmAnyRef:
         case kWasmFuncRef:
+        case kWasmNullRef:
         case kWasmExnRef:
+          DCHECK_IMPLIES(sig->GetParam(i) == kWasmNullRef,
+                         arg.to_anyref()->IsNull());
           packer.Push(arg.to_anyref()->ptr());
           break;
         default:
@@ -3833,8 +3929,10 @@ class ThreadImpl {
           break;
         case kWasmAnyRef:
         case kWasmFuncRef:
+        case kWasmNullRef:
         case kWasmExnRef: {
           Handle<Object> ref(Object(packer.Pop<Address>()), isolate);
+          DCHECK_IMPLIES(sig->GetReturn(i) == kWasmNullRef, ref->IsNull());
           Push(WasmValue(ref));
           break;
         }

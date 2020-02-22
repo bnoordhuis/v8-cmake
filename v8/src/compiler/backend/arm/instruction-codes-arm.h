@@ -172,6 +172,7 @@ namespace compiler {
   V(ArmI64x2ShrS)                  \
   V(ArmI64x2Add)                   \
   V(ArmI64x2Sub)                   \
+  V(ArmI64x2Mul)                   \
   V(ArmI64x2ShrU)                  \
   V(ArmI32x4Splat)                 \
   V(ArmI32x4ExtractLane)           \
@@ -232,6 +233,7 @@ namespace compiler {
   V(ArmI16x8MaxU)                  \
   V(ArmI16x8GtU)                   \
   V(ArmI16x8GeU)                   \
+  V(ArmI16x8RoundingAverageU)      \
   V(ArmI8x16Splat)                 \
   V(ArmI8x16ExtractLaneS)          \
   V(ArmI8x16ReplaceLane)           \
@@ -259,6 +261,7 @@ namespace compiler {
   V(ArmI8x16MaxU)                  \
   V(ArmI8x16GtU)                   \
   V(ArmI8x16GeU)                   \
+  V(ArmI8x16RoundingAverageU)      \
   V(ArmS128Zero)                   \
   V(ArmS128Dup)                    \
   V(ArmS128And)                    \
@@ -266,6 +269,7 @@ namespace compiler {
   V(ArmS128Xor)                    \
   V(ArmS128Not)                    \
   V(ArmS128Select)                 \
+  V(ArmS128AndNot)                 \
   V(ArmS32x4ZipLeft)               \
   V(ArmS32x4ZipRight)              \
   V(ArmS32x4UnzipLeft)             \
@@ -336,7 +340,8 @@ namespace compiler {
   V(Operand2_R_ASR_R) /* %r0 ASR %r1 */ \
   V(Operand2_R_LSL_R) /* %r0 LSL %r1 */ \
   V(Operand2_R_LSR_R) /* %r0 LSR %r1 */ \
-  V(Operand2_R_ROR_R) /* %r0 ROR %r1 */
+  V(Operand2_R_ROR_R) /* %r0 ROR %r1 */ \
+  V(Root)             /* [%rr + K] */
 
 }  // namespace compiler
 }  // namespace internal

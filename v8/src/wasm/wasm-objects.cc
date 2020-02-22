@@ -205,161 +205,48 @@ Handle<WasmModuleObject> WasmModuleObject::New(
   return module_object;
 }
 
-
-
-namespace {
-
-enum AsmJsOffsetTableEntryLayout {
-  kOTEByteOffset,
-  kOTECallPosition,
-  kOTENumberConvPosition,
-  kOTESize
-};
-
-Handle<ByteArray> GetDecodedAsmJsOffsetTable(
-    Handle<WasmModuleObject> module_object, Isolate* isolate) {
-  DCHECK(module_object->is_asm_js());
-  Handle<ByteArray> offset_table(module_object->asm_js_offset_table(), isolate);
-
-  // The last byte in the asm_js_offset_tables ByteArray tells whether it is
-  // still encoded (0) or decoded (1).
-  enum AsmJsTableType : int { Encoded = 0, Decoded = 1 };
-  int table_type = offset_table->get(offset_table->length() - 1);
-  DCHECK(table_type == Encoded || table_type == Decoded);
-  if (table_type == Decoded) return offset_table;
-
-  wasm::AsmJsOffsets asm_offsets;
-  {
-    DisallowHeapAllocation no_gc;
-    byte* bytes_start = offset_table->GetDataStartAddress();
-    byte* bytes_end = reinterpret_cast<byte*>(
-        reinterpret_cast<Address>(bytes_start) + offset_table->length() - 1);
-    asm_offsets = wasm::DecodeAsmJsOffsets(bytes_start, bytes_end).value();
-  }
-  // Wasm bytes must be valid and must contain asm.js offset table.
-  DCHECK_GE(kMaxInt, asm_offsets.size());
-  int num_functions = static_cast<int>(asm_offsets.size());
-  int num_imported_functions =
-      static_cast<int>(module_object->module()->num_imported_functions);
-  DCHECK_EQ(module_object->module()->functions.size(),
-            static_cast<size_t>(num_functions) + num_imported_functions);
-  int num_entries = 0;
-  for (int func = 0; func < num_functions; ++func) {
-    size_t new_size = asm_offsets[func].size();
-    DCHECK_LE(new_size, static_cast<size_t>(kMaxInt) - num_entries);
-    num_entries += static_cast<int>(new_size);
-  }
-  // One byte to encode that this is a decoded table.
-  DCHECK_GE(kMaxInt,
-            1 + static_cast<uint64_t>(num_entries) * kOTESize * kIntSize);
-  int total_size = 1 + num_entries * kOTESize * kIntSize;
-  Handle<ByteArray> decoded_table =
-      isolate->factory()->NewByteArray(total_size, AllocationType::kOld);
-  decoded_table->set(total_size - 1, AsmJsTableType::Decoded);
-  module_object->set_asm_js_offset_table(*decoded_table);
-
-  int idx = 0;
-  const std::vector<WasmFunction>& wasm_funs =
-      module_object->module()->functions;
-  for (int func = 0; func < num_functions; ++func) {
-    std::vector<wasm::AsmJsOffsetEntry>& func_asm_offsets = asm_offsets[func];
-    if (func_asm_offsets.empty()) continue;
-    int func_offset = wasm_funs[num_imported_functions + func].code.offset();
-    for (wasm::AsmJsOffsetEntry& e : func_asm_offsets) {
-      // Byte offsets must be strictly monotonously increasing:
-      DCHECK_IMPLIES(idx > 0, func_offset + e.byte_offset >
-                                  decoded_table->get_int(idx - kOTESize));
-      decoded_table->set_int(idx + kOTEByteOffset, func_offset + e.byte_offset);
-      decoded_table->set_int(idx + kOTECallPosition, e.source_position_call);
-      decoded_table->set_int(idx + kOTENumberConvPosition,
-                             e.source_position_number_conversion);
-      idx += kOTESize;
-    }
-  }
-  DCHECK_EQ(total_size, idx * kIntSize + 1);
-  return decoded_table;
-}
-
-}  // namespace
-
-int WasmModuleObject::GetSourcePosition(Handle<WasmModuleObject> module_object,
-                                        uint32_t func_index,
-                                        uint32_t byte_offset,
-                                        bool is_at_number_conversion) {
-  Isolate* isolate = module_object->GetIsolate();
-  const WasmModule* module = module_object->module();
-
-  if (module->origin == wasm::kWasmOrigin) {
-    // for non-asm.js modules, we just add the function's start offset
-    // to make a module-relative position.
-    return byte_offset + GetWasmFunctionOffset(module, func_index);
-  }
-
-  // asm.js modules have an additional offset table that must be searched.
-  Handle<ByteArray> offset_table =
-      GetDecodedAsmJsOffsetTable(module_object, isolate);
-
-  DCHECK_LT(func_index, module->functions.size());
-  uint32_t func_code_offset = module->functions[func_index].code.offset();
-  uint32_t total_offset = func_code_offset + byte_offset;
-
-  // Binary search for the total byte offset.
-  int left = 0;                                              // inclusive
-  int right = offset_table->length() / kIntSize / kOTESize;  // exclusive
-  DCHECK_LT(left, right);
-  while (right - left > 1) {
-    int mid = left + (right - left) / 2;
-    int mid_entry = offset_table->get_int(kOTESize * mid);
-    DCHECK_GE(kMaxInt, mid_entry);
-    if (static_cast<uint32_t>(mid_entry) <= total_offset) {
-      left = mid;
-    } else {
-      right = mid;
-    }
-  }
-  // There should be an entry for each position that could show up on the stack
-  // trace:
-  DCHECK_EQ(total_offset, offset_table->get_int(kOTESize * left));
-  int idx = is_at_number_conversion ? kOTENumberConvPosition : kOTECallPosition;
-  return offset_table->get_int(kOTESize * left + idx);
-}
-
-MaybeHandle<String> WasmModuleObject::ExtractUtf8StringFromModuleBytes(
+Handle<String> WasmModuleObject::ExtractUtf8StringFromModuleBytes(
     Isolate* isolate, Handle<WasmModuleObject> module_object,
-    wasm::WireBytesRef ref) {
-  // TODO(wasm): cache strings from modules if it's a performance win.
+    wasm::WireBytesRef ref, InternalizeString internalize) {
   Vector<const uint8_t> wire_bytes =
       module_object->native_module()->wire_bytes();
-  return ExtractUtf8StringFromModuleBytes(isolate, wire_bytes, ref);
+  return ExtractUtf8StringFromModuleBytes(isolate, wire_bytes, ref,
+                                          internalize);
 }
 
-MaybeHandle<String> WasmModuleObject::ExtractUtf8StringFromModuleBytes(
-    Isolate* isolate, Vector<const uint8_t> wire_bytes,
-    wasm::WireBytesRef ref) {
-  Vector<const uint8_t> name_vec = wire_bytes + ref.offset();
-  name_vec.Truncate(ref.length());
+Handle<String> WasmModuleObject::ExtractUtf8StringFromModuleBytes(
+    Isolate* isolate, Vector<const uint8_t> wire_bytes, wasm::WireBytesRef ref,
+    InternalizeString internalize) {
+  Vector<const uint8_t> name_vec =
+      wire_bytes.SubVector(ref.offset(), ref.end_offset());
   // UTF8 validation happens at decode time.
   DCHECK(unibrow::Utf8::ValidateEncoding(name_vec.begin(), name_vec.length()));
-  return isolate->factory()->NewStringFromUtf8(
-      Vector<const char>::cast(name_vec));
+  auto* factory = isolate->factory();
+  return internalize
+             ? factory->InternalizeUtf8String(
+                   Vector<const char>::cast(name_vec))
+             : factory->NewStringFromUtf8(Vector<const char>::cast(name_vec))
+                   .ToHandleChecked();
 }
 
 MaybeHandle<String> WasmModuleObject::GetModuleNameOrNull(
     Isolate* isolate, Handle<WasmModuleObject> module_object) {
   const WasmModule* module = module_object->module();
   if (!module->name.is_set()) return {};
-  return ExtractUtf8StringFromModuleBytes(isolate, module_object, module->name);
+  return ExtractUtf8StringFromModuleBytes(isolate, module_object, module->name,
+                                          kNoInternalize);
 }
 
 MaybeHandle<String> WasmModuleObject::GetFunctionNameOrNull(
     Isolate* isolate, Handle<WasmModuleObject> module_object,
     uint32_t func_index) {
   DCHECK_LT(func_index, module_object->module()->functions.size());
-  wasm::WireBytesRef name = module_object->module()->LookupFunctionName(
+  wasm::WireBytesRef name = module_object->module()->function_names.Lookup(
       wasm::ModuleWireBytes(module_object->native_module()->wire_bytes()),
       func_index);
   if (!name.is_set()) return {};
-  return ExtractUtf8StringFromModuleBytes(isolate, module_object, name);
+  return ExtractUtf8StringFromModuleBytes(isolate, module_object, name,
+                                          kNoInternalize);
 }
 
 Handle<String> WasmModuleObject::GetFunctionName(
@@ -380,7 +267,7 @@ Vector<const uint8_t> WasmModuleObject::GetRawFunctionName(
   DCHECK_GT(module()->functions.size(), func_index);
   wasm::ModuleWireBytes wire_bytes(native_module()->wire_bytes());
   wasm::WireBytesRef name_ref =
-      module()->LookupFunctionName(wire_bytes, func_index);
+      module()->function_names.Lookup(wire_bytes, func_index);
   wasm::WasmName name = wire_bytes.GetNameOrNull(name_ref);
   return Vector<const uint8_t>::cast(name);
 }
@@ -516,6 +403,10 @@ bool WasmTableObject::IsValidElement(Isolate* isolate,
   if (table->type() == wasm::kWasmAnyRef ||
       table->type() == wasm::kWasmExnRef) {
     return true;
+  }
+  // Nullref only takes {null}.
+  if (table->type() == wasm::kWasmNullRef) {
+    return entry->IsNull(isolate);
   }
   // FuncRef tables can store {null}, {WasmExportedFunction}, {WasmJSFunction},
   // or {WasmCapiFunction} objects.
@@ -1345,7 +1236,7 @@ Handle<WasmInstanceObject> WasmInstanceObject::New(
 
   // Insert the new instance into the scripts weak list of instances. This list
   // is used for breakpoints affecting all instances belonging to the script.
-  // TODO(mstarzinger): Allow to reuse holes in the {WeakArrayList} below.
+  // TODO(wasm): Allow to reuse holes in the {WeakArrayList} below.
   if (module_object->script().type() == Script::TYPE_WASM) {
     Handle<WeakArrayList> weak_instance_list(
         module_object->script().wasm_weak_instance_list(), isolate);
@@ -1556,7 +1447,7 @@ void WasmInstanceObject::ImportWasmJSFunctionIntoTable(
   if (sig_id >= 0) {
     wasm::NativeModule* native_module =
         instance->module_object().native_module();
-    // TODO(mstarzinger): Cache and reuse wrapper code.
+    // TODO(wasm): Cache and reuse wrapper code.
     const wasm::WasmFeatures enabled = native_module->enabled_features();
     auto resolved = compiler::ResolveWasmImportCall(callable, sig, enabled);
     compiler::WasmImportCallKind kind = resolved.first;
@@ -1788,6 +1679,7 @@ uint32_t WasmExceptionPackage::GetEncodedSize(
         break;
       case wasm::kWasmAnyRef:
       case wasm::kWasmFuncRef:
+      case wasm::kWasmNullRef:
       case wasm::kWasmExnRef:
         encoded_size += 1;
         break;
@@ -1908,6 +1800,7 @@ Handle<WasmExportedFunction> WasmExportedFunction::New(
   DCHECK_EQ(is_asm_js_module, js_function->IsConstructor());
   js_function->shared().set_length(arity);
   js_function->shared().set_internal_formal_parameter_count(arity);
+  js_function->shared().set_script(instance->module_object().script());
   return Handle<WasmExportedFunction>::cast(js_function);
 }
 
@@ -1938,8 +1831,8 @@ Handle<WasmJSFunction> WasmJSFunction::New(Isolate* isolate,
   if (sig_size > 0) {
     serialized_sig->copy_in(0, sig->all().begin(), sig_size);
   }
-  // TODO(mstarzinger): Think about caching and sharing the JS-to-JS wrappers
-  // per signature instead of compiling a new one for every instantiation.
+  // TODO(wasm): Think about caching and sharing the JS-to-JS wrappers per
+  // signature instead of compiling a new one for every instantiation.
   Handle<Code> wrapper_code =
       compiler::CompileJSToJSWrapper(isolate, sig).ToHandleChecked();
   Handle<WasmJSFunctionData> function_data =
@@ -2016,8 +1909,7 @@ Handle<WasmExceptionTag> WasmExceptionTag::New(Isolate* isolate, int index) {
 
 Handle<AsmWasmData> AsmWasmData::New(
     Isolate* isolate, std::shared_ptr<wasm::NativeModule> native_module,
-    Handle<FixedArray> export_wrappers, Handle<ByteArray> asm_js_offset_table,
-    Handle<HeapNumber> uses_bitset) {
+    Handle<FixedArray> export_wrappers, Handle<HeapNumber> uses_bitset) {
   const WasmModule* module = native_module->module();
   const bool kUsesLiftoff = false;
   size_t memory_estimate =
@@ -2031,7 +1923,6 @@ Handle<AsmWasmData> AsmWasmData::New(
       isolate->factory()->NewStruct(ASM_WASM_DATA_TYPE, AllocationType::kOld));
   result->set_managed_native_module(*managed_native_module);
   result->set_export_wrappers(*export_wrappers);
-  result->set_asm_js_offset_table(*asm_js_offset_table);
   result->set_uses_bitset(*uses_bitset);
   return result;
 }

@@ -367,7 +367,6 @@ add_library(
   $<${is-s390}:${D}/src/builtins/s390/builtins-s390.cc>
   $<${is-x64}:${D}/src/builtins/x64/builtins-x64.cc>
   $<$<BOOL:${V8_ENABLE_I18N}>:${D}/src/builtins/builtins-intl-gen.cc>
-  ${D}/src/builtins/builtins-arguments-gen.cc
   ${D}/src/builtins/builtins-array-gen.cc
   ${D}/src/builtins/builtins-async-function-gen.cc
   ${D}/src/builtins/builtins-async-gen.cc
@@ -512,7 +511,9 @@ target_include_directories(v8_inspector
   PRIVATE
     ${PROJECT_BINARY_DIR}/inspector
     ${D}
-    ${D}/include)
+    ${D}/include
+    ${D}/third_party/googletest/src/googlemock/include
+    ${D}/third_party/googletest/src/googletest/include)
 
 target_link_libraries(v8_inspector PRIVATE v8_torque_generated)
 

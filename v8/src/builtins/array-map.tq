@@ -91,19 +91,19 @@ namespace array {
   }
 
   struct Vector {
-    ReportSkippedElement() {
+    macro ReportSkippedElement() {
       this.skippedElements = true;
     }
 
-    CreateJSArray(implicit context: Context)(validLength: Smi): JSArray {
+    macro CreateJSArray(implicit context: Context)(validLength: Smi): JSArray {
       const length: Smi = this.fixedArray.length;
       assert(validLength <= length);
-      let kind: ElementsKind = PACKED_SMI_ELEMENTS;
+      let kind: ElementsKind = ElementsKind::PACKED_SMI_ELEMENTS;
       if (!this.onlySmis) {
         if (this.onlyNumbers) {
-          kind = PACKED_DOUBLE_ELEMENTS;
+          kind = ElementsKind::PACKED_DOUBLE_ELEMENTS;
         } else {
-          kind = PACKED_ELEMENTS;
+          kind = ElementsKind::PACKED_ELEMENTS;
         }
       }
 
@@ -124,13 +124,13 @@ namespace array {
         // First, initialize the elements field before allocation to prevent
         // heap corruption.
         const elements: FixedDoubleArray = AllocateFixedDoubleArrayWithHoles(
-            SmiUntag(length), kAllowLargeObjectAllocation);
+            SmiUntag(length), AllocationFlag::kAllowLargeObjectAllocation);
         a = NewJSArray(map, this.fixedArray);
         for (let i: Smi = 0; i < validLength; i++) {
           typeswitch (
               UnsafeCast<(Number | TheHole)>(this.fixedArray.objects[i])) {
             case (n: Number): {
-              elements.floats[i] = Convert<float64>(n);
+              elements.floats[i] = Convert<float64_or_hole>(n);
             }
             case (TheHole): {
             }
@@ -147,7 +147,7 @@ namespace array {
       return a;
     }
 
-    StoreResult(implicit context: Context)(index: Smi, result: JSAny) {
+    macro StoreResult(implicit context: Context)(index: Smi, result: JSAny) {
       typeswitch (result) {
         case (s: Smi): {
           this.fixedArray.objects[index] = s;
@@ -173,7 +173,7 @@ namespace array {
   macro NewVector(implicit context: Context)(length: Smi): Vector {
     const fixedArray = length > 0 ?
         AllocateFixedArrayWithHoles(
-            SmiUntag(length), kAllowLargeObjectAllocation) :
+            SmiUntag(length), AllocationFlag::kAllowLargeObjectAllocation) :
         kEmptyFixedArray;
     return Vector{
       fixedArray,
@@ -267,7 +267,7 @@ namespace array {
       return ArrayMapLoopContinuation(o, callbackfn, thisArg, array, o, k, len);
     }
     label TypeError deferred {
-      ThrowTypeError(kCalledNonCallable, arguments[0]);
+      ThrowTypeError(MessageTemplate::kCalledNonCallable, arguments[0]);
     }
   }
 }

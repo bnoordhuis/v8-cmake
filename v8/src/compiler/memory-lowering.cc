@@ -44,7 +44,7 @@ class MemoryLowering::AllocationGroup final : public ZoneObject {
 };
 
 MemoryLowering::MemoryLowering(JSGraph* jsgraph, Zone* zone,
-                               GraphAssembler* graph_assembler,
+                               JSGraphAssembler* graph_assembler,
                                PoisoningMitigationLevel poisoning_level,
                                AllocationFolding allocation_folding,
                                WriteBarrierAssertFailedCallback callback,
@@ -402,9 +402,6 @@ bool ValueNeedsWriteBarrier(Node* value, Isolate* isolate) {
     switch (value->opcode()) {
       case IrOpcode::kBitcastWordToTaggedSigned:
         return false;
-      case IrOpcode::kChangeTaggedToCompressed:
-        value = NodeProperties::GetValueInput(value, 0);
-        continue;
       case IrOpcode::kHeapConstant: {
         RootIndex root_index;
         if (isolate->roots_table().IsRootHandle(HeapConstantOf(value->op()),
