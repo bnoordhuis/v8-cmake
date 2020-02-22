@@ -847,35 +847,24 @@ Type Typer::Visitor::TypeInductionVariablePhi(Node* node) {
   DCHECK_EQ(IrOpcode::kLoop, NodeProperties::GetControlInput(node)->opcode());
   DCHECK_EQ(2, NodeProperties::GetControlInput(node)->InputCount());
 
-  auto res = induction_vars_->induction_variables().find(node->id());
-  DCHECK(res != induction_vars_->induction_variables().end());
-  InductionVariable* induction_var = res->second;
-  InductionVariable::ArithmeticType arithmetic_type = induction_var->Type();
   Type initial_type = Operand(node, 0);
   Type increment_type = Operand(node, 2);
 
-  const bool both_types_integer = initial_type.Is(typer_->cache_->kInteger) &&
-                                  increment_type.Is(typer_->cache_->kInteger);
-  bool maybe_nan = false;
-  // The addition or subtraction could still produce a NaN, if the integer
-  // ranges touch infinity.
-  if (both_types_integer) {
-    Type resultant_type =
-        (arithmetic_type == InductionVariable::ArithmeticType::kAddition)
-            ? typer_->operation_typer()->NumberAdd(initial_type, increment_type)
-            : typer_->operation_typer()->NumberSubtract(initial_type,
-                                                        increment_type);
-    maybe_nan = resultant_type.Maybe(Type::NaN());
-  }
-
-  // We only handle integer induction variables (otherwise ranges
-  // do not apply and we cannot do anything).
-  if (!both_types_integer || maybe_nan) {
-    // Fallback to normal phi typing, but ensure monotonicity.
-    // (Unfortunately, without baking in the previous type, monotonicity might
-    // be violated because we might not yet have retyped the incrementing
-    // operation even though the increment's type might been already reflected
-    // in the induction variable phi.)
+  // Fallback to normal phi typing in a variety of cases: when the induction
+  // variable is not initially of type Integer (we want to work with ranges
+  // below), when the increment is zero (in that case, phi typing will generally
+  // yield a better type), and when the induction variable can become NaN
+  // (through addition/subtraction of opposing infinities).
+  if (initial_type.IsNone() ||
+      increment_type.Is(typer_->cache_->kSingletonZero) ||
+      !initial_type.Is(typer_->cache_->kInteger) ||
+      !increment_type.Is(typer_->cache_->kInteger) ||
+      increment_type.Min() == -V8_INFINITY ||
+      increment_type.Max() == +V8_INFINITY) {
+    // Unfortunately, without baking in the previous type, monotonicity might be
+    // violated because we might not yet have retyped the incrementing operation
+    // even though the increment's type might been already reflected in the
+    // induction variable phi.
     Type type = NodeProperties::IsTyped(node) ? NodeProperties::GetType(node)
                                               : Type::None();
     for (int i = 0; i < arity; ++i) {
@@ -883,14 +872,13 @@ Type Typer::Visitor::TypeInductionVariablePhi(Node* node) {
     }
     return type;
   }
-  // If we do not have enough type information for the initial value or
-  // the increment, just return the initial value's type.
-  if (initial_type.IsNone() ||
-      increment_type.Is(typer_->cache_->kSingletonZero)) {
-    return initial_type;
-  }
 
   // Now process the bounds.
+  auto res = induction_vars_->induction_variables().find(node->id());
+  DCHECK(res != induction_vars_->induction_variables().end());
+  InductionVariable* induction_var = res->second;
+  InductionVariable::ArithmeticType arithmetic_type = induction_var->Type();
+
   double min = -V8_INFINITY;
   double max = V8_INFINITY;
 
@@ -946,8 +934,8 @@ Type Typer::Visitor::TypeInductionVariablePhi(Node* node) {
     // The lower bound must be at most the initial value's lower bound.
     min = std::min(min, initial_type.Min());
   } else {
-    // Shortcut: If the increment can be both positive and negative,
-    // the variable can go arbitrarily far, so just return integer.
+    // If the increment can be both positive and negative, the variable can go
+    // arbitrarily far.
     return typer_->cache_->kInteger;
   }
   if (FLAG_trace_turbo_loop) {
