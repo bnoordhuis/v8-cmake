@@ -281,7 +281,8 @@ bool KeyAccumulator::IsShadowed(Handle<Object> key) {
   return shadowing_keys_->Has(isolate_, key);
 }
 
-void KeyAccumulator::AddShadowingKey(Object key) {
+void KeyAccumulator::AddShadowingKey(Object key,
+                                     AllowHeapAllocation* allow_gc) {
   if (mode_ == KeyCollectionMode::kOwnOnly) return;
   AddShadowingKey(handle(key, isolate_));
 }
@@ -585,7 +586,14 @@ MaybeHandle<FixedArray> FastKeyAccumulator::GetKeysWithPrototypeInfoCache(
                  MaybeHandle<FixedArray>());
     prototype_chain_keys = accumulator.GetKeys(keys_conversion);
   }
-  return CombineKeys(isolate_, own_keys, prototype_chain_keys, receiver_);
+  Handle<FixedArray> result = CombineKeys(
+      isolate_, own_keys, prototype_chain_keys, receiver_);
+  if (is_for_in_ && own_keys.is_identical_to(result)) {
+    // Don't leak the enumeration cache without the receiver since it might get
+    // trimmed otherwise.
+    return isolate_->factory()->CopyFixedArrayUpTo(result, result->length());
+  }
+  return result;
 }
 
 bool FastKeyAccumulator::MayHaveElements(JSReceiver receiver) {
@@ -737,6 +745,7 @@ template <bool skip_symbols>
 base::Optional<int> CollectOwnPropertyNamesInternal(
     Handle<JSObject> object, KeyAccumulator* keys,
     Handle<DescriptorArray> descs, int start_index, int limit) {
+  AllowHeapAllocation allow_gc;
   int first_skipped = -1;
   PropertyFilter filter = keys->filter();
   KeyCollectionMode mode = keys->mode();
@@ -767,7 +776,9 @@ base::Optional<int> CollectOwnPropertyNamesInternal(
     if (key.FilterKey(keys->filter())) continue;
 
     if (is_shadowing_key) {
-      keys->AddShadowingKey(key);
+      // This might allocate, but {key} is not used afterwards.
+      keys->AddShadowingKey(key, &allow_gc);
+      continue;
     } else {
       if (keys->AddKey(key, DO_NOT_CONVERT) != ExceptionStatus::kSuccess) {
         return base::Optional<int>();
@@ -806,13 +817,13 @@ Maybe<bool> KeyAccumulator::CollectOwnPropertyNames(Handle<JSReceiver> receiver,
       int nof_descriptors = map.NumberOfOwnDescriptors();
       if (enum_keys->length() != nof_descriptors) {
         if (map.prototype(isolate_) != ReadOnlyRoots(isolate_).null_value()) {
+          AllowHeapAllocation allow_gc;
           Handle<DescriptorArray> descs =
               Handle<DescriptorArray>(map.instance_descriptors(), isolate_);
           for (InternalIndex i : InternalIndex::Range(nof_descriptors)) {
             PropertyDetails details = descs->GetDetails(i);
             if (!details.IsDontEnum()) continue;
-            Object key = descs->GetKey(i);
-            this->AddShadowingKey(key);
+            this->AddShadowingKey(descs->GetKey(i), &allow_gc);
           }
         }
       }
@@ -866,6 +877,7 @@ Maybe<bool> KeyAccumulator::CollectOwnPropertyNames(Handle<JSReceiver> receiver,
 
 ExceptionStatus KeyAccumulator::CollectPrivateNames(Handle<JSReceiver> receiver,
                                                     Handle<JSObject> object) {
+  DCHECK_EQ(mode_, KeyCollectionMode::kOwnOnly);
   if (object->HasFastProperties()) {
     int limit = object->map().NumberOfOwnDescriptors();
     Handle<DescriptorArray> descs(object->map().instance_descriptors(),
