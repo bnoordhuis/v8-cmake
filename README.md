@@ -31,7 +31,7 @@ If CMake complains about `python` being incompatible or too old:
     $ cmake -DPYTHON_EXECUTABLE=/usr/bin/python3 /path/to/v8-cmake
 
 
-Debug
+debug
 ===============
 
 - [Debug in VSCode](docs/debug-in-vscode.md)
