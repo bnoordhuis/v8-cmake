@@ -955,7 +955,7 @@ path/to/foo_test.cc:11: Failure
 Value of: Bar(n)
 Expected: 1
   Actual: 2
-   Trace:
+Google Test trace:
 path/to/foo_test.cc:17: A
 
 path/to/foo_test.cc:12: Failure
@@ -1376,6 +1376,17 @@ function scope.
 
 NOTE: Don't forget this step! If you do your test will silently pass, but none
 of its suites will ever run!
+
+There is work in progress to make omitting `INSTANTIATE_TEST_SUITE_P` show up
+under the `GoogleTestVerification` test suite and to then make that an error.
+If you have a test suite where that omission is not an error, for example it is
+in a library that may be linked in for other reason or where the list of test
+cases is dynamic and may be empty, then this check can be suppressed by tagging
+the test suite:
+
+```c++
+GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(FooTest);
+```
 
 To distinguish different instances of the pattern (yes, you can instantiate it
 more than once), the first argument to `INSTANTIATE_TEST_SUITE_P` is a prefix

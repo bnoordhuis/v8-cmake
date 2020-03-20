@@ -844,7 +844,7 @@ struct GTEST_API_ ConstCharPtr {
 
 // Helper for declaring std::string within 'if' statement
 // in pre C++17 build environment.
-struct GTEST_API_ TrueWithString {
+struct TrueWithString {
   TrueWithString() = default;
   explicit TrueWithString(const char* str) : value(str) {}
   explicit TrueWithString(const std::string& str) : value(str) {}
@@ -1405,7 +1405,7 @@ constexpr bool InstantiateTypedTestCase_P_IsDeprecated() { return true; }
       : public parent_class {                                                 \
    public:                                                                    \
     GTEST_TEST_CLASS_NAME_(test_suite_name, test_name)() {}                   \
-    ~GTEST_TEST_CLASS_NAME_(test_suite_name, test_name)() = default;          \
+    ~GTEST_TEST_CLASS_NAME_(test_suite_name, test_name)() override = default; \
     GTEST_DISALLOW_COPY_AND_ASSIGN_(GTEST_TEST_CLASS_NAME_(test_suite_name,   \
                                                            test_name));       \
     GTEST_DISALLOW_MOVE_AND_ASSIGN_(GTEST_TEST_CLASS_NAME_(test_suite_name,   \

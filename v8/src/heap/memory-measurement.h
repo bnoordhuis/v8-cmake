@@ -8,6 +8,7 @@
 #include <list>
 #include <unordered_map>
 
+#include "src/base/platform/elapsed-timer.h"
 #include "src/common/globals.h"
 #include "src/objects/contexts.h"
 #include "src/objects/map.h"
@@ -19,7 +20,7 @@ namespace internal {
 class Heap;
 class NativeContextStats;
 
-class V8_EXPORT_PRIVATE MemoryMeasurement {
+class MemoryMeasurement {
  public:
   explicit MemoryMeasurement(Isolate* isolate);
 
@@ -34,12 +35,13 @@ class V8_EXPORT_PRIVATE MemoryMeasurement {
       Handle<JSPromise> promise, v8::MeasureMemoryMode mode);
 
  private:
-  static const int kGCTaskDelayInSeconds = 60;
+  static const int kGCTaskDelayInSeconds = 10;
   struct Request {
     std::unique_ptr<v8::MeasureMemoryDelegate> delegate;
     Handle<WeakFixedArray> contexts;
     std::vector<size_t> sizes;
     size_t shared;
+    base::ElapsedTimer timer;
   };
   void ScheduleReportingTask();
   void ReportResults();

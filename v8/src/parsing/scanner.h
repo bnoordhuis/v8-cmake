@@ -403,8 +403,10 @@ class V8_EXPORT_PRIVATE Scanner {
     return ScanTemplateSpan();
   }
 
-  Handle<String> SourceUrl(Isolate* isolate) const;
-  Handle<String> SourceMappingUrl(Isolate* isolate) const;
+  template <typename LocalIsolate>
+  Handle<String> SourceUrl(LocalIsolate* isolate) const;
+  template <typename LocalIsolate>
+  Handle<String> SourceMappingUrl(LocalIsolate* isolate) const;
 
   bool FoundHtmlComment() const { return found_html_comment_; }
 
@@ -421,9 +423,6 @@ class V8_EXPORT_PRIVATE Scanner {
   void set_allow_harmony_nullish(bool allow) { allow_harmony_nullish_ = allow; }
 
   const Utf16CharacterStream* stream() const { return source_; }
-
-  // If the next characters in the stream are "#!", the line is skipped.
-  void SkipHashBang();
 
  private:
   // Scoped helper for saving & restoring scanner error state.

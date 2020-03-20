@@ -1,14 +1,14 @@
 [
   {
     "url": "https://chromium.googlesource.com/v8/v8.git", 
-    "commit": "a21998f629c90470f7a4274208564bb17e7875ab", 
+    "commit": "07e7de002d408ba1a60f258fafa4ce27f0fe48b7", 
     "/* comment */": "Dependency v8 must be first.", 
-    "branch": "branch-heads/8.1", 
+    "branch": "branch-heads/8.2", 
     "path": "v8"
   }, 
   {
     "url": "https://chromium.googlesource.com/external/github.com/google/googletest.git", 
-    "commit": "306f3754a71d6d1ac644681d3544d06744914228", 
+    "commit": "10b1902d893ea8cc43c69541d70868f91af3646b", 
     "branch": "master", 
     "path": "v8/third_party/googletest/src"
   }, 
@@ -20,13 +20,13 @@
   }, 
   {
     "url": "https://chromium.googlesource.com/chromium/src/base/trace_event/common.git", 
-    "commit": "bd79231eb1f9e7de2efb4ad79e530d9a7e70d9a5", 
+    "commit": "dab187b372fc17e51f5b9fad8201813d0aed5129", 
     "branch": "master", 
     "path": "v8/base/trace_event/common"
   }, 
   {
     "url": "https://chromium.googlesource.com/chromium/src/third_party/zlib.git", 
-    "commit": "b9b9a5af7cca2e683e5f2aead8418e5bf9d5a7d5", 
+    "commit": "c2eb8a7f7a0fa7884234ebc1b836644084ccbec9", 
     "branch": "master", 
     "path": "v8/third_party/zlib"
   }, 
