@@ -3842,6 +3842,12 @@ std::unique_ptr<v8::BackingStore> v8::BackingStore::Reallocate(
   return backing_store;
 }
 
+// static
+void v8::BackingStore::EmptyDeleter(void* data, size_t length,
+                                    void* deleter_data) {
+  DCHECK_NULL(deleter_data);
+}
+
 std::shared_ptr<v8::BackingStore> v8::ArrayBuffer::GetBackingStore() {
   i::Handle<i::JSArrayBuffer> self = Utils::OpenHandle(this);
   std::shared_ptr<i::BackingStore> backing_store = self->GetBackingStore();
@@ -7577,7 +7583,7 @@ std::unique_ptr<v8::BackingStore> v8::ArrayBuffer::NewBackingStore(
 }
 
 std::unique_ptr<v8::BackingStore> v8::ArrayBuffer::NewBackingStore(
-    void* data, size_t byte_length, BackingStoreDeleterCallback deleter,
+    void* data, size_t byte_length, v8::BackingStore::DeleterCallback deleter,
     void* deleter_data) {
   CHECK_LE(byte_length, i::JSArrayBuffer::kMaxByteLength);
   std::unique_ptr<i::BackingStoreBase> backing_store =
@@ -7906,7 +7912,7 @@ std::unique_ptr<v8::BackingStore> v8::SharedArrayBuffer::NewBackingStore(
 }
 
 std::unique_ptr<v8::BackingStore> v8::SharedArrayBuffer::NewBackingStore(
-    void* data, size_t byte_length, BackingStoreDeleterCallback deleter,
+    void* data, size_t byte_length, v8::BackingStore::DeleterCallback deleter,
     void* deleter_data) {
   CHECK_LE(byte_length, i::JSArrayBuffer::kMaxByteLength);
   std::unique_ptr<i::BackingStoreBase> backing_store =
@@ -9840,6 +9846,15 @@ uint32_t debug::WasmScript::GetFunctionHash(int function_index) {
   // TODO(herhut): Maybe also take module, name and signature into account.
   return i::StringHasher::HashSequentialString(function_bytes.begin(),
                                                function_bytes.length(), 0);
+}
+
+int debug::WasmScript::CodeOffset() const {
+  i::Handle<i::Script> script = Utils::OpenHandle(this);
+  DCHECK_EQ(i::Script::TYPE_WASM, script->type());
+  i::wasm::NativeModule* native_module = script->wasm_native_module();
+  const i::wasm::WasmModule* module = native_module->module();
+
+  return module->code.offset();
 }
 
 debug::Location::Location(int line_number, int column_number)

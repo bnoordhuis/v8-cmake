@@ -219,6 +219,7 @@ namespace internal {
   F(GetTemplateObject, 3, 1)                         \
   F(IncrementUseCounter, 1, 1)                       \
   F(BytecodeBudgetInterrupt, 1, 1)                   \
+  F(NewError, 2, 1)                                  \
   F(NewReferenceError, 2, 1)                         \
   F(NewSyntaxError, 2, 1)                            \
   F(NewTypeError, 2, 1)                              \
@@ -568,8 +569,8 @@ namespace internal {
   F(WasmRefFunc, 1, 1)                  \
   F(WasmFunctionTableGet, 3, 1)         \
   F(WasmFunctionTableSet, 4, 1)         \
-  F(WasmTableInit, 5, 1)                \
-  F(WasmTableCopy, 5, 1)                \
+  F(WasmTableInit, 6, 1)                \
+  F(WasmTableCopy, 6, 1)                \
   F(WasmTableGrow, 3, 1)                \
   F(WasmTableFill, 4, 1)                \
   F(WasmIsValidFuncRefValue, 1, 1)      \

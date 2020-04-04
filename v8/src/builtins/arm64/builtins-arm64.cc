@@ -35,6 +35,8 @@ namespace internal {
 #define __ ACCESS_MASM(masm)
 
 void Builtins::Generate_Adaptor(MacroAssembler* masm, Address address) {
+  __ CodeEntry();
+
   __ Mov(kJavaScriptCallExtraArg1Register, ExternalReference::Create(address));
   __ Jump(BUILTIN_CODE(masm->isolate(), AdaptorWithBuiltinExitFrame),
           RelocInfo::CODE_TARGET);
@@ -696,10 +698,10 @@ void Generate_JSEntryVariant(MacroAssembler* masm, StackFrame::Type type,
   // that.
   {
     Assembler::BlockPoolsScope block_pools(masm);
-    __ bind(&handler_entry);
 
     // Store the current pc as the handler offset. It's used later to create the
     // handler table.
+    __ BindExceptionHandler(&handler_entry);
     masm->isolate()->builtins()->SetJSEntryHandlerOffset(handler_entry.pos());
 
     // Caught exception: Store result (exception) in the pending exception
@@ -1056,17 +1058,26 @@ static void MaybeOptimizeCode(MacroAssembler* masm, Register feedback_vector,
 
 // Advance the current bytecode offset. This simulates what all bytecode
 // handlers do upon completion of the underlying operation. Will bail out to a
-// label if the bytecode (without prefix) is a return bytecode.
+// label if the bytecode (without prefix) is a return bytecode. Will not advance
+// the bytecode offset if the current bytecode is a JumpLoop, instead just
+// re-executing the JumpLoop to jump to the correct bytecode.
 static void AdvanceBytecodeOffsetOrReturn(MacroAssembler* masm,
                                           Register bytecode_array,
                                           Register bytecode_offset,
                                           Register bytecode, Register scratch1,
-                                          Label* if_return) {
+                                          Register scratch2, Label* if_return) {
   Register bytecode_size_table = scratch1;
+
+  // The bytecode offset value will be increased by one in wide and extra wide
+  // cases. In the case of having a wide or extra wide JumpLoop bytecode, we
+  // will restore the original bytecode. In order to simplify the code, we have
+  // a backup of it.
+  Register original_bytecode_offset = scratch2;
   DCHECK(!AreAliased(bytecode_array, bytecode_offset, bytecode_size_table,
-                     bytecode));
+                     bytecode, original_bytecode_offset));
 
   __ Mov(bytecode_size_table, ExternalReference::bytecode_size_table_address());
+  __ Mov(original_bytecode_offset, bytecode_offset);
 
   // Check if the bytecode is a Wide or ExtraWide prefix bytecode.
   Label process_bytecode, extra_wide;
@@ -1103,9 +1114,22 @@ static void AdvanceBytecodeOffsetOrReturn(MacroAssembler* masm,
   RETURN_BYTECODE_LIST(JUMP_IF_EQUAL)
 #undef JUMP_IF_EQUAL
 
+  // If this is a JumpLoop, re-execute it to perform the jump to the beginning
+  // of the loop.
+  Label end, not_jump_loop;
+  __ Cmp(bytecode, Operand(static_cast<int>(interpreter::Bytecode::kJumpLoop)));
+  __ B(ne, &not_jump_loop);
+  // We need to restore the original bytecode_offset since we might have
+  // increased it to skip the wide / extra-wide prefix bytecode.
+  __ Mov(bytecode_offset, original_bytecode_offset);
+  __ B(&end);
+
+  __ bind(&not_jump_loop);
   // Otherwise, load the size of the current bytecode and advance the offset.
   __ Ldr(scratch1.W(), MemOperand(bytecode_size_table, bytecode, LSL, 2));
   __ Add(bytecode_offset, bytecode_offset, scratch1);
+
+  __ Bind(&end);
 }
 
 // Generate code for entering a JS function with the interpreter.
@@ -1289,7 +1313,7 @@ void Builtins::Generate_InterpreterEntryTrampoline(MacroAssembler* masm) {
   __ Ldrb(x1, MemOperand(kInterpreterBytecodeArrayRegister,
                          kInterpreterBytecodeOffsetRegister));
   AdvanceBytecodeOffsetOrReturn(masm, kInterpreterBytecodeArrayRegister,
-                                kInterpreterBytecodeOffsetRegister, x1, x2,
+                                kInterpreterBytecodeOffsetRegister, x1, x2, x3,
                                 &do_return);
   __ B(&do_dispatch);
 
@@ -1592,7 +1616,7 @@ void Builtins::Generate_InterpreterEnterBytecodeAdvance(MacroAssembler* masm) {
   // Advance to the next bytecode.
   Label if_return;
   AdvanceBytecodeOffsetOrReturn(masm, kInterpreterBytecodeArrayRegister,
-                                kInterpreterBytecodeOffsetRegister, x1, x2,
+                                kInterpreterBytecodeOffsetRegister, x1, x2, x3,
                                 &if_return);
 
   __ bind(&enter_bytecode);
@@ -3021,19 +3045,8 @@ void Builtins::Generate_WasmDebugBreak(MacroAssembler* masm) {
 
     // Save all parameter registers. They might hold live values, we restore
     // them after the runtime call.
-    RegList gp_regs = 0;
-    for (Register reg : wasm::kGpParamRegisters) gp_regs |= reg.bit();
-    // The size of {gp_regs} must be a multiple of 2, so that the total pushed
-    // size is a multiple of 16 bytes.
-    if (NumRegs(gp_regs) % 2) {
-      // Just add any unset register.
-      gp_regs |= uint64_t{1} << base::bits::CountTrailingZeros(~gp_regs);
-    }
-    RegList fp_regs = 0;
-    for (DoubleRegister reg : wasm::kFpParamRegisters) fp_regs |= reg.bit();
-
-    __ PushXRegList(gp_regs);
-    __ PushDRegList(fp_regs);
+    __ PushXRegList(WasmDebugBreakFrameConstants::kPushedGpRegs);
+    __ PushDRegList(WasmDebugBreakFrameConstants::kPushedFpRegs);
 
     // Initialize the JavaScript context with 0. CEntry will use it to
     // set the current context on the isolate.
@@ -3041,8 +3054,8 @@ void Builtins::Generate_WasmDebugBreak(MacroAssembler* masm) {
     __ CallRuntime(Runtime::kWasmDebugBreak, 0);
 
     // Restore registers.
-    __ PopDRegList(fp_regs);
-    __ PopXRegList(gp_regs);
+    __ PopDRegList(WasmDebugBreakFrameConstants::kPushedFpRegs);
+    __ PopXRegList(WasmDebugBreakFrameConstants::kPushedGpRegs);
   }
   __ Ret();
 }

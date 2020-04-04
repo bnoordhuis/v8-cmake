@@ -577,7 +577,7 @@ config("toolchain") {
     if (v8_control_flow_integrity) {
       # TODO(v8:10026): Enable this in src/build.
       if (current_cpu == "arm64") {
-        cflags += [ "-mbranch-protection=pac-ret" ]
+        cflags += [ "-mbranch-protection=standard" ]
       }
     }
   }
@@ -2325,6 +2325,9 @@ v8_source_set("v8_base_without_compiler") {
     "src/handles/handles-inl.h",
     "src/handles/handles.cc",
     "src/handles/handles.h",
+    "src/handles/local-handles-inl.h",
+    "src/handles/local-handles.cc",
+    "src/handles/local-handles.h",
     "src/handles/maybe-handles-inl.h",
     "src/handles/maybe-handles.h",
     "src/heap/array-buffer-collector.cc",
@@ -2402,6 +2405,8 @@ v8_source_set("v8_base_without_compiler") {
     "src/heap/read-only-heap.cc",
     "src/heap/read-only-heap.h",
     "src/heap/remembered-set.h",
+    "src/heap/safepoint.cc",
+    "src/heap/safepoint.h",
     "src/heap/scavenge-job.cc",
     "src/heap/scavenge-job.h",
     "src/heap/scavenger-inl.h",
@@ -2831,6 +2836,8 @@ v8_source_set("v8_base_without_compiler") {
     "src/regexp/regexp-compiler.h",
     "src/regexp/regexp-dotprinter.cc",
     "src/regexp/regexp-dotprinter.h",
+    "src/regexp/regexp-error.cc",
+    "src/regexp/regexp-error.h",
     "src/regexp/regexp-interpreter.cc",
     "src/regexp/regexp-interpreter.h",
     "src/regexp/regexp-macro-assembler-arch.h",
@@ -3024,6 +3031,8 @@ v8_source_set("v8_base_without_compiler") {
     "src/wasm/wasm-code-manager.cc",
     "src/wasm/wasm-code-manager.h",
     "src/wasm/wasm-constants.h",
+    "src/wasm/wasm-debug-evaluate.cc",
+    "src/wasm/wasm-debug-evaluate.h",
     "src/wasm/wasm-debug.cc",
     "src/wasm/wasm-engine.cc",
     "src/wasm/wasm-engine.h",
@@ -3635,6 +3644,7 @@ v8_component("v8_libbase") {
     "src/base/atomicops_internals_std.h",
     "src/base/base-export.h",
     "src/base/bit-field.h",
+    "src/base/bits-iterator.h",
     "src/base/bits.cc",
     "src/base/bits.h",
     "src/base/bounded-page-allocator.cc",
@@ -3913,6 +3923,47 @@ v8_source_set("fuzzer_support") {
   ]
 }
 
+v8_source_set("cppgc_base") {
+  visibility = [ ":*" ]
+
+  sources = [
+    "include/cppgc/allocation.h",
+    "include/cppgc/api-constants.h",
+    "include/cppgc/finalizer-trait.h",
+    "include/cppgc/garbage-collected.h",
+    "include/cppgc/gc-info.h",
+    "include/cppgc/heap.h",
+    "include/cppgc/platform.h",
+    "include/v8config.h",
+    "src/heap/cppgc/allocation.cc",
+    "src/heap/cppgc/gc-info-table.cc",
+    "src/heap/cppgc/gc-info-table.h",
+    "src/heap/cppgc/gc-info.cc",
+    "src/heap/cppgc/heap-inl.h",
+    "src/heap/cppgc/heap-object-header-inl.h",
+    "src/heap/cppgc/heap-object-header.cc",
+    "src/heap/cppgc/heap-object-header.h",
+    "src/heap/cppgc/heap.cc",
+    "src/heap/cppgc/heap.h",
+    "src/heap/cppgc/platform.cc",
+    "src/heap/cppgc/sanitizers.h",
+    "src/heap/cppgc/stack.cc",
+    "src/heap/cppgc/stack.h",
+  ]
+
+  if (target_cpu == "x64") {
+    if (is_win) {
+      sources += [ "src/heap/cppgc/asm/x64/push_registers_win.S" ]
+    } else {
+      sources += [ "src/heap/cppgc/asm/x64/push_registers.S" ]
+    }
+  }
+
+  configs = [ ":internal_config" ]
+
+  public_deps = [ ":v8_libbase" ]
+}
+
 ###############################################################################
 # Produce a single static library for embedders
 #
@@ -3957,6 +4008,12 @@ v8_static_library("wee8") {
     "third_party/wasm-api/wasm.h",
     "third_party/wasm-api/wasm.hh",
   ]
+}
+
+v8_static_library("cppgc") {
+  deps = [ ":cppgc_base" ]
+
+  configs = [ ":internal_config" ]
 }
 
 ###############################################################################
@@ -4250,6 +4307,15 @@ if (is_component_build) {
 
     public_configs = [ ":external_config" ]
   }
+
+  v8_component("cppgc_for_testing") {
+    testonly = true
+
+    public_deps = [ ":cppgc_base" ]
+
+    configs = [ ":internal_config" ]
+    public_configs = [ ":external_config" ]
+  }
 } else {
   group("v8") {
     public_deps = [
@@ -4270,6 +4336,14 @@ if (is_component_build) {
       ":v8_initializers",
       ":v8_snapshot",
     ]
+
+    public_configs = [ ":external_config" ]
+  }
+
+  group("cppgc_for_testing") {
+    testonly = true
+
+    public_deps = [ ":cppgc_base" ]
 
     public_configs = [ ":external_config" ]
   }

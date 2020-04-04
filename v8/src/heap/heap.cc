@@ -50,6 +50,7 @@
 #include "src/heap/objects-visiting.h"
 #include "src/heap/read-only-heap.h"
 #include "src/heap/remembered-set.h"
+#include "src/heap/safepoint.h"
 #include "src/heap/scavenge-job.h"
 #include "src/heap/scavenger-inl.h"
 #include "src/heap/stress-marking-observer.h"
@@ -201,7 +202,7 @@ Heap::Heap()
     : isolate_(isolate()),
       memory_pressure_level_(MemoryPressureLevel::kNone),
       global_pretenuring_feedback_(kInitialFeedbackCapacity),
-      local_heaps_head_(nullptr),
+      safepoint_(new Safepoint(this)),
       external_string_table_(this) {
   // Ensure old_generation_size_ is a multiple of kPageSize.
   DCHECK_EQ(0, max_old_generation_size_ & (Page::kPageSize - 1));
@@ -821,12 +822,6 @@ void Heap::GarbageCollectionPrologue() {
   {
     AllowHeapAllocation for_the_first_part_of_prologue;
     gc_count_++;
-
-#ifdef VERIFY_HEAP
-    if (FLAG_verify_heap) {
-      Verify();
-    }
-#endif
   }
 
   // Reset GC statistics.
@@ -1119,12 +1114,6 @@ void Heap::GarbageCollectionEpilogue() {
   if (Heap::ShouldZapGarbage() || FLAG_clear_free_memory) {
     ZapFromSpace();
   }
-
-#ifdef VERIFY_HEAP
-  if (FLAG_verify_heap) {
-    Verify();
-  }
-#endif
 
   AllowHeapAllocation for_the_rest_of_the_epilogue;
 
@@ -2021,6 +2010,13 @@ bool Heap::PerformGarbageCollection(
     }
   }
 
+  if (FLAG_local_heaps) safepoint()->Start();
+#ifdef VERIFY_HEAP
+  if (FLAG_verify_heap) {
+    Verify();
+  }
+#endif
+
   EnsureFromSpaceIsCommitted();
 
   size_t start_young_generation_size =
@@ -2093,6 +2089,13 @@ bool Heap::PerformGarbageCollection(
     // can potentially trigger recursive garbage
     local_embedder_heap_tracer()->TraceEpilogue();
   }
+
+#ifdef VERIFY_HEAP
+  if (FLAG_verify_heap) {
+    Verify();
+  }
+#endif
+  if (FLAG_local_heaps) safepoint()->End();
 
   {
     TRACE_GC(tracer(), GCTracer::Scope::HEAP_EXTERNAL_WEAK_GLOBAL_HANDLES);
@@ -2313,16 +2316,8 @@ void Heap::MarkCompactPrologue() {
 
 
 void Heap::CheckNewSpaceExpansionCriteria() {
-  if (FLAG_experimental_new_space_growth_heuristic) {
-    if (new_space_->TotalCapacity() < new_space_->MaximumCapacity() &&
-        survived_last_scavenge_ * 100 / new_space_->TotalCapacity() >= 10) {
-      // Grow the size of new space if there is room to grow, and more than 10%
-      // have survived the last scavenge.
-      new_space_->Grow();
-      survived_since_last_expansion_ = 0;
-    }
-  } else if (new_space_->TotalCapacity() < new_space_->MaximumCapacity() &&
-             survived_since_last_expansion_ > new_space_->TotalCapacity()) {
+  if (new_space_->TotalCapacity() < new_space_->MaximumCapacity() &&
+      survived_since_last_expansion_ > new_space_->TotalCapacity()) {
     // Grow the size of new space if there is room to grow, and enough data
     // has survived scavenge since the last expansion.
     new_space_->Grow();
@@ -3876,40 +3871,6 @@ void Heap::AppendArrayBufferExtension(JSArrayBuffer object,
   array_buffer_sweeper_->Append(object, extension);
 }
 
-void Heap::AddLocalHeap(LocalHeap* local_heap) {
-  base::MutexGuard guard(&local_heaps_mutex_);
-  if (local_heaps_head_) local_heaps_head_->prev_ = local_heap;
-  local_heap->prev_ = nullptr;
-  local_heap->next_ = local_heaps_head_;
-  local_heaps_head_ = local_heap;
-}
-
-void Heap::RemoveLocalHeap(LocalHeap* local_heap) {
-  base::MutexGuard guard(&local_heaps_mutex_);
-  if (local_heap->next_) local_heap->next_->prev_ = local_heap->prev_;
-  if (local_heap->prev_)
-    local_heap->prev_->next_ = local_heap->next_;
-  else
-    local_heaps_head_ = local_heap->next_;
-}
-
-bool Heap::ContainsLocalHeap(LocalHeap* local_heap) {
-  base::MutexGuard guard(&local_heaps_mutex_);
-  LocalHeap* current = local_heaps_head_;
-
-  while (current) {
-    if (current == local_heap) return true;
-    current = current->next_;
-  }
-
-  return false;
-}
-
-bool Heap::ContainsAnyLocalHeap() {
-  base::MutexGuard guard(&local_heaps_mutex_);
-  return local_heaps_head_ != nullptr;
-}
-
 void Heap::AutomaticallyRestoreInitialHeapLimit(double threshold_percent) {
   initial_max_old_generation_size_threshold_ =
       initial_max_old_generation_size_ * threshold_percent;
@@ -4508,6 +4469,12 @@ void Heap::IterateStrongRoots(RootVisitor* v, VisitMode mode) {
   FixStaleLeftTrimmedHandlesVisitor left_trim_visitor(this);
   isolate_->handle_scope_implementer()->Iterate(&left_trim_visitor);
   isolate_->handle_scope_implementer()->Iterate(v);
+
+  if (FLAG_local_heaps) {
+    safepoint_->Iterate(&left_trim_visitor);
+    safepoint_->Iterate(v);
+  }
+
   isolate_->IterateDeferredHandles(&left_trim_visitor);
   isolate_->IterateDeferredHandles(v);
   v->Synchronize(VisitorSynchronization::kHandleScope);
@@ -6707,7 +6674,7 @@ bool Heap::PageFlagsAreConsistent(HeapObject object) {
   CHECK_EQ(chunk->InReadOnlySpace(), slim_chunk->InReadOnlySpace());
 
   // Marking consistency.
-  if (chunk->IsWritable()) {
+  if (chunk->IsWritable() && !Heap::InOffThreadSpace(object)) {
     // RO_SPACE can be shared between heaps, so we can't use RO_SPACE objects to
     // find a heap. The exception is when the ReadOnlySpace is writeable, during
     // bootstrapping, so explicitly allow this case.

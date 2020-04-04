@@ -892,6 +892,25 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                                         callable, receiver, args...));
   }
 
+  TNode<Object> CallApiCallback(TNode<Object> context, TNode<RawPtrT> callback,
+                                TNode<IntPtrT> argc, TNode<Object> data,
+                                TNode<Object> holder, TNode<Object> receiver);
+
+  TNode<Object> CallApiCallback(TNode<Object> context, TNode<RawPtrT> callback,
+                                TNode<IntPtrT> argc, TNode<Object> data,
+                                TNode<Object> holder, TNode<Object> receiver,
+                                TNode<Object> value);
+
+  TNode<Object> CallRuntimeNewArray(TNode<Context> context,
+                                    TNode<Object> receiver,
+                                    TNode<Object> length,
+                                    TNode<Object> new_target,
+                                    TNode<Object> allocation_site);
+
+  void TailCallRuntimeNewArray(TNode<Context> context, TNode<Object> receiver,
+                               TNode<Object> length, TNode<Object> new_target,
+                               TNode<Object> allocation_site);
+
   template <class... TArgs>
   TNode<JSReceiver> ConstructWithTarget(TNode<Context> context,
                                         TNode<JSReceiver> target,
@@ -1050,9 +1069,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<Object> LoadFromParentFrame(int offset);
 
   // Load an object pointer from a buffer that isn't in the heap.
-  template <typename T = Object>
-  TNode<T> LoadBufferObject(TNode<RawPtrT> buffer, int offset) {
-    return CAST(Load(MachineTypeOf<T>::value, buffer, IntPtrConstant(offset)));
+  TNode<Object> LoadBufferObject(TNode<RawPtrT> buffer, int offset) {
+    return LoadFullTagged(buffer, IntPtrConstant(offset));
   }
   template <typename T>
   TNode<T> LoadBufferData(TNode<RawPtrT> buffer, int offset) {
@@ -1063,7 +1081,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
     return LoadBufferData<RawPtrT>(buffer, offset);
   }
   TNode<Smi> LoadBufferSmi(TNode<RawPtrT> buffer, int offset) {
-    return LoadBufferObject<Smi>(buffer, offset);
+    return CAST(LoadBufferObject(buffer, offset));
   }
   // Load a field from an object on the heap.
   template <class T, typename std::enable_if<

@@ -339,8 +339,8 @@ void V8Debugger::terminateExecution(
     std::unique_ptr<TerminateExecutionCallback> callback) {
   if (m_terminateExecutionCallback) {
     if (callback) {
-      callback->sendFailure(
-          Response::Error("There is current termination request in progress"));
+      callback->sendFailure(Response::ServerError(
+          "There is current termination request in progress"));
     }
     return;
   }
@@ -394,9 +394,9 @@ Response V8Debugger::continueToLocation(
     }
     continueProgram(targetContextGroupId);
     // TODO(kozyatinskiy): Return actual line and column number.
-    return Response::OK();
+    return Response::Success();
   } else {
-    return Response::Error("Cannot continue to specified location");
+    return Response::ServerError("Cannot continue to specified location");
   }
 }
 
@@ -684,6 +684,9 @@ v8::MaybeLocal<v8::Value> V8Debugger::getTargetScopes(
         break;
       case v8::debug::ScopeIterator::ScopeTypeModule:
         description = "Module" + nameSuffix;
+        break;
+      case v8::debug::ScopeIterator::ScopeTypeWasmExpressionStack:
+        description = "Wasm Expression Stack" + nameSuffix;
         break;
     }
     v8::Local<v8::Object> object = iterator->GetObject();

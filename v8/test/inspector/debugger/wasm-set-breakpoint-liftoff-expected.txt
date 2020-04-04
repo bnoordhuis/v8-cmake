@@ -4,20 +4,24 @@ Waiting for wasm script (ignoring first non-wasm script).
 Setting breakpoint at offset 38 on script wasm://wasm/0c10a5fe
 Calling main(4)
 Paused:
-Script wasm://wasm/0c10a5fe byte offset 38: Wasm opcode 0x1
+Script wasm://wasm/0c10a5fe byte offset 38: Wasm opcode 0x01
 Scope:
 at wasm_A (0:38):
  - scope (global):
  - scope (local):
    stack: 
+ - scope (wasm-expression-stack):
 at wasm_B (0:56):
  - scope (global):
  - scope (local):
-   locals: "$var0": 3 (number)
+   locals: "var0": 3 (number)
    stack: 
+ - scope (wasm-expression-stack):
 at (anonymous) (0:17):
    -- skipped
 Setting breakpoint at offset 39 on script v8://test/runWasm
+Setting breakpoint at offset 61 on script v8://test/runWasm
+Setting breakpoint at offset 60 on script v8://test/runWasm
 Setting breakpoint at offset 54 on script v8://test/runWasm
 Setting breakpoint at offset 53 on script v8://test/runWasm
 Setting breakpoint at offset 51 on script v8://test/runWasm
@@ -25,17 +29,19 @@ Setting breakpoint at offset 49 on script v8://test/runWasm
 Setting breakpoint at offset 45 on script v8://test/runWasm
 Setting breakpoint at offset 47 on script v8://test/runWasm
 Paused:
-Script wasm://wasm/0c10a5fe byte offset 39: Wasm opcode 0x1
+Script wasm://wasm/0c10a5fe byte offset 39: Wasm opcode 0x01
 Scope:
 at wasm_A (0:39):
  - scope (global):
  - scope (local):
    stack: 
+ - scope (wasm-expression-stack):
 at wasm_B (0:56):
  - scope (global):
  - scope (local):
-   locals: "$var0": 3 (number)
+   locals: "var0": 3 (number)
    stack: 
+ - scope (wasm-expression-stack):
 at (anonymous) (0:17):
    -- skipped
 Paused:
@@ -44,18 +50,21 @@ Scope:
 at wasm_B (0:45):
  - scope (global):
  - scope (local):
-   locals: "$var0": 3 (number)
+   locals: "var0": 3 (number)
    stack: 
+ - scope (wasm-expression-stack):
 at (anonymous) (0:17):
    -- skipped
 Paused:
-Script wasm://wasm/0c10a5fe byte offset 47: Wasm opcode 0x4
+Script wasm://wasm/0c10a5fe byte offset 47: Wasm opcode 0x04
 Scope:
 at wasm_B (0:47):
  - scope (global):
  - scope (local):
-   locals: "$var0": 3 (number)
-   stack: "0": -11 (number)
+   locals: "var0": 3 (number)
+   stack: "0": 3 (number)
+ - scope (wasm-expression-stack):
+   0: 3 (number)
 at (anonymous) (0:17):
    -- skipped
 Paused:
@@ -64,8 +73,9 @@ Scope:
 at wasm_B (0:49):
  - scope (global):
  - scope (local):
-   locals: "$var0": 3 (number)
+   locals: "var0": 3 (number)
    stack: 
+ - scope (wasm-expression-stack):
 at (anonymous) (0:17):
    -- skipped
 Paused:
@@ -74,8 +84,10 @@ Scope:
 at wasm_B (0:51):
  - scope (global):
  - scope (local):
-   locals: "$var0": 3 (number)
-   stack: "0": -11 (number)
+   locals: "var0": 3 (number)
+   stack: "0": 3 (number)
+ - scope (wasm-expression-stack):
+   0: 3 (number)
 at (anonymous) (0:17):
    -- skipped
 Paused:
@@ -84,8 +96,11 @@ Scope:
 at wasm_B (0:53):
  - scope (global):
  - scope (local):
-   locals: "$var0": 3 (number)
-   stack: "0": -11 (number), "1": 1 (number)
+   locals: "var0": 3 (number)
+   stack: "0": 3 (number), "1": 1 (number)
+ - scope (wasm-expression-stack):
+   0: 3 (number)
+   1: 1 (number)
 at (anonymous) (0:17):
    -- skipped
 Paused:
@@ -94,36 +109,42 @@ Scope:
 at wasm_B (0:54):
  - scope (global):
  - scope (local):
-   locals: "$var0": 3 (number)
-   stack: "0": -11 (number)
+   locals: "var0": 3 (number)
+   stack: "0": 2 (number)
+ - scope (wasm-expression-stack):
+   0: 2 (number)
 at (anonymous) (0:17):
    -- skipped
 Paused:
-Script wasm://wasm/0c10a5fe byte offset 38: Wasm opcode 0x1
+Script wasm://wasm/0c10a5fe byte offset 38: Wasm opcode 0x01
 Scope:
 at wasm_A (0:38):
  - scope (global):
  - scope (local):
    stack: 
+ - scope (wasm-expression-stack):
 at wasm_B (0:56):
  - scope (global):
  - scope (local):
-   locals: "$var0": 2 (number)
+   locals: "var0": 2 (number)
    stack: 
+ - scope (wasm-expression-stack):
 at (anonymous) (0:17):
    -- skipped
 Paused:
-Script wasm://wasm/0c10a5fe byte offset 39: Wasm opcode 0x1
+Script wasm://wasm/0c10a5fe byte offset 39: Wasm opcode 0x01
 Scope:
 at wasm_A (0:39):
  - scope (global):
  - scope (local):
    stack: 
+ - scope (wasm-expression-stack):
 at wasm_B (0:56):
  - scope (global):
  - scope (local):
-   locals: "$var0": 2 (number)
+   locals: "var0": 2 (number)
    stack: 
+ - scope (wasm-expression-stack):
 at (anonymous) (0:17):
    -- skipped
 Paused:
@@ -132,18 +153,21 @@ Scope:
 at wasm_B (0:45):
  - scope (global):
  - scope (local):
-   locals: "$var0": 2 (number)
+   locals: "var0": 2 (number)
    stack: 
+ - scope (wasm-expression-stack):
 at (anonymous) (0:17):
    -- skipped
 Paused:
-Script wasm://wasm/0c10a5fe byte offset 47: Wasm opcode 0x4
+Script wasm://wasm/0c10a5fe byte offset 47: Wasm opcode 0x04
 Scope:
 at wasm_B (0:47):
  - scope (global):
  - scope (local):
-   locals: "$var0": 2 (number)
-   stack: "0": -11 (number)
+   locals: "var0": 2 (number)
+   stack: "0": 2 (number)
+ - scope (wasm-expression-stack):
+   0: 2 (number)
 at (anonymous) (0:17):
    -- skipped
 Paused:
@@ -152,8 +176,9 @@ Scope:
 at wasm_B (0:49):
  - scope (global):
  - scope (local):
-   locals: "$var0": 2 (number)
+   locals: "var0": 2 (number)
    stack: 
+ - scope (wasm-expression-stack):
 at (anonymous) (0:17):
    -- skipped
 Paused:
@@ -162,8 +187,10 @@ Scope:
 at wasm_B (0:51):
  - scope (global):
  - scope (local):
-   locals: "$var0": 2 (number)
-   stack: "0": -11 (number)
+   locals: "var0": 2 (number)
+   stack: "0": 2 (number)
+ - scope (wasm-expression-stack):
+   0: 2 (number)
 at (anonymous) (0:17):
    -- skipped
 Paused:
@@ -172,8 +199,11 @@ Scope:
 at wasm_B (0:53):
  - scope (global):
  - scope (local):
-   locals: "$var0": 2 (number)
-   stack: "0": -11 (number), "1": 1 (number)
+   locals: "var0": 2 (number)
+   stack: "0": 2 (number), "1": 1 (number)
+ - scope (wasm-expression-stack):
+   0: 2 (number)
+   1: 1 (number)
 at (anonymous) (0:17):
    -- skipped
 Paused:
@@ -182,36 +212,42 @@ Scope:
 at wasm_B (0:54):
  - scope (global):
  - scope (local):
-   locals: "$var0": 2 (number)
-   stack: "0": -11 (number)
+   locals: "var0": 2 (number)
+   stack: "0": 1 (number)
+ - scope (wasm-expression-stack):
+   0: 1 (number)
 at (anonymous) (0:17):
    -- skipped
 Paused:
-Script wasm://wasm/0c10a5fe byte offset 38: Wasm opcode 0x1
+Script wasm://wasm/0c10a5fe byte offset 38: Wasm opcode 0x01
 Scope:
 at wasm_A (0:38):
  - scope (global):
  - scope (local):
    stack: 
+ - scope (wasm-expression-stack):
 at wasm_B (0:56):
  - scope (global):
  - scope (local):
-   locals: "$var0": 1 (number)
+   locals: "var0": 1 (number)
    stack: 
+ - scope (wasm-expression-stack):
 at (anonymous) (0:17):
    -- skipped
 Paused:
-Script wasm://wasm/0c10a5fe byte offset 39: Wasm opcode 0x1
+Script wasm://wasm/0c10a5fe byte offset 39: Wasm opcode 0x01
 Scope:
 at wasm_A (0:39):
  - scope (global):
  - scope (local):
    stack: 
+ - scope (wasm-expression-stack):
 at wasm_B (0:56):
  - scope (global):
  - scope (local):
-   locals: "$var0": 1 (number)
+   locals: "var0": 1 (number)
    stack: 
+ - scope (wasm-expression-stack):
 at (anonymous) (0:17):
    -- skipped
 Paused:
@@ -220,18 +256,21 @@ Scope:
 at wasm_B (0:45):
  - scope (global):
  - scope (local):
-   locals: "$var0": 1 (number)
+   locals: "var0": 1 (number)
    stack: 
+ - scope (wasm-expression-stack):
 at (anonymous) (0:17):
    -- skipped
 Paused:
-Script wasm://wasm/0c10a5fe byte offset 47: Wasm opcode 0x4
+Script wasm://wasm/0c10a5fe byte offset 47: Wasm opcode 0x04
 Scope:
 at wasm_B (0:47):
  - scope (global):
  - scope (local):
-   locals: "$var0": 1 (number)
-   stack: "0": -11 (number)
+   locals: "var0": 1 (number)
+   stack: "0": 1 (number)
+ - scope (wasm-expression-stack):
+   0: 1 (number)
 at (anonymous) (0:17):
    -- skipped
 Paused:
@@ -240,8 +279,9 @@ Scope:
 at wasm_B (0:49):
  - scope (global):
  - scope (local):
-   locals: "$var0": 1 (number)
+   locals: "var0": 1 (number)
    stack: 
+ - scope (wasm-expression-stack):
 at (anonymous) (0:17):
    -- skipped
 Paused:
@@ -250,8 +290,10 @@ Scope:
 at wasm_B (0:51):
  - scope (global):
  - scope (local):
-   locals: "$var0": 1 (number)
-   stack: "0": -11 (number)
+   locals: "var0": 1 (number)
+   stack: "0": 1 (number)
+ - scope (wasm-expression-stack):
+   0: 1 (number)
 at (anonymous) (0:17):
    -- skipped
 Paused:
@@ -260,8 +302,11 @@ Scope:
 at wasm_B (0:53):
  - scope (global):
  - scope (local):
-   locals: "$var0": 1 (number)
-   stack: "0": -11 (number), "1": 1 (number)
+   locals: "var0": 1 (number)
+   stack: "0": 1 (number), "1": 1 (number)
+ - scope (wasm-expression-stack):
+   0: 1 (number)
+   1: 1 (number)
 at (anonymous) (0:17):
    -- skipped
 Paused:
@@ -270,36 +315,42 @@ Scope:
 at wasm_B (0:54):
  - scope (global):
  - scope (local):
-   locals: "$var0": 1 (number)
-   stack: "0": -11 (number)
+   locals: "var0": 1 (number)
+   stack: "0": 0 (number)
+ - scope (wasm-expression-stack):
+   0: 0 (number)
 at (anonymous) (0:17):
    -- skipped
 Paused:
-Script wasm://wasm/0c10a5fe byte offset 38: Wasm opcode 0x1
+Script wasm://wasm/0c10a5fe byte offset 38: Wasm opcode 0x01
 Scope:
 at wasm_A (0:38):
  - scope (global):
  - scope (local):
    stack: 
+ - scope (wasm-expression-stack):
 at wasm_B (0:56):
  - scope (global):
  - scope (local):
-   locals: "$var0": 0 (number)
+   locals: "var0": 0 (number)
    stack: 
+ - scope (wasm-expression-stack):
 at (anonymous) (0:17):
    -- skipped
 Paused:
-Script wasm://wasm/0c10a5fe byte offset 39: Wasm opcode 0x1
+Script wasm://wasm/0c10a5fe byte offset 39: Wasm opcode 0x01
 Scope:
 at wasm_A (0:39):
  - scope (global):
  - scope (local):
    stack: 
+ - scope (wasm-expression-stack):
 at wasm_B (0:56):
  - scope (global):
  - scope (local):
-   locals: "$var0": 0 (number)
+   locals: "var0": 0 (number)
    stack: 
+ - scope (wasm-expression-stack):
 at (anonymous) (0:17):
    -- skipped
 Paused:
@@ -308,18 +359,32 @@ Scope:
 at wasm_B (0:45):
  - scope (global):
  - scope (local):
-   locals: "$var0": 0 (number)
+   locals: "var0": 0 (number)
    stack: 
+ - scope (wasm-expression-stack):
 at (anonymous) (0:17):
    -- skipped
 Paused:
-Script wasm://wasm/0c10a5fe byte offset 47: Wasm opcode 0x4
+Script wasm://wasm/0c10a5fe byte offset 47: Wasm opcode 0x04
 Scope:
 at wasm_B (0:47):
  - scope (global):
  - scope (local):
-   locals: "$var0": 0 (number)
-   stack: "0": -11 (number)
+   locals: "var0": 0 (number)
+   stack: "0": 0 (number)
+ - scope (wasm-expression-stack):
+   0: 0 (number)
+at (anonymous) (0:17):
+   -- skipped
+Paused:
+Script wasm://wasm/0c10a5fe byte offset 61: Wasm opcode 0x0b
+Scope:
+at wasm_B (0:61):
+ - scope (global):
+ - scope (local):
+   locals: "var0": 0 (number)
+   stack: 
+ - scope (wasm-expression-stack):
 at (anonymous) (0:17):
    -- skipped
 exports.main returned!

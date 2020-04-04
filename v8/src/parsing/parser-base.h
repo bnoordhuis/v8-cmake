@@ -2221,7 +2221,7 @@ typename ParserBase<Impl>::ExpressionT ParserBase<Impl>::ParseProperty(
 
     case Token::BIGINT: {
       Consume(Token::BIGINT);
-      prop_info->name = impl()->GetNumberAsSymbol();
+      prop_info->name = impl()->GetSymbol();
       is_array_index = impl()->IsArrayIndex(prop_info->name, &index);
       break;
     }
@@ -4606,7 +4606,6 @@ typename ParserBase<Impl>::ExpressionT ParserBase<Impl>::ParseClassLiteral(
   }
 
   if (class_info.requires_brand) {
-    // TODO(joyee): implement static brand checking
     class_scope->DeclareBrandVariable(
         ast_value_factory(), IsStaticFlag::kNotStatic, kNoSourcePosition);
   }

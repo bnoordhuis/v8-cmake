@@ -96,6 +96,8 @@ namespace internal {
   V(WasmI64AtomicWait32)              \
   V(WasmI64AtomicWait64)              \
   V(WasmMemoryGrow)                   \
+  V(WasmTableInit)                    \
+  V(WasmTableCopy)                    \
   V(WasmTableGet)                     \
   V(WasmTableSet)                     \
   V(WasmThrow)                        \
@@ -1045,6 +1047,7 @@ class ArrayNoArgumentConstructorDescriptor
                      ArrayNArgumentsConstructorDescriptor)
 };
 
+#ifdef V8_REVERSE_JSARGS
 class ArraySingleArgumentConstructorDescriptor
     : public ArrayNArgumentsConstructorDescriptor {
  public:
@@ -1052,15 +1055,35 @@ class ArraySingleArgumentConstructorDescriptor
   // ArrayNArgumentsConstructorDescriptor and it declares indices for
   // JS arguments passed on the expression stack.
   DEFINE_PARAMETERS(kFunction, kAllocationSite, kActualArgumentsCount,
-                    kFunctionParameter, kArraySizeSmiParameter)
+                    kArraySizeSmiParameter, kReceiverParameter)
   DEFINE_PARAMETER_TYPES(MachineType::AnyTagged(),  // kFunction
                          MachineType::AnyTagged(),  // kAllocationSite
                          MachineType::Int32(),      // kActualArgumentsCount
-                         MachineType::AnyTagged(),  // kFunctionParameter
+                         // JS arguments on the stack
+                         MachineType::AnyTagged(),  // kArraySizeSmiParameter
+                         MachineType::AnyTagged())  // kReceiverParameter
+  DECLARE_DESCRIPTOR(ArraySingleArgumentConstructorDescriptor,
+                     ArrayNArgumentsConstructorDescriptor)
+};
+#else
+class ArraySingleArgumentConstructorDescriptor
+    : public ArrayNArgumentsConstructorDescriptor {
+ public:
+  // This descriptor declares same register arguments as the parent
+  // ArrayNArgumentsConstructorDescriptor and it declares indices for
+  // JS arguments passed on the expression stack.
+  DEFINE_PARAMETERS(kFunction, kAllocationSite, kActualArgumentsCount,
+                    kReceiverParameter, kArraySizeSmiParameter)
+  DEFINE_PARAMETER_TYPES(MachineType::AnyTagged(),  // kFunction
+                         MachineType::AnyTagged(),  // kAllocationSite
+                         MachineType::Int32(),      // kActualArgumentsCount
+                         // JS arguments on the stack
+                         MachineType::AnyTagged(),  // kReceiverParameter
                          MachineType::AnyTagged())  // kArraySizeSmiParameter
   DECLARE_DESCRIPTOR(ArraySingleArgumentConstructorDescriptor,
                      ArrayNArgumentsConstructorDescriptor)
 };
+#endif
 
 class CompareDescriptor : public CallInterfaceDescriptor {
  public:
@@ -1293,6 +1316,52 @@ class WasmMemoryGrowDescriptor final : public CallInterfaceDescriptor {
   DEFINE_RESULT_AND_PARAMETER_TYPES(MachineType::Int32(),  // result 1
                                     MachineType::Int32())  // kNumPages
   DECLARE_DESCRIPTOR(WasmMemoryGrowDescriptor, CallInterfaceDescriptor)
+};
+
+class WasmTableInitDescriptor final : public CallInterfaceDescriptor {
+ public:
+  DEFINE_PARAMETERS_NO_CONTEXT(kDestination, kSource, kSize, kTableIndex,
+                               kSegmentIndex)
+  DEFINE_PARAMETER_TYPES(MachineType::Int32(),      // kDestination
+                         MachineType::Int32(),      // kSource
+                         MachineType::Int32(),      // kSize
+                         MachineType::AnyTagged(),  // kTableIndex
+                         MachineType::AnyTagged(),  // kSegmentindex
+  )
+
+#if V8_TARGET_ARCH_IA32
+  static constexpr bool kPassLastArgOnStack = true;
+#else
+  static constexpr bool kPassLastArgOnStack = false;
+#endif
+
+  // Pass the last parameter through the stack.
+  static constexpr int kStackArgumentsCount = kPassLastArgOnStack ? 1 : 0;
+
+  DECLARE_DESCRIPTOR(WasmTableInitDescriptor, CallInterfaceDescriptor)
+};
+
+class WasmTableCopyDescriptor final : public CallInterfaceDescriptor {
+ public:
+  DEFINE_PARAMETERS_NO_CONTEXT(kDestination, kSource, kSize, kDestinationTable,
+                               kSourceTable)
+  DEFINE_PARAMETER_TYPES(MachineType::Int32(),      // kDestination
+                         MachineType::Int32(),      // kSource
+                         MachineType::Int32(),      // kSize
+                         MachineType::AnyTagged(),  // kDestinationTable
+                         MachineType::AnyTagged(),  // kSourceTable
+  )
+
+#if V8_TARGET_ARCH_IA32
+  static constexpr bool kPassLastArgOnStack = true;
+#else
+  static constexpr bool kPassLastArgOnStack = false;
+#endif
+
+  // Pass the last parameter through the stack.
+  static constexpr int kStackArgumentsCount = kPassLastArgOnStack ? 1 : 0;
+
+  DECLARE_DESCRIPTOR(WasmTableCopyDescriptor, CallInterfaceDescriptor)
 };
 
 class WasmTableGetDescriptor final : public CallInterfaceDescriptor {

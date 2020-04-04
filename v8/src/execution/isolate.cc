@@ -970,13 +970,13 @@ Handle<Object> CaptureStackTrace(Isolate* isolate, Handle<Object> caller,
             builder.AppendJavaScriptFrame(java_script);
           } else if (summary.IsWasmCompiled()) {
             //=========================================================
-            // Handle a WASM compiled frame.
+            // Handle a Wasm compiled frame.
             //=========================================================
             auto const& wasm_compiled = summary.AsWasmCompiled();
             builder.AppendWasmCompiledFrame(wasm_compiled);
           } else if (summary.IsWasmInterpreted()) {
             //=========================================================
-            // Handle a WASM interpreted frame.
+            // Handle a Wasm interpreted frame.
             //=========================================================
             auto const& wasm_interpreted = summary.AsWasmInterpreted();
             builder.AppendWasmInterpretedFrame(wasm_interpreted);
@@ -1614,6 +1614,7 @@ Object Isolate::UnwindAndFindHandler() {
   // Special handling of termination exceptions, uncatchable by JavaScript and
   // Wasm code, we unwind the handlers until the top ENTRY handler is found.
   bool catchable_by_js = is_catchable_by_javascript(exception);
+  bool catchable_by_wasm = is_catchable_by_wasm(exception);
 
   // Compute handler and stack unwinding information by performing a full walk
   // over the stack and dispatching according to the frame type.
@@ -1664,8 +1665,9 @@ Object Isolate::UnwindAndFindHandler() {
           trap_handler::ClearThreadInWasm();
         }
 
+        if (!catchable_by_wasm) break;
+
         // For WebAssembly frames we perform a lookup in the handler table.
-        if (!catchable_by_js) break;
         // This code ref scope is here to avoid a check failure when looking up
         // the code. It's not actually necessary to keep the code alive as it's
         // currently being executed.
@@ -3703,6 +3705,11 @@ CodeTracer* Isolate::GetCodeTracer() {
 bool Isolate::use_optimizer() {
   return FLAG_opt && !serializer_enabled_ && CpuFeatures::SupportsOptimizer() &&
          !is_precise_count_code_coverage();
+}
+
+void Isolate::IncreaseTotalRegexpCodeGenerated(Handle<HeapObject> code) {
+  DCHECK(code->IsCode() || code->IsByteArray());
+  total_regexp_code_generated_ += code->Size();
 }
 
 bool Isolate::NeedsDetailedOptimizedCodeLineInfo() const {

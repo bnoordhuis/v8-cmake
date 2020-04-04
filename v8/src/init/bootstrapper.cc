@@ -1553,9 +1553,10 @@ void Genesis::InitializeGlobal(Handle<JSGlobalObject> global_object,
         isolate_, isolate_->initial_object_prototype(), "toString",
         Builtins::kObjectPrototypeToString, 0, true);
     native_context()->set_object_to_string(*object_to_string);
-    SimpleInstallFunction(isolate_, isolate_->initial_object_prototype(),
-                          "valueOf", Builtins::kObjectPrototypeValueOf, 0,
-                          true);
+    Handle<JSFunction> object_value_of = SimpleInstallFunction(
+        isolate_, isolate_->initial_object_prototype(), "valueOf",
+        Builtins::kObjectPrototypeValueOf, 0, true);
+    native_context()->set_object_value_of_function(*object_value_of);
 
     SimpleInstallGetterSetter(
         isolate_, isolate_->initial_object_prototype(), factory->proto_string(),
@@ -4996,7 +4997,7 @@ bool Genesis::InstallSpecialObjects(Isolate* isolate,
     WasmJs::Install(isolate, true);
   } else if (FLAG_validate_asm) {
     // Install the internal data structures only; these are needed for asm.js
-    // translated to WASM to work correctly.
+    // translated to Wasm to work correctly.
     WasmJs::Install(isolate, false);
   }
 

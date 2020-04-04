@@ -51,6 +51,9 @@ extern class WasmDebugInfo extends Struct {
 
 @generateCppClass
 extern class WasmExceptionTag extends Struct {
+  // Note that this index is only useful for debugging purposes and it is not
+  // unique across modules. The GC however does not allow objects without at
+  // least one field, hence this also serves as a padding field for now.
   index: Smi;
 }
 
@@ -74,7 +77,7 @@ extern class WasmMemoryObject extends JSObject {
   instances: WeakArrayList|Undefined;
 }
 
-type WasmValueType extends uint8 constexpr 'wasm::ValueType';
+type WasmValueType extends uint8 constexpr 'wasm::ValueType::Kind';
 bitfield struct WasmGlobalObjectFlags extends uint31 {
   Type: WasmValueType: 8 bit;  // "type" is a reserved word.
   is_mutable: bool: 1 bit;

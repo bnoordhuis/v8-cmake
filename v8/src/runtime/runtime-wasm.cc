@@ -19,6 +19,7 @@
 #include "src/wasm/module-compiler.h"
 #include "src/wasm/wasm-code-manager.h"
 #include "src/wasm/wasm-constants.h"
+#include "src/wasm/wasm-debug.h"
 #include "src/wasm/wasm-engine.h"
 #include "src/wasm/wasm-objects.h"
 #include "src/wasm/wasm-value.h"
@@ -76,7 +77,10 @@ class ClearThreadInWasmScope {
 
 Object ThrowWasmError(Isolate* isolate, MessageTemplate message) {
   HandleScope scope(isolate);
-  Handle<Object> error_obj = isolate->factory()->NewWasmRuntimeError(message);
+  Handle<JSObject> error_obj = isolate->factory()->NewWasmRuntimeError(message);
+  JSObject::AddProperty(isolate, error_obj,
+                        isolate->factory()->wasm_uncatchable_symbol(),
+                        isolate->factory()->true_value(), NONE);
   return isolate->Throw(*error_obj);
 }
 }  // namespace
@@ -234,33 +238,33 @@ RUNTIME_FUNCTION(Runtime_WasmRunInterpreter) {
   Address arg_buf_ptr = arg_buffer;
   for (int i = 0; i < num_params; ++i) {
 #define CASE_ARG_TYPE(type, ctype)                                     \
-  case wasm::type:                                                     \
-    DCHECK_EQ(wasm::ValueTypes::ElementSizeInBytes(sig->GetParam(i)),  \
-              sizeof(ctype));                                          \
+  case wasm::ValueType::type:                                          \
+    DCHECK_EQ(sig->GetParam(i).element_size_bytes(), sizeof(ctype));   \
     wasm_args[i] =                                                     \
         wasm::WasmValue(base::ReadUnalignedValue<ctype>(arg_buf_ptr)); \
     arg_buf_ptr += sizeof(ctype);                                      \
     break;
-    switch (sig->GetParam(i)) {
-      CASE_ARG_TYPE(kWasmI32, uint32_t)
-      CASE_ARG_TYPE(kWasmI64, uint64_t)
-      CASE_ARG_TYPE(kWasmF32, float)
-      CASE_ARG_TYPE(kWasmF64, double)
+    switch (sig->GetParam(i).kind()) {
+      CASE_ARG_TYPE(kI32, uint32_t)
+      CASE_ARG_TYPE(kI64, uint64_t)
+      CASE_ARG_TYPE(kF32, float)
+      CASE_ARG_TYPE(kF64, double)
 #undef CASE_ARG_TYPE
-      case wasm::kWasmAnyRef:
-      case wasm::kWasmFuncRef:
-      case wasm::kWasmNullRef:
-      case wasm::kWasmExnRef: {
-        DCHECK_EQ(wasm::ValueTypes::ElementSizeInBytes(sig->GetParam(i)),
-                  kSystemPointerSize);
-        Handle<Object> ref(base::ReadUnalignedValue<Object>(arg_buf_ptr),
-                           isolate);
+      case wasm::ValueType::kAnyRef:
+      case wasm::ValueType::kFuncRef:
+      case wasm::ValueType::kNullRef:
+      case wasm::ValueType::kExnRef: {
+        DCHECK_EQ(sig->GetParam(i).element_size_bytes(), kSystemPointerSize);
+        Handle<Object> ref(
+            Object(base::ReadUnalignedValue<Address>(arg_buf_ptr)), isolate);
         DCHECK_IMPLIES(sig->GetParam(i) == wasm::kWasmNullRef, ref->IsNull());
         wasm_args[i] = wasm::WasmValue(ref);
         arg_buf_ptr += kSystemPointerSize;
         break;
       }
-      default:
+      case wasm::ValueType::kStmt:
+      case wasm::ValueType::kS128:
+      case wasm::ValueType::kBottom:
         UNREACHABLE();
     }
   }
@@ -288,24 +292,22 @@ RUNTIME_FUNCTION(Runtime_WasmRunInterpreter) {
   arg_buf_ptr = arg_buffer;
   for (int i = 0; i < num_returns; ++i) {
 #define CASE_RET_TYPE(type, ctype)                                           \
-  case wasm::type:                                                           \
-    DCHECK_EQ(wasm::ValueTypes::ElementSizeInBytes(sig->GetReturn(i)),       \
-              sizeof(ctype));                                                \
+  case wasm::ValueType::type:                                                \
+    DCHECK_EQ(sig->GetReturn(i).element_size_bytes(), sizeof(ctype));        \
     base::WriteUnalignedValue<ctype>(arg_buf_ptr, wasm_rets[i].to<ctype>()); \
     arg_buf_ptr += sizeof(ctype);                                            \
     break;
-    switch (sig->GetReturn(i)) {
-      CASE_RET_TYPE(kWasmI32, uint32_t)
-      CASE_RET_TYPE(kWasmI64, uint64_t)
-      CASE_RET_TYPE(kWasmF32, float)
-      CASE_RET_TYPE(kWasmF64, double)
+    switch (sig->GetReturn(i).kind()) {
+      CASE_RET_TYPE(kI32, uint32_t)
+      CASE_RET_TYPE(kI64, uint64_t)
+      CASE_RET_TYPE(kF32, float)
+      CASE_RET_TYPE(kF64, double)
 #undef CASE_RET_TYPE
-      case wasm::kWasmAnyRef:
-      case wasm::kWasmFuncRef:
-      case wasm::kWasmNullRef:
-      case wasm::kWasmExnRef: {
-        DCHECK_EQ(wasm::ValueTypes::ElementSizeInBytes(sig->GetReturn(i)),
-                  kSystemPointerSize);
+      case wasm::ValueType::kAnyRef:
+      case wasm::ValueType::kFuncRef:
+      case wasm::ValueType::kNullRef:
+      case wasm::ValueType::kExnRef: {
+        DCHECK_EQ(sig->GetReturn(i).element_size_bytes(), kSystemPointerSize);
         DCHECK_IMPLIES(sig->GetReturn(i) == wasm::kWasmNullRef,
                        wasm_rets[i].to_anyref()->IsNull());
         base::WriteUnalignedValue<Object>(arg_buf_ptr,
@@ -499,17 +501,15 @@ RUNTIME_FUNCTION(Runtime_WasmFunctionTableSet) {
 
 RUNTIME_FUNCTION(Runtime_WasmTableInit) {
   HandleScope scope(isolate);
-  DCHECK_EQ(5, args.length());
-  auto instance =
-      Handle<WasmInstanceObject>(GetWasmInstanceOnStackTop(isolate), isolate);
-  CONVERT_UINT32_ARG_CHECKED(table_index, 0);
-  CONVERT_UINT32_ARG_CHECKED(elem_segment_index, 1);
-  CONVERT_UINT32_ARG_CHECKED(dst, 2);
-  CONVERT_UINT32_ARG_CHECKED(src, 3);
-  CONVERT_UINT32_ARG_CHECKED(count, 4);
+  DCHECK_EQ(6, args.length());
+  CONVERT_ARG_HANDLE_CHECKED(WasmInstanceObject, instance, 0);
+  CONVERT_UINT32_ARG_CHECKED(table_index, 1);
+  CONVERT_UINT32_ARG_CHECKED(elem_segment_index, 2);
+  CONVERT_UINT32_ARG_CHECKED(dst, 3);
+  CONVERT_UINT32_ARG_CHECKED(src, 4);
+  CONVERT_UINT32_ARG_CHECKED(count, 5);
 
-  DCHECK(isolate->context().is_null());
-  isolate->set_context(instance->native_context());
+  DCHECK(!isolate->context().is_null());
 
   bool oob = !WasmInstanceObject::InitTableEntries(
       isolate, instance, table_index, elem_segment_index, dst, src, count);
@@ -519,16 +519,15 @@ RUNTIME_FUNCTION(Runtime_WasmTableInit) {
 
 RUNTIME_FUNCTION(Runtime_WasmTableCopy) {
   HandleScope scope(isolate);
-  DCHECK_EQ(5, args.length());
-  DCHECK(isolate->context().is_null());
-  isolate->set_context(GetNativeContextFromWasmInstanceOnStackTop(isolate));
-  auto instance =
-      Handle<WasmInstanceObject>(GetWasmInstanceOnStackTop(isolate), isolate);
-  CONVERT_UINT32_ARG_CHECKED(table_dst_index, 0);
-  CONVERT_UINT32_ARG_CHECKED(table_src_index, 1);
-  CONVERT_UINT32_ARG_CHECKED(dst, 2);
-  CONVERT_UINT32_ARG_CHECKED(src, 3);
-  CONVERT_UINT32_ARG_CHECKED(count, 4);
+  DCHECK_EQ(6, args.length());
+  CONVERT_ARG_HANDLE_CHECKED(WasmInstanceObject, instance, 0);
+  CONVERT_UINT32_ARG_CHECKED(table_dst_index, 1);
+  CONVERT_UINT32_ARG_CHECKED(table_src_index, 2);
+  CONVERT_UINT32_ARG_CHECKED(dst, 3);
+  CONVERT_UINT32_ARG_CHECKED(src, 4);
+  CONVERT_UINT32_ARG_CHECKED(count, 5);
+
+  DCHECK(!isolate->context().is_null());
 
   bool oob = !WasmInstanceObject::CopyTableEntries(
       isolate, instance, table_dst_index, table_src_index, dst, src, count);
@@ -617,18 +616,41 @@ RUNTIME_FUNCTION(Runtime_WasmDebugBreak) {
   // Enter the debugger.
   DebugScope debug_scope(isolate->debug());
 
+  const auto undefined = ReadOnlyRoots(isolate).undefined_value();
+  WasmCompiledFrame* frame = frame_finder.frame();
+  auto* debug_info = frame->native_module()->GetDebugInfo();
+  if (debug_info->IsStepping(frame)) {
+    debug_info->ClearStepping();
+    isolate->debug()->ClearStepping();
+    isolate->debug()->OnDebugBreak(isolate->factory()->empty_fixed_array());
+    return undefined;
+  }
+
   // Check whether we hit a breakpoint.
-  if (isolate->debug()->break_points_active()) {
-    Handle<Script> script(instance->module_object().script(), isolate);
-    Handle<FixedArray> breakpoints;
-    if (WasmScript::CheckBreakPoints(isolate, script, position)
-            .ToHandle(&breakpoints)) {
+  Handle<Script> script(instance->module_object().script(), isolate);
+  Handle<FixedArray> breakpoints;
+  if (WasmScript::CheckBreakPoints(isolate, script, position)
+          .ToHandle(&breakpoints)) {
+    debug_info->ClearStepping();
+    isolate->debug()->ClearStepping();
+    if (isolate->debug()->break_points_active()) {
       // We hit one or several breakpoints. Notify the debug listeners.
       isolate->debug()->OnDebugBreak(breakpoints);
     }
+  } else {
+    // Unused breakpoint. Possible scenarios:
+    // 1. We hit a breakpoint that was already removed,
+    // 2. We hit a stepping breakpoint after resuming,
+    // 3. We hit a stepping breakpoint during a stepOver on a recursive call.
+    // 4. The breakpoint was set in a different isolate.
+    // We can handle the first three cases by simply removing the breakpoint (if
+    // it exists), since this will also recompile the function without the
+    // stepping breakpoints.
+    // TODO(thibaudm/clemensb): handle case 4.
+    debug_info->RemoveBreakpoint(frame->function_index(), position, isolate);
   }
 
-  return ReadOnlyRoots(isolate).undefined_value();
+  return undefined;
 }
 
 }  // namespace internal

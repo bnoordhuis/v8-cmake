@@ -26,11 +26,13 @@
 #include "src/compiler/pipeline.h"
 #include "src/debug/debug.h"
 #include "src/debug/liveedit.h"
+#include "src/diagnostics/code-tracer.h"
 #include "src/execution/frames-inl.h"
 #include "src/execution/isolate-inl.h"
 #include "src/execution/isolate.h"
 #include "src/execution/runtime-profiler.h"
 #include "src/execution/vm-state-inl.h"
+#include "src/handles/maybe-handles.h"
 #include "src/heap/heap-inl.h"
 #include "src/heap/off-thread-factory-inl.h"
 #include "src/init/bootstrapper.h"
@@ -224,7 +226,8 @@ CompilationJob::Status OptimizedCompilationJob::PrepareJob(Isolate* isolate) {
   DisallowJavascriptExecution no_js(isolate);
 
   if (FLAG_trace_opt && compilation_info()->IsOptimizing()) {
-    StdoutStream os;
+    CodeTracer::Scope scope(isolate->GetCodeTracer());
+    OFStream os(scope.file());
     os << "[compiling method " << Brief(*compilation_info()->closure())
        << " using " << compiler_name_;
     if (compilation_info()->is_osr()) os << " OSR";
@@ -278,10 +281,11 @@ void OptimizedCompilationJob::RecordCompilationStats(CompilationMode mode,
   double ms_optimize = time_taken_to_execute_.InMillisecondsF();
   double ms_codegen = time_taken_to_finalize_.InMillisecondsF();
   if (FLAG_trace_opt) {
-    PrintF("[optimizing ");
-    function->ShortPrint();
-    PrintF(" - took %0.3f, %0.3f, %0.3f ms]\n", ms_creategraph, ms_optimize,
-           ms_codegen);
+    CodeTracer::Scope scope(isolate->GetCodeTracer());
+    PrintF(scope.file(), "[optimizing ");
+    function->ShortPrint(scope.file());
+    PrintF(scope.file(), " - took %0.3f, %0.3f, %0.3f ms]\n", ms_creategraph,
+           ms_optimize, ms_codegen);
   }
   if (FLAG_trace_opt_stats) {
     static double compilation_time = 0.0;
@@ -824,9 +828,10 @@ bool GetOptimizedCodeNow(OptimizedCompilationJob* job, Isolate* isolate) {
           CompilationJob::SUCCEEDED ||
       job->FinalizeJob(isolate) != CompilationJob::SUCCEEDED) {
     if (FLAG_trace_opt) {
-      PrintF("[aborted optimizing ");
-      compilation_info->closure()->ShortPrint();
-      PrintF(" because: %s]\n",
+      CodeTracer::Scope scope(isolate->GetCodeTracer());
+      PrintF(scope.file(), "[aborted optimizing ");
+      compilation_info->closure()->ShortPrint(scope.file());
+      PrintF(scope.file(), " because: %s]\n",
              GetBailoutReason(compilation_info->bailout_reason()));
     }
     return false;
@@ -910,12 +915,13 @@ MaybeHandle<Code> GetOptimizedCode(Handle<JSFunction> function,
   if (GetCodeFromOptimizedCodeCache(function, osr_offset)
           .ToHandle(&cached_code)) {
     if (FLAG_trace_opt) {
-      PrintF("[found optimized code for ");
-      function->ShortPrint();
+      CodeTracer::Scope scope(isolate->GetCodeTracer());
+      PrintF(scope.file(), "[found optimized code for ");
+      function->ShortPrint(scope.file());
       if (!osr_offset.IsNone()) {
-        PrintF(" at OSR AST id %d", osr_offset.ToInt());
+        PrintF(scope.file(), " at OSR AST id %d", osr_offset.ToInt());
       }
-      PrintF("]\n");
+      PrintF(scope.file(), "]\n");
     }
     return cached_code;
   }
@@ -1070,7 +1076,8 @@ MaybeHandle<SharedFunctionInfo> FinalizeTopLevel(
 }
 
 MaybeHandle<SharedFunctionInfo> CompileToplevel(
-    ParseInfo* parse_info, Handle<Script> script, Isolate* isolate,
+    ParseInfo* parse_info, Handle<Script> script,
+    MaybeHandle<ScopeInfo> maybe_outer_scope_info, Isolate* isolate,
     IsCompiledScope* is_compiled_scope) {
   TimerEventScope<TimerEventCompileCode> top_level_timer(isolate);
   TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.compile"), "V8.CompileCode");
@@ -1083,7 +1090,8 @@ MaybeHandle<SharedFunctionInfo> CompileToplevel(
                                      : RuntimeCallCounterId::kCompileScript);
   VMState<BYTECODE_COMPILER> state(isolate);
   if (parse_info->literal() == nullptr &&
-      !parsing::ParseProgram(parse_info, script, isolate)) {
+      !parsing::ParseProgram(parse_info, script, maybe_outer_scope_info,
+                             isolate)) {
     return MaybeHandle<SharedFunctionInfo>();
   }
   // Measure how long it takes to do the compilation; only take the
@@ -1128,6 +1136,13 @@ std::unique_ptr<UnoptimizedCompilationJob> CompileOnBackgroundThread(
   std::unique_ptr<UnoptimizedCompilationJob> outer_function_job(
       GenerateUnoptimizedCode(parse_info, allocator, inner_function_jobs));
   return outer_function_job;
+}
+
+MaybeHandle<SharedFunctionInfo> CompileToplevel(
+    ParseInfo* parse_info, Handle<Script> script, Isolate* isolate,
+    IsCompiledScope* is_compiled_scope) {
+  return CompileToplevel(parse_info, script, kNullMaybeHandle, isolate,
+                         is_compiled_scope);
 }
 
 }  // namespace
@@ -1215,6 +1230,7 @@ class OffThreadParseInfoScope {
   }
 
   ~OffThreadParseInfoScope() {
+    DCHECK_NOT_NULL(parse_info_);
     parse_info_->set_stack_limit(original_stack_limit_);
     parse_info_->set_runtime_call_stats(original_runtime_call_stats_);
   }
@@ -1236,8 +1252,9 @@ void BackgroundCompileTask::Run() {
   DisallowHeapAccess no_heap_access;
 
   TimedHistogramScope timer(timer_);
-  OffThreadParseInfoScope off_thread_scope(
-      info_.get(), worker_thread_runtime_call_stats_, stack_size_);
+  base::Optional<OffThreadParseInfoScope> off_thread_scope(
+      base::in_place, info_.get(), worker_thread_runtime_call_stats_,
+      stack_size_);
   TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.compile"),
                "BackgroundCompileTask::Run");
   RuntimeCallTimerScope runtimeTimer(
@@ -1268,6 +1285,8 @@ void BackgroundCompileTask::Run() {
       TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.compile"),
                    "V8.FinalizeCodeBackground");
 
+      off_thread_isolate_->PinToCurrentThread();
+
       OffThreadHandleScope handle_scope(off_thread_isolate_.get());
 
       // We don't have the script source or the script origin yet, so use a few
@@ -1296,6 +1315,7 @@ void BackgroundCompileTask::Run() {
       TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.compile"),
                    "V8.FinalizeCodeBackground.ReleaseParser");
       DCHECK_EQ(language_mode_, info_->language_mode());
+      off_thread_scope.reset();
       parser_.reset();
       info_.reset();
       outer_function_job_.reset();
@@ -1556,9 +1576,10 @@ bool Compiler::Compile(Handle<JSFunction> function, ClearExceptionFlag flag,
   // Optimize now if --always-opt is enabled.
   if (FLAG_always_opt && !function->shared().HasAsmWasmData()) {
     if (FLAG_trace_opt) {
-      PrintF("[optimizing ");
-      function->ShortPrint();
-      PrintF(" because --always-opt]\n");
+      CodeTracer::Scope scope(isolate->GetCodeTracer());
+      PrintF(scope.file(), "[optimizing ");
+      function->ShortPrint(scope.file());
+      PrintF(scope.file(), " because --always-opt]\n");
     }
     Handle<Code> opt_code;
     if (GetOptimizedCode(function, ConcurrencyMode::kNotConcurrent)
@@ -1703,10 +1724,12 @@ MaybeHandle<JSFunction> Compiler::GetFunctionFromEval(
     parse_info.set_eval();
     parse_info.set_parse_restriction(restriction);
     parse_info.set_parameters_end_pos(parameters_end_pos);
-    if (!context->IsNativeContext()) {
-      parse_info.set_outer_scope_info(handle(context->scope_info(), isolate));
-    }
     DCHECK(!parse_info.is_module());
+
+    MaybeHandle<ScopeInfo> maybe_outer_scope_info;
+    if (!context->IsNativeContext()) {
+      maybe_outer_scope_info = handle(context->scope_info(), isolate);
+    }
 
     script = parse_info.CreateScript(
         isolate, source, OriginOptionsForEval(outer_info->script()));
@@ -1728,7 +1751,8 @@ MaybeHandle<JSFunction> Compiler::GetFunctionFromEval(
     }
     script->set_eval_from_position(eval_position);
 
-    if (!CompileToplevel(&parse_info, script, isolate, &is_compiled_scope)
+    if (!CompileToplevel(&parse_info, script, maybe_outer_scope_info, isolate,
+                         &is_compiled_scope)
              .ToHandle(&shared_info)) {
       return MaybeHandle<JSFunction>();
     }
@@ -2314,22 +2338,24 @@ MaybeHandle<JSFunction> Compiler::GetWrappedFunction(
 
     parse_info.set_eval();  // Use an eval scope as declaration scope.
     parse_info.set_function_syntax_kind(FunctionSyntaxKind::kWrapped);
-    parse_info.set_wrapped_arguments(arguments);
     // TODO(delphick): Remove this and instead make the wrapped and wrapper
     // functions fully non-lazy instead thus preventing source positions from
     // being omitted.
     parse_info.set_collect_source_positions(true);
     // parse_info.set_eager(compile_options == ScriptCompiler::kEagerCompile);
+
+    MaybeHandle<ScopeInfo> maybe_outer_scope_info;
     if (!context->IsNativeContext()) {
-      parse_info.set_outer_scope_info(handle(context->scope_info(), isolate));
+      maybe_outer_scope_info = handle(context->scope_info(), isolate);
     }
 
     script = NewScript(isolate, &parse_info, source, script_details,
                        origin_options, NOT_NATIVES_CODE);
+    script->set_wrapped_arguments(*arguments);
 
     Handle<SharedFunctionInfo> top_level;
-    maybe_result =
-        CompileToplevel(&parse_info, script, isolate, &is_compiled_scope);
+    maybe_result = CompileToplevel(&parse_info, script, maybe_outer_scope_info,
+                                   isolate, &is_compiled_scope);
     if (maybe_result.is_null()) isolate->ReportPendingMessages();
     ASSIGN_RETURN_ON_EXCEPTION(isolate, top_level, maybe_result, JSFunction);
 
@@ -2558,9 +2584,10 @@ bool Compiler::FinalizeOptimizedCompilationJob(OptimizedCompilationJob* job,
                                      isolate);
       InsertCodeIntoOptimizedCodeCache(compilation_info);
       if (FLAG_trace_opt) {
-        PrintF("[completed optimizing ");
-        compilation_info->closure()->ShortPrint();
-        PrintF("]\n");
+        CodeTracer::Scope scope(isolate->GetCodeTracer());
+        PrintF(scope.file(), "[completed optimizing ");
+        compilation_info->closure()->ShortPrint(scope.file());
+        PrintF(scope.file(), "]\n");
       }
       compilation_info->closure()->set_code(*compilation_info->code());
       return CompilationJob::SUCCEEDED;
@@ -2569,9 +2596,10 @@ bool Compiler::FinalizeOptimizedCompilationJob(OptimizedCompilationJob* job,
 
   DCHECK_EQ(job->state(), CompilationJob::State::kFailed);
   if (FLAG_trace_opt) {
-    PrintF("[aborted optimizing ");
-    compilation_info->closure()->ShortPrint();
-    PrintF(" because: %s]\n",
+    CodeTracer::Scope scope(isolate->GetCodeTracer());
+    PrintF(scope.file(), "[aborted optimizing ");
+    compilation_info->closure()->ShortPrint(scope.file());
+    PrintF(scope.file(), " because: %s]\n",
            GetBailoutReason(compilation_info->bailout_reason()));
   }
   compilation_info->closure()->set_code(shared->GetCode());

@@ -1734,7 +1734,7 @@ void TurboAssembler::JumpHelper(int64_t offset, RelocInfo::Mode rmode,
 namespace {
 
 // The calculated offset is either:
-// * the 'target' input unmodified if this is a WASM call, or
+// * the 'target' input unmodified if this is a Wasm call, or
 // * the offset of the target from the current PC, in instructions, for any
 //   other type of call.
 static int64_t CalculateTargetOffset(Address target, RelocInfo::Mode rmode,
@@ -1985,19 +1985,20 @@ bool TurboAssembler::IsNearCallOffset(int64_t offset) {
   return is_int26(offset);
 }
 
-void TurboAssembler::CallForDeoptimization(Address target, int deopt_id) {
+void TurboAssembler::CallForDeoptimization(Address target, int deopt_id,
+                                           Label* exit, DeoptimizeKind kind) {
   BlockPoolsScope scope(this);
-#ifdef DEBUG
-  Label start;
-  bind(&start);
-#endif
   int64_t offset = static_cast<int64_t>(target) -
                    static_cast<int64_t>(options().code_range_start);
   DCHECK_EQ(offset % kInstrSize, 0);
   offset = offset / static_cast<int>(kInstrSize);
   DCHECK(IsNearCallOffset(offset));
   near_call(static_cast<int>(offset), RelocInfo::RUNTIME_ENTRY);
-  DCHECK_EQ(SizeOfCodeGeneratedSince(&start), Deoptimizer::kDeoptExitSize);
+  DCHECK_EQ(SizeOfCodeGeneratedSince(exit),
+            (kind == DeoptimizeKind::kLazy)
+                ? Deoptimizer::kLazyDeoptExitSize
+                : Deoptimizer::kNonLazyDeoptExitSize);
+  USE(exit, kind);
 }
 
 void TurboAssembler::PrepareForTailCall(Register callee_args_count,

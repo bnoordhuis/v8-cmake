@@ -106,7 +106,7 @@ void VisitSimdShiftRRR(InstructionSelector* selector, ArchOpcode opcode,
   } else {
     InstructionOperand temps[] = {g.TempSimd128Register(), g.TempRegister()};
     selector->Emit(opcode, g.DefineAsRegister(node),
-                   g.UseRegister(node->InputAt(0)),
+                   g.UseUniqueRegister(node->InputAt(0)),
                    g.UseRegister(node->InputAt(1)), arraysize(temps), temps);
   }
 }
@@ -2913,6 +2913,29 @@ void InstructionSelector::VisitInt32AbsWithOverflow(Node* node) {
 
 void InstructionSelector::VisitInt64AbsWithOverflow(Node* node) {
   UNREACHABLE();
+}
+
+namespace {
+template <ArchOpcode opcode>
+void VisitBitMask(InstructionSelector* selector, Node* node) {
+  ArmOperandGenerator g(selector);
+  InstructionOperand temps[] = {g.TempSimd128Register(),
+                                g.TempSimd128Register()};
+  selector->Emit(opcode, g.DefineAsRegister(node),
+                 g.UseRegister(node->InputAt(0)), arraysize(temps), temps);
+}
+}  // namespace
+
+void InstructionSelector::VisitI8x16BitMask(Node* node) {
+  VisitBitMask<kArmI8x16BitMask>(this, node);
+}
+
+void InstructionSelector::VisitI16x8BitMask(Node* node) {
+  VisitBitMask<kArmI16x8BitMask>(this, node);
+}
+
+void InstructionSelector::VisitI32x4BitMask(Node* node) {
+  VisitBitMask<kArmI32x4BitMask>(this, node);
 }
 
 // static

@@ -161,6 +161,11 @@ class String : public TorqueGeneratedString<String, Name> {
   template <typename Char>
   inline const Char* GetChars(const DisallowHeapAllocation& no_gc);
 
+  // Returns the address of the character at an offset into this string.
+  // Requires: this->IsFlat()
+  const byte* AddressOfCharacterAt(int start_index,
+                                   const DisallowHeapAllocation& no_gc);
+
   // Get and set the length of the string using acquire loads and release
   // stores.
   DECL_SYNCHRONIZED_INT_ACCESSORS(length)
@@ -677,7 +682,6 @@ class SlicedString : public TorqueGeneratedSlicedString<SlicedString, String> {
  public:
   inline void set_parent(String parent,
                          WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
-  DECL_INT_ACCESSORS(offset)
   // Dispatched behavior.
   V8_EXPORT_PRIVATE uint16_t Get(int index);
 

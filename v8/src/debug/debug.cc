@@ -37,6 +37,7 @@
 #include "src/objects/js-promise-inl.h"
 #include "src/objects/slots.h"
 #include "src/snapshot/snapshot.h"
+#include "src/wasm/wasm-debug.h"
 #include "src/wasm/wasm-objects-inl.h"
 
 namespace v8 {
@@ -871,8 +872,9 @@ void Debug::PrepareStepIn(Handle<JSFunction> function) {
   if (in_debug_scope()) return;
   if (break_disabled()) return;
   Handle<SharedFunctionInfo> shared(function->shared(), isolate_);
-  // If stepping from JS into Wasm, prepare for it.
-  if (shared->HasWasmExportedFunctionData()) {
+  // If stepping from JS into Wasm, and we are using the wasm interpreter for
+  // debugging, prepare the interpreter for step in.
+  if (shared->HasWasmExportedFunctionData() && !FLAG_debug_in_liftoff) {
     auto imported_function = Handle<WasmExportedFunction>::cast(function);
     Handle<WasmInstanceObject> wasm_instance(imported_function->instance(),
                                              isolate_);
@@ -995,19 +997,6 @@ void Debug::PrepareStep(StepAction step_action) {
   StackTraceFrameIterator frames_it(isolate_, frame_id);
   StandardFrame* frame = frames_it.frame();
 
-  // Handle stepping in wasm functions via the wasm interpreter.
-  if (frame->is_wasm_interpreter_entry()) {
-    WasmInterpreterEntryFrame* wasm_frame =
-        WasmInterpreterEntryFrame::cast(frame);
-    if (wasm_frame->NumberOfActiveFrames() > 0) {
-      wasm_frame->debug_info().PrepareStep(step_action);
-      return;
-    }
-  }
-  // If this is wasm, but there are no interpreted frames on top, all we can do
-  // is step out.
-  if (frame->is_wasm()) step_action = StepOut;
-
   BreakLocation location = BreakLocation::Invalid();
   Handle<SharedFunctionInfo> shared;
   int current_frame_count = CurrentFrameCount();
@@ -1051,6 +1040,26 @@ void Debug::PrepareStep(StepAction step_action) {
     thread_local_.last_frame_count_ = current_frame_count;
     // No longer perform the current async step.
     clear_suspended_generator();
+  } else if (frame->is_wasm_interpreter_entry()) {
+    // Handle stepping in wasm functions via the wasm interpreter.
+    WasmInterpreterEntryFrame* wasm_frame =
+        WasmInterpreterEntryFrame::cast(frame);
+    if (wasm_frame->NumberOfActiveFrames() > 0) {
+      wasm_frame->debug_info().PrepareStep(step_action);
+      return;
+    }
+  } else if (FLAG_debug_in_liftoff && frame->is_wasm_compiled()) {
+    // Handle stepping in Liftoff code.
+    WasmCompiledFrame* wasm_frame = WasmCompiledFrame::cast(frame);
+    wasm::WasmCodeRefScope code_ref_scope;
+    wasm::WasmCode* code = wasm_frame->wasm_code();
+    if (code->is_liftoff()) {
+      wasm_frame->native_module()->GetDebugInfo()->PrepareStep(isolate_,
+                                                               frame_id);
+    }
+    // In case the wasm code returns, prepare the next frame (if JS) to break.
+    step_action = StepOut;
+    UpdateHookOnFunctionCall();
   }
 
   switch (step_action) {

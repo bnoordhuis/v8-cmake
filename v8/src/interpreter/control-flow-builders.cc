@@ -82,7 +82,7 @@ void LoopBuilder::JumpToHeader(int loop_depth, LoopBuilder* const parent_loop) {
     int level = Min(loop_depth, AbstractCode::kMaxLoopNestingMarker - 1);
     // Loop must have closed form, i.e. all loop elements are within the loop,
     // the loop header precedes the body and next elements in the loop.
-    builder()->JumpLoop(&loop_header_, level);
+    builder()->JumpLoop(&loop_header_, level, source_position_);
   }
 }
 

@@ -48,31 +48,32 @@
   V(RelocatableInt32Constant) \
   V(RelocatableInt64Constant)
 
-#define INNER_OP_LIST(V)          \
-  V(Select)                       \
-  V(Phi)                          \
-  V(EffectPhi)                    \
-  V(InductionVariablePhi)         \
-  V(Checkpoint)                   \
-  V(BeginRegion)                  \
-  V(FinishRegion)                 \
-  V(FrameState)                   \
-  V(StateValues)                  \
-  V(TypedStateValues)             \
-  V(ArgumentsElementsState)       \
-  V(ArgumentsLengthState)         \
-  V(ObjectState)                  \
-  V(ObjectId)                     \
-  V(TypedObjectState)             \
-  V(Call)                         \
-  V(Parameter)                    \
-  V(OsrValue)                     \
-  V(LoopExit)                     \
-  V(LoopExitValue)                \
-  V(LoopExitEffect)               \
-  V(Projection)                   \
-  V(Retain)                       \
-  V(MapGuard)                     \
+#define INNER_OP_LIST(V)    \
+  V(Select)                 \
+  V(Phi)                    \
+  V(EffectPhi)              \
+  V(InductionVariablePhi)   \
+  V(Checkpoint)             \
+  V(BeginRegion)            \
+  V(FinishRegion)           \
+  V(FrameState)             \
+  V(StateValues)            \
+  V(TypedStateValues)       \
+  V(ArgumentsElementsState) \
+  V(ArgumentsLengthState)   \
+  V(ObjectState)            \
+  V(ObjectId)               \
+  V(TypedObjectState)       \
+  V(Call)                   \
+  V(Parameter)              \
+  V(OsrValue)               \
+  V(LoopExit)               \
+  V(LoopExitValue)          \
+  V(LoopExitEffect)         \
+  V(Projection)             \
+  V(Retain)                 \
+  V(MapGuard)               \
+  V(FoldConstant)           \
   V(TypeGuard)
 
 #define COMMON_OP_LIST(V) \
@@ -839,6 +840,7 @@
   V(I32x4GtU)                   \
   V(I32x4GeU)                   \
   V(I32x4Abs)                   \
+  V(I32x4BitMask)               \
   V(I16x8Splat)                 \
   V(I16x8ExtractLaneU)          \
   V(I16x8ExtractLaneS)          \
@@ -877,6 +879,7 @@
   V(I16x8GeU)                   \
   V(I16x8RoundingAverageU)      \
   V(I16x8Abs)                   \
+  V(I16x8BitMask)               \
   V(I8x16Splat)                 \
   V(I8x16ExtractLaneU)          \
   V(I8x16ExtractLaneS)          \
@@ -910,6 +913,7 @@
   V(I8x16GeU)                   \
   V(I8x16RoundingAverageU)      \
   V(I8x16Abs)                   \
+  V(I8x16BitMask)               \
   V(S128Load)                   \
   V(S128Store)                  \
   V(S128Zero)                   \

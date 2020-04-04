@@ -161,6 +161,7 @@ file(GLOB deoptimizer-sources CONFIGURE_DEPENDS v8/src/deoptimizer/*.cc)
 file(GLOB diagnostic-sources CONFIGURE_DEPENDS v8/src/diagnostics/*.cc)
 file(GLOB execution-sources CONFIGURE_DEPENDS v8/src/execution/*.cc)
 file(GLOB extensions-sources CONFIGURE_DEPENDS v8/src/extensions/*.cc)
+file(GLOB handles-sources CONFIGURE_DEPENDS v8/src/handles/*.cc)
 file(GLOB interpreter-sources CONFIGURE_DEPENDS v8/src/interpreter/*.cc)
 file(GLOB json-sources CONFIGURE_DEPENDS v8/src/json/*.cc)
 file(GLOB logging-sources CONFIGURE_DEPENDS v8/src/logging/*.cc)
@@ -251,6 +252,7 @@ add_library(v8_base_without_compiler STATIC
   ${D}/src/init/isolate-allocator.cc
   ${D}/src/init/startup-data-util.cc
   ${D}/src/init/v8.cc
+  ${handles-sources}
   ${interpreter-sources}
   ${json-sources}
   ${logging-sources}

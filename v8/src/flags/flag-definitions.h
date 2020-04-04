@@ -134,6 +134,12 @@ struct MaybeBoolFlag {
 #define COMPRESS_POINTERS_BOOL false
 #endif
 
+#ifdef V8_ENABLE_CONTROL_FLOW_INTEGRITY
+#define ENABLE_CONTROL_FLOW_INTEGRITY_BOOL true
+#else
+#define ENABLE_CONTROL_FLOW_INTEGRITY_BOOL false
+#endif
+
 // Supported ARM configurations are:
 //  "armv6":       ARMv6 + VFPv2
 //  "armv7":       ARMv7 + VFPv3-D32 + NEON
@@ -488,7 +494,7 @@ DEFINE_BOOL(turboprop, false,
             "enable experimental turboprop mid-tier compiler.")
 DEFINE_NEG_IMPLICATION(turboprop, turbo_inlining)
 DEFINE_IMPLICATION(turboprop, concurrent_inlining)
-DEFINE_VALUE_IMPLICATION(turboprop, interrupt_budget, 10 * KB)
+DEFINE_VALUE_IMPLICATION(turboprop, interrupt_budget, 15 * KB)
 
 // Flags for concurrent recompilation.
 DEFINE_BOOL(concurrent_recompilation, true,
@@ -715,6 +721,7 @@ DEFINE_INT(wasm_tier_mask_for_testing, 0,
 DEFINE_BOOL(debug_in_liftoff, false,
             "use Liftoff instead of the C++ interpreter for debugging "
             "WebAssembly (experimental)")
+DEFINE_IMPLICATION(future, debug_in_liftoff)
 
 DEFINE_BOOL(validate_asm, true, "validate asm.js modules before compiling")
 DEFINE_BOOL(suppress_asm_messages, false,
@@ -729,7 +736,7 @@ DEFINE_DEBUG_BOOL(dump_wasm_module, false, "dump wasm module bytes")
 DEFINE_STRING(dump_wasm_module_path, nullptr,
               "directory to dump wasm modules to")
 
-// Declare command-line flags for WASM features. Warning: avoid using these
+// Declare command-line flags for Wasm features. Warning: avoid using these
 // flags directly in the implementation. Instead accept wasm::WasmFeatures
 // for configurability.
 #include "src/wasm/wasm-feature-flags.h"
@@ -812,9 +819,6 @@ DEFINE_SIZE_T(max_semi_space_size, 0,
               "max size of a semi-space (in MBytes), the new space consists of "
               "two semi-spaces")
 DEFINE_INT(semi_space_growth_factor, 2, "factor by which to grow the new space")
-DEFINE_BOOL(experimental_new_space_growth_heuristic, false,
-            "Grow the new space based on the percentage of survivors instead "
-            "of their absolute value.")
 DEFINE_SIZE_T(max_old_space_size, 0, "max size of the old space (in Mbytes)")
 DEFINE_SIZE_T(
     max_heap_size, 0,
@@ -906,6 +910,7 @@ DEFINE_BOOL_READONLY(array_buffer_extension, V8_ARRAY_BUFFER_EXTENSION_BOOL,
 DEFINE_IMPLICATION(array_buffer_extension, always_promote_young_mc)
 DEFINE_BOOL(concurrent_array_buffer_sweeping, true,
             "concurrently sweep array buffers")
+DEFINE_BOOL(local_heaps, false, "allow heap access from background tasks")
 DEFINE_BOOL(parallel_marking, true, "use parallel marking in atomic pause")
 DEFINE_INT(ephemeron_fixpoint_iterations, 10,
            "number of fixpoint iterations it takes to switch to linear "

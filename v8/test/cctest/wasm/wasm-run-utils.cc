@@ -8,13 +8,44 @@
 #include "src/diagnostics/code-tracer.h"
 #include "src/heap/heap-inl.h"
 #include "src/wasm/graph-builder-interface.h"
+#include "src/wasm/leb-helper.h"
 #include "src/wasm/module-compiler.h"
 #include "src/wasm/wasm-import-wrapper-cache.h"
 #include "src/wasm/wasm-objects-inl.h"
+#include "src/wasm/wasm-opcodes.h"
 
 namespace v8 {
 namespace internal {
 namespace wasm {
+
+template <>
+void AppendSingle(std::vector<byte>* code, WasmOpcode op) {
+  // We do not yet have opcodes that take up more than 2 byte (decoded). But if
+  // that changes, this will need to be updated.
+  DCHECK_EQ(0, op >> 16);
+  byte prefix = (op >> 8) & 0xff;
+  byte opcode = op & 0xff;
+
+  if (!prefix) {
+    code->push_back(opcode);
+    return;
+  }
+
+  // Ensure the prefix is really one of the supported prefixed opcodes.
+  DCHECK(WasmOpcodes::IsPrefixOpcode(static_cast<WasmOpcode>(prefix)));
+  code->push_back(prefix);
+
+  // Decoded opcodes fit in a byte (0x00-0xff).
+  DCHECK_LE(LEBHelper::sizeof_u32v(opcode), 2);
+  // Therefore, the encoding needs max 2 bytes.
+  uint8_t encoded[2];
+  uint8_t* d = encoded;
+  // d is updated to after the last uint8_t written.
+  LEBHelper::write_u32v(&d, opcode);
+  for (uint8_t* p = encoded; p < d; p++) {
+    code->push_back(*p);
+  }
+}
 
 TestingModuleBuilder::TestingModuleBuilder(
     Zone* zone, ManuallyImportedJSFunction* maybe_import, ExecutionTier tier,
@@ -322,7 +353,7 @@ CompilationEnv TestingModuleBuilder::CreateCompilationEnv(
 }
 
 const WasmGlobal* TestingModuleBuilder::AddGlobal(ValueType type) {
-  byte size = ValueTypes::MemSize(ValueTypes::MachineTypeFor(type));
+  byte size = type.element_size_bytes();
   global_offset = (global_offset + size - 1) & ~(size - 1);  // align
   test_module_->globals.push_back(
       {type, true, WasmInitExpr(), {global_offset}, false, false});
@@ -579,23 +610,24 @@ WasmFunctionCompiler::WasmFunctionCompiler(Zone* zone, const FunctionSig* sig,
 
 WasmFunctionCompiler::~WasmFunctionCompiler() = default;
 
-const FunctionSig* WasmRunnerBase::CreateSig(MachineType return_type,
-                                             Vector<MachineType> param_types) {
+/* static */
+FunctionSig* WasmRunnerBase::CreateSig(Zone* zone, MachineType return_type,
+                                       Vector<MachineType> param_types) {
   int return_count = return_type.IsNone() ? 0 : 1;
   int param_count = param_types.length();
 
   // Allocate storage array in zone.
-  ValueType* sig_types = zone_.NewArray<ValueType>(return_count + param_count);
+  ValueType* sig_types = zone->NewArray<ValueType>(return_count + param_count);
 
   // Convert machine types to local types, and check that there are no
   // MachineType::None()'s in the parameters.
   int idx = 0;
-  if (return_count) sig_types[idx++] = ValueTypes::ValueTypeFor(return_type);
+  if (return_count) sig_types[idx++] = ValueType::For(return_type);
   for (MachineType param : param_types) {
     CHECK_NE(MachineType::None(), param);
-    sig_types[idx++] = ValueTypes::ValueTypeFor(param);
+    sig_types[idx++] = ValueType::For(param);
   }
-  return new (&zone_) FunctionSig(return_count, param_count, sig_types);
+  return new (zone) FunctionSig(return_count, param_count, sig_types);
 }
 
 // static

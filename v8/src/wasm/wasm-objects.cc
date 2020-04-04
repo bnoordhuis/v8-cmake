@@ -243,7 +243,7 @@ MaybeHandle<String> WasmModuleObject::GetFunctionNameOrNull(
   DCHECK_LT(func_index, module_object->module()->functions.size());
   wasm::WireBytesRef name = module_object->module()->function_names.Lookup(
       wasm::ModuleWireBytes(module_object->native_module()->wire_bytes()),
-      func_index);
+      func_index, VectorOf(module_object->module()->export_table));
   if (!name.is_set()) return {};
   return ExtractUtf8StringFromModuleBytes(isolate, module_object, name,
                                           kNoInternalize);
@@ -256,7 +256,8 @@ Handle<String> WasmModuleObject::GetFunctionName(
       GetFunctionNameOrNull(isolate, module_object, func_index);
   if (!name.is_null()) return name.ToHandleChecked();
   EmbeddedVector<char, 32> buffer;
-  int length = SNPrintF(buffer, "wasm-function[%u]", func_index);
+  DCHECK_GE(func_index, module_object->module()->num_imported_functions);
+  int length = SNPrintF(buffer, "func%u", func_index);
   return isolate->factory()
       ->NewStringFromOneByte(Vector<uint8_t>::cast(buffer.SubVector(0, length)))
       .ToHandleChecked();
@@ -266,8 +267,8 @@ Vector<const uint8_t> WasmModuleObject::GetRawFunctionName(
     uint32_t func_index) {
   DCHECK_GT(module()->functions.size(), func_index);
   wasm::ModuleWireBytes wire_bytes(native_module()->wire_bytes());
-  wasm::WireBytesRef name_ref =
-      module()->function_names.Lookup(wire_bytes, func_index);
+  wasm::WireBytesRef name_ref = module()->function_names.Lookup(
+      wire_bytes, func_index, VectorOf(module()->export_table));
   wasm::WasmName name = wire_bytes.GetNameOrNull(name_ref);
   return Vector<const uint8_t>::cast(name);
 }
@@ -299,7 +300,7 @@ Handle<WasmTableObject> WasmTableObject::New(Isolate* isolate,
   table_obj->set_entries(*backing_store);
   table_obj->set_current_length(initial);
   table_obj->set_maximum_length(*max);
-  table_obj->set_raw_type(static_cast<int>(type));
+  table_obj->set_raw_type(static_cast<int>(type.kind()));
 
   table_obj->set_dispatch_tables(ReadOnlyRoots(isolate).empty_fixed_array());
   if (entries != nullptr) {
@@ -931,7 +932,13 @@ int32_t WasmMemoryObject::Grow(Isolate* isolate,
   // Try allocating a new backing store and copying.
   std::unique_ptr<BackingStore> new_backing_store =
       backing_store->CopyWasmMemory(isolate, new_pages);
-  if (!new_backing_store) return -1;
+  if (!new_backing_store) {
+    // Crash on out-of-memory if the correctness fuzzer is running.
+    if (FLAG_correctness_fuzzer_suppressions) {
+      FATAL("could not grow wasm memory");
+    }
+    return -1;
+  }
 
   // Detach old and create a new one with the new backing store.
   old_buffer->Detach(true);
@@ -960,7 +967,7 @@ MaybeHandle<WasmGlobalObject> WasmGlobalObject::New(
     global_obj->set_is_mutable(is_mutable);
   }
 
-  if (wasm::ValueTypes::IsReferenceType(type)) {
+  if (type.IsReferenceType()) {
     DCHECK(maybe_untagged_buffer.is_null());
     Handle<FixedArray> tagged_buffer;
     if (!maybe_tagged_buffer.ToHandle(&tagged_buffer)) {
@@ -972,7 +979,7 @@ MaybeHandle<WasmGlobalObject> WasmGlobalObject::New(
     global_obj->set_tagged_buffer(*tagged_buffer);
   } else {
     DCHECK(maybe_tagged_buffer.is_null());
-    uint32_t type_size = wasm::ValueTypes::ElementSizeInBytes(type);
+    uint32_t type_size = type.element_size_bytes();
 
     Handle<JSArrayBuffer> untagged_buffer;
     if (!maybe_untagged_buffer.ToHandle(&untagged_buffer)) {
@@ -1084,7 +1091,7 @@ void ImportedFunctionEntry::SetWasmToJs(
 
 void ImportedFunctionEntry::SetWasmToWasm(WasmInstanceObject instance,
                                           Address call_target) {
-  TRACE_IFT("Import WASM 0x%" PRIxPTR "[%d] = {instance=0x%" PRIxPTR
+  TRACE_IFT("Import Wasm 0x%" PRIxPTR "[%d] = {instance=0x%" PRIxPTR
             ", target=0x%" PRIxPTR "}\n",
             instance_->ptr(), index_, instance.ptr(), call_target);
   instance_->imported_function_refs().set(index_, instance);
@@ -1231,6 +1238,8 @@ Handle<WasmInstanceObject> WasmInstanceObject::New(
   instance->set_module_object(*module_object);
   instance->set_jump_table_start(
       module_object->native_module()->jump_table_start());
+  instance->set_hook_on_function_call_address(
+      isolate->debug()->hook_on_function_call_address());
 
   // Insert the new instance into the scripts weak list of instances. This list
   // is used for breakpoints affecting all instances belonging to the script.
@@ -1483,7 +1492,7 @@ void WasmInstanceObject::ImportWasmJSFunctionIntoTable(
 // static
 uint8_t* WasmInstanceObject::GetGlobalStorage(
     Handle<WasmInstanceObject> instance, const wasm::WasmGlobal& global) {
-  DCHECK(!wasm::ValueTypes::IsReferenceType(global.type));
+  DCHECK(!global.type.IsReferenceType());
   if (global.mutability && global.imported) {
     return reinterpret_cast<byte*>(
         instance->imported_mutable_globals()[global.index]);
@@ -1496,7 +1505,7 @@ uint8_t* WasmInstanceObject::GetGlobalStorage(
 std::pair<Handle<FixedArray>, uint32_t>
 WasmInstanceObject::GetGlobalBufferAndIndex(Handle<WasmInstanceObject> instance,
                                             const wasm::WasmGlobal& global) {
-  DCHECK(wasm::ValueTypes::IsReferenceType(global.type));
+  DCHECK(global.type.IsReferenceType());
   Isolate* isolate = instance->GetIsolate();
   if (global.mutability && global.imported) {
     Handle<FixedArray> buffer(
@@ -1511,10 +1520,37 @@ WasmInstanceObject::GetGlobalBufferAndIndex(Handle<WasmInstanceObject> instance,
 }
 
 // static
+MaybeHandle<String> WasmInstanceObject::GetGlobalNameOrNull(
+    Isolate* isolate, Handle<WasmInstanceObject> instance,
+    uint32_t global_index) {
+  wasm::ModuleWireBytes wire_bytes(
+      instance->module_object().native_module()->wire_bytes());
+
+  // This is pair of <module_name, field_name>.
+  // If field_name is not set then we don't generate a name. Else if module_name
+  // is set then it is imported global. Otherwise it is exported global.
+  std::pair<wasm::WireBytesRef, wasm::WireBytesRef> name_ref =
+      instance->module()->global_names.Lookup(
+          global_index, VectorOf(instance->module()->import_table),
+          VectorOf(instance->module()->export_table));
+  if (!name_ref.second.is_set()) return {};
+  Vector<const char> field_name = wire_bytes.GetNameOrNull(name_ref.second);
+  if (!name_ref.first.is_set()) {
+    return isolate->factory()->NewStringFromUtf8(VectorOf(field_name));
+  }
+  Vector<const char> module_name = wire_bytes.GetNameOrNull(name_ref.first);
+  std::string global_name;
+  global_name.append(module_name.begin(), module_name.end());
+  global_name.append(".");
+  global_name.append(field_name.begin(), field_name.end());
+  return isolate->factory()->NewStringFromUtf8(VectorOf(global_name));
+}
+
+// static
 wasm::WasmValue WasmInstanceObject::GetGlobalValue(
     Handle<WasmInstanceObject> instance, const wasm::WasmGlobal& global) {
   Isolate* isolate = instance->GetIsolate();
-  if (wasm::ValueTypes::IsReferenceType(global.type)) {
+  if (global.type.IsReferenceType()) {
     Handle<FixedArray> global_buffer;  // The buffer of the global.
     uint32_t global_index = 0;         // The index into the buffer.
     std::tie(global_buffer, global_index) =
@@ -1523,9 +1559,9 @@ wasm::WasmValue WasmInstanceObject::GetGlobalValue(
   }
   Address ptr = reinterpret_cast<Address>(GetGlobalStorage(instance, global));
   using wasm::Simd128;
-  switch (global.type) {
+  switch (global.type.kind()) {
 #define CASE_TYPE(valuetype, ctype) \
-  case wasm::valuetype:             \
+  case wasm::ValueType::valuetype:  \
     return wasm::WasmValue(base::ReadLittleEndianValue<ctype>(ptr));
     FOREACH_WASMVALUE_CTYPES(CASE_TYPE)
 #undef CASE_TYPE
@@ -1648,8 +1684,7 @@ namespace {
 constexpr uint32_t kBytesPerExceptionValuesArrayElement = 2;
 
 size_t ComputeEncodedElementSize(wasm::ValueType type) {
-  size_t byte_size =
-      static_cast<size_t>(wasm::ValueTypes::ElementSizeInBytes(type));
+  size_t byte_size = type.element_size_bytes();
   DCHECK_EQ(byte_size % kBytesPerExceptionValuesArrayElement, 0);
   DCHECK_LE(1, byte_size / kBytesPerExceptionValuesArrayElement);
   return byte_size / kBytesPerExceptionValuesArrayElement;
@@ -1665,28 +1700,29 @@ uint32_t WasmExceptionPackage::GetEncodedSize(
   const wasm::WasmExceptionSig* sig = exception->sig;
   uint32_t encoded_size = 0;
   for (size_t i = 0; i < sig->parameter_count(); ++i) {
-    switch (sig->GetParam(i)) {
-      case wasm::kWasmI32:
-      case wasm::kWasmF32:
+    switch (sig->GetParam(i).kind()) {
+      case wasm::ValueType::kI32:
+      case wasm::ValueType::kF32:
         DCHECK_EQ(2, ComputeEncodedElementSize(sig->GetParam(i)));
         encoded_size += 2;
         break;
-      case wasm::kWasmI64:
-      case wasm::kWasmF64:
+      case wasm::ValueType::kI64:
+      case wasm::ValueType::kF64:
         DCHECK_EQ(4, ComputeEncodedElementSize(sig->GetParam(i)));
         encoded_size += 4;
         break;
-      case wasm::kWasmS128:
+      case wasm::ValueType::kS128:
         DCHECK_EQ(8, ComputeEncodedElementSize(sig->GetParam(i)));
         encoded_size += 8;
         break;
-      case wasm::kWasmAnyRef:
-      case wasm::kWasmFuncRef:
-      case wasm::kWasmNullRef:
-      case wasm::kWasmExnRef:
+      case wasm::ValueType::kAnyRef:
+      case wasm::ValueType::kFuncRef:
+      case wasm::ValueType::kNullRef:
+      case wasm::ValueType::kExnRef:
         encoded_size += 1;
         break;
-      default:
+      case wasm::ValueType::kStmt:
+      case wasm::ValueType::kBottom:
         UNREACHABLE();
     }
   }
