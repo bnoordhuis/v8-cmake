@@ -1,0 +1,70 @@
+From eba7aae41a74bab1aba7e26effbebf4c3e297c0d Mon Sep 17 00:00:00 2001
+From: Ben Noordhuis <info@bnoordhuis.nl>
+Date: Wed, 15 Apr 2020 11:11:44 +0200
+Subject: [PATCH] Patch v8/src/heap/third-party
+
+Provide a stub `third_party_heap::Heap` implementation to work around
+linker erors with Visual Studio.
+
+Refs: https://github.com/bnoordhuis/v8-cmake/issues/10
+---
+ v8/src/heap/third-party/heap-api-stub.cc | 47 ++++++++++++++++++++++++
+ 1 file changed, 47 insertions(+)
+ create mode 100644 v8/src/heap/third-party/heap-api-stub.cc
+
+diff --git a/v8/src/heap/third-party/heap-api-stub.cc b/v8/src/heap/third-party/heap-api-stub.cc
+new file mode 100644
+index 0000000..3135aca
+--- /dev/null
++++ b/v8/src/heap/third-party/heap-api-stub.cc
+@@ -0,0 +1,47 @@
++// Copyright 2020 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "src/heap/third-party/heap-api.h"
++
++namespace v8 {
++namespace internal {
++namespace third_party_heap {
++
++// Work around Visual Studio linker errors when V8_ENABLE_THIRD_PARTY_HEAP
++// is disabled.
++#ifndef V8_ENABLE_THIRD_PARTY_HEAP
++
++// static
++std::unique_ptr<Heap> Heap::New(v8::internal::Isolate*) { return nullptr; }
++
++// static
++v8::internal::Isolate* Heap::GetIsolate(Address) { return nullptr; }
++
++AllocationResult Heap::Allocate(size_t, AllocationType, AllocationAlignment) {
++  return AllocationResult();
++}
++
++Address Heap::GetObjectFromInnerPointer(Address) { return 0; }
++
++const base::AddressRegion& Heap::GetCodeRange() {
++  static const base::AddressRegion no_region(0, 0);
++  return no_region;
++}
++
++// static
++bool Heap::InCodeSpace(Address) { return false; }
++
++// static
++bool Heap::InReadOnlySpace(Address) { return false; }
++
++// static
++bool Heap::IsValidHeapObject(HeapObject) { return false; }
++
++bool Heap::CollectGarbage() { return false; }
++
++#endif  // !defined(V8_ENABLE_THIRD_PARTY_HEAP)
++
++}  // namespace third_party_heap
++}  // namespace internal
++}  // namespace v8
+-- 
+2.20.1
+
