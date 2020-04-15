@@ -54,7 +54,6 @@ string(CONCAT is-x64 $<OR:
 >)
 
 option(V8_ENABLE_CONCURRENT_MARKING "Enable concurrent marking" ON)
-option(V8_ENABLE_THIRD_PARTY_HEAP "Enable third party HEAP library" OFF)
 option(V8_ENABLE_I18N "Enable Internationalization support")
 
 set(
@@ -69,7 +68,6 @@ set(
   $<${is-win}:NOMINMAX>
   $<$<OR:${is-win},${is-x64}>:V8_OS_WINX64>
   $<$<BOOL:${V8_ENABLE_CONCURRENT_MARKING}>:V8_CONCURRENT_MARKING>
-  $<$<BOOL:${V8_ENABLE_THIRD_PARTY_HEAP}>:V8_ENABLE_THIRD_PARTY_HEAP>
   $<${is-win}:V8_OS_WIN32>
 )
 
