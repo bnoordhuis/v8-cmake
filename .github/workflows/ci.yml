@@ -26,4 +26,5 @@ jobs:
       - name: build
         run: cmake --build ${{runner.workspace}}/build -j 2
       - name: test
-        run: ${{runner.workspace}}/build/d8 -e 42
+        run: ./build/d8 -e 42
+        working-directory: ${{runner.workspace}}
