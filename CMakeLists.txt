@@ -3,8 +3,12 @@ set(CMAKE_USER_MAKE_RULES_OVERRIDE "${CMAKE_CURRENT_SOURCE_DIR}/cmake/MSVC.cmake
 set(CMAKE_DISABLE_IN_SOURCE_BUILD ON)
 project(V8 LANGUAGES CXX C ASM)
 
+if(WIN32)
+  enable_language(ASM_MASM)
+  set_property(SOURCE ${PROJECT_BINARY_DIR}/embedded.S PROPERTY LANGUAGE ASM_MASM)
+endif()
+
 list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
-list(APPEND CMAKE_ASM_MASM_SOURCE_FILE_EXTENSIONS S)
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 
 find_package(Python 3 REQUIRED QUIET COMPONENTS Interpreter)
@@ -451,6 +455,7 @@ add_custom_command(
     $<${is-x64}:--target_arch=x64>
     $<$<PLATFORM_ID:Darwin>:--target_os=mac>
     $<$<PLATFORM_ID:Linux>:--target_os=linux>
+    $<$<PLATFORM_ID:Windows>:--target_os=win>
     --turbo_instruction_scheduling
   DEPENDS
     mksnapshot
