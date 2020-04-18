@@ -31,6 +31,6 @@ jobs:
       - name: test-windows
         if: matrix.os == 'windows-latest'
         run: |
-          npx tree-cli -l 3 ./build
-          ${{runner.workspace}}/build/d8 -e 42
+          npm install -g tree-cli && treee -l 3 ./build
+          ${{runner.workspace}}/build/Debug/d8 -e 42
         shell: powershell
