@@ -26,4 +26,8 @@ jobs:
       - name: build
         run: cmake --build ${{runner.workspace}}/build -j 2
       - name: test
-        run: cd ${{runner.workspace}}/build/ && ./d8 -e 42
+        if: matrix.os != 'windows-latest'
+        run: ${{runner.workspace}}/build/d8 -e 42
+      - name: test-windows
+        if: matrix.os == 'windows-latest'
+        run: ls -R build
