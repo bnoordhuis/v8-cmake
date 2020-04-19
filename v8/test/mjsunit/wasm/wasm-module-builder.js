@@ -65,7 +65,7 @@ let kElementSectionCode = 9;     // Elements section
 let kCodeSectionCode = 10;       // Function code
 let kDataSectionCode = 11;       // Data segments
 let kDataCountSectionCode = 12;  // Data segment count (between Element & Code)
-let kExceptionSectionCode = 13;  // Exception section (between Global & Export)
+let kExceptionSectionCode = 13;  // Exception section (between Memory & Global)
 
 // Name section types
 let kModuleNameCode = 0;
@@ -501,6 +501,8 @@ let kTrapUnalignedAccess      = 9;
 let kTrapDataSegmentDropped   = 10;
 let kTrapElemSegmentDropped   = 11;
 let kTrapTableOutOfBounds     = 12;
+let kTrapBrOnExnNullRef       = 13;
+let kTrapRethrowNullRef       = 14;
 
 let kTrapMsgs = [
   "unreachable",
@@ -515,7 +517,9 @@ let kTrapMsgs = [
   "operation does not support unaligned accesses",
   "data segment has been dropped",
   "element segment has been dropped",
-  "table access out of bounds"
+  "table access out of bounds",
+  "br_on_exn on nullref value",
+  "rethrowing nullref value"
 ];
 
 function assertTraps(trap, code) {
@@ -1076,6 +1080,18 @@ class WasmModuleBuilder {
       });
     }
 
+    // Add event section.
+    if (wasm.exceptions.length > 0) {
+      if (debug) print("emitting events @ " + binary.length);
+      binary.emit_section(kExceptionSectionCode, section => {
+        section.emit_u32v(wasm.exceptions.length);
+        for (let type of wasm.exceptions) {
+          section.emit_u32v(kExceptionAttribute);
+          section.emit_u32v(type);
+        }
+      });
+    }
+
     // Add global section.
     if (wasm.globals.length > 0) {
       if (debug) print ("emitting globals @ " + binary.length);
@@ -1125,18 +1141,6 @@ class WasmModuleBuilder {
             section.emit_u32v(global.init_index);
           }
           section.emit_u8(kExprEnd);  // end of init expression
-        }
-      });
-    }
-
-    // Add exceptions.
-    if (wasm.exceptions.length > 0) {
-      if (debug) print("emitting exceptions @ " + binary.length);
-      binary.emit_section(kExceptionSectionCode, section => {
-        section.emit_u32v(wasm.exceptions.length);
-        for (let type of wasm.exceptions) {
-          section.emit_u32v(kExceptionAttribute);
-          section.emit_u32v(type);
         }
       });
     }

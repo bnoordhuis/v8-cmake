@@ -1256,7 +1256,19 @@ BytecodeArrayBuilder& BytecodeArrayBuilder::JumpIfJSReceiver(
 }
 
 BytecodeArrayBuilder& BytecodeArrayBuilder::JumpLoop(
-    BytecodeLoopHeader* loop_header, int loop_depth) {
+    BytecodeLoopHeader* loop_header, int loop_depth, int position) {
+  if (position != kNoSourcePosition) {
+    // We need to attach a non-breakable source position to JumpLoop for its
+    // implicit stack check, so we simply add it as expression position. There
+    // can be a prior statement position from constructs like:
+    //
+    //    do var x;  while (false);
+    //
+    // A Nop could be inserted for empty statements, but since no code
+    // is associated with these positions, instead we force the jump loop's
+    // expression position which eliminates the empty statement's position.
+    latest_source_info_.ForceExpressionPosition(position);
+  }
   OutputJumpLoop(loop_header, loop_depth);
   return *this;
 }
@@ -1264,24 +1276,6 @@ BytecodeArrayBuilder& BytecodeArrayBuilder::JumpLoop(
 BytecodeArrayBuilder& BytecodeArrayBuilder::SwitchOnSmiNoFeedback(
     BytecodeJumpTable* jump_table) {
   OutputSwitchOnSmiNoFeedback(jump_table);
-  return *this;
-}
-
-BytecodeArrayBuilder& BytecodeArrayBuilder::StackCheck(int position) {
-  if (position != kNoSourcePosition) {
-    // We need to attach a non-breakable source position to a stack
-    // check, so we simply add it as expression position. There can be
-    // a prior statement position from constructs like:
-    //
-    //    do var x;  while (false);
-    //
-    // A Nop could be inserted for empty statements, but since no code
-    // is associated with these positions, instead we force the stack
-    // check's expression position which eliminates the empty
-    // statement's position.
-    latest_source_info_.ForceExpressionPosition(position);
-  }
-  OutputStackCheck();
   return *this;
 }
 

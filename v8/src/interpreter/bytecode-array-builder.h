@@ -427,7 +427,7 @@ class V8_EXPORT_PRIVATE BytecodeArrayBuilder final {
 
   BytecodeArrayBuilder& Jump(BytecodeLabel* label);
   BytecodeArrayBuilder& JumpLoop(BytecodeLoopHeader* loop_header,
-                                 int loop_depth);
+                                 int loop_depth, int position);
 
   BytecodeArrayBuilder& JumpIfTrue(ToBooleanMode mode, BytecodeLabel* label);
   BytecodeArrayBuilder& JumpIfFalse(ToBooleanMode mode, BytecodeLabel* label);
@@ -443,8 +443,6 @@ class V8_EXPORT_PRIVATE BytecodeArrayBuilder final {
                                      NilValue nil);
 
   BytecodeArrayBuilder& SwitchOnSmiNoFeedback(BytecodeJumpTable* jump_table);
-
-  BytecodeArrayBuilder& StackCheck(int position);
 
   // Sets the pending message to the value in the accumulator, and returns the
   // previous pending message in the accumulator.

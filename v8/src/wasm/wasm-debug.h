@@ -23,6 +23,7 @@ class Handle;
 class JSObject;
 template <typename T>
 class Vector;
+class WasmCompiledFrame;
 class WasmInstanceObject;
 
 namespace wasm {
@@ -140,11 +141,25 @@ class DebugInfo {
   explicit DebugInfo(NativeModule*);
   ~DebugInfo();
 
-  Handle<JSObject> GetLocalScopeObject(Isolate*, Address pc, Address fp);
+  // {fp} is the frame pointer of the Liftoff frame, {debug_break_fp} that of
+  // the {WasmDebugBreak} frame (if any).
+  Handle<JSObject> GetLocalScopeObject(Isolate*, Address pc, Address fp,
+                                       Address debug_break_fp);
+
+  Handle<JSObject> GetStackScopeObject(Isolate*, Address pc, Address fp,
+                                       Address debug_break_fp);
 
   WireBytesRef GetLocalName(int func_index, int local_index);
 
   void SetBreakpoint(int func_index, int offset, Isolate* current_isolate);
+
+  void PrepareStep(Isolate*, StackFrameId);
+
+  void ClearStepping();
+
+  bool IsStepping(WasmCompiledFrame*);
+
+  void RemoveBreakpoint(int func_index, int offset, Isolate* current_isolate);
 
   void RemoveDebugSideTables(Vector<WasmCode* const>);
 

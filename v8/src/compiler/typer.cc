@@ -547,10 +547,10 @@ Type Typer::Visitor::ToLength(Type type, Typer* t) {
   double min = type.Min();
   double max = type.Max();
   if (max <= 0.0) {
-    return Type::NewConstant(0, t->zone());
+    return Type::Constant(0, t->zone());
   }
   if (min >= kMaxSafeInteger) {
-    return Type::NewConstant(kMaxSafeInteger, t->zone());
+    return Type::Constant(kMaxSafeInteger, t->zone());
   }
   if (min <= 0.0) min = 0.0;
   if (max >= kMaxSafeInteger) max = kMaxSafeInteger;
@@ -782,7 +782,7 @@ Type Typer::Visitor::TypeFloat64Constant(Node* node) { UNREACHABLE(); }
 
 Type Typer::Visitor::TypeNumberConstant(Node* node) {
   double number = OpParameter<double>(node->op());
-  return Type::NewConstant(number, zone());
+  return Type::Constant(number, zone());
 }
 
 Type Typer::Visitor::TypeHeapConstant(Node* node) {
@@ -1057,6 +1057,8 @@ Type Typer::Visitor::TypeTypeGuard(Node* node) {
   return typer_->operation_typer()->TypeTypeGuard(node->op(), type);
 }
 
+Type Typer::Visitor::TypeFoldConstant(Node* node) { return Operand(node, 0); }
+
 Type Typer::Visitor::TypeDead(Node* node) { return Type::None(); }
 
 Type Typer::Visitor::TypeDeadValue(Node* node) { return Type::None(); }
@@ -1081,7 +1083,6 @@ Type Typer::Visitor::JSEqualTyper(Type lhs, Type rhs, Typer* t) {
     // Types are equal and are inhabited only by a single semantic value,
     // which is not nan due to the earlier check.
     DCHECK(lhs.Is(rhs));
-    DCHECK(lhs.Is(Type::NonInternal()) || lhs.Is(Type::Hole()));
     return t->singleton_true_;
   }
   return Type::Boolean();
@@ -2393,7 +2394,7 @@ Type Typer::Visitor::TypeAssertType(Node* node) { UNREACHABLE(); }
 // Heap constants.
 
 Type Typer::Visitor::TypeConstant(Handle<Object> value) {
-  return Type::NewConstant(typer_->broker(), value, zone());
+  return Type::Constant(typer_->broker(), value, zone());
 }
 
 Type Typer::Visitor::TypeJSGetIterator(Node* node) { return Type::Any(); }

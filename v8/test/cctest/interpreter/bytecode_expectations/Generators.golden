@@ -98,7 +98,7 @@ snippet: "
 "
 frame size: 15
 parameter count: 1
-bytecode array length: 252
+bytecode array length: 251
 bytecodes: [
                 B(SwitchOnGeneratorState), R(0), U8(0), U8(2),
                 B(Mov), R(closure), R(4),
@@ -132,13 +132,12 @@ bytecodes: [
                 B(JumpIfJSReceiver), U8(7),
                 B(CallRuntime), U16(Runtime::kThrowIteratorResultNotAnObject), R(10), U8(1),
                 B(LdaNamedProperty), R(10), U8(6), U8(9),
-                B(JumpIfToBooleanTrue), U8(64),
+                B(JumpIfToBooleanTrue), U8(63),
                 B(LdaNamedProperty), R(10), U8(7), U8(11),
                 B(Star), R(10),
                 B(LdaFalse),
                 B(Star), R(6),
                 B(Mov), R(10), R(1),
-  /*   16 E> */ B(StackCheck),
   /*   25 S> */ B(Mov), R(1), R(3),
   /*   36 S> */ B(LdaFalse),
                 B(Star), R(12),
@@ -156,7 +155,7 @@ bytecodes: [
                 B(Mov), R(11), R(8),
                 B(Jump), U8(20),
                 B(Ldar), R(11),
-                B(JumpLoop), U8(81), I8(0),
+  /*   16 E> */ B(JumpLoop), U8(80), I8(0),
                 B(LdaSmi), I8(-1),
                 B(Star), R(8),
                 B(Star), R(7),
@@ -206,7 +205,7 @@ bytecodes: [
 ]
 constant pool: [
   Smi [21],
-  Smi [125],
+  Smi [124],
   Smi [10],
   Smi [7],
   ARRAY_BOILERPLATE_DESCRIPTION_TYPE,
@@ -221,8 +220,8 @@ constant pool: [
   Smi [9],
 ]
 handlers: [
-  [72, 156, 164],
-  [188, 221, 223],
+  [72, 155, 163],
+  [187, 220, 222],
 ]
 
 ---

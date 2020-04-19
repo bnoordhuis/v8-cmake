@@ -896,6 +896,7 @@ void StandardFrame::ComputeCallerState(State* state) const {
   state->fp = caller_fp();
   state->pc_address = ResolveReturnAddressLocation(
       reinterpret_cast<Address*>(ComputePCAddress(fp())));
+  state->callee_fp = fp();
   state->callee_pc_address = pc_address();
   state->constant_pool_address =
       reinterpret_cast<Address*>(ComputeConstantPoolAddress(fp()));
@@ -2050,7 +2051,7 @@ void WasmDebugBreakFrame::Print(StringStream* accumulator, PrintMode mode,
 Address WasmDebugBreakFrame::GetCallerStackPointer() const {
   // WasmDebugBreak does not receive any arguments, hence the stack pointer of
   // the caller is at a fixed offset from the frame pointer.
-  return fp() + StandardFrameConstants::kCallerSPOffset;
+  return fp() + WasmDebugBreakFrameConstants::kCallerSPOffset;
 }
 
 Code WasmCompileLazyFrame::unchecked_code() const { return Code(); }

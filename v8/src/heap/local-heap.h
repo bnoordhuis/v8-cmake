@@ -6,6 +6,7 @@
 #define V8_HEAP_LOCAL_HEAP_H_
 
 #include <atomic>
+#include <memory>
 
 #include "src/base/platform/condition-variable.h"
 #include "src/base/platform/mutex.h"
@@ -14,6 +15,8 @@ namespace v8 {
 namespace internal {
 
 class Heap;
+class Safepoint;
+class LocalHandles;
 
 class LocalHeap {
  public:
@@ -26,7 +29,9 @@ class LocalHeap {
 
   // Frequently invoked by local thread to check whether safepoint was requested
   // from the main thread.
-  void Safepoint();
+  V8_EXPORT_PRIVATE void Safepoint();
+
+  LocalHandles* handles() { return handles_.get(); }
 
  private:
   enum class ThreadState {
@@ -39,21 +44,43 @@ class LocalHeap {
     Safepoint
   };
 
-  void Park();
-  void Unpark();
+  V8_EXPORT_PRIVATE void Park();
+  V8_EXPORT_PRIVATE void Unpark();
+  void EnsureParkedBeforeDestruction();
+
   bool IsSafepointRequested();
   void ClearSafepointRequested();
+
   void EnterSafepoint();
 
   Heap* heap_;
+
   base::Mutex state_mutex_;
-  base::ConditionVariable state_condvar_;
+  base::ConditionVariable state_change_;
   ThreadState state_;
+
   std::atomic<bool> safepoint_requested_;
+
   LocalHeap* prev_;
   LocalHeap* next_;
 
+  std::unique_ptr<LocalHandles> handles_;
+
   friend class Heap;
+  friend class Safepoint;
+  friend class ParkedScope;
+};
+
+class ParkedScope {
+ public:
+  explicit ParkedScope(LocalHeap* local_heap) : local_heap_(local_heap) {
+    local_heap_->Park();
+  }
+
+  ~ParkedScope() { local_heap_->Unpark(); }
+
+ private:
+  LocalHeap* local_heap_;
 };
 
 }  // namespace internal

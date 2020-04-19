@@ -158,6 +158,9 @@
   # Only makes sense in the no_i18n variant.
   'es6/unicode-regexp-ignore-case-noi18n':
       [['no_i18n == True', PASS], ['no_i18n == False', FAIL]],
+
+  # Needs to be adapted after changes to Function constructor. chromium:1065094
+  'cross-realm-filtering': [SKIP],
 }],  # ALWAYS
 
 ##############################################################################
@@ -862,9 +865,6 @@
   # Forced optimisation path tests.
   'shared-function-tier-up-turbo': [SKIP],
 
-  # Fails deopt_fuzzer due to --deopt_every_n_times
-  'es6/array-iterator-turbo': [SKIP],
-
   # Too slow tests.
   'regress/regress-740784': [SKIP],
 
@@ -987,7 +987,6 @@
 ['variant == stress', {
   # Slow tests.
   'array-natives-elements': [SKIP],
-  'es6/array-iterator-turbo': [SKIP],
   'ignition/regress-599001-verifyheap': [SKIP],
   'unicode-test': [SKIP],
 
@@ -1152,5 +1151,13 @@
   # especially in combination with tsan or other slow configurations.
   'wasm/many-modules': [SKIP],
 }],  # variant == stress_js_bg_compile_wasm_code_gc
+
+##############################################################################
+['variant == assert_types', {
+  # Type assertions can lead to differences in representation selection,
+  # which in turn can lead to different deopt behavior.
+  'compiler/number-abs': [SKIP],
+  'compiler/number-toboolean': [SKIP],
+}],  # variant == assert_types
 
 ]

@@ -320,8 +320,8 @@ void VisitRROSimdShift(InstructionSelector* selector, Node* node,
   }
 }
 
-void VisitRROI8x16SimdRightShift(InstructionSelector* selector, Node* node,
-                                 ArchOpcode opcode) {
+void VisitRROI8x16SimdShift(InstructionSelector* selector, Node* node,
+                            ArchOpcode opcode) {
   IA32OperandGenerator g(selector);
   InstructionOperand operand0 = g.UseUniqueRegister(node->InputAt(0));
   InstructionOperand operand1 = g.UseUniqueRegister(node->InputAt(1));
@@ -329,7 +329,6 @@ void VisitRROI8x16SimdRightShift(InstructionSelector* selector, Node* node,
   selector->Emit(opcode, g.DefineSameAsFirst(node), operand0, operand1,
                  arraysize(temps), temps);
 }
-
 }  // namespace
 
 void InstructionSelector::VisitStackSlot(Node* node) {
@@ -2145,10 +2144,6 @@ void InstructionSelector::VisitWord32AtomicPairCompareExchange(Node* node) {
   V(I16x8ShrS)                               \
   V(I16x8ShrU)
 
-#define SIMD_I8X16_RIGHT_SHIFT_OPCODES(V) \
-  V(I8x16ShrS)                            \
-  V(I8x16ShrU)
-
 void InstructionSelector::VisitF64x2Min(Node* node) {
   IA32OperandGenerator g(this);
   InstructionOperand temps[] = {g.TempSimd128Register()};
@@ -2371,14 +2366,6 @@ SIMD_SHIFT_OPCODES_UNIFED_SSE_AVX(VISIT_SIMD_SHIFT_UNIFIED_SSE_AVX)
 #undef VISIT_SIMD_SHIFT_UNIFIED_SSE_AVX
 #undef SIMD_SHIFT_OPCODES_UNIFED_SSE_AVX
 
-#define VISIT_SIMD_I8x16_RIGHT_SHIFT(Opcode)                \
-  void InstructionSelector::Visit##Opcode(Node* node) {     \
-    VisitRROI8x16SimdRightShift(this, node, kIA32##Opcode); \
-  }
-SIMD_I8X16_RIGHT_SHIFT_OPCODES(VISIT_SIMD_I8x16_RIGHT_SHIFT)
-#undef SIMD_I8X16_RIGHT_SHIFT_OPCODES
-#undef VISIT_SIMD_I8x16_RIGHT_SHIFT
-
 #define VISIT_SIMD_UNOP(Opcode)                                             \
   void InstructionSelector::Visit##Opcode(Node* node) {                     \
     IA32OperandGenerator g(this);                                           \
@@ -2458,15 +2445,36 @@ void InstructionSelector::VisitI8x16UConvertI16x8(Node* node) {
 
 void InstructionSelector::VisitI8x16Shl(Node* node) {
   IA32OperandGenerator g(this);
-  InstructionOperand operand0 = g.UseUniqueRegister(node->InputAt(0));
-  InstructionOperand operand1 = g.UseUniqueRegister(node->InputAt(1));
-  InstructionOperand temps[] = {g.TempRegister(), g.TempSimd128Register()};
-  if (IsSupported(AVX)) {
-    Emit(kAVXI8x16Shl, g.DefineAsRegister(node), operand0, operand1,
-         arraysize(temps), temps);
+  if (g.CanBeImmediate(node->InputAt(1))) {
+    InstructionOperand temps[] = {g.TempRegister(), g.TempSimd128Register()};
+    this->Emit(kIA32I8x16Shl, g.DefineSameAsFirst(node),
+               g.UseRegister(node->InputAt(0)),
+               g.UseImmediate(node->InputAt(1)), arraysize(temps), temps);
   } else {
-    Emit(kSSEI8x16Shl, g.DefineSameAsFirst(node), operand0, operand1,
-         arraysize(temps), temps);
+    VisitRROI8x16SimdShift(this, node, kIA32I8x16Shl);
+  }
+}
+
+void InstructionSelector::VisitI8x16ShrS(Node* node) {
+  IA32OperandGenerator g(this);
+  if (g.CanBeImmediate(node->InputAt(1))) {
+    this->Emit(kIA32I8x16ShrS, g.DefineSameAsFirst(node),
+               g.UseRegister(node->InputAt(0)),
+               g.UseImmediate(node->InputAt(1)));
+  } else {
+    VisitRROI8x16SimdShift(this, node, kIA32I8x16ShrS);
+  }
+}
+
+void InstructionSelector::VisitI8x16ShrU(Node* node) {
+  IA32OperandGenerator g(this);
+  if (g.CanBeImmediate(node->InputAt(1))) {
+    InstructionOperand temps[] = {g.TempRegister(), g.TempSimd128Register()};
+    this->Emit(kIA32I8x16ShrU, g.DefineSameAsFirst(node),
+               g.UseRegister(node->InputAt(0)),
+               g.UseImmediate(node->InputAt(1)), arraysize(temps), temps);
+  } else {
+    VisitRROI8x16SimdShift(this, node, kIA32I8x16ShrU);
   }
 }
 

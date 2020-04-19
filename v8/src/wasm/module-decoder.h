@@ -160,11 +160,20 @@ V8_EXPORT_PRIVATE std::vector<CustomSectionOffset> DecodeCustomSections(
 // function.
 AsmJsOffsetsResult DecodeAsmJsOffsets(Vector<const uint8_t> encoded_offsets);
 
-// Decode the function names from the name section.
-// Returns the result as an unordered map. Only names with valid utf8 encoding
-// are stored and conflicts are resolved by choosing the last name read.
+// Decode the function names from the name section and also look at export
+// table. Returns the result as an unordered map. Only names with valid utf8
+// encoding are stored and conflicts are resolved by choosing the last name
+// read.
 void DecodeFunctionNames(const byte* module_start, const byte* module_end,
-                         std::unordered_map<uint32_t, WireBytesRef>* names);
+                         std::unordered_map<uint32_t, WireBytesRef>* names,
+                         const Vector<const WasmExport> export_table);
+
+// Decode the global names from import table and export table. Returns the
+// result as an unordered map.
+void DecodeGlobalNames(
+    const Vector<const WasmImport> import_table,
+    const Vector<const WasmExport> export_table,
+    std::unordered_map<uint32_t, std::pair<WireBytesRef, WireBytesRef>>* names);
 
 // Decode the local names assignment from the name section.
 // The result will be empty if no name section is present. On encountering an
@@ -193,6 +202,8 @@ class ModuleDecoder {
                           bool verify_functions = true);
 
   ModuleResult FinishDecoding(bool verify_functions = true);
+
+  void set_code_section(uint32_t offset, uint32_t size);
 
   const std::shared_ptr<WasmModule>& shared_module() const;
   WasmModule* module() const { return shared_module().get(); }

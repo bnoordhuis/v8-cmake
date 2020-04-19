@@ -93,21 +93,21 @@ class IndirectFunctionTableEntry {
 // The underlying storage in the instance is used by generated code to
 // call imported functions at runtime.
 // Each entry is either:
-//   - WASM to JS, which has fields
+//   - Wasm to JS, which has fields
 //      - object = a Tuple2 of the importing instance and the callable
 //      - target = entrypoint to import wrapper code
-//   - WASM to WASM, which has fields
+//   - Wasm to Wasm, which has fields
 //      - object = target instance
 //      - target = entrypoint for the function
 class ImportedFunctionEntry {
  public:
   inline ImportedFunctionEntry(Handle<WasmInstanceObject>, int index);
 
-  // Initialize this entry as a WASM to JS call. This accepts the isolate as a
+  // Initialize this entry as a Wasm to JS call. This accepts the isolate as a
   // parameter, since it must allocate a tuple.
   V8_EXPORT_PRIVATE void SetWasmToJs(Isolate*, Handle<JSReceiver> callable,
                                      const wasm::WasmCode* wasm_to_js_wrapper);
-  // Initialize this entry as a WASM to WASM call.
+  // Initialize this entry as a Wasm to Wasm call.
   void SetWasmToWasm(WasmInstanceObject target_instance, Address call_target);
 
   WasmInstanceObject instance();
@@ -170,7 +170,7 @@ class WasmModuleObject : public JSObject {
                                                    uint32_t func_index);
 
   // Get the function name of the function identified by the given index.
-  // Returns "wasm-function[func_index]" if the function is unnamed or the
+  // Returns "func[func_index]" if the function is unnamed or the
   // name is not a valid UTF-8 string.
   static Handle<String> GetFunctionName(Isolate*, Handle<WasmModuleObject>,
                                         uint32_t func_index);
@@ -405,6 +405,7 @@ class WasmInstanceObject : public JSObject {
   DECL_PRIMITIVE_ACCESSORS(data_segment_starts, Address*)
   DECL_PRIMITIVE_ACCESSORS(data_segment_sizes, uint32_t*)
   DECL_PRIMITIVE_ACCESSORS(dropped_elem_segments, byte*)
+  DECL_PRIMITIVE_ACCESSORS(hook_on_function_call_address, Address)
 
   // Clear uninitialized padding space. This ensures that the snapshot content
   // is deterministic. Depending on the V8 build mode there could be no padding.
@@ -451,6 +452,7 @@ class WasmInstanceObject : public JSObject {
   V(kDataSegmentStartsOffset, kSystemPointerSize)                         \
   V(kDataSegmentSizesOffset, kSystemPointerSize)                          \
   V(kDroppedElemSegmentsOffset, kSystemPointerSize)                       \
+  V(kHookOnFunctionCallAddressOffset, kSystemPointerSize)                 \
   V(kHeaderSize, 0)
 
   DEFINE_FIELD_OFFSET_CONSTANTS(JSObject::kHeaderSize,
@@ -564,6 +566,11 @@ class WasmInstanceObject : public JSObject {
   // Get the value of a global in the given instance.
   static wasm::WasmValue GetGlobalValue(Handle<WasmInstanceObject>,
                                         const wasm::WasmGlobal&);
+
+  // Get the name of a global in the given instance by index.
+  static MaybeHandle<String> GetGlobalNameOrNull(Isolate*,
+                                                 Handle<WasmInstanceObject>,
+                                                 uint32_t global_index);
 
   OBJECT_CONSTRUCTORS(WasmInstanceObject, JSObject);
 
@@ -877,6 +884,12 @@ class WasmDebugInfo : public Struct {
                                               Address frame_pointer,
                                               int frame_index);
 
+  // Get stack scope details for a specific interpreted frame. It contains
+  // information about stack values.
+  static Handle<JSObject> GetStackScopeObject(Handle<WasmDebugInfo>,
+                                              Address frame_pointer,
+                                              int frame_index);
+
   V8_EXPORT_PRIVATE static Handle<Code> GetCWasmEntry(Handle<WasmDebugInfo>,
                                                       const wasm::FunctionSig*);
 
@@ -948,11 +961,6 @@ class WasmExceptionTag
  public:
   V8_EXPORT_PRIVATE static Handle<WasmExceptionTag> New(Isolate* isolate,
                                                         int index);
-
-  // Note that this index is only useful for debugging purposes and it is not
-  // unique across modules. The GC however does not allow objects without at
-  // least one field, hence this also serves as a padding field for now.
-  DECL_INT_ACCESSORS(index)
 
   DECL_PRINTER(WasmExceptionTag)
 

@@ -215,8 +215,8 @@
 
 ##############################################################################
 ['byteorder == big', {
-  # Skip WASM atomic tests on big-endian machines.
-  # There is no support to emulate atomic WASM operations on big-endian
+  # Skip Wasm atomic tests on big-endian machines.
+  # There is no support to emulate atomic Wasm operations on big-endian
   # platforms, since this would require bit swapping as a part of atomic
   # operations.
   'test-run-wasm-atomics/*': [SKIP],
@@ -482,6 +482,7 @@
   'test-streaming-compilation/*': [SKIP],
   'test-wasm-breakpoints/*': [SKIP],
   'test-wasm-codegen/*': [SKIP],
+  'test-wasm-debug-evaluate/*': [SKIP],
   'test-wasm-import-wrapper-cache/*': [SKIP],
   'test-wasm-interpreter-entry/*': [SKIP],
   'test-wasm-serialization/*': [SKIP],

@@ -26,6 +26,7 @@
 #include "src/wasm/wasm-limits.h"
 #include "src/wasm/wasm-module.h"
 #include "src/wasm/wasm-objects-inl.h"
+#include "src/wasm/wasm-opcodes.h"
 #include "src/zone/accounting-allocator.h"
 #include "src/zone/zone-containers.h"
 
@@ -1301,12 +1302,14 @@ class ThreadImpl {
   WasmInterpreter::Thread::ExceptionHandlingResult HandleException(
       Isolate* isolate) {
     DCHECK(isolate->has_pending_exception());
+    bool catchable =
+        isolate->is_catchable_by_wasm(isolate->pending_exception());
     DCHECK_LT(0, activations_.size());
     Activation& act = activations_.back();
     while (frames_.size() > act.fp) {
       Frame& frame = frames_.back();
       InterpreterCode* code = frame.code;
-      if (code->side_table->HasEntryAt(frame.pc)) {
+      if (catchable && code->side_table->HasEntryAt(frame.pc)) {
         TRACE("----- HANDLE -----\n");
         Push(WasmValue(handle(isolate->pending_exception(), isolate)));
         isolate->clear_pending_exception();
@@ -1453,23 +1456,24 @@ class ThreadImpl {
   }
 
   pc_t InitLocals(InterpreterCode* code) {
-    for (auto p : code->locals.type_list) {
+    for (ValueType p : code->locals.type_list) {
       WasmValue val;
-      switch (p) {
+      switch (p.kind()) {
 #define CASE_TYPE(valuetype, ctype) \
-  case valuetype:                   \
+  case ValueType::valuetype:        \
     val = WasmValue(ctype{});       \
     break;
         FOREACH_WASMVALUE_CTYPES(CASE_TYPE)
 #undef CASE_TYPE
-        case kWasmAnyRef:
-        case kWasmFuncRef:
-        case kWasmNullRef:
-        case kWasmExnRef: {
+        case ValueType::kAnyRef:
+        case ValueType::kFuncRef:
+        case ValueType::kNullRef:
+        case ValueType::kExnRef: {
           val = WasmValue(isolate_->factory()->null_value());
           break;
         }
-        default:
+        case ValueType::kStmt:
+        case ValueType::kBottom:
           UNREACHABLE();
           break;
       }
@@ -1824,7 +1828,8 @@ class ThreadImpl {
         Address src_addr =
             instance_object_->data_segment_starts()[imm.data_segment_index] +
             src;
-        memory_copy(dst_addr, src_addr, size);
+        std::memmove(reinterpret_cast<void*>(dst_addr),
+                     reinterpret_cast<void*>(src_addr), size);
         return true;
       }
       case kExprDataDrop: {
@@ -1850,7 +1855,8 @@ class ThreadImpl {
           return false;
         }
 
-        memory_copy(dst_addr, src_addr, size);
+        std::memmove(reinterpret_cast<void*>(dst_addr),
+                     reinterpret_cast<void*>(src_addr), size);
         return true;
       }
       case kExprMemoryFill: {
@@ -1866,7 +1872,7 @@ class ThreadImpl {
           DoTrap(kTrapMemOutOfBounds, pc);
           return false;
         }
-        memory_fill_wrapper(dst_addr, value, size);
+        std::memset(reinterpret_cast<void*>(dst_addr), value, size);
         return true;
       }
       case kExprTableInit: {
@@ -2376,6 +2382,26 @@ class ThreadImpl {
       UNOP_CASE(I8x16Neg, i8x16, int16, 16, base::NegateWithWraparound(a))
       UNOP_CASE(I8x16Abs, i8x16, int16, 16, std::abs(a))
 #undef UNOP_CASE
+
+// Cast to double in call to signbit is due to MSCV issue, see
+// https://github.com/microsoft/STL/issues/519.
+#define BITMASK_CASE(op, name, stype, count)                   \
+  case kExpr##op: {                                            \
+    WasmValue v = Pop();                                       \
+    stype s = v.to_s128().to_##name();                         \
+    int32_t res = 0;                                           \
+    for (size_t i = 0; i < count; ++i) {                       \
+      bool sign = std::signbit(static_cast<double>(s.val[i])); \
+      res |= (sign << i);                                      \
+    }                                                          \
+    Push(WasmValue(res));                                      \
+    return true;                                               \
+  }
+      BITMASK_CASE(I8x16BitMask, i8x16, int16, 16)
+      BITMASK_CASE(I16x8BitMask, i16x8, int8, 8)
+      BITMASK_CASE(I32x4BitMask, i32x4, int4, 4)
+#undef BITMASK_CASE
+
 #define CMPOP_CASE(op, name, stype, out_stype, count, expr) \
   case kExpr##op: {                                         \
     WasmValue v2 = Pop();                                   \
@@ -2826,28 +2852,28 @@ class ThreadImpl {
     sp_t base_index = StackHeight() - sig->parameter_count();
     for (size_t i = 0; i < sig->parameter_count(); ++i) {
       WasmValue value = GetStackValue(base_index + i);
-      switch (sig->GetParam(i)) {
-        case kWasmI32: {
+      switch (sig->GetParam(i).kind()) {
+        case ValueType::kI32: {
           uint32_t u32 = value.to_u32();
           EncodeI32ExceptionValue(encoded_values, &encoded_index, u32);
           break;
         }
-        case kWasmF32: {
+        case ValueType::kF32: {
           uint32_t f32 = value.to_f32_boxed().get_bits();
           EncodeI32ExceptionValue(encoded_values, &encoded_index, f32);
           break;
         }
-        case kWasmI64: {
+        case ValueType::kI64: {
           uint64_t u64 = value.to_u64();
           EncodeI64ExceptionValue(encoded_values, &encoded_index, u64);
           break;
         }
-        case kWasmF64: {
+        case ValueType::kF64: {
           uint64_t f64 = value.to_f64_boxed().get_bits();
           EncodeI64ExceptionValue(encoded_values, &encoded_index, f64);
           break;
         }
-        case kWasmS128: {
+        case ValueType::kS128: {
           int4 s128 = value.to_s128().to_i32x4();
           EncodeI32ExceptionValue(encoded_values, &encoded_index, s128.val[0]);
           EncodeI32ExceptionValue(encoded_values, &encoded_index, s128.val[1]);
@@ -2855,16 +2881,17 @@ class ThreadImpl {
           EncodeI32ExceptionValue(encoded_values, &encoded_index, s128.val[3]);
           break;
         }
-        case kWasmAnyRef:
-        case kWasmFuncRef:
-        case kWasmNullRef:
-        case kWasmExnRef: {
+        case ValueType::kAnyRef:
+        case ValueType::kFuncRef:
+        case ValueType::kNullRef:
+        case ValueType::kExnRef: {
           Handle<Object> anyref = value.to_anyref();
           DCHECK_IMPLIES(sig->GetParam(i) == kWasmNullRef, anyref->IsNull());
           encoded_values->set(encoded_index++, *anyref);
           break;
         }
-        default:
+        case ValueType::kStmt:
+        case ValueType::kBottom:
           UNREACHABLE();
       }
     }
@@ -2924,32 +2951,32 @@ class ThreadImpl {
     uint32_t encoded_index = 0;
     for (size_t i = 0; i < sig->parameter_count(); ++i) {
       WasmValue value;
-      switch (sig->GetParam(i)) {
-        case kWasmI32: {
+      switch (sig->GetParam(i).kind()) {
+        case ValueType::kI32: {
           uint32_t u32 = 0;
           DecodeI32ExceptionValue(encoded_values, &encoded_index, &u32);
           value = WasmValue(u32);
           break;
         }
-        case kWasmF32: {
+        case ValueType::kF32: {
           uint32_t f32_bits = 0;
           DecodeI32ExceptionValue(encoded_values, &encoded_index, &f32_bits);
           value = WasmValue(Float32::FromBits(f32_bits));
           break;
         }
-        case kWasmI64: {
+        case ValueType::kI64: {
           uint64_t u64 = 0;
           DecodeI64ExceptionValue(encoded_values, &encoded_index, &u64);
           value = WasmValue(u64);
           break;
         }
-        case kWasmF64: {
+        case ValueType::kF64: {
           uint64_t f64_bits = 0;
           DecodeI64ExceptionValue(encoded_values, &encoded_index, &f64_bits);
           value = WasmValue(Float64::FromBits(f64_bits));
           break;
         }
-        case kWasmS128: {
+        case ValueType::kS128: {
           int4 s128 = {0, 0, 0, 0};
           uint32_t* vals = reinterpret_cast<uint32_t*>(s128.val);
           DecodeI32ExceptionValue(encoded_values, &encoded_index, &vals[0]);
@@ -2959,16 +2986,17 @@ class ThreadImpl {
           value = WasmValue(Simd128(s128));
           break;
         }
-        case kWasmAnyRef:
-        case kWasmFuncRef:
-        case kWasmNullRef:
-        case kWasmExnRef: {
+        case ValueType::kAnyRef:
+        case ValueType::kFuncRef:
+        case ValueType::kNullRef:
+        case ValueType::kExnRef: {
           Handle<Object> anyref(encoded_values->get(encoded_index++), isolate_);
           DCHECK_IMPLIES(sig->GetParam(i) == kWasmNullRef, anyref->IsNull());
           value = WasmValue(anyref);
           break;
         }
-        default:
+        case ValueType::kStmt:
+        case ValueType::kBottom:
           UNREACHABLE();
       }
       Push(value);
@@ -3031,8 +3059,10 @@ class ThreadImpl {
       }
 
       // If max is 0, break. If max is positive (a limit is set), decrement it.
-      if (max == 0) break;
-      if (max > 0) --max;
+      if (max >= 0 && WasmOpcodes::IsBreakable(opcode)) {
+        if (max == 0) break;
+        --max;
+      }
 
       USE(skip);
       TRACE("@%-3zu: %s%-24s:", pc, skip, WasmOpcodes::OpcodeName(opcode));
@@ -3093,6 +3123,7 @@ class ThreadImpl {
         case kExprRethrow: {
           HandleScope handle_scope(isolate_);  // Avoid leaking handles.
           WasmValue ex = Pop();
+          if (ex.to_anyref()->IsNull()) return DoTrap(kTrapRethrowNullRef, pc);
           CommitPc(pc);  // Needed for local unwinding.
           if (!DoRethrowException(ex)) return;
           ReloadFromFrameOnException(&decoder, &code, &pc, &limit);
@@ -3104,6 +3135,7 @@ class ThreadImpl {
           HandleScope handle_scope(isolate_);  // Avoid leaking handles.
           WasmValue ex = Pop();
           Handle<Object> exception = ex.to_anyref();
+          if (exception->IsNull()) return DoTrap(kTrapBrOnExnNullRef, pc);
           if (MatchingExceptionTag(exception, imm.index.index)) {
             imm.index.exception = &module()->exceptions[imm.index.index];
             DoUnpackException(imm.index.exception, exception);
@@ -3407,9 +3439,9 @@ class ThreadImpl {
           GlobalIndexImmediate<Decoder::kNoValidate> imm(&decoder,
                                                          code->at(pc));
           auto& global = module()->globals[imm.index];
-          switch (global.type) {
+          switch (global.type.kind()) {
 #define CASE_TYPE(valuetype, ctype)                                     \
-  case valuetype: {                                                     \
+  case ValueType::valuetype: {                                          \
     uint8_t* ptr =                                                      \
         WasmInstanceObject::GetGlobalStorage(instance_object_, global); \
     WriteLittleEndianValue<ctype>(reinterpret_cast<Address>(ptr),       \
@@ -3418,10 +3450,10 @@ class ThreadImpl {
   }
             FOREACH_WASMVALUE_CTYPES(CASE_TYPE)
 #undef CASE_TYPE
-            case kWasmAnyRef:
-            case kWasmFuncRef:
-            case kWasmNullRef:
-            case kWasmExnRef: {
+            case ValueType::kAnyRef:
+            case ValueType::kFuncRef:
+            case ValueType::kNullRef:
+            case ValueType::kExnRef: {
               HandleScope handle_scope(isolate_);  // Avoid leaking handles.
               Handle<FixedArray> global_buffer;    // The buffer of the global.
               uint32_t global_index;               // The index into the buffer.
@@ -3433,7 +3465,8 @@ class ThreadImpl {
               global_buffer->set(global_index, *ref);
               break;
             }
-            default:
+            case ValueType::kStmt:
+            case ValueType::kBottom:
               UNREACHABLE();
           }
           len = 1 + imm.length;
@@ -3790,27 +3823,28 @@ class ThreadImpl {
     sp_t plimit = top ? top->plimit() : 0;
     sp_t llimit = top ? top->llimit() : 0;
     for (size_t i = sp; i < StackHeight(); ++i) {
-      if (i < plimit)
+      if (i < plimit) {
         PrintF(" p%zu:", i);
-      else if (i < llimit)
+      } else if (i < llimit) {
         PrintF(" l%zu:", i);
-      else
+      } else {
         PrintF(" s%zu:", i);
+      }
       WasmValue val = GetStackValue(i);
-      switch (val.type()) {
-        case kWasmI32:
+      switch (val.type().kind()) {
+        case ValueType::kI32:
           PrintF("i32:%d", val.to<int32_t>());
           break;
-        case kWasmI64:
+        case ValueType::kI64:
           PrintF("i64:%" PRId64 "", val.to<int64_t>());
           break;
-        case kWasmF32:
+        case ValueType::kF32:
           PrintF("f32:%f", val.to<float>());
           break;
-        case kWasmF64:
+        case ValueType::kF64:
           PrintF("f64:%lf", val.to<double>());
           break;
-        case kWasmS128: {
+        case ValueType::kS128: {
           // This defaults to tracing all S128 values as i32x4 values for now,
           // when there is more state to know what type of values are on the
           // stack, the right format should be printed here.
@@ -3818,7 +3852,7 @@ class ThreadImpl {
           PrintF("i32x4:%d,%d,%d,%d", s.val[0], s.val[1], s.val[2], s.val[3]);
           break;
         }
-        case kWasmAnyRef: {
+        case ValueType::kAnyRef: {
           Handle<Object> ref = val.to_anyref();
           if (ref->IsNull()) {
             PrintF("ref:null");
@@ -3827,10 +3861,15 @@ class ThreadImpl {
           }
           break;
         }
-        case kWasmStmt:
+        case ValueType::kStmt:
           PrintF("void");
           break;
-        default:
+        case ValueType::kFuncRef:
+        case ValueType::kExnRef:
+        case ValueType::kNullRef:
+          PrintF("(func|null|exn)ref:unimplemented");
+          break;
+        case ValueType::kBottom:
           UNREACHABLE();
           break;
       }
@@ -3871,23 +3910,23 @@ class ThreadImpl {
     sp_t base_index = StackHeight() - num_args;
     for (int i = 0; i < num_args; ++i) {
       WasmValue arg = GetStackValue(base_index + i);
-      switch (sig->GetParam(i)) {
-        case kWasmI32:
+      switch (sig->GetParam(i).kind()) {
+        case ValueType::kI32:
           packer.Push(arg.to<uint32_t>());
           break;
-        case kWasmI64:
+        case ValueType::kI64:
           packer.Push(arg.to<uint64_t>());
           break;
-        case kWasmF32:
+        case ValueType::kF32:
           packer.Push(arg.to<float>());
           break;
-        case kWasmF64:
+        case ValueType::kF64:
           packer.Push(arg.to<double>());
           break;
-        case kWasmAnyRef:
-        case kWasmFuncRef:
-        case kWasmNullRef:
-        case kWasmExnRef:
+        case ValueType::kAnyRef:
+        case ValueType::kFuncRef:
+        case ValueType::kNullRef:
+        case ValueType::kExnRef:
           DCHECK_IMPLIES(sig->GetParam(i) == kWasmNullRef,
                          arg.to_anyref()->IsNull());
           packer.Push(arg.to_anyref()->ptr());
@@ -3913,23 +3952,23 @@ class ThreadImpl {
     // Push return values.
     packer.Reset();
     for (size_t i = 0; i < sig->return_count(); i++) {
-      switch (sig->GetReturn(i)) {
-        case kWasmI32:
+      switch (sig->GetReturn(i).kind()) {
+        case ValueType::kI32:
           Push(WasmValue(packer.Pop<uint32_t>()));
           break;
-        case kWasmI64:
+        case ValueType::kI64:
           Push(WasmValue(packer.Pop<uint64_t>()));
           break;
-        case kWasmF32:
+        case ValueType::kF32:
           Push(WasmValue(packer.Pop<float>()));
           break;
-        case kWasmF64:
+        case ValueType::kF64:
           Push(WasmValue(packer.Pop<double>()));
           break;
-        case kWasmAnyRef:
-        case kWasmFuncRef:
-        case kWasmNullRef:
-        case kWasmExnRef: {
+        case ValueType::kAnyRef:
+        case ValueType::kFuncRef:
+        case ValueType::kNullRef:
+        case ValueType::kExnRef: {
           Handle<Object> ref(Object(packer.Pop<Address>()), isolate);
           DCHECK_IMPLIES(sig->GetReturn(i) == kWasmNullRef, ref->IsNull());
           Push(WasmValue(ref));

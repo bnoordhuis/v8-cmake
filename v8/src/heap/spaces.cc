@@ -762,7 +762,8 @@ Page* PagedSpace::InitializePage(MemoryChunk* chunk) {
       page->area_size());
   // Make sure that categories are initialized before freeing the area.
   page->ResetAllocationStatistics();
-  page->SetOldGenerationPageFlags(heap()->incremental_marking()->IsMarking());
+  page->SetOldGenerationPageFlags(!is_off_thread_space() &&
+                                  heap()->incremental_marking()->IsMarking());
   page->AllocateFreeListCategories();
   page->InitializeFreeListCategories();
   page->list_node().Initialize();
@@ -1119,7 +1120,7 @@ size_t Page::ShrinkToHighWaterMark() {
 void Page::CreateBlackArea(Address start, Address end) {
   DCHECK(heap()->incremental_marking()->black_allocation());
   DCHECK_EQ(Page::FromAddress(start), this);
-  DCHECK_NE(start, end);
+  DCHECK_LT(start, end);
   DCHECK_EQ(Page::FromAddress(end - 1), this);
   IncrementalMarking::MarkingState* marking_state =
       heap()->incremental_marking()->marking_state();
@@ -1131,7 +1132,7 @@ void Page::CreateBlackArea(Address start, Address end) {
 void Page::DestroyBlackArea(Address start, Address end) {
   DCHECK(heap()->incremental_marking()->black_allocation());
   DCHECK_EQ(Page::FromAddress(start), this);
-  DCHECK_NE(start, end);
+  DCHECK_LT(start, end);
   DCHECK_EQ(Page::FromAddress(end - 1), this);
   IncrementalMarking::MarkingState* marking_state =
       heap()->incremental_marking()->marking_state();
@@ -1744,6 +1745,7 @@ void PagedSpace::MergeLocalSpace(LocalSpace* other) {
 
     if (merging_from_off_thread) {
       DCHECK_NULL(p->sweeping_slot_set());
+      p->SetOldGenerationPageFlags(heap()->incremental_marking()->IsMarking());
       if (heap()->incremental_marking()->black_allocation()) {
         p->CreateBlackArea(p->area_start(), p->HighWaterMark());
       }
@@ -1912,7 +1914,7 @@ int PagedSpace::CountTotalPages() {
 
 void PagedSpace::SetLinearAllocationArea(Address top, Address limit) {
   SetTopAndLimit(top, limit);
-  if (top != kNullAddress && top != limit &&
+  if (top != kNullAddress && top != limit && !is_off_thread_space() &&
       heap()->incremental_marking()->black_allocation()) {
     Page::FromAllocationAreaAddress(top)->CreateBlackArea(top, limit);
   }
@@ -1996,7 +1998,8 @@ void PagedSpace::FreeLinearAllocationArea() {
     return;
   }
 
-  if (heap()->incremental_marking()->black_allocation()) {
+  if (!is_off_thread_space() &&
+      heap()->incremental_marking()->black_allocation()) {
     Page* page = Page::FromAllocationAreaAddress(current_top);
 
     // Clear the bits in the unused black area.
@@ -2200,7 +2203,9 @@ void PagedSpace::Verify(Isolate* isolate, ObjectVisitor* visitor) {
       } else if (object.IsJSArrayBuffer()) {
         JSArrayBuffer array_buffer = JSArrayBuffer::cast(object);
         if (ArrayBufferTracker::IsTracked(array_buffer)) {
-          size_t size = array_buffer.PerIsolateAccountingLength();
+          size_t size =
+              ArrayBufferTracker::Lookup(isolate->heap(), array_buffer)
+                  ->PerIsolateAccountingLength();
           external_page_bytes[ExternalBackingStoreType::kArrayBuffer] += size;
         }
       }
@@ -2698,7 +2703,8 @@ void NewSpace::Verify(Isolate* isolate) {
       } else if (object.IsJSArrayBuffer()) {
         JSArrayBuffer array_buffer = JSArrayBuffer::cast(object);
         if (ArrayBufferTracker::IsTracked(array_buffer)) {
-          size_t size = array_buffer.PerIsolateAccountingLength();
+          size_t size = ArrayBufferTracker::Lookup(heap(), array_buffer)
+                            ->PerIsolateAccountingLength();
           external_space_bytes[ExternalBackingStoreType::kArrayBuffer] += size;
         }
       }

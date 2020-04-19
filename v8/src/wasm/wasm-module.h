@@ -194,7 +194,8 @@ struct ModuleWireBytes;
 class V8_EXPORT_PRIVATE DecodedFunctionNames {
  public:
   WireBytesRef Lookup(const ModuleWireBytes& wire_bytes,
-                      uint32_t function_index) const;
+                      uint32_t function_index,
+                      Vector<const WasmExport> export_table) const;
   void AddForTesting(int function_index, WireBytesRef name);
 
  private:
@@ -203,6 +204,21 @@ class V8_EXPORT_PRIVATE DecodedFunctionNames {
   mutable base::Mutex mutex_;
   mutable std::unique_ptr<std::unordered_map<uint32_t, WireBytesRef>>
       function_names_;
+};
+
+class V8_EXPORT_PRIVATE DecodedGlobalNames {
+ public:
+  std::pair<WireBytesRef, WireBytesRef> Lookup(
+      uint32_t global_index, Vector<const WasmImport> import_table,
+      Vector<const WasmExport> export_table) const;
+
+ private:
+  // {global_names_} is populated lazily after decoding, and therefore needs a
+  // mutex to protect concurrent modifications from multiple {WasmModuleObject}.
+  mutable base::Mutex mutex_;
+  mutable std::unique_ptr<
+      std::unordered_map<uint32_t, std::pair<WireBytesRef, WireBytesRef>>>
+      global_names_;
 };
 
 class V8_EXPORT_PRIVATE AsmJsOffsetInformation {
@@ -255,6 +271,7 @@ struct V8_EXPORT_PRIVATE WasmModule {
   uint32_t num_declared_functions = 0;  // excluding imported
   uint32_t num_exported_functions = 0;
   uint32_t num_declared_data_segments = 0;  // From the DataCount section.
+  WireBytesRef code = {0, 0};
   WireBytesRef name = {0, 0};
   std::vector<const FunctionSig*> signatures;  // by signature index
   std::vector<uint32_t> signature_ids;   // by signature index
@@ -270,6 +287,7 @@ struct V8_EXPORT_PRIVATE WasmModule {
 
   ModuleOrigin origin = kWasmOrigin;  // origin of the module
   DecodedFunctionNames function_names;
+  DecodedGlobalNames global_names;
   std::string source_map_url;
 
   // Asm.js source position information. Only available for modules compiled

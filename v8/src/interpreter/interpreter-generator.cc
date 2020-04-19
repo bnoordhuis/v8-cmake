@@ -2367,12 +2367,15 @@ IGNITION_HANDLER(JumpIfJSReceiverConstant, InterpreterAssembler) {
 // JumpLoop <imm> <loop_depth>
 //
 // Jump by the number of bytes represented by the immediate operand |imm|. Also
-// performs a loop nesting check and potentially triggers OSR in case the
-// current OSR level matches (or exceeds) the specified |loop_depth|.
+// performs a loop nesting check, a stack check, and potentially triggers OSR in
+// case the current OSR level matches (or exceeds) the specified |loop_depth|.
 IGNITION_HANDLER(JumpLoop, InterpreterAssembler) {
   TNode<IntPtrT> relative_jump = Signed(BytecodeOperandUImmWord(0));
   TNode<Int32T> loop_depth = BytecodeOperandImm(1);
   TNode<Int8T> osr_level = LoadOsrNestingLevel();
+  TNode<Context> context = GetContext();
+
+  PerformStackCheck(context);
 
   // Check if OSR points at the given {loop_depth} are armed by comparing it to
   // the current {osr_level} loaded from the header of the BytecodeArray.
@@ -2387,7 +2390,6 @@ IGNITION_HANDLER(JumpLoop, InterpreterAssembler) {
   {
     Callable callable = CodeFactory::InterpreterOnStackReplacement(isolate());
     TNode<Code> target = HeapConstant(callable.code());
-    TNode<Context> context = GetContext();
     CallStub(callable.descriptor(), target, context);
     JumpBackward(relative_jump);
   }
@@ -2841,15 +2843,6 @@ IGNITION_HANDLER(CreateRestParameter, InterpreterAssembler) {
   Dispatch();
 }
 
-// StackCheck
-//
-// Performs a stack guard check.
-IGNITION_HANDLER(StackCheck, InterpreterAssembler) {
-  TNode<Context> context = GetContext();
-  PerformStackCheck(context);
-  Dispatch();
-}
-
 // SetPendingMessage
 //
 // Sets the pending message to the value in the accumulator, and returns the
@@ -2857,7 +2850,8 @@ IGNITION_HANDLER(StackCheck, InterpreterAssembler) {
 IGNITION_HANDLER(SetPendingMessage, InterpreterAssembler) {
   TNode<ExternalReference> pending_message = ExternalConstant(
       ExternalReference::address_of_pending_message_obj(isolate()));
-  TNode<HeapObject> previous_message = Load<HeapObject>(pending_message);
+  TNode<HeapObject> previous_message =
+      UncheckedCast<HeapObject>(LoadFullTagged(pending_message));
   TNode<Object> new_message = GetAccumulator();
   StoreFullTaggedNoWriteBarrier(pending_message, new_message);
   SetAccumulator(previous_message);

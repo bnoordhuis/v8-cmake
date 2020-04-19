@@ -653,6 +653,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   bool IsExternalHandlerOnTop(Object exception);
 
   inline bool is_catchable_by_javascript(Object exception);
+  inline bool is_catchable_by_wasm(Object exception);
 
   // JS execution stack (see frames.h).
   static Address c_entry_fp(ThreadLocalTop* thread) {
@@ -1040,9 +1041,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   RegExpStack* regexp_stack() { return regexp_stack_; }
 
   size_t total_regexp_code_generated() { return total_regexp_code_generated_; }
-  void IncreaseTotalRegexpCodeGenerated(int size) {
-    total_regexp_code_generated_ += size;
-  }
+  void IncreaseTotalRegexpCodeGenerated(Handle<HeapObject> code);
 
   std::vector<int>* regexp_indices() { return &regexp_indices_; }
 

@@ -75,6 +75,42 @@ using compiler::Node;
     r.Build(code, code + arraysize(code)); \
   } while (false)
 
+template <typename T>
+void AppendSingle(std::vector<byte>* code, T t) {
+  static_assert(std::is_integral<T>::value,
+                "Special types need specializations");
+  code->push_back(t);
+}
+
+// Specialized for WasmOpcode.
+template <>
+void AppendSingle<WasmOpcode>(std::vector<byte>* code, WasmOpcode op);
+
+template <typename... T>
+void Append(std::vector<byte>* code, T... ts) {
+  static_assert(sizeof...(ts) == 0, "Base case for appending bytes to code.");
+}
+
+template <typename First, typename... Rest>
+void Append(std::vector<byte>* code, First first, Rest... rest) {
+  AppendSingle(code, first);
+  Append(code, rest...);
+}
+
+// Like BUILD but pushes code bytes into a std::vector instead of an array
+// initializer. This is useful for opcodes (like SIMD), that are LEB128
+// (variable-sized). We use recursive template instantiations with variadic
+// template arguments, so that the Append calls can handle either bytes or
+// opcodes. AppendSingle is specialized for WasmOpcode, and appends multiple
+// bytes. This allows existing callers to swap out the BUILD macro for BUILD_V
+// macro without changes. Also see https://crbug.com/v8/10258.
+#define BUILD_V(r, ...)                              \
+  do {                                               \
+    std::vector<byte> code;                          \
+    Append(&code, __VA_ARGS__);                      \
+    r.Build(code.data(), code.data() + code.size()); \
+  } while (false)
+
 // For tests that must manually import a JSFunction with source code.
 struct ManuallyImportedJSFunction {
   const FunctionSig* sig;
@@ -104,8 +140,7 @@ class TestingModuleBuilder {
   }
 
   template <typename T>
-  T* AddGlobal(
-      ValueType type = ValueTypes::ValueTypeFor(MachineTypeForC<T>())) {
+  T* AddGlobal(ValueType type = ValueType::For(MachineTypeForC<T>())) {
     const WasmGlobal* global = AddGlobal(type);
     return reinterpret_cast<T*>(globals_data_ + global->offset);
   }
@@ -222,6 +257,8 @@ class TestingModuleBuilder {
   }
 
   void SetExecutable() { native_module_->SetExecutable(true); }
+
+  void TierDown() { native_module_->TierDown(isolate_); }
 
   enum AssumeDebugging : bool { kDebug = true, kNoDebug = false };
   CompilationEnv CreateCompilationEnv(AssumeDebugging = kNoDebug);
@@ -409,18 +446,25 @@ class WasmRunnerBase : public HandleAndZoneScope {
 
   bool interpret() { return builder_.interpret(); }
 
+  void TierDown() { builder_.TierDown(); }
+
   template <typename ReturnType, typename... ParamTypes>
-  const FunctionSig* CreateSig() {
+  FunctionSig* CreateSig() {
+    return WasmRunnerBase::CreateSig<ReturnType, ParamTypes...>(&zone_);
+  }
+
+  template <typename ReturnType, typename... ParamTypes>
+  static FunctionSig* CreateSig(Zone* zone) {
     std::array<MachineType, sizeof...(ParamTypes)> param_machine_types{
         {MachineTypeForC<ParamTypes>()...}};
     Vector<MachineType> param_vec(param_machine_types.data(),
                                   param_machine_types.size());
-    return CreateSig(MachineTypeForC<ReturnType>(), param_vec);
+    return CreateSig(zone, MachineTypeForC<ReturnType>(), param_vec);
   }
 
  private:
-  const FunctionSig* CreateSig(MachineType return_type,
-                               Vector<MachineType> param_types);
+  static FunctionSig* CreateSig(Zone* zone, MachineType return_type,
+                                Vector<MachineType> param_types);
 
  protected:
   v8::internal::AccountingAllocator allocator_;
@@ -560,6 +604,10 @@ class WasmRunner : public WasmRunnerBase {
     Handle<Object> buffer[] = {isolate->factory()->NewNumber(p)...,
                                Handle<Object>()};
     CheckCallApplyViaJS(expected, function()->func_index, buffer, sizeof...(p));
+  }
+
+  void CheckCallViaJSTraps(ParamTypes... p) {
+    CheckCallViaJS(static_cast<double>(0xDEADBEEF), p...);
   }
 
   void CheckUsedExecutionTier(ExecutionTier expected_tier) {

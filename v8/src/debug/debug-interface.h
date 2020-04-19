@@ -181,6 +181,9 @@ class WasmScript : public Script {
   int GetContainingFunction(int byte_offset) const;
 
   uint32_t GetFunctionHash(int function_index);
+
+  int CodeOffset() const;
+  int CodeLength() const;
 };
 
 V8_EXPORT_PRIVATE void GetLoadedScripts(
@@ -420,7 +423,8 @@ class V8_EXPORT_PRIVATE ScopeIterator {
     ScopeTypeBlock,
     ScopeTypeScript,
     ScopeTypeEval,
-    ScopeTypeModule
+    ScopeTypeModule,
+    ScopeTypeWasmExpressionStack
   };
 
   virtual bool Done() = 0;

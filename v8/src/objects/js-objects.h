@@ -516,7 +516,7 @@ class JSObject : public TorqueGeneratedJSObject<JSObject, JSReceiver> {
                                               EnsureElementsMode mode);
   static void EnsureCanContainElements(Handle<JSObject> object,
                                        JavaScriptArguments* arguments,
-                                       uint32_t first_arg, uint32_t arg_count,
+                                       uint32_t arg_count,
                                        EnsureElementsMode mode);
 
   // Would we convert a fast elements array to dictionary mode given
@@ -1442,10 +1442,6 @@ class JSStringIterator
   // Dispatched behavior.
   DECL_PRINTER(JSStringIterator)
   DECL_VERIFIER(JSStringIterator)
-
-  // [index]: The [[StringIteratorNextIndex]] slot.
-  inline int index() const;
-  inline void set_index(int value);
 
   TQ_OBJECT_CONSTRUCTORS(JSStringIterator)
 };

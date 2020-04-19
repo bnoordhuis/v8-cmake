@@ -317,6 +317,10 @@ const char* WasmOpcodes::OpcodeName(WasmOpcode opcode) {
     CASE_I16x8_OP(Abs, "abs")
     CASE_I32x4_OP(Abs, "abs")
 
+    CASE_I8x16_OP(BitMask, "bitmask")
+    CASE_I16x8_OP(BitMask, "bitmask")
+    CASE_I32x4_OP(BitMask, "bitmask")
+
     // Atomic operations.
     CASE_OP(AtomicNotify, "atomic.notify")
     CASE_INT_OP(AtomicWait, "atomic.wait")
@@ -405,6 +409,19 @@ bool WasmOpcodes::IsUnconditionalJump(WasmOpcode opcode) {
   }
 }
 
+bool WasmOpcodes::IsBreakable(WasmOpcode opcode) {
+  switch (opcode) {
+    case kExprBlock:
+    case kExprTry:
+    case kExprCatch:
+    case kExprLoop:
+    case kExprElse:
+      return false;
+    default:
+      return true;
+  }
+}
+
 bool WasmOpcodes::IsAnyRefOpcode(WasmOpcode opcode) {
   switch (opcode) {
     case kExprRefNull:
@@ -443,12 +460,12 @@ bool WasmOpcodes::IsSimdPostMvpOpcode(WasmOpcode opcode) {
 std::ostream& operator<<(std::ostream& os, const FunctionSig& sig) {
   if (sig.return_count() == 0) os << "v";
   for (auto ret : sig.returns()) {
-    os << ValueTypes::ShortNameOf(ret);
+    os << ret.short_name();
   }
   os << "_";
   if (sig.parameter_count() == 0) os << "v";
   for (auto param : sig.parameters()) {
-    os << ValueTypes::ShortNameOf(param);
+    os << param.short_name();
   }
   return os;
 }

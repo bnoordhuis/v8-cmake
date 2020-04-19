@@ -87,6 +87,7 @@ class BasicBlock;
   V(Word32Xor)                            \
   V(Word64And)                            \
   V(Word64Equal)                          \
+  V(Word64Or)                             \
   V(WordAnd)                              \
   V(WordEqual)                            \
   V(WordSar)                              \
@@ -302,6 +303,7 @@ class V8_EXPORT_PRIVATE GraphAssembler {
   Node* Float64RoundTruncate(Node* value);
 
   Node* BitcastWordToTagged(Node* value);
+  Node* BitcastWordToTaggedSigned(Node* value);
   Node* BitcastTaggedToWord(Node* value);
   Node* BitcastTaggedToWordForTagAndSmiBits(Node* value);
 
