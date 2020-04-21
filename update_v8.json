@@ -1,7 +1,7 @@
 [
   {
     "url": "https://chromium.googlesource.com/v8/v8.git", 
-    "commit": "61a92470634b34c87722a6e6c77fd13fc2073518", 
+    "commit": "083a26c85b851e871241ffc04221fd3388d3990e", 
     "/* comment */": "Dependency v8 must be first.", 
     "branch": "branch-heads/8.3", 
     "path": "v8"
