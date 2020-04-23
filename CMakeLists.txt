@@ -15,8 +15,6 @@ include(GNUInstallDirs)
 include(CheckPythonModuleExists)
 include(GenerateBuiltinsList)
 
-include(CTest)
-
 check_python_module_exists(PYTHON_HAVE_MARKUPSAFE markupsafe)
 
 if (NOT CMAKE_CXX_STANDARD)
@@ -26,6 +24,40 @@ endif()
 if (NOT CMAKE_C_STANDARD)
   set(CMAKE_C_STANDARD 90)
 endif()
+
+#
+# CMakeLists.txt is a rough conversion from the BUILD.gn-based
+# system used by Google.  There are a number of features
+# (notably public_deps inheritance) that could be built using
+# cmake functions and lists but for simplicity, we explicitly
+# build include/library lists
+#
+# We expect that as v8 evolves, new files/targets/etc. will be
+# added which will necessitate examining BUILD.gn changes and
+# reflecting these changes here.  Thus, we have a number of
+# guidelines to help in this maintenance:
+#
+# 1.  Names of targets are preserved.
+#
+# 2.  v8_source_set is mapped to add_library OBJECT.
+#
+# 3.  v8_header_set is a list of files
+#
+# 4.  v8_executable is add_executable
+#
+# 5.  v8_component is add_custom_target
+#
+# 6.  v8_shared_library is add_library SHARED
+#
+# 7.  v8_static_library is add_library STATIC
+#
+
+#
+# Platform identification variables are supplied by the gn
+# infrastructures. We do our best to emulate them.
+#
+# Note:  cross-compilation is not supported at this time
+#
 
 set(is-freebsd $<PLATFORM_ID:FreeBSD>)
 set(is-darwin $<PLATFORM_ID:Darwin>)
@@ -800,11 +832,11 @@ target_include_directories(v8-adler32 PUBLIC $<BUILD_INTERFACE:${D}/third_party/
 #
 
 # fixme
-set(CURRENT_CPU x64)
-set(V8_CURRENT_CPU ${CURRENT_CPU})
+set(current_cpu x64)
+set(v8_current_cpu ${current_cpu})
 # fixme - how to decide 32 v 64
 # fixme - variations on s390
-set(TARGET_CPU
+set(target_cpu
   "$<${is-arm64}:arm64>
     $<${is-arm}:arm>
     $<${is-ia32}:ia32>
@@ -814,12 +846,12 @@ set(TARGET_CPU
     $<${is-s390}:s390>
     $<${is-x64}:x64>"
 )
-string(REGEX REPLACE "[\r\n \t]+" "" TARGET_CPU ${TARGET_CPU})
-set(V8_TARGET_CPU ${TARGET_CPU})
+string(REGEX REPLACE "[\r\n \t]+" "" target_cpu ${target_cpu})
+set(v8_target_cpu ${target_cpu})
 
-set(V8_BUILD_CONFIG_CONTENTS
+set(v8_build_config_contents
   "{
-  \"current_cpu\": \"${CURRENT_CPU}\",
+  \"current_cpu\": \"${current_cpu}\",
   \"dcheck_always_on\": false,
   \"is_android\": false,
   \"is_asan\": false,
@@ -832,11 +864,11 @@ set(V8_BUILD_CONFIG_CONTENTS
   \"is_ubsan_vptr\": false,
   \"is_msan\": false,
   \"is_tsan\": false,
-  \"target_cpu\": \"${TARGET_CPU}\",
-  \"v8_current_cpu\": \"${V8_CURRENT_CPU}\",
+  \"target_cpu\": \"${target_cpu}\",
+  \"v8_current_cpu\": \"${v8_current_cpu}\",
   \"v8_enable_i18n_support\": true,
   \"v8_enable_verify_predictable\": false,
-  \"v8_target_cpu\": \"${V8_TARGET_CPU}\",
+  \"v8_target_cpu\": \"${v8_target_cpu}\",
   \"v8_enable_verify_csa\": false,
   \"v8_enable_lite_mode\": false,
   \"v8_enable_pointer_compression\": true
@@ -851,6 +883,6 @@ file(
   OUTPUT
     v8_build_config.json
   CONTENT
-    "${V8_BUILD_CONFIG_CONTENTS}"
+    "${v8_build_config_contents}"
 )
 
