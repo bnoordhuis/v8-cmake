@@ -30,6 +30,40 @@ if (NOT CMAKE_C_STANDARD)
   set(CMAKE_C_STANDARD 90)
 endif()
 
+#
+# CMakeLists.txt is a rough conversion from the BUILD.gn-based
+# system used by Google.  There are a number of features
+# (notably public_deps inheritance) that could be built using
+# cmake functions and lists but for simplicity, we explicitly
+# build include/library lists
+#
+# We expect that as v8 evolves, new files/targets/etc. will be
+# added which will necessitate examining BUILD.gn changes and
+# reflecting these changes here.  Thus, we have a number of
+# guidelines to help in this maintenance:
+#
+# 1.  Names of targets are preserved.
+#
+# 2.  v8_source_set is mapped to add_library OBJECT.
+#
+# 3.  v8_header_set is a list of files
+#
+# 4.  v8_executable is add_executable
+#
+# 5.  v8_component is add_custom_target
+#
+# 6.  v8_shared_library is add_library SHARED
+#
+# 7.  v8_static_library is add_library STATIC
+#
+
+#
+# Platform identification variables are supplied by the gn
+# infrastructures. We do our best to emulate them.
+#
+# Note:  cross-compilation is not supported at this time
+#
+
 set(is-freebsd $<PLATFORM_ID:FreeBSD>)
 set(is-darwin $<PLATFORM_ID:Darwin>)
 set(is-linux $<PLATFORM_ID:Linux>)
