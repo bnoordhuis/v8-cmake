@@ -889,5 +889,4 @@ file(
         CONTENT
         "${v8_build_config_contents}"
 )
-set( ADDITIONAL_CLEAN_FILES ${ADDITIONAL_CLEAN_FILES} ${v8_build_config_file})
-message("additional clean ${ADDITIONAL_CLEAN_FILES}")
+
