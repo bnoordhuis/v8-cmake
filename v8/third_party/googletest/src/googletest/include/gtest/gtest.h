@@ -101,6 +101,10 @@ GTEST_DECLARE_bool_(catch_exceptions);
 // to let Google Test decide.
 GTEST_DECLARE_string_(color);
 
+// This flag controls whether the test runner should continue execution past
+// first failure.
+GTEST_DECLARE_bool_(fail_fast);
+
 // This flag sets up the filter to select by name using a glob pattern
 // the tests to run. If the filter is not given all tests are executed.
 GTEST_DECLARE_string_(filter);
@@ -116,6 +120,9 @@ GTEST_DECLARE_bool_(list_tests);
 // This flag controls whether Google Test emits a detailed XML report to a file
 // in addition to its normal textual output.
 GTEST_DECLARE_string_(output);
+
+// This flags control whether Google Test prints only test failures.
+GTEST_DECLARE_bool_(brief);
 
 // This flags control whether Google Test prints the elapsed time for each
 // test.
@@ -279,7 +286,11 @@ class GTEST_API_ AssertionResult {
   // Used in EXPECT_TRUE/FALSE(assertion_result).
   AssertionResult(const AssertionResult& other);
 
-#if defined(_MSC_VER) && _MSC_VER < 1910
+// C4800 is a level 3 warning in Visual Studio 2015 and earlier.
+// This warning is not emitted in Visual Studio 2017.
+// This warning is off by default starting in Visual Studio 2019 but can be
+// enabled with command-line options.
+#if defined(_MSC_VER) && (_MSC_VER < 1910 || _MSC_VER >= 1920)
   GTEST_DISABLE_MSC_WARNINGS_PUSH_(4800 /* forcing value to bool */)
 #endif
 
@@ -299,7 +310,7 @@ class GTEST_API_ AssertionResult {
       = nullptr)
       : success_(success) {}
 
-#if defined(_MSC_VER) && _MSC_VER < 1910
+#if defined(_MSC_VER) && (_MSC_VER < 1910 || _MSC_VER >= 1920)
   GTEST_DISABLE_MSC_WARNINGS_POP_()
 #endif
 
@@ -791,6 +802,9 @@ class GTEST_API_ TestInfo {
   // deletes it.
   void Run();
 
+  // Skip and records the test result for this object.
+  void Skip();
+
   static void ClearTestResult(TestInfo* test_info) {
     test_info->result_.Clear();
   }
@@ -938,6 +952,9 @@ class GTEST_API_ TestSuite {
 
   // Runs every test in this TestSuite.
   void Run();
+
+  // Skips the execution of tests under this TestSuite
+  void Skip();
 
   // Runs SetUpTestSuite() for this TestSuite.  This wrapper is needed
   // for catching exceptions thrown from SetUpTestSuite().
@@ -1803,12 +1820,6 @@ class GTEST_API_ AssertHelper {
   GTEST_DISALLOW_COPY_AND_ASSIGN_(AssertHelper);
 };
 
-enum GTestColor { COLOR_DEFAULT, COLOR_RED, COLOR_GREEN, COLOR_YELLOW };
-
-GTEST_API_ GTEST_ATTRIBUTE_PRINTF_(2, 3) void ColoredPrintf(GTestColor color,
-                                                            const char* fmt,
-                                                            ...);
-
 }  // namespace internal
 
 // The pure interface class that all value-parameterized tests inherit from.
@@ -2364,9 +2375,11 @@ constexpr bool StaticAssertTypeEq() noexcept {
 //   }
 //
 // GOOGLETEST_CM0011 DO NOT DELETE
+#if !GTEST_DONT_DEFINE_TEST
 #define TEST_F(test_fixture, test_name)\
   GTEST_TEST_(test_fixture, test_name, test_fixture, \
               ::testing::internal::GetTypeId<test_fixture>())
+#endif  // !GTEST_DONT_DEFINE_TEST
 
 // Returns a path to temporary directory.
 // Tries to determine an appropriate directory for the platform.
