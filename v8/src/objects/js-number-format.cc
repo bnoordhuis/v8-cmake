@@ -18,7 +18,6 @@
 #include "unicode/currunit.h"
 #include "unicode/decimfmt.h"
 #include "unicode/locid.h"
-#include "unicode/nounit.h"
 #include "unicode/numberformatter.h"
 #include "unicode/numfmt.h"
 #include "unicode/numsys.h"
@@ -218,7 +217,7 @@ class UnitFactory {
       return found->second;
     }
     // 2. Return false.
-    return icu::NoUnit::base();
+    return icu::MeasureUnit();
   }
 
  private:
@@ -236,7 +235,7 @@ icu::MeasureUnit IsSanctionedUnitIdentifier(const std::string& unit) {
 Maybe<std::pair<icu::MeasureUnit, icu::MeasureUnit>> IsWellFormedUnitIdentifier(
     Isolate* isolate, const std::string& unit) {
   icu::MeasureUnit result = IsSanctionedUnitIdentifier(unit);
-  icu::MeasureUnit none = icu::NoUnit::base();
+  icu::MeasureUnit none = icu::MeasureUnit();
   // 1. If the result of IsSanctionedUnitIdentifier(unitIdentifier) is true,
   // then
   if (result != none) {
@@ -633,10 +632,11 @@ Style StyleFromSkeleton(const icu::UnicodeString& skeleton) {
     return Style::CURRENCY;
   }
   if (skeleton.indexOf("measure-unit/") >= 0) {
+    if (skeleton.indexOf("scale/100") >= 0 &&
+        skeleton.indexOf("measure-unit/concentr-percent") >= 0) {
+      return Style::PERCENT;
+    }
     return Style::UNIT;
-  }
-  if (skeleton.indexOf("percent ") >= 0) {
-    return Style::PERCENT;
   }
   return Style::DECIMAL;
 }
@@ -874,17 +874,15 @@ MaybeHandle<JSNumberFormat> JSNumberFormat::New(Isolate* isolate,
   Intl::MatcherOption matcher = maybe_locale_matcher.FromJust();
 
   std::unique_ptr<char[]> numbering_system_str = nullptr;
-  if (FLAG_harmony_intl_add_calendar_numbering_system) {
-    // 7. Let _numberingSystem_ be ? GetOption(_options_, `"numberingSystem"`,
-    //    `"string"`, *undefined*, *undefined*).
-    Maybe<bool> maybe_numberingSystem = Intl::GetNumberingSystem(
-        isolate, options, service, &numbering_system_str);
-    // 8. If _numberingSystem_ is not *undefined*, then
-    // a. If _numberingSystem_ does not match the
-    //    `(3*8alphanum) *("-" (3*8alphanum))` sequence, throw a *RangeError*
-    //     exception.
-    MAYBE_RETURN(maybe_numberingSystem, MaybeHandle<JSNumberFormat>());
-  }
+  // 7. Let _numberingSystem_ be ? GetOption(_options_, `"numberingSystem"`,
+  //    `"string"`, *undefined*, *undefined*).
+  Maybe<bool> maybe_numberingSystem = Intl::GetNumberingSystem(
+      isolate, options, service, &numbering_system_str);
+  // 8. If _numberingSystem_ is not *undefined*, then
+  // a. If _numberingSystem_ does not match the
+  //    `(3*8alphanum) *("-" (3*8alphanum))` sequence, throw a *RangeError*
+  //     exception.
+  MAYBE_RETURN(maybe_numberingSystem, MaybeHandle<JSNumberFormat>());
 
   // 7. Let localeData be %NumberFormat%.[[LocaleData]].
   // 8. Let r be ResolveLocale(%NumberFormat%.[[AvailableLocales]],
@@ -1088,11 +1086,12 @@ MaybeHandle<JSNumberFormat> JSNumberFormat::New(Isolate* isolate,
     std::pair<icu::MeasureUnit, icu::MeasureUnit> unit_pair =
         maybe_wellformed_unit.FromJust();
 
+    icu::MeasureUnit none = icu::MeasureUnit();
     // 13.b Set intlObj.[[Unit]] to unit.
-    if (unit_pair.first != icu::NoUnit::base()) {
+    if (unit_pair.first != none) {
       icu_number_formatter = icu_number_formatter.unit(unit_pair.first);
     }
-    if (unit_pair.second != icu::NoUnit::base()) {
+    if (unit_pair.second != none) {
       icu_number_formatter = icu_number_formatter.perUnit(unit_pair.second);
     }
 
@@ -1105,8 +1104,9 @@ MaybeHandle<JSNumberFormat> JSNumberFormat::New(Isolate* isolate,
   }
 
   if (style == Style::PERCENT) {
-    icu_number_formatter = icu_number_formatter.unit(icu::NoUnit::percent())
-                               .scale(icu::number::Scale::powerOfTen(2));
+    icu_number_formatter =
+        icu_number_formatter.unit(icu::MeasureUnit::getPercent())
+            .scale(icu::number::Scale::powerOfTen(2));
   }
 
   // 23. If style is "currency", then
@@ -1239,44 +1239,33 @@ MaybeHandle<JSNumberFormat> JSNumberFormat::New(Isolate* isolate,
 }
 
 namespace {
-Maybe<icu::UnicodeString> IcuFormatNumber(
+Maybe<bool> IcuFormatNumber(
     Isolate* isolate,
     const icu::number::LocalizedNumberFormatter& number_format,
-    Handle<Object> numeric_obj, icu::FieldPositionIterator* fp_iter) {
+    Handle<Object> numeric_obj, icu::number::FormattedNumber* formatted) {
   // If it is BigInt, handle it differently.
   UErrorCode status = U_ZERO_ERROR;
-  icu::number::FormattedNumber formatted;
   if (numeric_obj->IsBigInt()) {
     Handle<BigInt> big_int = Handle<BigInt>::cast(numeric_obj);
     Handle<String> big_int_string;
     ASSIGN_RETURN_ON_EXCEPTION_VALUE(isolate, big_int_string,
                                      BigInt::ToString(isolate, big_int),
-                                     Nothing<icu::UnicodeString>());
-    formatted = number_format.formatDecimal(
+                                     Nothing<bool>());
+    *formatted = number_format.formatDecimal(
         {big_int_string->ToCString().get(), big_int_string->length()}, status);
   } else {
     double number = numeric_obj->IsNaN()
                         ? std::numeric_limits<double>::quiet_NaN()
                         : numeric_obj->Number();
-    formatted = number_format.formatDouble(number, status);
+    *formatted = number_format.formatDouble(number, status);
   }
   if (U_FAILURE(status)) {
     // This happen because of icu data trimming trim out "unit".
     // See https://bugs.chromium.org/p/v8/issues/detail?id=8641
-    THROW_NEW_ERROR_RETURN_VALUE(isolate,
-                                 NewTypeError(MessageTemplate::kIcuError),
-                                 Nothing<icu::UnicodeString>());
+    THROW_NEW_ERROR_RETURN_VALUE(
+        isolate, NewTypeError(MessageTemplate::kIcuError), Nothing<bool>());
   }
-  if (fp_iter) {
-    formatted.getAllFieldPositions(*fp_iter, status);
-  }
-  icu::UnicodeString result = formatted.toString(status);
-  if (U_FAILURE(status)) {
-    THROW_NEW_ERROR_RETURN_VALUE(isolate,
-                                 NewTypeError(MessageTemplate::kIcuError),
-                                 Nothing<icu::UnicodeString>());
-  }
-  return Just(result);
+  return Just(true);
 }
 
 }  // namespace
@@ -1287,10 +1276,16 @@ MaybeHandle<String> JSNumberFormat::FormatNumeric(
     Handle<Object> numeric_obj) {
   DCHECK(numeric_obj->IsNumeric());
 
-  Maybe<icu::UnicodeString> maybe_format =
-      IcuFormatNumber(isolate, number_format, numeric_obj, nullptr);
+  icu::number::FormattedNumber formatted;
+  Maybe<bool> maybe_format =
+      IcuFormatNumber(isolate, number_format, numeric_obj, &formatted);
   MAYBE_RETURN(maybe_format, Handle<String>());
-  return Intl::ToString(isolate, maybe_format.FromJust());
+  UErrorCode status = U_ZERO_ERROR;
+  icu::UnicodeString result = formatted.toString(status);
+  if (U_FAILURE(status)) {
+    THROW_NEW_ERROR(isolate, NewTypeError(MessageTemplate::kIcuError), String);
+  }
+  return Intl::ToString(isolate, result);
 }
 
 namespace {
@@ -1403,12 +1398,18 @@ std::vector<NumberFormatSpan> FlattenRegionsToParts(
 }
 
 namespace {
-Maybe<int> ConstructParts(Isolate* isolate, const icu::UnicodeString& formatted,
-                          icu::FieldPositionIterator* fp_iter,
+Maybe<int> ConstructParts(Isolate* isolate,
+                          icu::number::FormattedNumber* formatted,
                           Handle<JSArray> result, int start_index,
                           Handle<Object> numeric_obj, bool style_is_unit) {
+  UErrorCode status = U_ZERO_ERROR;
+  icu::UnicodeString formatted_text = formatted->toString(status);
+  if (U_FAILURE(status)) {
+    THROW_NEW_ERROR_RETURN_VALUE(
+        isolate, NewTypeError(MessageTemplate::kIcuError), Nothing<int>());
+  }
   DCHECK(numeric_obj->IsNumeric());
-  int32_t length = formatted.length();
+  int32_t length = formatted_text.length();
   int index = start_index;
   if (length == 0) return Just(index);
 
@@ -1417,13 +1418,14 @@ Maybe<int> ConstructParts(Isolate* isolate, const icu::UnicodeString& formatted,
   // other region covers some part of the formatted string. It's possible
   // there's another field with exactly the same begin and end as this backdrop,
   // in which case the backdrop's field_id of -1 will give it lower priority.
-  regions.push_back(NumberFormatSpan(-1, 0, formatted.length()));
+  regions.push_back(NumberFormatSpan(-1, 0, formatted_text.length()));
 
   {
-    icu::FieldPosition fp;
-    while (fp_iter->next(fp)) {
-      regions.push_back(NumberFormatSpan(fp.getField(), fp.getBeginIndex(),
-                                         fp.getEndIndex()));
+    icu::ConstrainedFieldPosition cfp;
+    cfp.constrainCategory(UFIELD_CATEGORY_NUMBER);
+    while (formatted->nextPosition(cfp, status)) {
+      regions.push_back(
+          NumberFormatSpan(cfp.getField(), cfp.getStart(), cfp.getLimit()));
     }
   }
 
@@ -1445,7 +1447,7 @@ Maybe<int> ConstructParts(Isolate* isolate, const icu::UnicodeString& formatted,
     Handle<String> substring;
     ASSIGN_RETURN_ON_EXCEPTION_VALUE(
         isolate, substring,
-        Intl::ToString(isolate, formatted, part.begin_pos, part.end_pos),
+        Intl::ToString(isolate, formatted_text, part.begin_pos, part.end_pos),
         Nothing<int>());
     Intl::AddElement(isolate, result, index, field_type_string, substring);
     ++index;
@@ -1465,20 +1467,19 @@ MaybeHandle<JSArray> JSNumberFormat::FormatToParts(
       number_format->icu_number_formatter().raw();
   CHECK_NOT_NULL(fmt);
 
-  icu::FieldPositionIterator fp_iter;
-  Maybe<icu::UnicodeString> maybe_format =
-      IcuFormatNumber(isolate, *fmt, numeric_obj, &fp_iter);
+  icu::number::FormattedNumber formatted;
+  Maybe<bool> maybe_format =
+      IcuFormatNumber(isolate, *fmt, numeric_obj, &formatted);
   MAYBE_RETURN(maybe_format, Handle<JSArray>());
-
   UErrorCode status = U_ZERO_ERROR;
+
   bool style_is_unit =
       Style::UNIT == StyleFromSkeleton(fmt->toSkeleton(status));
   CHECK(U_SUCCESS(status));
 
   Handle<JSArray> result = factory->NewJSArray(0);
-  Maybe<int> maybe_format_to_parts =
-      ConstructParts(isolate, maybe_format.FromJust(), &fp_iter, result, 0,
-                     numeric_obj, style_is_unit);
+  Maybe<int> maybe_format_to_parts = ConstructParts(
+      isolate, &formatted, result, 0, numeric_obj, style_is_unit);
   MAYBE_RETURN(maybe_format_to_parts, Handle<JSArray>());
 
   return result;
@@ -1494,8 +1495,7 @@ struct CheckNumberElements {
 }  // namespace
 
 const std::set<std::string>& JSNumberFormat::GetAvailableLocales() {
-  static base::LazyInstance<
-      Intl::AvailableLocales<icu::NumberFormat, CheckNumberElements>>::type
+  static base::LazyInstance<Intl::AvailableLocales<CheckNumberElements>>::type
       available_locales = LAZY_INSTANCE_INITIALIZER;
   return available_locales.Pointer()->Get();
 }

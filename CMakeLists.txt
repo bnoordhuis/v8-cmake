@@ -108,10 +108,10 @@ target_compile_definitions(d8 PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 target_compile_options(d8 PRIVATE ${disable-exceptions})
 target_include_directories(d8
   PUBLIC
-    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/v8/include>
+    $<BUILD_INTERFACE:${D}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
   PRIVATE
-    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/v8>
+    $<BUILD_INTERFACE:${D}>
 )
 
 target_link_libraries(d8
@@ -127,21 +127,21 @@ add_library(v8-i18n-support OBJECT)
 set_property(TARGET v8-i18n-support PROPERTY EXCLUDE_FROM_ALL ON)
 
 list(APPEND i18n-sources
-  ${PROJECT_SOURCE_DIR}/v8/src/builtins/builtins-intl.cc
-  ${PROJECT_SOURCE_DIR}/v8/src/objects/intl-objects.cc
-  ${PROJECT_SOURCE_DIR}/v8/src/objects/js-break-iterator.cc
-  ${PROJECT_SOURCE_DIR}/v8/src/objects/js-collator.cc
-  ${PROJECT_SOURCE_DIR}/v8/src/objects/js-date-time-format.cc
-  ${PROJECT_SOURCE_DIR}/v8/src/objects/js-display-names.cc
-  ${PROJECT_SOURCE_DIR}/v8/src/objects/js-list-format.cc
-  ${PROJECT_SOURCE_DIR}/v8/src/objects/js-locale.cc
-  ${PROJECT_SOURCE_DIR}/v8/src/objects/js-number-format.cc
-  ${PROJECT_SOURCE_DIR}/v8/src/objects/js-plural-rules.cc
-  ${PROJECT_SOURCE_DIR}/v8/src/objects/js-relative-time-format.cc
-  ${PROJECT_SOURCE_DIR}/v8/src/objects/js-segment-iterator.cc
-  ${PROJECT_SOURCE_DIR}/v8/src/objects/js-segmenter.cc
-  ${PROJECT_SOURCE_DIR}/v8/src/runtime/runtime-intl.cc
-  ${PROJECT_SOURCE_DIR}/v8/src/strings/char-predicates.cc)
+  ${D}/src/builtins/builtins-intl.cc
+  ${D}/src/objects/intl-objects.cc
+  ${D}/src/objects/js-break-iterator.cc
+  ${D}/src/objects/js-collator.cc
+  ${D}/src/objects/js-date-time-format.cc
+  ${D}/src/objects/js-display-names.cc
+  ${D}/src/objects/js-list-format.cc
+  ${D}/src/objects/js-locale.cc
+  ${D}/src/objects/js-number-format.cc
+  ${D}/src/objects/js-plural-rules.cc
+  ${D}/src/objects/js-relative-time-format.cc
+  ${D}/src/objects/js-segment-iterator.cc
+  ${D}/src/objects/js-segmenter.cc
+  ${D}/src/runtime/runtime-intl.cc
+  ${D}/src/strings/char-predicates.cc)
 
 target_sources(v8-i18n-support PRIVATE ${i18n-sources})
 target_compile_definitions(v8-i18n-support PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
@@ -183,26 +183,23 @@ file(GLOB wasm-baseline-sources CONFIGURE_DEPENDS v8/src/wasm/baseline/*.cc)
 file(GLOB zone-sources CONFIGURE_DEPENDS v8/src/zone/*.cc)
 
 list(REMOVE_ITEM builtin-sources
-  ${PROJECT_SOURCE_DIR}/v8/src/builtins/builtins-intl-gen.cc
-  ${PROJECT_SOURCE_DIR}/v8/src/builtins/builtins-intl.cc)
+  ${D}/src/builtins/builtins-intl-gen.cc
+  ${D}/src/builtins/builtins-intl.cc)
 list(REMOVE_ITEM diagnostic-sources
-  ${PROJECT_SOURCE_DIR}/v8/src/diagnostics/unwinding-info-win64.cc)
+  ${D}/src/diagnostics/unwinding-info-win64.cc)
 list(REMOVE_ITEM object-sources ${i18n-sources})
-list(REMOVE_ITEM regexp-sources
-  ${PROJECT_SOURCE_DIR}/v8/src/regexp/gen-regexp-special-case.cc)
+list(REMOVE_ITEM regexp-sources ${D}/src/regexp/gen-regexp-special-case.cc)
 list(REMOVE_ITEM runtime-sources
-  ${PROJECT_SOURCE_DIR}/v8/src/runtime/runtime-intl.cc)
+  ${D}/src/runtime/runtime-intl.cc)
 list(REMOVE_ITEM snapshot-sources
-  ${PROJECT_SOURCE_DIR}/v8/src/snapshot/mksnapshot.cc
-  ${PROJECT_SOURCE_DIR}/v8/src/snapshot/snapshot-empty.cc
-  ${PROJECT_SOURCE_DIR}/v8/src/snapshot/snapshot-external.cc)
-list(REMOVE_ITEM strings-sources
-  ${PROJECT_SOURCE_DIR}/v8/src/strings/char-predicates.cc)
+  ${D}/src/snapshot/mksnapshot.cc
+  ${D}/src/snapshot/snapshot-empty.cc
+  ${D}/src/snapshot/snapshot-external.cc)
+list(REMOVE_ITEM strings-sources ${D}/src/strings/char-predicates.cc)
 # wasm-memory.h is currently missing??
-list(REMOVE_ITEM wasm-sources ${PROJECT_SOURCE_DIR}/v8/src/wasm/wasm-memory.cc)
+list(REMOVE_ITEM wasm-sources ${D}/src/wasm/wasm-memory.cc)
 
-list(APPEND snapshot-sources
-  ${PROJECT_SOURCE_DIR}/v8/src/snapshot/embedded/embedded-data.cc)
+list(APPEND snapshot-sources ${D}/src/snapshot/embedded/embedded-data.cc)
 list(APPEND wasm-sources ${wasm-baseline-sources})
 
 add_library(v8_base_without_compiler STATIC
@@ -309,7 +306,7 @@ target_compile_options(v8_base_without_compiler PRIVATE ${disable-exceptions})
 target_include_directories(
   v8_base_without_compiler
   PRIVATE
-    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/v8/include>
+    $<BUILD_INTERFACE:${D}/include>
     $<BUILD_INTERFACE:$<TARGET_PROPERTY:v8-bytecodes-builtin-list,INTERFACE_INCLUDE_DIRECTORIES>>
     ${D}
     ${PROJECT_BINARY_DIR}
@@ -328,8 +325,7 @@ target_link_libraries(
 #
 # v8_compiler
 #
-file(GLOB_RECURSE compiler-sources CONFIGURE_DEPENDS
-  "${PROJECT_SOURCE_DIR}/v8/src/compiler/*.cc")
+file(GLOB_RECURSE compiler-sources CONFIGURE_DEPENDS "${D}/src/compiler/*.cc")
 list(FILTER compiler-sources EXCLUDE REGEX ".*backend/.*/.*[.]cc$")
 
 
@@ -525,8 +521,8 @@ target_link_libraries(v8_inspector PRIVATE v8_torque_generated)
 
 file(GLOB inspector-templates
   CONFIGURE_DEPENDS
-    "${PROJECT_SOURCE_DIR}/v8/third_party/inspector_protocol/lib/*.template"
-    "${PROJECT_SOURCE_DIR}/v8/third_party/inspector_protocol/templates/*.template")
+    "${D}/third_party/inspector_protocol/lib/*.template"
+    "${D}/third_party/inspector_protocol/templates/*.template")
 
 add_custom_command(
   COMMAND ${CMAKE_COMMAND} -E make_directory ${inspector_dirs}
@@ -558,6 +554,7 @@ add_library(v8_libplatform STATIC)
 target_sources(v8_libplatform
   PRIVATE
     ${D}/src/libplatform/default-foreground-task-runner.cc
+    ${D}/src/libplatform/default-job.cc
     ${D}/src/libplatform/default-platform.cc
     ${D}/src/libplatform/default-worker-threads-task-runner.cc
     ${D}/src/libplatform/delayed-task-queue.cc
@@ -583,9 +580,8 @@ target_link_libraries(v8_libplatform PRIVATE v8_libbase)
 # v8_libsampler
 #
 
-add_library(v8_libsampler STATIC
-  ${D}/src/libsampler/sampler.cc)
-
+add_library(v8_libsampler STATIC ${D}/src/libsampler/sampler.cc)
+target_include_directories(v8_libsampler PRIVATE ${D} ${D}/include)
 target_compile_definitions(v8_libsampler PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 target_compile_options(v8_libsampler PRIVATE ${disable-exceptions})
 target_include_directories(v8_libsampler PRIVATE ${D})
@@ -668,12 +664,12 @@ target_link_libraries(bytecode_builtins_list_generator v8_libbase)
 
 # Note: torque does not like absolute paths.
 file(GLOB_RECURSE torque-builtins
-  RELATIVE "${PROJECT_SOURCE_DIR}/v8"
-  CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/v8/src/builtins/*.tq")
+  RELATIVE "${D}"
+  CONFIGURE_DEPENDS "${D}/src/builtins/*.tq")
 
 file(GLOB_RECURSE torque-objects
-  RELATIVE "${PROJECT_SOURCE_DIR}/v8"
-  CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/v8/src/objects/*.tq")
+  RELATIVE "${D}"
+  CONFIGURE_DEPENDS "${D}/src/objects/*.tq")
 
 list(APPEND torque_files ${torque-builtins})
 list(APPEND torque_files ${torque-objects})
@@ -726,6 +722,7 @@ target_compile_options(v8_torque_generated PRIVATE ${disable-exceptions})
 target_include_directories(v8_torque_generated
   PUBLIC
     ${PROJECT_BINARY_DIR}
+    ${D}/include
     ${D})
 target_link_libraries(v8_torque_generated PRIVATE v8-bytecodes-builtin-list)
 
@@ -754,7 +751,7 @@ add_custom_command(
 #
 # torque
 #
-file(GLOB torque-program-sources CONFIGURE_DEPENDS ${PROJECT_SOURCE_DIR}/v8/src/torque/*.cc)
+file(GLOB torque-program-sources CONFIGURE_DEPENDS ${D}/src/torque/*.cc)
 
 add_executable(torque)
 target_sources(torque PRIVATE ${torque-program-sources})
