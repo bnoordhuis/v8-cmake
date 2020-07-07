@@ -2306,9 +2306,8 @@ bool HeapObject::NeedsRehashing() const {
     case TRANSITION_ARRAY_TYPE:
       return TransitionArray::cast(*this).number_of_entries() > 1;
     case ORDERED_HASH_MAP_TYPE:
-      return OrderedHashMap::cast(*this).NumberOfElements() > 0;
     case ORDERED_HASH_SET_TYPE:
-      return OrderedHashSet::cast(*this).NumberOfElements() > 0;
+      return false;  // We'll rehash from the JSMap or JSSet referencing them.
     case NAME_DICTIONARY_TYPE:
     case GLOBAL_DICTIONARY_TYPE:
     case NUMBER_DICTIONARY_TYPE:
@@ -2318,6 +2317,8 @@ bool HeapObject::NeedsRehashing() const {
     case SMALL_ORDERED_HASH_MAP_TYPE:
     case SMALL_ORDERED_HASH_SET_TYPE:
     case SMALL_ORDERED_NAME_DICTIONARY_TYPE:
+    case JS_MAP_TYPE:
+    case JS_SET_TYPE:
       return true;
     default:
       return false;
@@ -2327,10 +2328,13 @@ bool HeapObject::NeedsRehashing() const {
 bool HeapObject::CanBeRehashed() const {
   DCHECK(NeedsRehashing());
   switch (map().instance_type()) {
+    case JS_MAP_TYPE:
+    case JS_SET_TYPE:
+      return true;
     case ORDERED_HASH_MAP_TYPE:
     case ORDERED_HASH_SET_TYPE:
+      UNREACHABLE();  // We'll rehash from the JSMap or JSSet referencing them.
     case ORDERED_NAME_DICTIONARY_TYPE:
-      // TODO(yangguo): actually support rehashing OrderedHash{Map,Set}.
       return false;
     case NAME_DICTIONARY_TYPE:
     case GLOBAL_DICTIONARY_TYPE:
@@ -2354,7 +2358,8 @@ bool HeapObject::CanBeRehashed() const {
   return false;
 }
 
-void HeapObject::RehashBasedOnMap(ReadOnlyRoots roots) {
+void HeapObject::RehashBasedOnMap(LocalIsolateWrapper isolate) {
+  ReadOnlyRoots roots = ReadOnlyRoots(isolate);
   switch (map().instance_type()) {
     case HASH_TABLE_TYPE:
       UNREACHABLE();
@@ -2386,6 +2391,19 @@ void HeapObject::RehashBasedOnMap(ReadOnlyRoots roots) {
     case SMALL_ORDERED_HASH_SET_TYPE:
       DCHECK_EQ(0, SmallOrderedHashSet::cast(*this).NumberOfElements());
       break;
+    case ORDERED_HASH_MAP_TYPE:
+    case ORDERED_HASH_SET_TYPE:
+      UNREACHABLE();  // We'll rehash from the JSMap or JSSet referencing them.
+    case JS_MAP_TYPE: {
+      DCHECK(isolate.is_main_thread());
+      JSMap::cast(*this).Rehash(isolate.main_thread());
+      break;
+    }
+    case JS_SET_TYPE: {
+      DCHECK(isolate.is_main_thread());
+      JSSet::cast(*this).Rehash(isolate.main_thread());
+      break;
+    }
     case SMALL_ORDERED_NAME_DICTIONARY_TYPE:
       DCHECK_EQ(0, SmallOrderedNameDictionary::cast(*this).NumberOfElements());
       break;
@@ -5509,12 +5527,20 @@ int SharedFunctionInfo::StartPosition() const {
     if (info.HasPositionInfo()) {
       return info.StartPosition();
     }
-  } else if (HasUncompiledData()) {
+  }
+  if (HasUncompiledData()) {
     // Works with or without scope.
     return uncompiled_data().start_position();
-  } else if (IsApiFunction() || HasBuiltinId()) {
+  }
+  if (IsApiFunction() || HasBuiltinId()) {
     DCHECK_IMPLIES(HasBuiltinId(), builtin_id() != Builtins::kCompileLazy);
     return 0;
+  }
+  if (HasWasmExportedFunctionData()) {
+    WasmInstanceObject instance = wasm_exported_function_data().instance();
+    int func_index = wasm_exported_function_data().function_index();
+    auto& function = instance.module()->functions[func_index];
+    return static_cast<int>(function.code.offset());
   }
   return kNoSourcePosition;
 }
@@ -5526,12 +5552,20 @@ int SharedFunctionInfo::EndPosition() const {
     if (info.HasPositionInfo()) {
       return info.EndPosition();
     }
-  } else if (HasUncompiledData()) {
+  }
+  if (HasUncompiledData()) {
     // Works with or without scope.
     return uncompiled_data().end_position();
-  } else if (IsApiFunction() || HasBuiltinId()) {
+  }
+  if (IsApiFunction() || HasBuiltinId()) {
     DCHECK_IMPLIES(HasBuiltinId(), builtin_id() != Builtins::kCompileLazy);
     return 0;
+  }
+  if (HasWasmExportedFunctionData()) {
+    WasmInstanceObject instance = wasm_exported_function_data().instance();
+    int func_index = wasm_exported_function_data().function_index();
+    auto& function = instance.module()->functions[func_index];
+    return static_cast<int>(function.code.end_offset());
   }
   return kNoSourcePosition;
 }
@@ -5717,17 +5751,27 @@ const char* AllocationSite::PretenureDecisionName(PretenureDecision decision) {
   return nullptr;
 }
 
+// static
+bool JSArray::MayHaveReadOnlyLength(Map js_array_map) {
+  DCHECK(js_array_map.IsJSArrayMap());
+  if (js_array_map.is_dictionary_map()) return true;
+
+  // Fast path: "length" is the first fast property of arrays with non
+  // dictionary properties. Since it's not configurable, it's guaranteed to be
+  // the first in the descriptor array.
+  InternalIndex first(0);
+  DCHECK(js_array_map.instance_descriptors().GetKey(first) ==
+         js_array_map.GetReadOnlyRoots().length_string());
+  return js_array_map.instance_descriptors().GetDetails(first).IsReadOnly();
+}
+
 bool JSArray::HasReadOnlyLength(Handle<JSArray> array) {
   Map map = array->map();
-  // Fast path: "length" is the first fast property of arrays. Since it's not
-  // configurable, it's guaranteed to be the first in the descriptor array.
-  if (!map.is_dictionary_map()) {
-    InternalIndex first(0);
-    DCHECK(map.instance_descriptors().GetKey(first) ==
-           array->GetReadOnlyRoots().length_string());
-    return map.instance_descriptors().GetDetails(first).IsReadOnly();
-  }
 
+  // If map guarantees that there can't be a read-only length, we are done.
+  if (!MayHaveReadOnlyLength(map)) return false;
+
+  // Look at the object.
   Isolate* isolate = array->GetIsolate();
   LookupIterator it(isolate, array, isolate->factory()->length_string(), array,
                     LookupIterator::OWN_SKIP_INTERCEPTOR);
@@ -5758,7 +5802,7 @@ void Dictionary<Derived, Shape>::Print(std::ostream& os) {
     if (!dictionary.ToKey(roots, i, &k)) continue;
     os << "\n   ";
     if (k.IsString()) {
-      String::cast(k).StringPrint(os);
+      String::cast(k).PrintUC16(os);
     } else {
       os << Brief(k);
     }
@@ -5796,10 +5840,8 @@ void Symbol::SymbolShortPrint(std::ostream& os) {
   os << "<Symbol:";
   if (!description().IsUndefined()) {
     os << " ";
-    HeapStringAllocator allocator;
-    StringStream accumulator(&allocator);
-    String::cast(description()).StringShortPrint(&accumulator, false);
-    os << accumulator.ToCString().get();
+    String description_as_string = String::cast(description());
+    description_as_string.PrintUC16(os, 0, description_as_string.length());
   } else {
     os << " (" << PrivateSymbolToName() << ")";
   }
@@ -6176,12 +6218,12 @@ Handle<Object> JSPromise::TriggerPromiseReactions(Isolate* isolate,
 // static
 JSRegExp::Flags JSRegExp::FlagsFromString(Isolate* isolate,
                                           Handle<String> flags, bool* success) {
-  STATIC_ASSERT(JSRegExp::FlagFromChar('g') == JSRegExp::kGlobal);
-  STATIC_ASSERT(JSRegExp::FlagFromChar('i') == JSRegExp::kIgnoreCase);
-  STATIC_ASSERT(JSRegExp::FlagFromChar('m') == JSRegExp::kMultiline);
-  STATIC_ASSERT(JSRegExp::FlagFromChar('s') == JSRegExp::kDotAll);
-  STATIC_ASSERT(JSRegExp::FlagFromChar('u') == JSRegExp::kUnicode);
-  STATIC_ASSERT(JSRegExp::FlagFromChar('y') == JSRegExp::kSticky);
+  STATIC_ASSERT(*JSRegExp::FlagFromChar('g') == JSRegExp::kGlobal);
+  STATIC_ASSERT(*JSRegExp::FlagFromChar('i') == JSRegExp::kIgnoreCase);
+  STATIC_ASSERT(*JSRegExp::FlagFromChar('m') == JSRegExp::kMultiline);
+  STATIC_ASSERT(*JSRegExp::FlagFromChar('s') == JSRegExp::kDotAll);
+  STATIC_ASSERT(*JSRegExp::FlagFromChar('u') == JSRegExp::kUnicode);
+  STATIC_ASSERT(*JSRegExp::FlagFromChar('y') == JSRegExp::kSticky);
 
   int length = flags->length();
   if (length == 0) {
@@ -6190,14 +6232,16 @@ JSRegExp::Flags JSRegExp::FlagsFromString(Isolate* isolate,
   }
   // A longer flags string cannot be valid.
   if (length > JSRegExp::kFlagCount) return JSRegExp::Flags(0);
-  // Initialize {value} to {kInvalid} to allow 2-in-1 duplicate/invalid check.
-  JSRegExp::Flags value = JSRegExp::kInvalid;
+  JSRegExp::Flags value(0);
   if (flags->IsSeqOneByteString()) {
     DisallowHeapAllocation no_gc;
     SeqOneByteString seq_flags = SeqOneByteString::cast(*flags);
     for (int i = 0; i < length; i++) {
-      JSRegExp::Flag flag = JSRegExp::FlagFromChar(seq_flags.Get(i));
-      // Duplicate or invalid flag.
+      base::Optional<JSRegExp::Flag> maybe_flag =
+          JSRegExp::FlagFromChar(seq_flags.Get(i));
+      if (!maybe_flag.has_value()) return JSRegExp::Flags(0);
+      JSRegExp::Flag flag = *maybe_flag;
+      // Duplicate flag.
       if (value & flag) return JSRegExp::Flags(0);
       value |= flag;
     }
@@ -6206,15 +6250,16 @@ JSRegExp::Flags JSRegExp::FlagsFromString(Isolate* isolate,
     DisallowHeapAllocation no_gc;
     String::FlatContent flags_content = flags->GetFlatContent(no_gc);
     for (int i = 0; i < length; i++) {
-      JSRegExp::Flag flag = JSRegExp::FlagFromChar(flags_content.Get(i));
-      // Duplicate or invalid flag.
+      base::Optional<JSRegExp::Flag> maybe_flag =
+          JSRegExp::FlagFromChar(flags_content.Get(i));
+      if (!maybe_flag.has_value()) return JSRegExp::Flags(0);
+      JSRegExp::Flag flag = *maybe_flag;
+      // Duplicate flag.
       if (value & flag) return JSRegExp::Flags(0);
       value |= flag;
     }
   }
   *success = true;
-  // Drop the initially set {kInvalid} bit.
-  value ^= JSRegExp::kInvalid;
   return value;
 }
 
@@ -7852,6 +7897,13 @@ void JSSet::Clear(Isolate* isolate, Handle<JSSet> set) {
   set->set_table(*table);
 }
 
+void JSSet::Rehash(Isolate* isolate) {
+  Handle<OrderedHashSet> table_handle(OrderedHashSet::cast(table()), isolate);
+  Handle<OrderedHashSet> new_table =
+      OrderedHashSet::Rehash(isolate, table_handle).ToHandleChecked();
+  set_table(*new_table);
+}
+
 void JSMap::Initialize(Handle<JSMap> map, Isolate* isolate) {
   Handle<OrderedHashMap> table = isolate->factory()->NewOrderedHashMap();
   map->set_table(*table);
@@ -7861,6 +7913,13 @@ void JSMap::Clear(Isolate* isolate, Handle<JSMap> map) {
   Handle<OrderedHashMap> table(OrderedHashMap::cast(map->table()), isolate);
   table = OrderedHashMap::Clear(isolate, table);
   map->set_table(*table);
+}
+
+void JSMap::Rehash(Isolate* isolate) {
+  Handle<OrderedHashMap> table_handle(OrderedHashMap::cast(table()), isolate);
+  Handle<OrderedHashMap> new_table =
+      OrderedHashMap::Rehash(isolate, table_handle).ToHandleChecked();
+  set_table(*new_table);
 }
 
 void JSWeakCollection::Initialize(Handle<JSWeakCollection> weak_collection,

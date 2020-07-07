@@ -1545,6 +1545,23 @@ class V8_EXPORT Module : public Data {
    */
   Local<UnboundModuleScript> GetUnboundModuleScript();
 
+  /**
+   * Returns the underlying script's id.
+   *
+   * The module must be a SourceTextModule and must not have a kErrored status.
+   */
+  int ScriptId();
+
+  /**
+   * Returns whether the module is a SourceTextModule.
+   */
+  bool IsSourceTextModule() const;
+
+  /**
+   * Returns whether the module is a SyntheticModule.
+   */
+  bool IsSyntheticModule() const;
+
   /*
    * Callback defined in the embedder.  This is responsible for setting
    * the module's exported values with calls to SetSyntheticModuleExport().
@@ -3616,11 +3633,11 @@ enum PropertyFilter {
 
 /**
  * Options for marking whether callbacks may trigger JS-observable side effects.
- * Side-effect-free callbacks are whitelisted during debug evaluation with
+ * Side-effect-free callbacks are allowlisted during debug evaluation with
  * throwOnSideEffect. It applies when calling a Function, FunctionTemplate,
  * or an Accessor callback. For Interceptors, please see
  * PropertyHandlerFlags's kHasNoSideEffect.
- * Callbacks that only cause side effects to the receiver are whitelisted if
+ * Callbacks that only cause side effects to the receiver are allowlisted if
  * invoked on receiver objects that are created within the same debug-evaluate
  * call, as these objects are temporary and the side effect does not escape.
  */
@@ -5350,7 +5367,7 @@ class V8_EXPORT TypedArray : public ArrayBufferView {
    */
   static constexpr size_t kMaxLength = internal::kApiSystemPointerSize == 4
                                            ? internal::kSmiMaxValue
-                                           : 0xFFFFFFFF;
+                                           : size_t{1} << 32;
 
   /**
    * Number of elements in this typed array
@@ -8308,7 +8325,7 @@ class V8_EXPORT Isolate {
 
   /**
    * This scope allows terminations inside direct V8 API calls and forbid them
-   * inside any recursice API calls without explicit SafeForTerminationScope.
+   * inside any recursive API calls without explicit SafeForTerminationScope.
    */
   class V8_EXPORT SafeForTerminationScope {
    public:
@@ -8447,6 +8464,9 @@ class V8_EXPORT Isolate {
     kInvalidatedTypedArraySpeciesLookupChainProtector = 105,
     kWasmSimdOpcodes = 106,
     kVarRedeclaredCatchBinding = 107,
+    kWasmRefTypes = 108,
+    kWasmBulkMemory = 109,
+    kWasmMultiValue = 110,
 
     // If you add new values here, you'll also need to update Chromium's:
     // web_feature.mojom, use_counter_callback.cc, and enums.xml. V8 changes to
@@ -8543,7 +8563,7 @@ class V8_EXPORT Isolate {
       HostImportModuleDynamicallyCallback callback);
 
   /**
-   * This specifies the callback called by the upcoming importa.meta
+   * This specifies the callback called by the upcoming import.meta
    * language feature to retrieve host-defined meta data for a module.
    */
   void SetHostInitializeImportMetaObjectCallback(
@@ -9499,11 +9519,15 @@ class V8_EXPORT StartupData {
    * Only valid for StartupData returned by SnapshotCreator::CreateBlob().
    */
   bool CanBeRehashed() const;
+  /**
+   * Allows embedders to verify whether the data is valid for the current
+   * V8 instance.
+   */
+  bool IsValid() const;
 
   const char* data;
   int raw_size;
 };
-
 
 /**
  * EntropySource is used as a callback function when v8 needs a source
@@ -10804,8 +10828,15 @@ V8_INLINE void PersistentBase<T>::SetWeak(
     P* parameter, typename WeakCallbackInfo<P>::Callback callback,
     WeakCallbackType type) {
   typedef typename WeakCallbackInfo<void>::Callback Callback;
+#if (__GNUC__ >= 8) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcast-function-type"
+#endif
   V8::MakeWeak(reinterpret_cast<internal::Address*>(this->val_), parameter,
                reinterpret_cast<Callback>(callback), type);
+#if (__GNUC__ >= 8) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 }
 
 template <class T>

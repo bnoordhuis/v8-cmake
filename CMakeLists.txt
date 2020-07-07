@@ -278,8 +278,8 @@ add_library(v8_base_without_compiler STATIC
   ${utils-sources}
   ${wasm-sources}
   ${zone-sources}
-  $<TARGET_OBJECTS:v8-adler32>
-)
+  $<TARGET_OBJECTS:v8-adler32>)
+
 if (WIN32)
   if (CMAKE_SYSTEM_VERSION VERSION_GREATER 10) # Windows 10
     set(windows-version 0x0A00)
@@ -309,6 +309,7 @@ target_include_directories(
     $<BUILD_INTERFACE:${D}/include>
     $<BUILD_INTERFACE:$<TARGET_PROPERTY:v8-bytecodes-builtin-list,INTERFACE_INCLUDE_DIRECTORIES>>
     ${D}
+    ${D}/third_party/zlib
     ${PROJECT_BINARY_DIR}
 )
 
@@ -380,7 +381,6 @@ add_library(
   ${D}/src/builtins/builtins-conversion-gen.cc
   ${D}/src/builtins/builtins-date-gen.cc
   ${D}/src/builtins/builtins-debug-gen.cc
-  ${D}/src/builtins/builtins-function-gen.cc
   ${D}/src/builtins/builtins-generator-gen.cc
   ${D}/src/builtins/builtins-global-gen.cc
   ${D}/src/builtins/builtins-handler-gen.cc
@@ -406,6 +406,7 @@ add_library(
   ${D}/src/ic/accessor-assembler.cc
   ${D}/src/ic/binary-op-assembler.cc
   ${D}/src/ic/keyed-store-generic.cc
+  ${D}/src/ic/unary-op-assembler.cc
   ${D}/src/interpreter/interpreter-assembler.cc
   ${D}/src/interpreter/interpreter-generator.cc
   ${D}/src/interpreter/interpreter-intrinsics-generator.cc
@@ -689,12 +690,15 @@ list(TRANSFORM torque_files PREPEND ${D}/ OUTPUT_VARIABLE torque_files_abs)
 # Note: target v8_compiler depends on ${torque_outputs}. Maybe this should be
 # a source-only dependency.
 set(torque_outputs
-  ${PROJECT_BINARY_DIR}/torque-generated/interface-descriptors-tq.inc
-  ${PROJECT_BINARY_DIR}/torque-generated/class-verifiers-tq.cc
-  ${PROJECT_BINARY_DIR}/torque-generated/objects-printer-tq.cc
-  ${PROJECT_BINARY_DIR}/torque-generated/class-definitions-tq.cc
   ${PROJECT_BINARY_DIR}/torque-generated/class-debug-readers-tq.cc
-  ${PROJECT_BINARY_DIR}/torque-generated/exported-macros-assembler-tq.cc)
+  ${PROJECT_BINARY_DIR}/torque-generated/class-definitions-tq.cc
+  ${PROJECT_BINARY_DIR}/torque-generated/class-verifiers-tq.cc
+  ${PROJECT_BINARY_DIR}/torque-generated/exported-macros-assembler-tq.cc
+  ${PROJECT_BINARY_DIR}/torque-generated/factory-tq.cc
+  ${PROJECT_BINARY_DIR}/torque-generated/factory-tq.inc
+  ${PROJECT_BINARY_DIR}/torque-generated/interface-descriptors-tq.inc
+  ${PROJECT_BINARY_DIR}/torque-generated/objects-printer-tq.cc
+  ${PROJECT_BINARY_DIR}/torque-generated/objects-body-descriptors-tq-inl.inc)
 
 list(TRANSFORM torque_files
   REPLACE "[.]tq$" "-tq-csa.cc"

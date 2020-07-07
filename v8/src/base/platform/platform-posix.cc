@@ -531,7 +531,7 @@ OS::MemoryMappedFile* OS::MemoryMappedFile::open(const char* name,
 OS::MemoryMappedFile* OS::MemoryMappedFile::create(const char* name,
                                                    size_t size, void* initial) {
   if (FILE* file = fopen(name, "w+")) {
-    if (size == 0) return new PosixMemoryMappedFile(file, 0, 0);
+    if (size == 0) return new PosixMemoryMappedFile(file, nullptr, 0);
     size_t result = fwrite(initial, 1, size, file);
     if (result == size && !ferror(file)) {
       void* memory = mmap(OS::GetRandomMmapAddr(), result,
@@ -970,7 +970,8 @@ void Thread::SetThreadLocal(LocalStorageKey key, void* value) {
 // pthread_getattr_np used below is non portable (hence the _np suffix). We
 // keep this version in POSIX as most Linux-compatible derivatives will
 // support it. MacOS and FreeBSD are different here.
-#if !defined(V8_OS_FREEBSD) && !defined(V8_OS_MACOSX) && !defined(_AIX)
+#if !defined(V8_OS_FREEBSD) && !defined(V8_OS_MACOSX) && !defined(_AIX) && \
+    !defined(V8_OS_SOLARIS)
 
 // static
 void* Stack::GetStackStart() {
@@ -996,7 +997,8 @@ void* Stack::GetStackStart() {
   return nullptr;
 }
 
-#endif  // !defined(V8_OS_FREEBSD) && !defined(V8_OS_MACOSX) && !defined(_AIX)
+#endif  // !defined(V8_OS_FREEBSD) && !defined(V8_OS_MACOSX) &&
+        // !defined(_AIX) && !defined(V8_OS_SOLARIS)
 
 // static
 void* Stack::GetCurrentStackPosition() { return __builtin_frame_address(0); }
