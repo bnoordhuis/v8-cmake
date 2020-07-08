@@ -736,6 +736,8 @@ add_custom_command(
     -o ${PROJECT_BINARY_DIR}/torque-generated
     -v8-root ${D}
     ${torque_files}
+  COMMAND
+    ${CMAKE_COMMAND} -E touch ${torque-outputs} ${torque_outputs}
   DEPENDS
     torque
     ${torque_dirs}
