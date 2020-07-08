@@ -20,6 +20,8 @@ include(GNUInstallDirs)
 include(CheckPythonModuleExists)
 include(GenerateBuiltinsList)
 
+include(GNUtils)
+
 check_python_module_exists(PYTHON_HAVE_MARKUPSAFE markupsafe)
 
 if (NOT CMAKE_CXX_STANDARD)
