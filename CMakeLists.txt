@@ -52,9 +52,13 @@ set(is-arm64 0)
 set(is-ia32 0)
 set(is-mips 0)
 set(is-mips64 0)
+set(is-mipsel 0)
+set(is-mips64el 0)
 set(is-ppc 0)
+set(is-ppc64 0)
 
 set(is-s390 $<STREQUAL:${CMAKE_SYSTEM_PROCESSOR},S390>)
+set(is-s390x 0)
 string(CONCAT is-x64 $<OR:
   $<STREQUAL:${CMAKE_SYSTEM_PROCESSOR},AMD64>,
   $<STREQUAL:${CMAKE_SYSTEM_PROCESSOR},x86_64>
@@ -62,6 +66,30 @@ string(CONCAT is-x64 $<OR:
 
 option(V8_ENABLE_CONCURRENT_MARKING "Enable concurrent marking" ON)
 option(V8_ENABLE_I18N "Enable Internationalization support")
+
+# Note: This is not a "component build
+string(CONCAT is-clang $<OR:
+  $<CXX_COMPILER_ID:AppleClang>,
+  $<CXX_COMPILER_ID:Clang>
+  >)
+string(REGEX REPLACE "[\r\n \t]+" "" is-clang ${is-clang})
+
+#
+# configs - holder for common configuration items
+#
+# GN passes around config objects that have common defines/flags/includes
+# that are common across many components. We emulate these in GNUtils.cmake
+#
+# The most common configs are:
+#   [no]exceptions - [disables]enables exceptions in components
+#   features - global defines relating to the product features.
+#   toolchain - global defines covering what is being used to build
+#
+# We could emulate this directly in cmake by clusters of
+# target_compile_definitions/target_compile_options/target_include_directories
+# but its a lot of typing and misses some of the key functionality
+# (relative vs absolute paths)
+#
 
 set(
   v8_defines
@@ -73,7 +101,7 @@ set(
   $<${is-win}:V8_TARGET_OS_WIN>
   $<${is-x64}:V8_TARGET_ARCH_X64>
   $<${is-win}:NOMINMAX>
-  $<$<OR:${is-win},${is-x64}>:V8_OS_WINX64>
+  $<$<AND:${is-win},${is-x64}>:V8_OS_WINX64>
   $<$<BOOL:${V8_ENABLE_CONCURRENT_MARKING}>:V8_CONCURRENT_MARKING>
   $<${is-win}:V8_OS_WIN32>
 )
@@ -92,22 +120,36 @@ set(enable-exceptions
   $<$<CXX_COMPILER_ID:Clang>:-fexceptions>
   $<$<CXX_COMPILER_ID:GNU>:-fexceptions>)
 
+config_defines(features PRIVATE
+  V8_ARRAY_BUFFER_EXTENSION
+  )
+
+config_defines(toolchain PRIVATE ${v8_defines})
+
+config_cflags(exceptions PRIVATE ${enable-exceptions})
+
+config_cflags(noexceptions PRIVATE ${disable-exceptions})
+config_defines(noexceptions PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
+
 #
 # d8
 #
 
-add_executable(
-  d8
-  $<${is-posix}:${D}/src/d8/d8-posix.cc>
-  $<${is-win}:${D}/src/d8/d8-windows.cc>
-  ${D}/src/d8/async-hooks-wrapper.cc
-  ${D}/src/d8/d8-console.cc
-  ${D}/src/d8/d8-js.cc
-  ${D}/src/d8/d8-platforms.cc
-  ${D}/src/d8/d8.cc)
+add_executable(d8)
+target_relative_sources(d8 ${D} PRIVATE
+  src/d8/async-hooks-wrapper.cc
+  src/d8/d8-console.cc
+  src/d8/d8-js.cc
+  src/d8/d8-platforms.cc
+  src/d8/d8.cc
+)
+target_conditional_relative_sources(d8 ${D} PRIVATE
+  $<${is-posix}:_SOURCES_> src/d8/d8-posix.cc
+  )
+target_conditional_relative_sources(d8 ${D} PRIVATE
+  $<${is-win}:_SOURCES_> src/d8/d8-windows.cc
+  )
 
-target_compile_definitions(d8 PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
-target_compile_options(d8 PRIVATE ${disable-exceptions})
 target_include_directories(d8
   PUBLIC
     $<BUILD_INTERFACE:${D}/include>
@@ -116,6 +158,7 @@ target_include_directories(d8
     $<BUILD_INTERFACE:${D}>
 )
 
+target_config(d8 ${D} noexceptions)
 target_link_libraries(d8
   PRIVATE
     v8_base_without_compiler
