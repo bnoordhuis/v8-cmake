@@ -756,13 +756,12 @@ add_library(
   ${torque-outputs}
   ${torque_outputs})
 
-target_compile_definitions(v8_torque_generated PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
-target_compile_options(v8_torque_generated PRIVATE ${disable-exceptions})
 target_include_directories(v8_torque_generated
   PUBLIC
     ${PROJECT_BINARY_DIR}
     ${D}/include
     ${D})
+target_config(v8_torque_generated ${D} noexceptions)
 target_link_libraries(v8_torque_generated PRIVATE v8-bytecodes-builtin-list)
 
 add_custom_command(
