@@ -32,12 +32,16 @@ endfunction()
 # Adds a set of files as sources subject to a generator conditional.
 # Lets the file set be cut/pasted from the v8 sources
 #
-function(target_conditional_relative_sources target base vis cond)
-  set(_sources ${ARGN})
+function(target_conditional_relative_sources target base vis cond src)
+  #message("target_conditional_relative_sources ${target} ${base} ${vis} ${cond} ${src}")
+  set(_sources ${src})
   prepend_base_directory(${base} _sources)
-  string(REPLACE _SOURCES_ "${_sources}" _replaced ${cond})
+  string(REPLACE _S_ "${_sources}" _replaced ${cond})
   #message("target_conditional_relative_sources ${target} ${vis} ${_replaced}")
   target_sources(${target} ${vis} ${_replaced})
+  if (ARGN)
+    target_conditional_relative_sources( ${target} ${base} ${vis} ${ARGN})
+  endif()
 endfunction()
 
 #
