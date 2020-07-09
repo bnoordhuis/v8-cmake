@@ -652,8 +652,7 @@ set_property(SOURCE ${D}/src/base/utils/random-number-generator.cc
   APPEND PROPERTY COMPILE_DEFINITIONS _CRT_RAND_S)
 
 target_compile_definitions(v8_libbase PRIVATE $<${is-win}:UNICODE>)
-target_include_directories(v8_libbase PRIVATE ${D})
-target_config(v8_libbase ${D} noexceptions)
+target_config(v8_libbase ${D} noexceptions internal_config_base)
 target_link_libraries(v8_libbase
   PRIVATE
     Threads::Threads
