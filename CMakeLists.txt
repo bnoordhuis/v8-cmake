@@ -344,9 +344,6 @@ set_property(SOURCE ${D}/src/diagnostics/unwinding-info-win64.cc
       UNICODE
       _WIN32_WINNT=${windows-version})
 
-target_compile_definitions(v8_base_without_compiler PRIVATE ${v8_defines} $<${is-msvc}:_HAS_EXCEPTIONS=0>)
-target_compile_options(v8_base_without_compiler PRIVATE ${disable-exceptions})
-
 target_include_directories(
   v8_base_without_compiler
   PRIVATE
@@ -356,6 +353,8 @@ target_include_directories(
     ${D}/third_party/zlib
     ${PROJECT_BINARY_DIR}
 )
+
+target_config(v8_base_without_compiler ${D} noexceptions)
 
 target_link_libraries(
   v8_base_without_compiler
@@ -376,8 +375,7 @@ list(FILTER compiler-sources EXCLUDE REGEX ".*backend/.*/.*[.]cc$")
 
 add_library(v8_compiler STATIC)
 target_sources(v8_compiler PRIVATE ${compiler-sources})
-target_compile_definitions(v8_compiler PRIVATE ${v8_defines} $<${is-msvc}:_HAS_EXCEPTIONS=0>)
-target_compile_options(v8_compiler PRIVATE ${disable-exceptions})
+target_config(v8_compiler ${D} noexceptions)
 
 target_include_directories(
   v8_compiler
