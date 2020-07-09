@@ -665,11 +665,12 @@ target_link_libraries(v8_libbase
 #
 # bytecode_builtins_list_generator
 #
-v8_generate_builtins_list(${PROJECT_BINARY_DIR}/generated)
+v8_generate_builtins_list(${PROJECT_BINARY_DIR})
 
 target_include_directories(v8-bytecodes-builtin-list
   INTERFACE
-    ${PROJECT_BINARY_DIR}/generated)
+    ${PROJECT_BINARY_DIR}
+  )
 
 
 add_executable(
