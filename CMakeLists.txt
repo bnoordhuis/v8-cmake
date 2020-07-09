@@ -381,15 +381,13 @@ list(FILTER compiler-sources EXCLUDE REGEX ".*backend/.*/.*[.]cc$")
 
 add_library(v8_compiler STATIC)
 target_sources(v8_compiler PRIVATE ${compiler-sources})
-target_config(v8_compiler ${D} noexceptions)
+target_config(v8_compiler ${D} noexceptions internal_config_base)
 
 target_include_directories(
   v8_compiler
   PUBLIC
     ${PROJECT_BINARY_DIR}
   PRIVATE
-    ${PROJECT_BINARY_DIR}
-    ${D}
     $<BUILD_INTERFACE:$<TARGET_PROPERTY:v8-bytecodes-builtin-list,INTERFACE_INCLUDE_DIRECTORIES>>
 )
 
