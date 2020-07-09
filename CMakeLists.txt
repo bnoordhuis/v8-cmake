@@ -662,9 +662,9 @@ add_library(v8_libbase STATIC
 set_property(SOURCE ${D}/src/base/utils/random-number-generator.cc
   APPEND PROPERTY COMPILE_DEFINITIONS _CRT_RAND_S)
 
-target_compile_definitions(v8_libbase PRIVATE $<${is-win}:UNICODE> $<${is-msvc}:_HAS_EXCEPTIONS=0>)
-target_compile_options(v8_libbase PRIVATE ${disable-exceptions})
+target_compile_definitions(v8_libbase PRIVATE $<${is-win}:UNICODE>)
 target_include_directories(v8_libbase PRIVATE ${D})
+target_config(v8_libbase ${D} noexceptions)
 target_link_libraries(v8_libbase
   PRIVATE
     Threads::Threads
