@@ -458,12 +458,7 @@ add_library(
   ${D}/src/interpreter/interpreter-intrinsics-generator.cc
 )
 
-target_include_directories(
-  v8_initializers
-  PRIVATE ${D} ${PROJECT_BINARY_DIR}
-)
-
-target_config(v8_initializers ${D} noexceptions)
+target_config(v8_initializers ${D} noexceptions internal_config_base)
 
 target_link_libraries(v8_initializers PRIVATE v8_torque_generated v8-bytecodes-builtin-list)
 
