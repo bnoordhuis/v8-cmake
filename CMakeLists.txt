@@ -605,14 +605,12 @@ target_sources(v8_libplatform
     ${D}/src/libplatform/tracing/tracing-controller.cc
     ${D}/src/libplatform/worker-thread.cc)
 
-target_compile_definitions(v8_libplatform PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
-target_compile_options(v8_libplatform PRIVATE ${disable-exceptions})
 target_include_directories(
   v8_libplatform
   PUBLIC ${D}/include
   PRIVATE ${D}
 )
-
+target_config(v8_libplatform ${D} noexceptions)
 target_link_libraries(v8_libplatform PRIVATE v8_libbase)
 
 #
