@@ -124,12 +124,20 @@ config_defines(features PRIVATE
   V8_ARRAY_BUFFER_EXTENSION
   )
 
+# see v8/BUILD.gn for all the pieces
 config_defines(toolchain PRIVATE ${v8_defines})
 
 config_cflags(exceptions PRIVATE ${enable-exceptions})
 
 config_cflags(noexceptions PRIVATE ${disable-exceptions})
 config_defines(noexceptions PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
+
+# internal_config is a very shallow wrapper around internal_config_base
+# so we will use internal_config_base everywhere
+
+config_include_dirs(internal_config_base PRIVATE . include ${PROJECT_BINARY_DIR})
+
+config_include_dirs(external_config PRIVATE include ${PROJECT_BINARY_DIR}/include)
 
 #
 # d8
@@ -189,14 +197,13 @@ set(i18n-sources
   ${D}/src/strings/char-predicates.cc)
 
 target_sources(v8-i18n-support PRIVATE ${i18n-sources})
-target_config(v8-i18n-support ${D} noexceptions)
+target_config(v8-i18n-support ${D} noexceptions internal_config_base)
 target_link_libraries(v8-i18n-support PRIVATE v8_torque_generated)
 
 target_include_directories(v8-i18n-support
   PRIVATE
-    ${D}
     ${D}/src/objects
-    ${D}/include)
+    )
 
 file(GLOB api-sources CONFIGURE_DEPENDS v8/src/api/*.cc)
 file(GLOB asmjs-sources CONFIGURE_DEPENDS v8/src/asmjs/*.cc)
