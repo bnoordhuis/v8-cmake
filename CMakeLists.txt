@@ -171,7 +171,7 @@ target_link_libraries(d8
 add_library(v8-i18n-support OBJECT)
 set_property(TARGET v8-i18n-support PROPERTY EXCLUDE_FROM_ALL ON)
 
-list(APPEND i18n-sources
+set(i18n-sources
   ${D}/src/builtins/builtins-intl.cc
   ${D}/src/objects/intl-objects.cc
   ${D}/src/objects/js-break-iterator.cc
@@ -189,8 +189,7 @@ list(APPEND i18n-sources
   ${D}/src/strings/char-predicates.cc)
 
 target_sources(v8-i18n-support PRIVATE ${i18n-sources})
-target_compile_definitions(v8-i18n-support PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
-target_compile_options(v8-i18n-support PRIVATE ${disable-exceptions})
+target_config(v8-i18n-support ${D} noexceptions)
 target_link_libraries(v8-i18n-support PRIVATE v8_torque_generated)
 
 target_include_directories(v8-i18n-support
