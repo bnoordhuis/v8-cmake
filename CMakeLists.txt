@@ -466,12 +466,14 @@ target_link_libraries(v8_initializers PRIVATE v8_torque_generated v8-bytecodes-b
 # v8_snapshot
 #
 
+set(snapshot-dir ${PROJECT_BINARY_DIR}/mksnapshot-generated/src)
+
 # Note: v8_use_external_startup_data not currently supported.
 # Note: v8_use_multi_snapshots not currently supported.
 add_library(
   v8_snapshot STATIC
-  ${PROJECT_BINARY_DIR}/embedded.S
-  ${PROJECT_BINARY_DIR}/snapshot.cc
+  ${snapshot-dir}/embedded.S
+  ${snapshot-dir}/snapshot.cc
   ${D}/src/init/setup-isolate-deserialize.cc
 )
 
@@ -485,8 +487,8 @@ target_link_libraries(v8_snapshot
 add_custom_command(
   COMMAND
     mksnapshot
-    --embedded_src ${PROJECT_BINARY_DIR}/embedded.S
-    --startup_src ${PROJECT_BINARY_DIR}/snapshot.cc
+    --embedded_src ${snapshot-dir}/embedded.S
+    --startup_src ${snapshot-dir}/snapshot.cc
     $<${is-x64}:--target_arch=x64>
     $<$<PLATFORM_ID:Darwin>:--target_os=mac>
     $<$<PLATFORM_ID:Linux>:--target_os=linux>
@@ -494,9 +496,15 @@ add_custom_command(
     --turbo_instruction_scheduling
   DEPENDS
     mksnapshot
+    ${snapshot-dir}
   OUTPUT
-    ${PROJECT_BINARY_DIR}/embedded.S
-    ${PROJECT_BINARY_DIR}/snapshot.cc
+    ${snapshot-dir}/embedded.S
+    ${snapshot-dir}/snapshot.cc
+)
+
+add_custom_command(
+  COMMAND ${CMAKE_COMMAND} -E make_directory ${snapshot-dir}
+  OUTPUT ${snapshot-dir}
 )
 
 #
