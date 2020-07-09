@@ -744,12 +744,7 @@ add_library(
   ${torque-outputs}
   ${torque_outputs})
 
-target_include_directories(v8_torque_generated
-  PUBLIC
-    ${PROJECT_BINARY_DIR}
-    ${D}/include
-    ${D})
-target_config(v8_torque_generated ${D} noexceptions)
+target_config(v8_torque_generated ${D} noexceptions internal_config_base)
 target_link_libraries(v8_torque_generated PRIVATE v8-bytecodes-builtin-list)
 
 add_custom_command(
@@ -781,8 +776,7 @@ file(GLOB torque-program-sources CONFIGURE_DEPENDS ${D}/src/torque/*.cc)
 
 add_executable(torque)
 target_sources(torque PRIVATE ${torque-program-sources})
-target_include_directories(torque PRIVATE ${D})
-target_config(torque ${D} exceptions)
+target_config(torque ${D} exceptions internal_config_base)
 target_link_libraries(torque PRIVATE v8_libbase)
 
 #
@@ -802,8 +796,7 @@ add_executable(mksnapshot
   ${D}/src/snapshot/snapshot-empty.cc
 )
 
-target_include_directories(mksnapshot PRIVATE ${D})
-target_config(mksnapshot ${D} noexceptions)
+target_config(mksnapshot ${D} noexceptions internal_config_base)
 target_link_libraries(mksnapshot
   PRIVATE
     v8_libbase
