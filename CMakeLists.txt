@@ -475,8 +475,7 @@ add_library(
   ${D}/src/init/setup-isolate-deserialize.cc
 )
 
-target_include_directories(v8_snapshot PRIVATE ${D})
-target_config(v8_snapshot ${D} noexceptions)
+target_config(v8_snapshot ${D} noexceptions internal_config_base)
 target_link_libraries(v8_snapshot
   PRIVATE
     v8_torque_generated
