@@ -549,11 +549,9 @@ target_compile_features(v8_inspector PUBLIC cxx_std_17)
 target_include_directories(v8_inspector
   PRIVATE
     ${PROJECT_BINARY_DIR}/inspector
-    ${D}
-    ${D}/include
     ${D}/third_party/googletest/src/googlemock/include
     ${D}/third_party/googletest/src/googletest/include)
-target_config(v8_inspector ${D} noexceptions)
+target_config(v8_inspector ${D} noexceptions internal_config_base)
 target_link_libraries(v8_inspector PRIVATE v8_torque_generated)
 
 file(GLOB inspector-templates
