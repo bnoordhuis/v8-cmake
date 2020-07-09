@@ -679,7 +679,7 @@ add_executable(
   ${D}/src/interpreter/bytecodes.cc
 )
 
-target_include_directories(bytecode_builtins_list_generator PRIVATE ${D})
+target_config(bytecode_builtins_list_generator ${D} internal_config_base)
 target_link_libraries(bytecode_builtins_list_generator v8_libbase)
 
 #
