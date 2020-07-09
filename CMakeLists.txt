@@ -609,9 +609,7 @@ target_link_libraries(v8_libplatform PRIVATE v8_libbase)
 #
 
 add_library(v8_libsampler STATIC ${D}/src/libsampler/sampler.cc)
-target_include_directories(v8_libsampler PRIVATE ${D} ${D}/include)
-target_include_directories(v8_libsampler PRIVATE ${D})
-target_config(v8_libsampler ${D} noexceptions)
+target_config(v8_libsampler ${D} noexceptions internal_config_base)
 target_link_libraries(v8_libsampler PRIVATE v8_libbase)
 
 #
