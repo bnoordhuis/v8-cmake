@@ -793,8 +793,8 @@ file(GLOB torque-program-sources CONFIGURE_DEPENDS ${D}/src/torque/*.cc)
 
 add_executable(torque)
 target_sources(torque PRIVATE ${torque-program-sources})
-target_compile_options(torque PRIVATE ${enable-exceptions})
 target_include_directories(torque PRIVATE ${D})
+target_config(torque ${D} exceptions)
 target_link_libraries(torque PRIVATE v8_libbase)
 
 #
