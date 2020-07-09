@@ -85,8 +85,8 @@ endfunction()
 #
 # Add incldue dirs to a config
 #
-function(config_include_dirs config base vis)
-  #message( "config_include_dirs ${config} ${base} ${dirs} ${ARGN}")
+function(config_include_dirs config vis)
+  #message( "config_include_dirs ${config} ${dirs} ${ARGN}")
   set(_list ${${config}_${vis}_include_dirs} ${ARGN})
   set(${config}_${vis}_include_dirs ${_list} PARENT_SCOPE)
   #message(" ${config}_${vis}_include_dirs ${${config}_${vis}_include_dirs}")

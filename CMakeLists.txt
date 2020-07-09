@@ -601,12 +601,7 @@ target_sources(v8_libplatform
     ${D}/src/libplatform/tracing/tracing-controller.cc
     ${D}/src/libplatform/worker-thread.cc)
 
-target_include_directories(
-  v8_libplatform
-  PUBLIC ${D}/include
-  PRIVATE ${D}
-)
-target_config(v8_libplatform ${D} noexceptions)
+target_config(v8_libplatform ${D} noexceptions internal_config_base)
 target_link_libraries(v8_libplatform PRIVATE v8_libbase)
 
 #
