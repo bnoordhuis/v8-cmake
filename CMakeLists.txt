@@ -814,9 +814,8 @@ add_executable(mksnapshot
   ${D}/src/snapshot/snapshot-empty.cc
 )
 
-target_compile_definitions(mksnapshot PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
-target_compile_options(mksnapshot PRIVATE ${disable-exceptions})
 target_include_directories(mksnapshot PRIVATE ${D})
+target_config(mksnapshot ${D} noexceptions)
 target_link_libraries(mksnapshot
   PRIVATE
     v8_libbase
