@@ -354,14 +354,13 @@ set_property(SOURCE ${D}/src/diagnostics/unwinding-info-win64.cc
 target_include_directories(
   v8_base_without_compiler
   PRIVATE
+    # Does this need to be qualified as BUILD_INTERFACE?
     $<BUILD_INTERFACE:${D}/include>
     $<BUILD_INTERFACE:$<TARGET_PROPERTY:v8-bytecodes-builtin-list,INTERFACE_INCLUDE_DIRECTORIES>>
-    ${D}
     ${D}/third_party/zlib
-    ${PROJECT_BINARY_DIR}
 )
 
-target_config(v8_base_without_compiler ${D} noexceptions)
+target_config(v8_base_without_compiler ${D} noexceptions internal_config_base)
 
 target_link_libraries(
   v8_base_without_compiler
