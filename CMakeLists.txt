@@ -5,7 +5,6 @@ project(V8 LANGUAGES CXX C ASM)
 
 if(MSVC)
   enable_language(ASM_MASM)
-  set_property(SOURCE ${snapshot-dir}/embedded.S PROPERTY LANGUAGE ASM_MASM)
 endif()
 
 list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
@@ -472,6 +471,9 @@ target_link_libraries(v8_initializers PRIVATE v8_torque_generated v8-bytecodes-b
 #
 
 set(snapshot-dir ${PROJECT_BINARY_DIR}/mksnapshot-generated/src)
+if(MSVC)
+  set_property(SOURCE ${snapshot-dir}/embedded.S PROPERTY LANGUAGE ASM_MASM)
+endif()
 
 # Note: v8_use_external_startup_data not currently supported.
 # Note: v8_use_multi_snapshots not currently supported.
