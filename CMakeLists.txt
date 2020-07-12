@@ -19,6 +19,7 @@ include(GNUInstallDirs)
 
 include(CheckPythonModuleExists)
 include(GenerateBuiltinsList)
+include(GNUtils)
 
 check_python_module_exists(PYTHON_HAVE_MARKUPSAFE markupsafe)
 
@@ -61,6 +62,23 @@ string(CONCAT is-x64 $<OR:
 option(V8_ENABLE_CONCURRENT_MARKING "Enable concurrent marking" ON)
 option(V8_ENABLE_I18N "Enable Internationalization support")
 
+#
+# configs - holder for common configuration data
+#
+# GN passes around config objects that have common defines/flags/includes
+# that are common across many components. We emulate these in GNUtils.cmake
+#
+# The most common configs are:
+#   [no]exceptions - [disables]enables exceptions in components
+#   features - global defines relating to the product features.
+#   toolchain - global defines covering what is being used to build
+#
+# We could emulate this directly in cmake by clusters of
+# target_compile_definitions/target_compile_options/target_include_directories
+# but its a lot of typing and misses some of the key functionality
+# (relative vs absolute paths)
+#
+
 set(
   v8_defines
   $<${is-darwin}:V8_HAVE_TARGET_OS>
@@ -71,7 +89,7 @@ set(
   $<${is-win}:V8_TARGET_OS_WIN>
   $<${is-x64}:V8_TARGET_ARCH_X64>
   $<${is-win}:NOMINMAX>
-  $<$<OR:${is-win},${is-x64}>:V8_OS_WINX64>
+  $<$<AND:${is-win},${is-x64}>:V8_OS_WINX64>
   $<$<BOOL:${V8_ENABLE_CONCURRENT_MARKING}>:V8_CONCURRENT_MARKING>
   $<${is-win}:V8_OS_WIN32>
 )
@@ -91,21 +109,63 @@ set(enable-exceptions
   $<$<CXX_COMPILER_ID:GNU>:-fexceptions>)
 
 #
+# features is configuration data for v8 compile-time features
+#
+config_defines(features PRIVATE
+  V8_ARRAY_BUFFER_EXTENSION
+  )
+
+#
+# toolchain is configuration data relative to the current cpu and target cpu
+#
+config_defines(toolchain 
+  PRIVATE 
+  ${v8_defines}
+  $<${is-win}:/wd4245
+    /wd4267
+    /wd4324
+    /wd4701
+    /wd4702
+    /wd4703
+    /wd4709
+    /wd4714
+    /wd4715
+    /wd4718
+    /wd4723
+    /wd4724
+    /wd4800
+  >
+  )
+
+config_cflags(exceptions PRIVATE ${enable-exceptions})
+
+config_cflags(noexceptions PRIVATE ${disable-exceptions})
+config_defines(noexceptions PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
+
+config_include_dirs(internal_config_base PRIVATE . include ${PROJECT_BINARY_DIR})
+
+#
+# Consider making this PUBLIC/INTERFACE/install
+#
+config_include_dirs(external_config PRIVATE include ${PROJECT_BINARY_DIR}/include)
+
+#
 # d8
 #
 
-add_executable(
-  d8
-  $<${is-posix}:${D}/src/d8/d8-posix.cc>
-  $<${is-win}:${D}/src/d8/d8-windows.cc>
-  ${D}/src/d8/async-hooks-wrapper.cc
-  ${D}/src/d8/d8-console.cc
-  ${D}/src/d8/d8-js.cc
-  ${D}/src/d8/d8-platforms.cc
-  ${D}/src/d8/d8.cc)
+add_executable(d8)
+target_relative_sources(d8 ${D} PRIVATE
+  src/d8/async-hooks-wrapper.cc
+  src/d8/d8-console.cc
+  src/d8/d8-js.cc
+  src/d8/d8-platforms.cc
+  src/d8/d8.cc
+)
+target_conditional_relative_sources(d8 ${D} PRIVATE
+  $<${is-posix}:_S_> src/d8/d8-posix.cc
+  $<${is-win}:_S_> src/d8/d8-windows.cc
+  )
 
-target_compile_definitions(d8 PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
-target_compile_options(d8 PRIVATE ${disable-exceptions})
 target_include_directories(d8
   PUBLIC
     $<BUILD_INTERFACE:${D}/include>
@@ -114,6 +174,7 @@ target_include_directories(d8
     $<BUILD_INTERFACE:${D}>
 )
 
+target_config(d8 ${D} noexceptions internal_config_base)
 target_link_libraries(d8
   PRIVATE
     v8_base_without_compiler
@@ -126,33 +187,32 @@ target_link_libraries(d8
 add_library(v8-i18n-support OBJECT)
 set_property(TARGET v8-i18n-support PROPERTY EXCLUDE_FROM_ALL ON)
 
-list(APPEND i18n-sources
-  ${D}/src/builtins/builtins-intl.cc
-  ${D}/src/objects/intl-objects.cc
-  ${D}/src/objects/js-break-iterator.cc
-  ${D}/src/objects/js-collator.cc
-  ${D}/src/objects/js-date-time-format.cc
-  ${D}/src/objects/js-display-names.cc
-  ${D}/src/objects/js-list-format.cc
-  ${D}/src/objects/js-locale.cc
-  ${D}/src/objects/js-number-format.cc
-  ${D}/src/objects/js-plural-rules.cc
-  ${D}/src/objects/js-relative-time-format.cc
-  ${D}/src/objects/js-segment-iterator.cc
-  ${D}/src/objects/js-segmenter.cc
-  ${D}/src/runtime/runtime-intl.cc
-  ${D}/src/strings/char-predicates.cc)
+set(i18n-sources
+  src/builtins/builtins-intl.cc
+  src/objects/intl-objects.cc
+  src/objects/js-break-iterator.cc
+  src/objects/js-collator.cc
+  src/objects/js-date-time-format.cc
+  src/objects/js-display-names.cc
+  src/objects/js-list-format.cc
+  src/objects/js-locale.cc
+  src/objects/js-number-format.cc
+  src/objects/js-plural-rules.cc
+  src/objects/js-relative-time-format.cc
+  src/objects/js-segment-iterator.cc
+  src/objects/js-segmenter.cc
+  src/runtime/runtime-intl.cc
+  src/strings/char-predicates.cc
+  )
 
-target_sources(v8-i18n-support PRIVATE ${i18n-sources})
-target_compile_definitions(v8-i18n-support PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
-target_compile_options(v8-i18n-support PRIVATE ${disable-exceptions})
+target_relative_sources(v8-i18n-support ${D} PRIVATE ${i18n-sources})
+target_config(v8-i18n-support ${D} noexceptions internal_config_base)
 target_link_libraries(v8-i18n-support PRIVATE v8_torque_generated)
 
 target_include_directories(v8-i18n-support
   PRIVATE
-    ${D}
     ${D}/src/objects
-    ${D}/include)
+    )
 
 file(GLOB api-sources CONFIGURE_DEPENDS v8/src/api/*.cc)
 file(GLOB asmjs-sources CONFIGURE_DEPENDS v8/src/asmjs/*.cc)
@@ -187,6 +247,7 @@ list(REMOVE_ITEM builtin-sources
   ${D}/src/builtins/builtins-intl.cc)
 list(REMOVE_ITEM diagnostic-sources
   ${D}/src/diagnostics/unwinding-info-win64.cc)
+prepend_base_directory(${D} i18n-sources)
 list(REMOVE_ITEM object-sources ${i18n-sources})
 list(REMOVE_ITEM regexp-sources ${D}/src/regexp/gen-regexp-special-case.cc)
 list(REMOVE_ITEM runtime-sources
