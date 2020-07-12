@@ -121,20 +121,23 @@ config_defines(features PRIVATE
 config_defines(toolchain 
   PRIVATE 
   ${v8_defines}
-  $<${is-win}:/wd4245
-    /wd4267
-    /wd4324
-    /wd4701
-    /wd4702
-    /wd4703
-    /wd4709
-    /wd4714
-    /wd4715
-    /wd4718
-    /wd4723
-    /wd4724
-    /wd4800
-  >
+  )
+config_cflags(toolchain
+  PRIVATE
+    $<${is-win}:/wd4245
+      /wd4267
+      /wd4324
+      /wd4701
+      /wd4702
+      /wd4703
+      /wd4709
+      /wd4714
+      /wd4715
+      /wd4718
+      /wd4723
+      /wd4724
+      /wd4800
+    >
   )
 
 config_cflags(exceptions PRIVATE ${enable-exceptions})
