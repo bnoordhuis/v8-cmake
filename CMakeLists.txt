@@ -145,12 +145,19 @@ config_cflags(exceptions PRIVATE ${enable-exceptions})
 config_cflags(noexceptions PRIVATE ${disable-exceptions})
 config_defines(noexceptions PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 
-config_include_dirs(internal_config_base PRIVATE . include ${PROJECT_BINARY_DIR})
+config_include_dirs(internal_config_base ${D} PRIVATE
+  .
+  include
+  ${PROJECT_BINARY_DIR}
+  )
 
 #
 # Consider making this PUBLIC/INTERFACE/install
 #
-config_include_dirs(external_config PRIVATE include ${PROJECT_BINARY_DIR}/include)
+config_include_dirs(external_config ${D} PRIVATE
+  include
+  ${PROJECT_BINARY_DIR}/include
+  )
 
 #
 # d8

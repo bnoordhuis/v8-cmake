@@ -90,9 +90,10 @@ endfunction()
 #
 # Add include dirs to a named config
 #
-function(config_include_dirs config vis)
+function(config_include_dirs config base vis)
   #message( "config_include_dirs ${config} ${dirs} ${ARGN}")
   set(_list ${${config}_${vis}_include_dirs} ${ARGN})
+  prepend_base_directory(${base} _list)
   set(${config}_${vis}_include_dirs ${_list} PARENT_SCOPE)
   #message(" ${config}_${vis}_include_dirs ${${config}_${vis}_include_dirs}")
   set(${config}_defined 1 PARENT_SCOPE)
