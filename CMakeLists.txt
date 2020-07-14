@@ -5,7 +5,6 @@ project(V8 LANGUAGES CXX C ASM)
 
 if(MSVC)
   enable_language(ASM_MASM)
-  set_property(SOURCE ${PROJECT_BINARY_DIR}/embedded.S PROPERTY LANGUAGE ASM_MASM)
 endif()
 
 list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
@@ -19,6 +18,8 @@ include(GNUInstallDirs)
 
 include(CheckPythonModuleExists)
 include(GenerateBuiltinsList)
+
+include(GNUtils)
 
 check_python_module_exists(PYTHON_HAVE_MARKUPSAFE markupsafe)
 
@@ -50,9 +51,13 @@ set(is-arm64 0)
 set(is-ia32 0)
 set(is-mips 0)
 set(is-mips64 0)
+set(is-mipsel 0)
+set(is-mips64el 0)
 set(is-ppc 0)
+set(is-ppc64 0)
 
 set(is-s390 $<STREQUAL:${CMAKE_SYSTEM_PROCESSOR},S390>)
+set(is-s390x 0)
 string(CONCAT is-x64 $<OR:
   $<STREQUAL:${CMAKE_SYSTEM_PROCESSOR},AMD64>,
   $<STREQUAL:${CMAKE_SYSTEM_PROCESSOR},x86_64>
@@ -60,6 +65,30 @@ string(CONCAT is-x64 $<OR:
 
 option(V8_ENABLE_CONCURRENT_MARKING "Enable concurrent marking" ON)
 option(V8_ENABLE_I18N "Enable Internationalization support")
+
+# Note: This is not a "component build
+string(CONCAT is-clang $<OR:
+  $<CXX_COMPILER_ID:AppleClang>,
+  $<CXX_COMPILER_ID:Clang>
+  >)
+string(REGEX REPLACE "[\r\n \t]+" "" is-clang ${is-clang})
+
+#
+# configs - holder for common configuration items
+#
+# GN passes around config objects that have common defines/flags/includes
+# that are common across many components. We emulate these in GNUtils.cmake
+#
+# The most common configs are:
+#   [no]exceptions - [disables]enables exceptions in components
+#   features - global defines relating to the product features.
+#   toolchain - global defines covering what is being used to build
+#
+# We could emulate this directly in cmake by clusters of
+# target_compile_definitions/target_compile_options/target_include_directories
+# but its a lot of typing and misses some of the key functionality
+# (relative vs absolute paths)
+#
 
 set(
   v8_defines
@@ -71,7 +100,7 @@ set(
   $<${is-win}:V8_TARGET_OS_WIN>
   $<${is-x64}:V8_TARGET_ARCH_X64>
   $<${is-win}:NOMINMAX>
-  $<$<OR:${is-win},${is-x64}>:V8_OS_WINX64>
+  $<$<AND:${is-win},${is-x64}>:V8_OS_WINX64>
   $<$<BOOL:${V8_ENABLE_CONCURRENT_MARKING}>:V8_CONCURRENT_MARKING>
   $<${is-win}:V8_OS_WIN32>
 )
@@ -90,22 +119,44 @@ set(enable-exceptions
   $<$<CXX_COMPILER_ID:Clang>:-fexceptions>
   $<$<CXX_COMPILER_ID:GNU>:-fexceptions>)
 
+config_defines(features PRIVATE
+  V8_ARRAY_BUFFER_EXTENSION
+  )
+
+# see v8/BUILD.gn for all the pieces
+config_defines(toolchain PRIVATE ${v8_defines})
+
+config_cflags(exceptions PRIVATE ${enable-exceptions})
+
+config_cflags(noexceptions PRIVATE ${disable-exceptions})
+config_defines(noexceptions PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
+
+# internal_config is a very shallow wrapper around internal_config_base
+# so we will use internal_config_base everywhere
+
+config_include_dirs(internal_config_base PRIVATE . include ${PROJECT_BINARY_DIR})
+
+config_include_dirs(external_config PRIVATE include ${PROJECT_BINARY_DIR}/include)
+
 #
 # d8
 #
 
-add_executable(
-  d8
-  $<${is-posix}:${D}/src/d8/d8-posix.cc>
-  $<${is-win}:${D}/src/d8/d8-windows.cc>
-  ${D}/src/d8/async-hooks-wrapper.cc
-  ${D}/src/d8/d8-console.cc
-  ${D}/src/d8/d8-js.cc
-  ${D}/src/d8/d8-platforms.cc
-  ${D}/src/d8/d8.cc)
+add_executable(d8)
+target_relative_sources(d8 ${D} PRIVATE
+  src/d8/async-hooks-wrapper.cc
+  src/d8/d8-console.cc
+  src/d8/d8-js.cc
+  src/d8/d8-platforms.cc
+  src/d8/d8.cc
+)
+target_conditional_relative_sources(d8 ${D} PRIVATE
+  $<${is-posix}:_S_> src/d8/d8-posix.cc
+  )
+target_conditional_relative_sources(d8 ${D} PRIVATE
+  $<${is-win}:_S_> src/d8/d8-windows.cc
+  )
 
-target_compile_definitions(d8 PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
-target_compile_options(d8 PRIVATE ${disable-exceptions})
 target_include_directories(d8
   PUBLIC
     $<BUILD_INTERFACE:${D}/include>
@@ -114,6 +165,7 @@ target_include_directories(d8
     $<BUILD_INTERFACE:${D}>
 )
 
+target_config(d8 ${D} noexceptions)
 target_link_libraries(d8
   PRIVATE
     v8_base_without_compiler
@@ -126,7 +178,7 @@ target_link_libraries(d8
 add_library(v8-i18n-support OBJECT)
 set_property(TARGET v8-i18n-support PROPERTY EXCLUDE_FROM_ALL ON)
 
-list(APPEND i18n-sources
+set(i18n-sources
   ${D}/src/builtins/builtins-intl.cc
   ${D}/src/objects/intl-objects.cc
   ${D}/src/objects/js-break-iterator.cc
@@ -144,15 +196,13 @@ list(APPEND i18n-sources
   ${D}/src/strings/char-predicates.cc)
 
 target_sources(v8-i18n-support PRIVATE ${i18n-sources})
-target_compile_definitions(v8-i18n-support PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
-target_compile_options(v8-i18n-support PRIVATE ${disable-exceptions})
+target_config(v8-i18n-support ${D} noexceptions internal_config_base)
 target_link_libraries(v8-i18n-support PRIVATE v8_torque_generated)
 
 target_include_directories(v8-i18n-support
   PRIVATE
-    ${D}
     ${D}/src/objects
-    ${D}/include)
+    )
 
 file(GLOB api-sources CONFIGURE_DEPENDS v8/src/api/*.cc)
 file(GLOB asmjs-sources CONFIGURE_DEPENDS v8/src/asmjs/*.cc)
@@ -300,18 +350,16 @@ set_property(SOURCE ${D}/src/diagnostics/unwinding-info-win64.cc
       UNICODE
       _WIN32_WINNT=${windows-version})
 
-target_compile_definitions(v8_base_without_compiler PRIVATE ${v8_defines} $<${is-msvc}:_HAS_EXCEPTIONS=0>)
-target_compile_options(v8_base_without_compiler PRIVATE ${disable-exceptions})
-
 target_include_directories(
   v8_base_without_compiler
   PRIVATE
+    # Does this need to be qualified as BUILD_INTERFACE?
     $<BUILD_INTERFACE:${D}/include>
     $<BUILD_INTERFACE:$<TARGET_PROPERTY:v8-bytecodes-builtin-list,INTERFACE_INCLUDE_DIRECTORIES>>
-    ${D}
     ${D}/third_party/zlib
-    ${PROJECT_BINARY_DIR}
 )
+
+target_config(v8_base_without_compiler ${D} noexceptions internal_config_base)
 
 target_link_libraries(
   v8_base_without_compiler
@@ -332,16 +380,13 @@ list(FILTER compiler-sources EXCLUDE REGEX ".*backend/.*/.*[.]cc$")
 
 add_library(v8_compiler STATIC)
 target_sources(v8_compiler PRIVATE ${compiler-sources})
-target_compile_definitions(v8_compiler PRIVATE ${v8_defines} $<${is-msvc}:_HAS_EXCEPTIONS=0>)
-target_compile_options(v8_compiler PRIVATE ${disable-exceptions})
+target_config(v8_compiler ${D} noexceptions internal_config_base)
 
 target_include_directories(
   v8_compiler
   PUBLIC
     ${PROJECT_BINARY_DIR}
   PRIVATE
-    ${PROJECT_BINARY_DIR}
-    ${D}
     $<BUILD_INTERFACE:$<TARGET_PROPERTY:v8-bytecodes-builtin-list,INTERFACE_INCLUDE_DIRECTORIES>>
 )
 
@@ -359,66 +404,65 @@ target_link_libraries(v8_compiler
 #
 
 add_library(
-  v8_initializers STATIC
-  $<${is-arm64}:${D}/src/builtins/arm64/builtins-arm64.cc>
-  $<${is-arm}:${D}/src/builtins/arm/builtins-arm.cc>
-  $<${is-ia32}:${D}/src/builtins/ia32/builtins-ia32.cc>
-  $<${is-mips64}:${D}/src/builtins/mips64/builtins-mips64.cc>
-  $<${is-mips}:${D}/src/builtins/mips/builtins-mips.cc>
-  $<${is-ppc}:${D}/src/builtins/ppc/builtins-ppc.cc>
-  $<${is-s390}:${D}/src/builtins/s390/builtins-s390.cc>
-  $<${is-x64}:${D}/src/builtins/x64/builtins-x64.cc>
-  $<$<BOOL:${V8_ENABLE_I18N}>:${D}/src/builtins/builtins-intl-gen.cc>
-  ${D}/src/builtins/builtins-array-gen.cc
-  ${D}/src/builtins/builtins-async-function-gen.cc
-  ${D}/src/builtins/builtins-async-gen.cc
-  ${D}/src/builtins/builtins-async-generator-gen.cc
-  ${D}/src/builtins/builtins-async-iterator-gen.cc
-  ${D}/src/builtins/builtins-bigint-gen.cc
-  ${D}/src/builtins/builtins-call-gen.cc
-  ${D}/src/builtins/builtins-collections-gen.cc
-  ${D}/src/builtins/builtins-constructor-gen.cc
-  ${D}/src/builtins/builtins-conversion-gen.cc
-  ${D}/src/builtins/builtins-date-gen.cc
-  ${D}/src/builtins/builtins-debug-gen.cc
-  ${D}/src/builtins/builtins-generator-gen.cc
-  ${D}/src/builtins/builtins-global-gen.cc
-  ${D}/src/builtins/builtins-handler-gen.cc
-  ${D}/src/builtins/builtins-ic-gen.cc
-  ${D}/src/builtins/builtins-internal-gen.cc
-  ${D}/src/builtins/builtins-interpreter-gen.cc
-  ${D}/src/builtins/builtins-iterator-gen.cc
-  ${D}/src/builtins/builtins-lazy-gen.cc
-  ${D}/src/builtins/builtins-microtask-queue-gen.cc
-  ${D}/src/builtins/builtins-number-gen.cc
-  ${D}/src/builtins/builtins-object-gen.cc
-  ${D}/src/builtins/builtins-promise-gen.cc
-  ${D}/src/builtins/builtins-proxy-gen.cc
-  ${D}/src/builtins/builtins-regexp-gen.cc
-  ${D}/src/builtins/builtins-sharedarraybuffer-gen.cc
-  ${D}/src/builtins/builtins-string-gen.cc
-  ${D}/src/builtins/builtins-typed-array-gen.cc
-  ${D}/src/builtins/builtins-wasm-gen.cc
-  ${D}/src/builtins/growable-fixed-array-gen.cc
-  ${D}/src/builtins/setup-builtins-internal.cc
-  ${D}/src/codegen/code-stub-assembler.cc
-  ${D}/src/heap/setup-heap-internal.cc
-  ${D}/src/ic/accessor-assembler.cc
-  ${D}/src/ic/binary-op-assembler.cc
-  ${D}/src/ic/keyed-store-generic.cc
-  ${D}/src/ic/unary-op-assembler.cc
-  ${D}/src/interpreter/interpreter-assembler.cc
-  ${D}/src/interpreter/interpreter-generator.cc
-  ${D}/src/interpreter/interpreter-intrinsics-generator.cc
+  v8_initializers STATIC )
+
+target_conditional_relative_sources(v8_initializers ${D} PRIVATE
+  $<${is-arm64}:_S_> src/builtins/arm64/builtins-arm64.cc
+  $<${is-arm}:_S_> src/builtins/arm/builtins-arm.cc
+  $<${is-ia32}:_S_> src/builtins/ia32/builtins-ia32.cc
+  $<${is-mips64}:_S_> src/builtins/mips64/builtins-mips64.cc
+  $<${is-mips}:_S_> src/builtins/mips/builtins-mips.cc
+  $<${is-ppc}:_S_> src/builtins/ppc/builtins-ppc.cc
+  $<${is-s390}:_S_> src/builtins/s390/builtins-s390.cc
+  $<${is-x64}:_S_> src/builtins/x64/builtins-x64.cc
+  $<$<BOOL:${V8_ENABLE_I18N}>:_S_> src/builtins/builtins-intl-gen.cc
 )
 
-target_compile_definitions(v8_initializers PRIVATE ${v8_defines} $<${is-msvc}:_HAS_EXCEPTIONS=0>)
-target_compile_options(v8_initializers PRIVATE ${disable-exceptions})
-
-target_include_directories(
-  v8_initializers
-  PRIVATE ${D} ${PROJECT_BINARY_DIR}
+target_relative_sources(v8_initializers ${D} PRIVATE
+  src/builtins/builtins-array-gen.cc
+  src/builtins/builtins-async-function-gen.cc
+  src/builtins/builtins-async-gen.cc
+  src/builtins/builtins-async-generator-gen.cc
+  src/builtins/builtins-async-iterator-gen.cc
+  src/builtins/builtins-bigint-gen.cc
+  src/builtins/builtins-call-gen.cc
+  src/builtins/builtins-collections-gen.cc
+  src/builtins/builtins-constructor-gen.cc
+  src/builtins/builtins-conversion-gen.cc
+  src/builtins/builtins-date-gen.cc
+  src/builtins/builtins-debug-gen.cc
+  src/builtins/builtins-generator-gen.cc
+  src/builtins/builtins-global-gen.cc
+  src/builtins/builtins-handler-gen.cc
+  src/builtins/builtins-ic-gen.cc
+  src/builtins/builtins-internal-gen.cc
+  src/builtins/builtins-interpreter-gen.cc
+  src/builtins/builtins-iterator-gen.cc
+  src/builtins/builtins-lazy-gen.cc
+  src/builtins/builtins-microtask-queue-gen.cc
+  src/builtins/builtins-number-gen.cc
+  src/builtins/builtins-object-gen.cc
+  src/builtins/builtins-promise-gen.cc
+  src/builtins/builtins-proxy-gen.cc
+  src/builtins/builtins-regexp-gen.cc
+  src/builtins/builtins-sharedarraybuffer-gen.cc
+  src/builtins/builtins-string-gen.cc
+  src/builtins/builtins-typed-array-gen.cc
+  src/builtins/builtins-wasm-gen.cc
+  src/builtins/growable-fixed-array-gen.cc
+  src/builtins/setup-builtins-internal.cc
+  src/codegen/code-stub-assembler.cc
+  src/heap/setup-heap-internal.cc
+  src/ic/accessor-assembler.cc
+  src/ic/binary-op-assembler.cc
+  src/ic/keyed-store-generic.cc
+  src/ic/unary-op-assembler.cc
+  src/interpreter/interpreter-assembler.cc
+  src/interpreter/interpreter-generator.cc
+  src/interpreter/interpreter-intrinsics-generator.cc
 )
+
+target_config(v8_initializers ${D} noexceptions internal_config_base)
 
 target_link_libraries(v8_initializers PRIVATE v8_torque_generated v8-bytecodes-builtin-list)
 
@@ -426,18 +470,21 @@ target_link_libraries(v8_initializers PRIVATE v8_torque_generated v8-bytecodes-b
 # v8_snapshot
 #
 
+set(snapshot-dir ${PROJECT_BINARY_DIR}/mksnapshot-generated/src)
+if(MSVC)
+  set_property(SOURCE ${snapshot-dir}/embedded.S PROPERTY LANGUAGE ASM_MASM)
+endif()
+
 # Note: v8_use_external_startup_data not currently supported.
 # Note: v8_use_multi_snapshots not currently supported.
 add_library(
   v8_snapshot STATIC
-  ${PROJECT_BINARY_DIR}/embedded.S
-  ${PROJECT_BINARY_DIR}/snapshot.cc
+  ${snapshot-dir}/embedded.S
+  ${snapshot-dir}/snapshot.cc
   ${D}/src/init/setup-isolate-deserialize.cc
 )
 
-target_compile_definitions(v8_snapshot PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
-target_compile_options(v8_snapshot PRIVATE ${disable-exceptions})
-target_include_directories(v8_snapshot PRIVATE ${D})
+target_config(v8_snapshot ${D} noexceptions internal_config_base)
 target_link_libraries(v8_snapshot
   PRIVATE
     v8_torque_generated
@@ -447,8 +494,8 @@ target_link_libraries(v8_snapshot
 add_custom_command(
   COMMAND
     mksnapshot
-    --embedded_src ${PROJECT_BINARY_DIR}/embedded.S
-    --startup_src ${PROJECT_BINARY_DIR}/snapshot.cc
+    --embedded_src ${snapshot-dir}/embedded.S
+    --startup_src ${snapshot-dir}/snapshot.cc
     $<${is-x64}:--target_arch=x64>
     $<$<PLATFORM_ID:Darwin>:--target_os=mac>
     $<$<PLATFORM_ID:Linux>:--target_os=linux>
@@ -456,9 +503,15 @@ add_custom_command(
     --turbo_instruction_scheduling
   DEPENDS
     mksnapshot
+    ${snapshot-dir}
   OUTPUT
-    ${PROJECT_BINARY_DIR}/embedded.S
-    ${PROJECT_BINARY_DIR}/snapshot.cc
+    ${snapshot-dir}/embedded.S
+    ${snapshot-dir}/snapshot.cc
+)
+
+add_custom_command(
+  COMMAND ${CMAKE_COMMAND} -E make_directory ${snapshot-dir}
+  OUTPUT ${snapshot-dir}
 )
 
 #
@@ -507,17 +560,13 @@ add_library(v8_inspector STATIC
   ${inspector_files})
 
 target_compile_features(v8_inspector PUBLIC cxx_std_17)
-target_compile_options(v8_inspector PRIVATE ${disable-exceptions})
-target_compile_definitions(v8_inspector PUBLIC $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 
 target_include_directories(v8_inspector
   PRIVATE
     ${PROJECT_BINARY_DIR}/inspector
-    ${D}
-    ${D}/include
     ${D}/third_party/googletest/src/googlemock/include
     ${D}/third_party/googletest/src/googletest/include)
-
+target_config(v8_inspector ${D} noexceptions internal_config_base)
 target_link_libraries(v8_inspector PRIVATE v8_torque_generated)
 
 file(GLOB inspector-templates
@@ -552,29 +601,23 @@ add_custom_command(
 #
 
 add_library(v8_libplatform STATIC)
-target_sources(v8_libplatform
+target_relative_sources(v8_libplatform ${D}
   PRIVATE
-    ${D}/src/libplatform/default-foreground-task-runner.cc
-    ${D}/src/libplatform/default-job.cc
-    ${D}/src/libplatform/default-platform.cc
-    ${D}/src/libplatform/default-worker-threads-task-runner.cc
-    ${D}/src/libplatform/delayed-task-queue.cc
-    ${D}/src/libplatform/task-queue.cc
-    ${D}/src/libplatform/tracing/trace-buffer.cc
-    ${D}/src/libplatform/tracing/trace-config.cc
-    ${D}/src/libplatform/tracing/trace-object.cc
-    ${D}/src/libplatform/tracing/trace-writer.cc
-    ${D}/src/libplatform/tracing/tracing-controller.cc
-    ${D}/src/libplatform/worker-thread.cc)
+    src/libplatform/default-foreground-task-runner.cc
+    src/libplatform/default-job.cc
+    src/libplatform/default-platform.cc
+    src/libplatform/default-worker-threads-task-runner.cc
+    src/libplatform/delayed-task-queue.cc
+    src/libplatform/task-queue.cc
+    src/libplatform/tracing/trace-buffer.cc
+    src/libplatform/tracing/trace-config.cc
+    src/libplatform/tracing/trace-object.cc
+    src/libplatform/tracing/trace-writer.cc
+    src/libplatform/tracing/tracing-controller.cc
+    src/libplatform/worker-thread.cc
+  )
 
-target_compile_definitions(v8_libplatform PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
-target_compile_options(v8_libplatform PRIVATE ${disable-exceptions})
-target_include_directories(
-  v8_libplatform
-  PUBLIC ${D}/include
-  PRIVATE ${D}
-)
-
+target_config(v8_libplatform ${D} noexceptions internal_config_base)
 target_link_libraries(v8_libplatform PRIVATE v8_libbase)
 
 #
@@ -582,54 +625,53 @@ target_link_libraries(v8_libplatform PRIVATE v8_libbase)
 #
 
 add_library(v8_libsampler STATIC ${D}/src/libsampler/sampler.cc)
-target_include_directories(v8_libsampler PRIVATE ${D} ${D}/include)
-target_compile_definitions(v8_libsampler PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
-target_compile_options(v8_libsampler PRIVATE ${disable-exceptions})
-target_include_directories(v8_libsampler PRIVATE ${D})
+target_config(v8_libsampler ${D} noexceptions internal_config_base)
 target_link_libraries(v8_libsampler PRIVATE v8_libbase)
 
 #
 # v8_libbase
 #
 
-add_library(v8_libbase STATIC
-  ${D}/src/base/bits.cc
-  ${D}/src/base/bounded-page-allocator.cc
-  ${D}/src/base/cpu.cc
-  ${D}/src/base/debug/stack_trace.cc
-  ${D}/src/base/division-by-constant.cc
-  ${D}/src/base/file-utils.cc
-  ${D}/src/base/functional.cc
-  ${D}/src/base/ieee754.cc
-  ${D}/src/base/logging.cc
-  ${D}/src/base/once.cc
-  ${D}/src/base/page-allocator.cc
-  ${D}/src/base/platform/condition-variable.cc
-  ${D}/src/base/platform/mutex.cc
-  ${D}/src/base/platform/semaphore.cc
-  ${D}/src/base/platform/time.cc
-  ${D}/src/base/region-allocator.cc
-  ${D}/src/base/sys-info.cc
-  ${D}/src/base/utils/random-number-generator.cc
-  ${D}/src/base/vlq-base64.cc
-  $<$<NOT:$<OR:${is-win},${is-aix}>>:${D}/src/base/platform/platform-posix-time.cc>
-  $<${is-win}:${D}/src/base/platform/platform-win32.cc>
-  $<${is-win}:${D}/src/base/debug/stack_trace_win.cc>
-  $<${is-aix}:${D}/src/base/debug/stack_trace_posix.cc>
-  $<${is-aix}:${D}/src/base/platform/platform-aix.cc>
-  $<${is-darwin}:${D}/src/base/debug/stack_trace_posix.cc>
-  $<${is-darwin}:${D}/src/base/platform/platform-macos.cc>
-  $<${is-linux}:${D}/src/base/debug/stack_trace_posix.cc>
-  $<${is-linux}:${D}/src/base/platform/platform-linux.cc>
-  $<${is-posix}:${D}/src/base/platform/platform-posix.cc>
+add_library(v8_libbase STATIC)
+target_relative_sources(v8_libbase ${D} PRIVATE
+  src/base/bits.cc
+  src/base/bounded-page-allocator.cc
+  src/base/cpu.cc
+  src/base/debug/stack_trace.cc
+  src/base/division-by-constant.cc
+  src/base/file-utils.cc
+  src/base/functional.cc
+  src/base/ieee754.cc
+  src/base/logging.cc
+  src/base/once.cc
+  src/base/page-allocator.cc
+  src/base/platform/condition-variable.cc
+  src/base/platform/mutex.cc
+  src/base/platform/semaphore.cc
+  src/base/platform/time.cc
+  src/base/region-allocator.cc
+  src/base/sys-info.cc
+  src/base/utils/random-number-generator.cc
+  src/base/vlq-base64.cc
+  )
+target_conditional_relative_sources(v8_libbase ${D} PRIVATE
+  $<$<NOT:$<OR:${is-win},${is-aix}>>:_S_> src/base/platform/platform-posix-time.cc
+  $<${is-win}:_S_> src/base/platform/platform-win32.cc
+  $<${is-win}:_S_> src/base/debug/stack_trace_win.cc
+  $<${is-aix}:_S_> src/base/debug/stack_trace_posix.cc
+  $<${is-aix}:_S_> src/base/platform/platform-aix.cc
+  $<${is-darwin}:_S_> src/base/debug/stack_trace_posix.cc
+  $<${is-darwin}:_S_> src/base/platform/platform-macos.cc
+  $<${is-linux}:_S_> src/base/debug/stack_trace_posix.cc
+  $<${is-linux}:_S_> src/base/platform/platform-linux.cc
+  $<${is-posix}:_S_> src/base/platform/platform-posix.cc
 )
 
 set_property(SOURCE ${D}/src/base/utils/random-number-generator.cc
   APPEND PROPERTY COMPILE_DEFINITIONS _CRT_RAND_S)
 
-target_compile_definitions(v8_libbase PRIVATE $<${is-win}:UNICODE> $<${is-msvc}:_HAS_EXCEPTIONS=0>)
-target_compile_options(v8_libbase PRIVATE ${disable-exceptions})
-target_include_directories(v8_libbase PRIVATE ${D})
+target_compile_definitions(v8_libbase PRIVATE $<${is-win}:UNICODE>)
+target_config(v8_libbase ${D} noexceptions internal_config_base)
 target_link_libraries(v8_libbase
   PRIVATE
     Threads::Threads
@@ -642,21 +684,22 @@ target_link_libraries(v8_libbase
 #
 # bytecode_builtins_list_generator
 #
-v8_generate_builtins_list(${PROJECT_BINARY_DIR}/generated)
+v8_generate_builtins_list(${PROJECT_BINARY_DIR})
 
 target_include_directories(v8-bytecodes-builtin-list
   INTERFACE
-    ${PROJECT_BINARY_DIR}/generated)
+    ${PROJECT_BINARY_DIR}
+  )
 
 
-add_executable(
-  bytecode_builtins_list_generator
-  ${D}/src/builtins/generate-bytecodes-builtins-list.cc
-  ${D}/src/interpreter/bytecode-operands.cc
-  ${D}/src/interpreter/bytecodes.cc
+add_executable(bytecode_builtins_list_generator)
+target_relative_sources(bytecode_builtins_list_generator ${D} PRIVATE
+  src/builtins/generate-bytecodes-builtins-list.cc
+  src/interpreter/bytecode-operands.cc
+  src/interpreter/bytecodes.cc
 )
 
-target_include_directories(bytecode_builtins_list_generator PRIVATE ${D})
+target_config(bytecode_builtins_list_generator ${D} internal_config_base)
 target_link_libraries(bytecode_builtins_list_generator v8_libbase)
 
 #
@@ -721,13 +764,7 @@ add_library(
   ${torque-outputs}
   ${torque_outputs})
 
-target_compile_definitions(v8_torque_generated PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
-target_compile_options(v8_torque_generated PRIVATE ${disable-exceptions})
-target_include_directories(v8_torque_generated
-  PUBLIC
-    ${PROJECT_BINARY_DIR}
-    ${D}/include
-    ${D})
+target_config(v8_torque_generated ${D} noexceptions internal_config_base)
 target_link_libraries(v8_torque_generated PRIVATE v8-bytecodes-builtin-list)
 
 add_custom_command(
@@ -761,30 +798,28 @@ file(GLOB torque-program-sources CONFIGURE_DEPENDS ${D}/src/torque/*.cc)
 
 add_executable(torque)
 target_sources(torque PRIVATE ${torque-program-sources})
-target_compile_options(torque PRIVATE ${enable-exceptions})
-target_include_directories(torque PRIVATE ${D})
+target_config(torque ${D} exceptions internal_config_base)
 target_link_libraries(torque PRIVATE v8_libbase)
 
 #
 # mksnapshot
 #
 
-add_executable(mksnapshot
-  ${D}/src/init/setup-isolate-full.cc
-  ${D}/src/snapshot/embedded/embedded-empty.cc
-  ${D}/src/snapshot/embedded/embedded-file-writer.cc
-  ${D}/src/snapshot/embedded/platform-embedded-file-writer-aix.cc
-  ${D}/src/snapshot/embedded/platform-embedded-file-writer-base.cc
-  ${D}/src/snapshot/embedded/platform-embedded-file-writer-generic.cc
-  ${D}/src/snapshot/embedded/platform-embedded-file-writer-mac.cc
-  ${D}/src/snapshot/embedded/platform-embedded-file-writer-win.cc
-  ${D}/src/snapshot/mksnapshot.cc
-  ${D}/src/snapshot/snapshot-empty.cc
+add_executable(mksnapshot)
+target_relative_sources(mksnapshot ${D} PRIVATE
+  src/init/setup-isolate-full.cc
+  src/snapshot/embedded/embedded-empty.cc
+  src/snapshot/embedded/embedded-file-writer.cc
+  src/snapshot/embedded/platform-embedded-file-writer-aix.cc
+  src/snapshot/embedded/platform-embedded-file-writer-base.cc
+  src/snapshot/embedded/platform-embedded-file-writer-generic.cc
+  src/snapshot/embedded/platform-embedded-file-writer-mac.cc
+  src/snapshot/embedded/platform-embedded-file-writer-win.cc
+  src/snapshot/mksnapshot.cc
+  src/snapshot/snapshot-empty.cc
 )
 
-target_compile_definitions(mksnapshot PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
-target_compile_options(mksnapshot PRIVATE ${disable-exceptions})
-target_include_directories(mksnapshot PRIVATE ${D})
+target_config(mksnapshot ${D} noexceptions internal_config_base)
 target_link_libraries(mksnapshot
   PRIVATE
     v8_libbase
