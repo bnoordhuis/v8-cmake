@@ -729,16 +729,20 @@ list(TRANSFORM torque_files PREPEND v8/ OUTPUT_VARIABLE torque_files_abs)
 
 # Note: target v8_compiler depends on ${torque_outputs}. Maybe this should be
 # a source-only dependency.
+
+# this directory shouldn't change as the .tq files rely on finding
+# "torque-generated"
+set(torque_generated_dir ${PROJECT_BINARY_DIR}/torque-generated)
 set(torque_outputs
-  ${PROJECT_BINARY_DIR}/torque-generated/class-debug-readers-tq.cc
-  ${PROJECT_BINARY_DIR}/torque-generated/class-definitions-tq.cc
-  ${PROJECT_BINARY_DIR}/torque-generated/class-verifiers-tq.cc
-  ${PROJECT_BINARY_DIR}/torque-generated/exported-macros-assembler-tq.cc
-  ${PROJECT_BINARY_DIR}/torque-generated/factory-tq.cc
-  ${PROJECT_BINARY_DIR}/torque-generated/factory-tq.inc
-  ${PROJECT_BINARY_DIR}/torque-generated/interface-descriptors-tq.inc
-  ${PROJECT_BINARY_DIR}/torque-generated/objects-printer-tq.cc
-  ${PROJECT_BINARY_DIR}/torque-generated/objects-body-descriptors-tq-inl.inc
+  ${torque_generated_dir}/class-debug-readers-tq.cc
+  ${torque_generated_dir}/class-definitions-tq.cc
+  ${torque_generated_dir}/class-verifiers-tq.cc
+  ${torque_generated_dir}/exported-macros-assembler-tq.cc
+  ${torque_generated_dir}/factory-tq.cc
+  ${torque_generated_dir}/factory-tq.inc
+  ${torque_generated_dir}/interface-descriptors-tq.inc
+  ${torque_generated_dir}/objects-printer-tq.cc
+  ${torque_generated_dir}/objects-body-descriptors-tq-inl.inc
 )
 
 list(TRANSFORM torque_files
@@ -752,11 +756,11 @@ list(TRANSFORM torque-outputs
 )
 
 list(APPEND torque-outputs ${torque-headers})
-list(TRANSFORM torque-outputs PREPEND "${PROJECT_BINARY_DIR}/torque-generated/")
+list(TRANSFORM torque-outputs PREPEND "${torque_generated_dir}/")
 
 foreach(filename IN LISTS torque_files)
   get_filename_component(directory ${filename} DIRECTORY)
-  list(APPEND torque_dirs ${PROJECT_BINARY_DIR}/torque-generated/${directory})
+  list(APPEND torque_dirs ${torque_generated_dir}/${directory})
 endforeach()
 
 list(REMOVE_DUPLICATES torque_dirs)
@@ -781,7 +785,7 @@ target_include_directories(v8_torque_generated
 add_custom_command(
   COMMAND
     torque
-    -o ${PROJECT_BINARY_DIR}/torque-generated
+    -o ${torque_generated_dir}
     -v8-root ${PROJECT_SOURCE_DIR}/v8
     ${torque_files}
   COMMAND
