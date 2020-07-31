@@ -61,8 +61,7 @@ string(CONCAT is-x64 $<OR:
 option(V8_ENABLE_CONCURRENT_MARKING "Enable concurrent marking" ON)
 option(V8_ENABLE_I18N "Enable Internationalization support")
 
-set(
-  v8_defines
+set(v8_defines
   $<${is-darwin}:V8_HAVE_TARGET_OS>
   $<${is-darwin}:V8_TARGET_OS_MACOSX>
   $<${is-linux}:V8_HAVE_TARGET_OS>
@@ -76,14 +75,21 @@ set(
   $<${is-win}:V8_OS_WIN32>
 )
 
-set(disable-exceptions
+set(v8_includes
+  ${PROJECT_SOURCE_DIR}/v8
+  ${PROJECT_SOURCE_DIR}/v8/include
+  ${PROJECT_BINARY_DIR}
+)
+
+set(disable-exceptions-flags
   $<$<CXX_COMPILER_ID:MSVC>:/EHs-c->
   $<$<CXX_COMPILER_ID:AppleClang>:-fno-exceptions>
   $<$<CXX_COMPILER_ID:Clang>:-fno-exceptions>
   $<$<CXX_COMPILER_ID:GNU>:-fno-exceptions>
 )
+set(disable-exceptions-defines $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 
-set(enable-exceptions
+set(enable-exceptions-flags
   $<$<CXX_COMPILER_ID:MSVC>:/EHsc>
   $<$<CXX_COMPILER_ID:AppleClang>:-fexceptions>
   $<$<CXX_COMPILER_ID:Clang>:-fexceptions>
@@ -105,15 +111,15 @@ add_executable(
   v8/src/d8/d8.cc
 )
 
-target_compile_definitions(d8 PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
-target_compile_options(d8 PRIVATE ${disable-exceptions})
+target_compile_definitions(d8 PRIVATE ${v8_defines} ${disable-exceptions-defines})
+target_compile_options(d8 PRIVATE ${disable-exceptions-flags})
 
 target_include_directories(d8
   PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/v8/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
   PRIVATE
-    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/v8>
+    ${v8_includes}
 )
 
 target_link_libraries(d8
@@ -148,15 +154,14 @@ list(APPEND i18n-sources
 )
 
 target_sources(v8-i18n-support PRIVATE ${i18n-sources})
-target_compile_definitions(v8-i18n-support PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
-target_compile_options(v8-i18n-support PRIVATE ${disable-exceptions})
+target_compile_definitions(v8-i18n-support PRIVATE ${v8_defines} ${disable-exceptions-defines})
+target_compile_options(v8-i18n-support PRIVATE ${disable-exceptions-flags})
 target_link_libraries(v8-i18n-support PRIVATE v8_torque_generated)
 
 target_include_directories(v8-i18n-support
   PRIVATE
-    ${PROJECT_SOURCE_DIR}/v8
+    ${v8_includes}
     ${PROJECT_SOURCE_DIR}/v8/src/objects
-    ${PROJECT_SOURCE_DIR}/v8/include
 )
 
 file(GLOB api-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/api/*.cc)
@@ -308,16 +313,14 @@ set_property(SOURCE v8/src/diagnostics/unwinding-info-win64.cc
       _WIN32_WINNT=${windows-version}
 )
 
-target_compile_definitions(v8_base_without_compiler PRIVATE ${v8_defines} $<${is-msvc}:_HAS_EXCEPTIONS=0>)
-target_compile_options(v8_base_without_compiler PRIVATE ${disable-exceptions})
+target_compile_definitions(v8_base_without_compiler PRIVATE ${v8_defines} ${disable-exceptions-defines})
+target_compile_options(v8_base_without_compiler PRIVATE ${disable-exceptions-flags})
 
 target_include_directories(v8_base_without_compiler
   PRIVATE
-    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/v8/include>
+    ${v8_includes}
     $<BUILD_INTERFACE:$<TARGET_PROPERTY:v8-bytecodes-builtin-list,INTERFACE_INCLUDE_DIRECTORIES>>
-    ${PROJECT_SOURCE_DIR}/v8
     ${PROJECT_SOURCE_DIR}/v8/third_party/zlib
-    ${PROJECT_BINARY_DIR}
 )
 
 target_link_libraries(
@@ -341,15 +344,14 @@ list(FILTER compiler-sources EXCLUDE REGEX ".*backend/.*/.*[.]cc$")
 
 add_library(v8_compiler STATIC)
 target_sources(v8_compiler PRIVATE ${compiler-sources})
-target_compile_definitions(v8_compiler PRIVATE ${v8_defines} $<${is-msvc}:_HAS_EXCEPTIONS=0>)
-target_compile_options(v8_compiler PRIVATE ${disable-exceptions})
+target_compile_definitions(v8_compiler PRIVATE ${v8_defines} ${disable-exceptions-defines})
+target_compile_options(v8_compiler PRIVATE ${disable-exceptions-flags})
 
 target_include_directories(v8_compiler
   PUBLIC
     ${PROJECT_BINARY_DIR}
   PRIVATE
-    ${PROJECT_BINARY_DIR}
-    ${PROJECT_SOURCE_DIR}/v8
+    ${v8_includes}
     $<BUILD_INTERFACE:$<TARGET_PROPERTY:v8-bytecodes-builtin-list,INTERFACE_INCLUDE_DIRECTORIES>>
 )
 
@@ -420,13 +422,12 @@ add_library(
   v8/src/interpreter/interpreter-intrinsics-generator.cc
 )
 
-target_compile_definitions(v8_initializers PRIVATE ${v8_defines} $<${is-msvc}:_HAS_EXCEPTIONS=0>)
-target_compile_options(v8_initializers PRIVATE ${disable-exceptions})
+target_compile_definitions(v8_initializers PRIVATE ${v8_defines} ${disable-exceptions-defines})
+target_compile_options(v8_initializers PRIVATE ${disable-exceptions-flags})
 
 target_include_directories(v8_initializers
   PRIVATE
-    ${PROJECT_SOURCE_DIR}/v8
-    ${PROJECT_BINARY_DIR}
+    ${v8_includes}
 )
 
 target_link_libraries(v8_initializers PRIVATE v8_torque_generated v8-bytecodes-builtin-list)
@@ -444,9 +445,9 @@ add_library(
   v8/src/init/setup-isolate-deserialize.cc
 )
 
-target_compile_definitions(v8_snapshot PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
-target_compile_options(v8_snapshot PRIVATE ${disable-exceptions})
-target_include_directories(v8_snapshot PRIVATE ${PROJECT_SOURCE_DIR}/v8)
+target_compile_definitions(v8_snapshot PRIVATE ${v8_defines} ${disable-exceptions-defines})
+target_compile_options(v8_snapshot PRIVATE ${disable-exceptions-flags})
+target_include_directories(v8_snapshot PRIVATE ${v8_includes})
 
 target_link_libraries(v8_snapshot
   PRIVATE
@@ -526,14 +527,13 @@ add_library(v8_inspector STATIC
 )
 
 target_compile_features(v8_inspector PUBLIC cxx_std_17)
-target_compile_options(v8_inspector PRIVATE ${disable-exceptions})
-target_compile_definitions(v8_inspector PUBLIC $<${is-msvc}:_HAS_EXCEPTIONS=0>)
+target_compile_options(v8_inspector PRIVATE ${disable-exceptions-flags})
+target_compile_definitions(v8_inspector PUBLIC ${v8_defines} ${disable-exceptions-defines})
 
 target_include_directories(v8_inspector
   PRIVATE
+    ${v8_includes}
     ${PROJECT_BINARY_DIR}/inspector
-    ${PROJECT_SOURCE_DIR}/v8
-    ${PROJECT_SOURCE_DIR}/v8/include
     ${PROJECT_SOURCE_DIR}/v8/third_party/googletest/src/googlemock/include
     ${PROJECT_SOURCE_DIR}/v8/third_party/googletest/src/googletest/include
 )
@@ -592,13 +592,13 @@ target_sources(v8_libplatform
     v8/src/libplatform/worker-thread.cc
 )
 
-target_compile_definitions(v8_libplatform PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
-target_compile_options(v8_libplatform PRIVATE ${disable-exceptions})
+target_compile_definitions(v8_libplatform PRIVATE ${v8_defines} ${disable-exceptions-defines})
+target_compile_options(v8_libplatform PRIVATE ${disable-exceptions-flags})
 target_include_directories(v8_libplatform
   PUBLIC
     ${PROJECT_SOURCE_DIR}/v8/include
   PRIVATE
-    ${PROJECT_SOURCE_DIR}/v8
+    ${v8_includes}
 )
 
 target_link_libraries(v8_libplatform PRIVATE v8_libbase)
@@ -611,13 +611,12 @@ add_library(v8_libsampler STATIC v8/src/libsampler/sampler.cc)
 
 target_include_directories(v8_libsampler
   PRIVATE
-    ${PROJECT_SOURCE_DIR}/v8
-    ${PROJECT_SOURCE_DIR}/v8/include
+    ${v8_includes}
 )
 
-target_compile_definitions(v8_libsampler PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
-target_compile_options(v8_libsampler PRIVATE ${disable-exceptions})
-target_include_directories(v8_libsampler PRIVATE ${PROJECT_SOURCE_DIR}/v8)
+target_compile_definitions(v8_libsampler PRIVATE ${v8_defines} ${disable-exceptions-defines})
+target_compile_options(v8_libsampler PRIVATE ${disable-exceptions-flags})
+target_include_directories(v8_libsampler PRIVATE ${v8_includes})
 target_link_libraries(v8_libsampler PRIVATE v8_libbase)
 
 #
@@ -660,9 +659,9 @@ set_property(SOURCE v8/src/base/utils/random-number-generator.cc
   APPEND PROPERTY COMPILE_DEFINITIONS _CRT_RAND_S
 )
 
-target_compile_definitions(v8_libbase PRIVATE $<${is-win}:UNICODE> $<${is-msvc}:_HAS_EXCEPTIONS=0>)
-target_compile_options(v8_libbase PRIVATE ${disable-exceptions})
-target_include_directories(v8_libbase PRIVATE ${PROJECT_SOURCE_DIR}/v8)
+target_compile_definitions(v8_libbase PRIVATE $<${is-win}:UNICODE> ${v8_defines} ${disable-exceptions-defines})
+target_compile_options(v8_libbase PRIVATE ${disable-exceptions-flags})
+target_include_directories(v8_libbase PRIVATE ${v8_includes})
 target_link_libraries(v8_libbase
   PRIVATE
     Threads::Threads
@@ -689,9 +688,10 @@ add_executable(
   v8/src/interpreter/bytecodes.cc
 )
 
+target_compile_definitions(bytecode_builtins_list_generator PRIVATE ${v8_defines})
 target_include_directories(bytecode_builtins_list_generator
   PRIVATE
-    ${PROJECT_SOURCE_DIR}/v8
+    ${v8_includes}
 )
 
 target_link_libraries(bytecode_builtins_list_generator v8_libbase)
@@ -771,15 +771,13 @@ add_library(
   ${torque_outputs}
 )
 
-target_compile_definitions(v8_torque_generated PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
-target_compile_options(v8_torque_generated PRIVATE ${disable-exceptions})
+target_compile_definitions(v8_torque_generated PRIVATE ${v8_defines} ${disable-exceptions-defines})
+target_compile_options(v8_torque_generated PRIVATE ${disable-exceptions-flags})
 target_link_libraries(v8_torque_generated PRIVATE v8-bytecodes-builtin-list)
 
 target_include_directories(v8_torque_generated
   PUBLIC
-    ${PROJECT_BINARY_DIR}
-    ${PROJECT_SOURCE_DIR}/v8/include
-    ${PROJECT_SOURCE_DIR}/v8
+    ${v8_includes}
 )
 
 add_custom_command(
@@ -816,8 +814,9 @@ file(GLOB torque-program-sources
 
 add_executable(torque)
 target_sources(torque PRIVATE ${torque-program-sources})
-target_compile_options(torque PRIVATE ${enable-exceptions})
-target_include_directories(torque PRIVATE ${PROJECT_SOURCE_DIR}/v8)
+target_compile_definitions(torque PRIVATE ${v8_defines})
+target_compile_options(torque PRIVATE ${enable-exceptions-flags})
+target_include_directories(torque PRIVATE ${v8_includes})
 target_link_libraries(torque PRIVATE v8_libbase)
 
 #
@@ -837,9 +836,9 @@ add_executable(mksnapshot
   v8/src/snapshot/snapshot-empty.cc
 )
 
-target_compile_definitions(mksnapshot PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
-target_compile_options(mksnapshot PRIVATE ${disable-exceptions})
-target_include_directories(mksnapshot PRIVATE ${PROJECT_SOURCE_DIR}/v8)
+target_compile_definitions(mksnapshot PRIVATE ${v8_defines} ${disable-exceptions-defines})
+target_compile_options(mksnapshot PRIVATE ${disable-exceptions-flags})
+target_include_directories(mksnapshot PRIVATE ${v8_includes})
 target_link_libraries(mksnapshot
   PRIVATE
     v8_libbase
@@ -852,6 +851,7 @@ target_link_libraries(mksnapshot
 )
 
 add_library(v8-adler32 OBJECT v8/third_party/zlib/adler32.c)
+target_compile_definitions(v8-adler32 PRIVATE ${v8_defines})
 target_include_directories(v8-adler32
   PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/v8/third_party/zlib>
