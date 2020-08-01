@@ -856,3 +856,7 @@ target_include_directories(v8-adler32
   PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/v8/third_party/zlib>
 )
+
+# include() really likes absolute paths
+set(test_cmake_dir ${PROJECT_SOURCE_DIR}/CMakeTests)
+include(${test_cmake_dir}/tests.cmake)
