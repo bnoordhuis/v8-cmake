@@ -133,7 +133,6 @@ target_link_libraries(d8
     v8_base_without_compiler
     v8_compiler
     v8_snapshot
-    v8_inspector
     v8_libplatform
 )
 
@@ -329,12 +328,12 @@ target_include_directories(v8_base_without_compiler
     ${PROJECT_SOURCE_DIR}/v8/third_party/zlib
 )
 
-target_link_libraries(
-  v8_base_without_compiler
+target_link_libraries(v8_base_without_compiler
   PRIVATE
     v8_libbase
     v8_libsampler
     v8_torque_generated
+    v8_inspector
   PUBLIC
     v8-bytecodes-builtin-list
 )

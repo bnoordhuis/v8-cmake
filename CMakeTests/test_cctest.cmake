@@ -12,6 +12,7 @@ add_executable(cctest)
 target_sources(cctest
   PRIVATE
     ${D}/cctest.cc
+    $<TARGET_OBJECTS:wasm_test_common>
   )
 target_compile_definitions(cctest
   PRIVATE
@@ -371,12 +372,14 @@ target_include_directories(cctest_sources
     ${PROJECT_BINARY_DIR}/inspector
   )
 
-target_link_libraries(cctest_sources PUBLIC
-  #v8_for_testing
-  v8_libbase
-  v8_libplatform
-  wasm_module_runner
-  wasm_test_common
-  #v8_debug_helper
+target_link_libraries(cctest_sources
+  PUBLIC
+    #v8_for_testing
+    v8_initializers # via v8_for_testing
+    v8_libbase
+    v8_libplatform
+    #wasm_module_runner
+    #wasm_test_common
+    #v8_debug_helper
   )
 add_dependencies(cctest_sources v8_inspector)
