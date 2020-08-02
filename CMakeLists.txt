@@ -49,14 +49,18 @@ set(is-arm 0)
 set(is-arm64 0)
 set(is-ia32 0)
 set(is-mips 0)
+set(is-mipsel 0)
 set(is-mips64 0)
+set(is-mips64el 0)
 set(is-ppc 0)
+set(is-ppc64 0)
 
 set(is-s390 $<STREQUAL:${CMAKE_SYSTEM_PROCESSOR},S390>)
 string(CONCAT is-x64 $<OR:
   $<STREQUAL:${CMAKE_SYSTEM_PROCESSOR},AMD64>,
   $<STREQUAL:${CMAKE_SYSTEM_PROCESSOR},x86_64>
 >)
+set(is-s390x 0)
 
 option(V8_ENABLE_CONCURRENT_MARKING "Enable concurrent marking" ON)
 option(V8_ENABLE_I18N "Enable Internationalization support")
@@ -75,6 +79,10 @@ set(v8_defines
   $<${is-win}:V8_OS_WIN32>
 )
 
+set(is-clang
+  $<OR:$<CXX_COMPILER_ID:AppleClang>,$<CXX_COMPILER_ID:Clang>>
+  )
+
 set(v8_includes
   ${PROJECT_SOURCE_DIR}/v8
   ${PROJECT_SOURCE_DIR}/v8/include
@@ -83,16 +91,14 @@ set(v8_includes
 
 set(disable-exceptions-flags
   $<$<CXX_COMPILER_ID:MSVC>:/EHs-c->
-  $<$<CXX_COMPILER_ID:AppleClang>:-fno-exceptions>
-  $<$<CXX_COMPILER_ID:Clang>:-fno-exceptions>
+  $<${is-clang}:-fno-exceptions>
   $<$<CXX_COMPILER_ID:GNU>:-fno-exceptions>
 )
 set(disable-exceptions-defines $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 
 set(enable-exceptions-flags
   $<$<CXX_COMPILER_ID:MSVC>:/EHsc>
-  $<$<CXX_COMPILER_ID:AppleClang>:-fexceptions>
-  $<$<CXX_COMPILER_ID:Clang>:-fexceptions>
+  $<${is-clang}:-fexceptions>
   $<$<CXX_COMPILER_ID:GNU>:-fexceptions>
 )
 
@@ -674,7 +680,7 @@ target_link_libraries(v8_libbase
 #
 # bytecode_builtins_list_generator
 #
-v8_generate_builtins_list(${PROJECT_BINARY_DIR}/generated)
+v8_generate_builtins_list(${PROJECT_BINARY_DIR})
 
 target_include_directories(v8-bytecodes-builtin-list
   INTERFACE
