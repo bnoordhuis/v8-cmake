@@ -357,6 +357,7 @@ target_compile_definitions(cctest_sources
     ${disable-exceptions-defines}
     ${external_config_defines}
     ${internal_config_base_defines}
+    ${cppgc_base_config_defines}
   )
 target_compile_options(cctest_sources
   PRIVATE

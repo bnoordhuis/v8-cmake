@@ -63,3 +63,41 @@ target_link_libraries(wasm_module_runner PRIVATE
   v8_torque_generated # run_torque
   # v8_tracing
   )
+
+#
+# torque_ls_base
+#
+
+add_library(torque_ls_base STATIC)
+target_sources(torque_ls_base
+  PRIVATE
+  ${PROJECT_SOURCE_DIR}/v8/src/torque/ls/globals.h
+  ${PROJECT_SOURCE_DIR}/v8/src/torque/ls/json-parser.cc
+  ${PROJECT_SOURCE_DIR}/v8/src/torque/ls/json-parser.h
+  ${PROJECT_SOURCE_DIR}/v8/src/torque/ls/json.cc
+  ${PROJECT_SOURCE_DIR}/v8/src/torque/ls/json.h
+  ${PROJECT_SOURCE_DIR}/v8/src/torque/ls/message-handler.cc
+  ${PROJECT_SOURCE_DIR}/v8/src/torque/ls/message-handler.h
+  ${PROJECT_SOURCE_DIR}/v8/src/torque/ls/message-macros.h
+  ${PROJECT_SOURCE_DIR}/v8/src/torque/ls/message-pipe.h
+  ${PROJECT_SOURCE_DIR}/v8/src/torque/ls/message.h
+  )
+target_compile_definitions(torque_ls_base
+  PRIVATE
+    ${v8_defines}
+    ${enable-exceptions-defines}
+  )
+target_compile_options(torque_ls_base
+  PRIVATE
+    ${enable-exceptions-flags}
+  )
+target_include_directories(torque_ls_base
+  PRIVATE
+    ${v8_includes}
+  )
+target_link_libraries(torque_ls_base
+  PRIVATE
+    torque_base
+  )
+
+

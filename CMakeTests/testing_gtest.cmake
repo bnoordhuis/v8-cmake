@@ -28,7 +28,7 @@ target_compile_definitions(gtest
   )
 target_include_directories(gtest
   PUBLIC
-  ${PROJECT_SOURCE_DIR}/third_party/googletest/src/googletest/include
+    ${PROJECT_SOURCE_DIR}/v8//third_party/googletest/src/googletest/include
   )
 target_link_libraries(gtest
   PUBLIC

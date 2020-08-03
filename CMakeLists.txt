@@ -77,6 +77,7 @@ set(v8_defines
   $<$<AND:${is-win},${is-x64}>:V8_OS_WIN_X64>
   $<$<BOOL:${V8_ENABLE_CONCURRENT_MARKING}>:V8_CONCURRENT_MARKING>
   $<${is-win}:V8_OS_WIN32>
+  V8_ARRAY_BUFFER_EXTENSION
 )
 
 set(is-clang
@@ -101,6 +102,10 @@ set(enable-exceptions-flags
   $<${is-clang}:-fexceptions>
   $<$<CXX_COMPILER_ID:GNU>:-fexceptions>
 )
+
+set(cppgc_base_config_defines
+  $<$<OR:${is-x64},${is-arm64}>:CPPGC_CAGED_HEAP>
+  )
 
 #
 # d8
@@ -318,7 +323,12 @@ set_property(SOURCE v8/src/diagnostics/unwinding-info-win64.cc
       _WIN32_WINNT=${windows-version}
 )
 
-target_compile_definitions(v8_base_without_compiler PRIVATE ${v8_defines} ${disable-exceptions-defines})
+target_compile_definitions(v8_base_without_compiler
+  PRIVATE
+    ${v8_defines}
+    ${disable-exceptions-defines}
+    ${cppgc_base_config_defines}
+  )
 target_compile_options(v8_base_without_compiler PRIVATE ${disable-exceptions-flags})
 
 target_include_directories(v8_base_without_compiler
@@ -810,19 +820,95 @@ add_custom_command(
 )
 
 #
-# torque
+# torque_base
 #
-file(GLOB torque-program-sources
-  RELATIVE ${PROJECT_SOURCE_DIR}
-  CONFIGURE_DEPENDS v8/src/torque/*.cc
-)
+add_library(torque_base OBJECT)
+target_sources(torque_base
+  PRIVATE
+    ${PROJECT_SOURCE_DIR}/v8/src/torque/ast.h
+    ${PROJECT_SOURCE_DIR}/v8/src/torque/cfg.cc
+    ${PROJECT_SOURCE_DIR}/v8/src/torque/cfg.h
+    ${PROJECT_SOURCE_DIR}/v8/src/torque/class-debug-reader-generator.cc
+    ${PROJECT_SOURCE_DIR}/v8/src/torque/constants.h
+    ${PROJECT_SOURCE_DIR}/v8/src/torque/contextual.h
+    ${PROJECT_SOURCE_DIR}/v8/src/torque/csa-generator.cc
+    ${PROJECT_SOURCE_DIR}/v8/src/torque/csa-generator.h
+    ${PROJECT_SOURCE_DIR}/v8/src/torque/declarable.cc
+    ${PROJECT_SOURCE_DIR}/v8/src/torque/declarable.h
+    ${PROJECT_SOURCE_DIR}/v8/src/torque/declaration-visitor.cc
+    ${PROJECT_SOURCE_DIR}/v8/src/torque/declaration-visitor.h
+    ${PROJECT_SOURCE_DIR}/v8/src/torque/declarations.cc
+    ${PROJECT_SOURCE_DIR}/v8/src/torque/declarations.h
+    ${PROJECT_SOURCE_DIR}/v8/src/torque/earley-parser.cc
+    ${PROJECT_SOURCE_DIR}/v8/src/torque/earley-parser.h
+    ${PROJECT_SOURCE_DIR}/v8/src/torque/global-context.cc
+    ${PROJECT_SOURCE_DIR}/v8/src/torque/global-context.h
+    ${PROJECT_SOURCE_DIR}/v8/src/torque/implementation-visitor.cc
+    ${PROJECT_SOURCE_DIR}/v8/src/torque/implementation-visitor.h
+    ${PROJECT_SOURCE_DIR}/v8/src/torque/instance-type-generator.cc
+    ${PROJECT_SOURCE_DIR}/v8/src/torque/instructions.cc
+    ${PROJECT_SOURCE_DIR}/v8/src/torque/instructions.h
+    ${PROJECT_SOURCE_DIR}/v8/src/torque/parameter-difference.h
+    ${PROJECT_SOURCE_DIR}/v8/src/torque/server-data.cc
+    ${PROJECT_SOURCE_DIR}/v8/src/torque/server-data.h
+    ${PROJECT_SOURCE_DIR}/v8/src/torque/source-positions.cc
+    ${PROJECT_SOURCE_DIR}/v8/src/torque/source-positions.h
+    ${PROJECT_SOURCE_DIR}/v8/src/torque/torque-compiler.cc
+    ${PROJECT_SOURCE_DIR}/v8/src/torque/torque-compiler.h
+    ${PROJECT_SOURCE_DIR}/v8/src/torque/torque-parser.cc
+    ${PROJECT_SOURCE_DIR}/v8/src/torque/torque-parser.h
+    ${PROJECT_SOURCE_DIR}/v8/src/torque/type-inference.cc
+    ${PROJECT_SOURCE_DIR}/v8/src/torque/type-inference.h
+    ${PROJECT_SOURCE_DIR}/v8/src/torque/type-oracle.cc
+    ${PROJECT_SOURCE_DIR}/v8/src/torque/type-oracle.h
+    ${PROJECT_SOURCE_DIR}/v8/src/torque/type-visitor.cc
+    ${PROJECT_SOURCE_DIR}/v8/src/torque/type-visitor.h
+    ${PROJECT_SOURCE_DIR}/v8/src/torque/types.cc
+    ${PROJECT_SOURCE_DIR}/v8/src/torque/types.h
+    ${PROJECT_SOURCE_DIR}/v8/src/torque/utils.cc
+    ${PROJECT_SOURCE_DIR}/v8/src/torque/utils.h
+  )
+target_compile_definitions(torque_base
+  PRIVATE
+    ${v8_defines}
+  )
+target_compile_options(torque_base
+  PRIVATE
+    ${enable-exceptions-flags}
+  )
+target_include_directories(torque_base
+  PRIVATE
+    ${v8_includes}
+  )
+target_link_libraries(torque_base
+  PUBLIC
+    v8_libbase
+  )
 
+#
+#  torque
+#
 add_executable(torque)
-target_sources(torque PRIVATE ${torque-program-sources})
-target_compile_definitions(torque PRIVATE ${v8_defines})
-target_compile_options(torque PRIVATE ${enable-exceptions-flags})
-target_include_directories(torque PRIVATE ${v8_includes})
-target_link_libraries(torque PRIVATE v8_libbase)
+target_sources(torque
+  PRIVATE
+    ${PROJECT_SOURCE_DIR}/v8/src/torque/torque.cc
+  )
+target_compile_definitions(torque
+  PRIVATE
+    ${v8_defines}
+  )
+target_compile_options(torque
+  PRIVATE
+    ${enable-exceptions-flags}
+  )
+target_include_directories(torque
+  PRIVATE
+    ${v8_includes}
+  )
+target_link_libraries(torque
+  PRIVATE
+    torque_base
+  )
 
 #
 # mksnapshot
