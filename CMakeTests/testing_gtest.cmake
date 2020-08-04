@@ -4,7 +4,7 @@
 
 set(D ${PROJECT_SOURCE_DIR}/v8/testing/gtest)
 
-set(gtest_direct_config_defines_public UNIT_TEST)
+config(gtest_direct_config DEFINES UNIT_TEST)
 
 add_library(gtest STATIC)
 set(gtest_files
@@ -16,21 +16,7 @@ set(gtest_files
   ${D}/include/gtest/gtest_prod.h
   ${D}/empty.cc
   )
-target_sources(gtest
-  PRIVATE
-    ${gtest_files}
-  )
-target_compile_definitions(gtest
-  PRIVATE
-    ${v8_defines}
-  PUBLIC
-    ${gtest_direct_config_defines_public}
-  )
-target_include_directories(gtest
-  PUBLIC
-    ${PROJECT_SOURCE_DIR}/v8//third_party/googletest/src/googletest/include
-  )
-target_link_libraries(gtest
-  PUBLIC
-    googletest_gtest
-  )
+target_sources(gtest PRIVATE ${gtest_files})
+target_config(gtest PRIVATE v8_features PUBLIC gtest_direct_config)
+target_include_directories(gtest PUBLIC ${PROJECT_SOURCE_DIR}/v8//third_party/googletest/src/googletest/include)
+target_link_libraries(gtest PUBLIC googletest_gtest)

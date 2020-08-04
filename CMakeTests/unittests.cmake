@@ -9,18 +9,12 @@ target_sources(cppgc_unittests
   PRIVATE
     ${D}/heap/cppgc/run-all-unittests.cc
   )
-target_compile_definitions(cppgc_unittests
+target_config(cppgc_unittests
   PRIVATE
-    ${v8_defines}
-    ${disable-exceptions-defines}
-  )
-target_compile_options(cppgc_unittests
-  PRIVATE
-    ${disable-exceptions-flags}
-  )
-target_include_directories(cppgc_unittests
-  PRIVATE
-    ${v8_includes}
+    v8_features
+    v8_disable_exceptions
+    external_config
+    internal_config_base
   )
 target_link_libraries(cppgc_unittests
   PRIVATE 
@@ -54,22 +48,17 @@ target_sources(cppgc_unittests_sources
     ${D}/heap/cppgc/visitor-unittest.cc
     ${D}/heap/cppgc/worklist-unittest.cc
   )
-target_compile_definitions(cppgc_unittests_sources
+target_config(cppgc_unittests_sources
   PRIVATE
-    ${v8_defines}
-    ${disable-exceptions-defines}
-    ${cppgc_base_config_defines}
+    v8_features
+    v8_disable_exceptions
+    external_config
+    internal_config_base
+    cppgc_base_config
   )
 target_compile_options(cppgc_unittests_sources
   PRIVATE
-    ${disable-exceptions-flags}
     $<${is-clang}:-Wno-narrowing>
-  )
-target_include_directories(cppgc_unittests_sources
-  PRIVATE
-    ${v8_includes}
-    ${gmock_config_includes}
-    ${gtest_config_includes}
   )
 target_link_libraries(cppgc_unittests_sources
   PUBLIC
@@ -77,6 +66,7 @@ target_link_libraries(cppgc_unittests_sources
   PRIVATE
     wasm_test_common
   )
+
 #add_dependencies(cppgc_unittests_sources
 #  cppgc_for_testing
 #  )
@@ -321,21 +311,10 @@ target_sources(unittests
     ${D}/wasm/trap-handler-win-unittest.cc
   >
   )
-target_compile_definitions(unittests
-  PRIVATE
-    ${v8_defines}
-    ${disable-exceptions-defines}
-    ${cppgc_base_config_defines}
-  )
-
+target_config(unittests PRIVATE v8_features v8_disable_exceptions cppgc_base_config external_config internal_config_base)
 target_compile_options(unittests
   PRIVATE
-    ${disable-exceptions-flags}
     $<${is-clang}:-Wno-narrowing>
-  )
-target_include_directories(unittests
-  PRIVATE
-    ${v8_includes}
   )
 target_link_libraries(unittests PRIVATE
   cppgc_unittests_sources

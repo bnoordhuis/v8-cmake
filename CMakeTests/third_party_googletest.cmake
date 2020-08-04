@@ -4,24 +4,22 @@
 
 set(D ${PROJECT_SOURCE_DIR}/v8/third_party/googletest)
 
-set(gtest_config_defines
-  GTEST_API_=
-  GTEST_HAS_POSIX_RE=0
-  GTEST_LANG_CXX11=1
-  GTEST_HAS_TR1_TUPLE=0
+config(gtest_config
+  DEFINES
+    GTEST_API_=
+    GTEST_HAS_POSIX_RE=0
+    GTEST_LANG_CXX11=1
+    GTEST_HAS_TR1_TUPLE=0
+  INCLUDES
+    ${D}/custom
+    ${D}/src/googletest/include
+  FLAGS
+    $<${is-win}:/wd4800>
   )
 
-set(gtest_config_includes
-  ${D}/custom
-  ${D}/src/googletest/include
-  )
-
-if(${is-win})
-  set(gtest_config_cflags /wd4800)
-endif()
-
-set(gmock_config_includes
-  ${D}/src/googlemock/include
+config(gmock_config
+  INCLUDES
+    ${D}/src/googlemock/include
   )
 
 add_library(googletest_gtest STATIC)
@@ -61,20 +59,9 @@ target_sources(googletest_gtest
     ${D}/src/googletest/src/gtest-typed-test.cc
     ${D}/src/googletest/src/gtest.cc
   )
+target_config(googletest_gtest PRIVATE gtest_config )
 
-target_compile_definitions(googletest_gtest
-  PRIVATE
-    ${v8_defines}
-    ${disable-exceptions-defines}
-    ${gtest_config_defines}
-  )
-
-target_include_directories(googletest_gtest
-  PRIVATE
-    ${v8_includes}
-    ${gtest_config_includes}
-    ${D}/src/googletest
-  )
+target_include_directories(googletest_gtest PRIVATE ${D}/src/googletest)
 
 add_library(googletest_gmock STATIC)
 target_sources(googletest_gmock
@@ -105,17 +92,8 @@ target_sources(googletest_gmock
     ${D}/src/googlemock/src/gmock-spec-builders.cc
     ${D}/src/googlemock/src/gmock.cc
   )
-
-target_compile_definitions(googletest_gmock
-  PRIVATE
-    ${v8_defines}
-    ${disable-exceptions-defines}
-    ${gmock_config_defines}
-    ${gtest_config_defines}
-  )
-target_include_directories(googletest_gmock
-  PRIVATE
-    ${v8_includes}
-    ${gmock_config_includes}
-    ${gtest_config_includes}
+target_config(googletest_gmock
+  PUBLIC
+    gmock_config
+    gtest_config
   )

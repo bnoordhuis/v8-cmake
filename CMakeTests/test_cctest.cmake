@@ -4,41 +4,27 @@
 
 set(D ${PROJECT_SOURCE_DIR}/v8/test/cctest)
 
-#
-# No usage of cctest_config
-#
+config(cctest_config)
 
 add_executable(cctest)
 target_sources(cctest
   PRIVATE
     ${D}/cctest.cc
+#    $<TARGET_OBJECTS:cctest_sources>  #TODO
     $<TARGET_OBJECTS:wasm_test_common>
   )
-target_compile_definitions(cctest
-  PRIVATE
-    ${v8_defines}
-    ${disable-exceptions-defines}
-    ${internal_config_base_defines}
-    ${external_config_defines}
-  )
-target_compile_options(cctest
-  PRIVATE
-    ${disable-exceptions-flags}
-    ${external_config_flags}
-    ${internal_config_base_flags}
-  )
-target_include_directories(cctest
-  PRIVATE
-    ${v8_includes}
-  )
+target_config(cctest
+  PRIVATE v8_features v8_disable_exceptions external_config internal_config_base v8_tracing_config cctest_config)
 
 target_link_libraries(cctest PRIVATE
-  cctest_sources
+  cctest_sources  #TODO delete
   v8_compiler
   v8_snapshot
+  v8_initializers
+  v8_libplatform
   )
 
-add_library(cctest_sources STATIC)
+add_library(cctest_sources STATIC) # TODO change to object
 target_sources(cctest_sources
   PRIVATE
     ${D}/../common/assembler-tester.h
@@ -350,28 +336,18 @@ target_sources(cctest_sources
       ${D}/test-disasm-s390.cc
     >
   )
+target_config(cctest_sources
+  PRIVATE
+    v8_features
+    v8_disable_exceptions
+    cppgc_base_config
+    external_config
+    internal_config_base
+    v8_tracing_config
+  )
 
-target_compile_definitions(cctest_sources
-  PRIVATE
-    ${v8_defines}
-    ${disable-exceptions-defines}
-    ${external_config_defines}
-    ${internal_config_base_defines}
-    ${cppgc_base_config_defines}
-  )
-target_compile_options(cctest_sources
-  PRIVATE
-    ${v8_flags}
-    $<${is-clang}:-Wno-narrowing>
-    ${disable_exceptions_flags}
-    ${external_config_flags}
-    ${internal_config_base_flags}
-  )
-target_include_directories(cctest_sources
-  PRIVATE
-    ${v8_includes}
-    ${PROJECT_BINARY_DIR}/inspector
-  )
+target_compile_options(cctest_sources PRIVATE $<${is-clang}:-Wno-narrowing>)
+target_include_directories(cctest_sources PRIVATE ${PROJECT_BINARY_DIR}/inspector)
 
 target_link_libraries(cctest_sources
   PUBLIC

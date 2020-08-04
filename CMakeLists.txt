@@ -54,6 +54,7 @@ set(is-mips64 0)
 set(is-mips64el 0)
 set(is-ppc 0)
 set(is-ppc64 0)
+set(is-ios 0)
 
 set(is-s390 $<STREQUAL:${CMAKE_SYSTEM_PROCESSOR},S390>)
 string(CONCAT is-x64 $<OR:
