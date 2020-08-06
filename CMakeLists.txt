@@ -104,9 +104,8 @@ set(enable-exceptions-flags
   $<$<CXX_COMPILER_ID:GNU>:-fexceptions>
 )
 
-set(cppgc_base_config_defines
-  $<$<OR:${is-x64},${is-arm64}>:CPPGC_CAGED_HEAP>
-  )
+set(cppgc_enable_caged_heap $<OR:${is-x64},${is-arm64}>)
+set(cppgc_base_config_defines $<${cppgc_enable_caged_heap}:CPPGC_CAGED_HEAP>)
 
 #
 # d8
@@ -345,6 +344,8 @@ target_link_libraries(v8_base_without_compiler
     v8_libsampler
     v8_torque_generated
     v8_inspector
+    zlib
+    compression_utils_portable
   PUBLIC
     v8-bytecodes-builtin-list
 )

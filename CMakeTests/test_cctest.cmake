@@ -10,21 +10,20 @@ add_executable(cctest)
 target_sources(cctest
   PRIVATE
     ${D}/cctest.cc
-#    $<TARGET_OBJECTS:cctest_sources>  #TODO
+    $<TARGET_OBJECTS:cctest_sources>
     $<TARGET_OBJECTS:wasm_test_common>
   )
 target_config(cctest
   PRIVATE v8_features v8_disable_exceptions external_config internal_config_base v8_tracing_config cctest_config)
 
 target_link_libraries(cctest PRIVATE
-  cctest_sources  #TODO delete
   v8_compiler
   v8_snapshot
   v8_initializers
   v8_libplatform
   )
 
-add_library(cctest_sources STATIC) # TODO change to object
+add_library(cctest_sources OBJECT)
 target_sources(cctest_sources
   PRIVATE
     ${D}/../common/assembler-tester.h

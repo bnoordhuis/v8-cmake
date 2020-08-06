@@ -104,7 +104,7 @@ config(zlib_warnings
   CFLAGS $<$<AND:${is-clang},${use_x86_x64_optimizations}>:-Wno-incompatible-pointer-types>
   )
 
-add_library(zlib OBJECT
+add_library(zlib STATIC
   ${D}/adler32.c
   ${D}/chromeconf.h
   ${D}/compress.c
@@ -137,20 +137,17 @@ add_library(zlib OBJECT
   $<$<NOT:${use_x86_x64_optimizations}>:
     ${D}/inflate.c
   >
+  $<${use_x86_x64_optimizations}:
+    $<TARGET_OBJECTS:zlib_adler32_simd>
+    $<TARGET_OBJECTS:zlib_inflate_chunk_simd>
+  >
+  $<${use_x86_x64_optimizations}:
+    $<TARGET_OBJECTS:zlib_crc32_simd>
+  >
   )
 
 target_config(zlib PUBLIC zlib_config PRIVATE zlib_internal_config zlib_warnings)
 target_compile_definitions(zlib
   PRIVATE
     $<$<NOT:${use_x86_x64_optimizations}>:CPU_NO_SIMD>
-  )
-target_link_libraries(zlib
-  PRIVATE
-    $<${use_x86_x64_optimizations}:
-      zlib_adler32_simd
-      zlib_inflate_chunk_simd
-    >
-    $<${use_x86_x64_optimizations}:
-      zlib_crc32_simd
-    >
   )

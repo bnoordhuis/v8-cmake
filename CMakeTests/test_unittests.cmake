@@ -4,49 +4,38 @@
 
 set(D ${PROJECT_SOURCE_DIR}/v8/test/unittests)
 
-add_executable(cppgc_unittests)
-target_sources(cppgc_unittests
-  PRIVATE
-    ${D}/heap/cppgc/run-all-unittests.cc
-  )
-target_config(cppgc_unittests
-  PRIVATE
-    v8_features
-    v8_disable_exceptions
-    external_config
-    internal_config_base
-  )
-target_link_libraries(cppgc_unittests
-  PRIVATE 
-    cppgc_unittests_sources 
-    gmock gtest)
-
-add_library(cppgc_unittests_sources STATIC)
-target_sources(cppgc_unittests_sources
-  PRIVATE
-    ${D}/heap/cppgc/custom-spaces-unittest.cc
-    ${D}/heap/cppgc/finalizer-trait-unittest.cc
-    ${D}/heap/cppgc/free-list-unittest.cc
-    ${D}/heap/cppgc/garbage-collected-unittest.cc
-    ${D}/heap/cppgc/gc-info-unittest.cc
-    ${D}/heap/cppgc/heap-object-header-unittest.cc
-    ${D}/heap/cppgc/heap-page-unittest.cc
-    ${D}/heap/cppgc/heap-unittest.cc
-    ${D}/heap/cppgc/logging-unittest.cc
-    ${D}/heap/cppgc/marker-unittest.cc
-    ${D}/heap/cppgc/marking-visitor-unittest.cc
-    ${D}/heap/cppgc/member-unittest.cc
-    ${D}/heap/cppgc/object-start-bitmap-unittest.cc
-    ${D}/heap/cppgc/page-memory-unittest.cc
-    ${D}/heap/cppgc/persistent-unittest.cc
-    ${D}/heap/cppgc/prefinalizer-unittest.cc
-    ${D}/heap/cppgc/source-location-unittest.cc
-    ${D}/heap/cppgc/stack-unittest.cc
-    ${D}/heap/cppgc/sweeper-unittest.cc
-    ${D}/heap/cppgc/tests.cc
-    ${D}/heap/cppgc/tests.h
-    ${D}/heap/cppgc/visitor-unittest.cc
-    ${D}/heap/cppgc/worklist-unittest.cc
+add_library(cppgc_unittests_sources OBJECT
+  ${D}/heap/cppgc/concurrent-sweeper-unittest.cc
+  ${D}/heap/cppgc/custom-spaces-unittest.cc
+  ${D}/heap/cppgc/finalizer-trait-unittest.cc
+  ${D}/heap/cppgc/free-list-unittest.cc
+  ${D}/heap/cppgc/garbage-collected-unittest.cc
+  ${D}/heap/cppgc/gc-info-unittest.cc
+  ${D}/heap/cppgc/gc-invoker-unittest.cc
+  ${D}/heap/cppgc/heap-growing-unittest.cc
+  ${D}/heap/cppgc/heap-object-header-unittest.cc
+  ${D}/heap/cppgc/heap-page-unittest.cc
+  ${D}/heap/cppgc/heap-unittest.cc
+  ${D}/heap/cppgc/logging-unittest.cc
+  ${D}/heap/cppgc/marker-unittest.cc
+  ${D}/heap/cppgc/marking-visitor-unittest.cc
+  ${D}/heap/cppgc/member-unittest.cc
+  ${D}/heap/cppgc/minor-gc-unittest.cc
+  ${D}/heap/cppgc/object-start-bitmap-unittest.cc
+  ${D}/heap/cppgc/page-memory-unittest.cc
+  ${D}/heap/cppgc/persistent-unittest.cc
+  ${D}/heap/cppgc/prefinalizer-unittest.cc
+  ${D}/heap/cppgc/source-location-unittest.cc
+  ${D}/heap/cppgc/stack-unittest.cc
+  ${D}/heap/cppgc/stats-collector-unittest.cc
+  ${D}/heap/cppgc/sweeper-unittest.cc
+  ${D}/heap/cppgc/test-platform.cc
+  ${D}/heap/cppgc/test-platform.h
+  ${D}/heap/cppgc/tests.cc
+  ${D}/heap/cppgc/tests.h
+  ${D}/heap/cppgc/visitor-unittest.cc
+  ${D}/heap/cppgc/worklist-unittest.cc
+  ${D}/heap/cppgc/write-barrier-unittest.cc
   )
 target_config(cppgc_unittests_sources
   PRIVATE
@@ -63,13 +52,32 @@ target_compile_options(cppgc_unittests_sources
 target_link_libraries(cppgc_unittests_sources
   PUBLIC
     gmock gtest
-  PRIVATE
-    wasm_test_common
+  #PRIVATE
+  #  cppgc_for_testing
   )
 
 #add_dependencies(cppgc_unittests_sources
 #  cppgc_for_testing
 #  )
+
+add_executable(cppgc_unittests
+  ${D}/heap/cppgc/run-all-unittests.cc
+  $<TARGET_OBJECTS:cppgc_unittests_sources>
+  $<TARGET_OBJECTS:v8_cppgc_shared>
+  $<TARGET_OBJECTS:cppgc_base>
+)
+target_config(cppgc_unittests
+  PRIVATE
+  v8_features
+  v8_disable_exceptions
+  external_config
+  internal_config_base
+  )
+target_link_libraries(cppgc_unittests
+  PRIVATE
+    v8_libbase
+    gmock gtest
+  )
 
 # Skip unittests_sources as these comprise the entire executable. Instead
 # make them sources for unittests
@@ -271,45 +279,45 @@ target_sources(unittests
     ${D}/zone/zone-allocator-unittest.cc
     ${D}/zone/zone-chunk-list-unittest.cc
     ${D}/zone/zone-unittest.cc
-  $<${is-arm}:
-    ${D}/assembler/turbo-assembler-arm-unittest.cc
-    ${D}/compiler/arm/instruction-selector-arm-unittest.cc
-  >
-  $<${is-arm64}:
-    ${D}/assembler/turbo-assembler-arm64-unittest.cc
-    ${D}/compiler/arm64/instruction-selector-arm64-unittest.cc
-  >
-  $<${is-ia32}:
-    ${D}/assembler/turbo-assembler-ia32-unittest.cc
-    ${D}/compiler/ia32/instruction-selector-ia32-unittest.cc
-  >
-  $<$<OR:${is-mips},${is-mipsel}>:
-    ${D}/assembler/turbo-assembler-mips-unittest.cc
-    ${D}/compiler/mips/instruction-selector-mips-unittest.cc
-  >
-  $<$<OR:${is-mips64},${is-mips64el}>:
-    ${D}/assembler/turbo-assembler-mips64-unittest.cc
-    ${D}/compiler/mips64/instruction-selector-mips64-unittest.cc
-  >
-  $<${is-ia32}:
-    ${D}/assembler/turbo-assembler-x64-unittest.cc
-    ${D}/compiler/x64/instruction-selector-x64-unittest.cc
-    ${D}/wasm/trap-handler-x64-unittest.cc
-  >
-  $<$<OR:${is-ppc},${is-ppc64}>:
-  ${D}/assembler/turbo-assembler-ppc-unittest.cc
-  ${D}/compiler/ppc/instruction-selector-ppc-unittest.cc
-  >
-  $<$<OR:${is-s390},${is-s390x}>:
-  ${D}/assembler/turbo-assembler-s390-unittest.cc
-  ${D}/compiler/s390/instruction-selector-s390-unittest.cc
-  >
-  $<${is-posix}:
-    ${D}/wasm/trap-handler-posix-unittest.cc
-  >
-  $<${is-win}:
-    ${D}/wasm/trap-handler-win-unittest.cc
-  >
+    $<${is-arm}:
+      ${D}/assembler/turbo-assembler-arm-unittest.cc
+      ${D}/compiler/arm/instruction-selector-arm-unittest.cc
+    >
+    $<${is-arm64}:
+      ${D}/assembler/turbo-assembler-arm64-unittest.cc
+      ${D}/compiler/arm64/instruction-selector-arm64-unittest.cc
+    >
+    $<${is-ia32}:
+      ${D}/assembler/turbo-assembler-ia32-unittest.cc
+      ${D}/compiler/ia32/instruction-selector-ia32-unittest.cc
+    >
+    $<$<OR:${is-mips},${is-mipsel}>:
+      ${D}/assembler/turbo-assembler-mips-unittest.cc
+      ${D}/compiler/mips/instruction-selector-mips-unittest.cc
+    >
+    $<$<OR:${is-mips64},${is-mips64el}>:
+      ${D}/assembler/turbo-assembler-mips64-unittest.cc
+      ${D}/compiler/mips64/instruction-selector-mips64-unittest.cc
+    >
+    $<${is-ia32}:
+      ${D}/assembler/turbo-assembler-x64-unittest.cc
+      ${D}/compiler/x64/instruction-selector-x64-unittest.cc
+      ${D}/wasm/trap-handler-x64-unittest.cc
+    >
+    $<$<OR:${is-ppc},${is-ppc64}>:
+    ${D}/assembler/turbo-assembler-ppc-unittest.cc
+    ${D}/compiler/ppc/instruction-selector-ppc-unittest.cc
+    >
+    $<$<OR:${is-s390},${is-s390x}>:
+    ${D}/assembler/turbo-assembler-s390-unittest.cc
+    ${D}/compiler/s390/instruction-selector-s390-unittest.cc
+    >
+    $<${is-posix}:
+      ${D}/wasm/trap-handler-posix-unittest.cc
+    >
+    $<${is-win}:
+      ${D}/wasm/trap-handler-win-unittest.cc
+    >
   )
 target_config(unittests PRIVATE v8_features v8_disable_exceptions cppgc_base_config external_config internal_config_base)
 target_compile_options(unittests

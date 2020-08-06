@@ -60,8 +60,10 @@ function(_get_dep_configs outvar )
 endfunction()
 
 #
-# From ${D}/BUILD.gn
+# From ${PROJECT_SOURCE_DIR}/v8/BUILD.gn
 #
+
+set(D ${PROJECT_SOURCE_DIR}/v8)
 
 config(v8_features
   DEFINES ${v8_defines}
@@ -101,6 +103,9 @@ config(external_config
   )
 
 config(v8_header_features)
+
+set(clang-or-not-win $<OR:${is-clang},$<NOT:${is-win}>>)
+set(not-clang-and-win $<AND:$<NOT:${is-clang}>,${is-win}>)
 
 
 add_library(wasm_test_common OBJECT
@@ -181,11 +186,142 @@ target_link_libraries(torque_ls_base
     torque_base
   )
 
+#
+# v8_cppgc_shared
+#
+add_library(v8_cppgc_shared OBJECT
+  ${D}/src/heap/base/stack.cc
+  ${D}/src/heap/base/stack.h
+  $<${clang-or-not-win}:$<${is-x64}:${D}/src/heap/base/asm/x64/push_registers_asm.cc>>
+  $<${clang-or-not-win}:$<${is-ia32}:${D}/src/heap/base/asm/ia32/push_registers_asm.cc>>
+  $<${clang-or-not-win}:$<${is-arm}:${D}/src/heap/base/asm/arm/push_registers_asm.cc>>
+  $<${clang-or-not-win}:$<${is-arm64}:${D}/src/heap/base/asm/arm64/push_registers_asm.cc>>
+  $<${clang-or-not-win}:$<${is-ppc64}:${D}/src/heap/base/asm/ppc/push_registers_asm.cc>>
+  $<${clang-or-not-win}:$<${is-s390x}:${D}/src/heap/base/asm/s390/push_registers_asm.cc>>
+  $<${clang-or-not-win}:$<${is-mipsel}:${D}/src/heap/base/asm/mips/push_registers_asm.cc>>
+  $<${clang-or-not-win}:$<${is-mips64el}:${D}/src/heap/base/asm/mips64/push_registers_asm.c>>
+  $<${not-clang-and-win}:$<${is-x64}:${D}/src/heap/base/asm/x64/push_registers_masm.S>>
+  $<${not-clang-and-win}:$<${is-ia32}:${D}/heap/base/asm/ia32/push_registers_masm.S>>
+  $<${not-clang-and-win}:$<${is-arm64}:${D}/src/heap/base/asm/arm64/push_registers_masm.S>>
+  )
+target_config(v8_cppgc_shared
+  PRIVATE internal_config
+  )
+target_link_libraries(v8_cppgc_shared
+  PUBLIC
+    v8_libbase
+  )
+
+#
+# cppgc_base
+#
+
+add_library(cppgc_base OBJECT
+  ${D}/include/cppgc/allocation.h
+  ${D}/include/cppgc/common.h
+  ${D}/include/cppgc/custom-space.h
+  ${D}/include/cppgc/garbage-collected.h
+  ${D}/include/cppgc/heap.h
+  ${D}/include/cppgc/internal/api-constants.h
+  ${D}/include/cppgc/internal/atomic-entry-flag.h
+  ${D}/include/cppgc/internal/compiler-specific.h
+  ${D}/include/cppgc/internal/finalizer-trait.h
+  ${D}/include/cppgc/internal/gc-info.h
+  ${D}/include/cppgc/internal/persistent-node.h
+  ${D}/include/cppgc/internal/pointer-policies.h
+  ${D}/include/cppgc/internal/prefinalizer-handler.h
+  ${D}/include/cppgc/internal/process-heap.h
+  ${D}/include/cppgc/internal/write-barrier.h
+  ${D}/include/cppgc/liveness-broker.h
+  ${D}/include/cppgc/liveness-broker.h
+  ${D}/include/cppgc/macros.h
+  ${D}/include/cppgc/member.h
+  ${D}/include/cppgc/persistent.h
+  ${D}/include/cppgc/platform.h
+  ${D}/include/cppgc/prefinalizer.h
+  ${D}/include/cppgc/source-location.h
+  ${D}/include/cppgc/trace-trait.h
+  ${D}/include/cppgc/type-traits.h
+  ${D}/include/cppgc/visitor.h
+  ${D}/include/v8config.h
+  ${D}/src/heap/cppgc/allocation.cc
+  ${D}/src/heap/cppgc/free-list.cc
+  ${D}/src/heap/cppgc/free-list.h
+  ${D}/src/heap/cppgc/garbage-collector.h
+  ${D}/src/heap/cppgc/gc-info-table.cc
+  ${D}/src/heap/cppgc/gc-info-table.h
+  ${D}/src/heap/cppgc/gc-info.cc
+  ${D}/src/heap/cppgc/gc-invoker.cc
+  ${D}/src/heap/cppgc/gc-invoker.h
+  ${D}/src/heap/cppgc/heap-base.cc
+  ${D}/src/heap/cppgc/heap-base.h
+  ${D}/src/heap/cppgc/heap-growing.cc
+  ${D}/src/heap/cppgc/heap-growing.h
+  ${D}/src/heap/cppgc/heap-object-header-inl.h
+  ${D}/src/heap/cppgc/heap-object-header.cc
+  ${D}/src/heap/cppgc/heap-object-header.h
+  ${D}/src/heap/cppgc/heap-page-inl.h
+  ${D}/src/heap/cppgc/heap-page.cc
+  ${D}/src/heap/cppgc/heap-page.h
+  ${D}/src/heap/cppgc/heap-space.cc
+  ${D}/src/heap/cppgc/heap-space.h
+  ${D}/src/heap/cppgc/heap-visitor.h
+  ${D}/src/heap/cppgc/heap.cc
+  ${D}/src/heap/cppgc/heap.h
+  ${D}/src/heap/cppgc/liveness-broker.cc
+  ${D}/src/heap/cppgc/logging.cc
+  ${D}/src/heap/cppgc/marker.cc
+  ${D}/src/heap/cppgc/marker.h
+  ${D}/src/heap/cppgc/marking-visitor.cc
+  ${D}/src/heap/cppgc/marking-visitor.h
+  ${D}/src/heap/cppgc/object-allocator-inl.h
+  ${D}/src/heap/cppgc/object-allocator.cc
+  ${D}/src/heap/cppgc/object-allocator.h
+  ${D}/src/heap/cppgc/object-start-bitmap-inl.h
+  ${D}/src/heap/cppgc/object-start-bitmap.h
+  ${D}/src/heap/cppgc/page-memory-inl.h
+  ${D}/src/heap/cppgc/page-memory.cc
+  ${D}/src/heap/cppgc/page-memory.h
+  ${D}/src/heap/cppgc/persistent-node.cc
+  ${D}/src/heap/cppgc/platform.cc
+  ${D}/src/heap/cppgc/pointer-policies.cc
+  ${D}/src/heap/cppgc/prefinalizer-handler.cc
+  ${D}/src/heap/cppgc/prefinalizer-handler.h
+  ${D}/src/heap/cppgc/process-heap.cc
+  ${D}/src/heap/cppgc/raw-heap.cc
+  ${D}/src/heap/cppgc/raw-heap.h
+  ${D}/src/heap/cppgc/sanitizers.h
+  ${D}/src/heap/cppgc/source-location.cc
+  ${D}/src/heap/cppgc/stats-collector.cc
+  ${D}/src/heap/cppgc/stats-collector.h
+  ${D}/src/heap/cppgc/sweeper.cc
+  ${D}/src/heap/cppgc/sweeper.h
+  ${D}/src/heap/cppgc/task-handle.h
+  ${D}/src/heap/cppgc/virtual-memory.cc
+  ${D}/src/heap/cppgc/virtual-memory.h
+  ${D}/src/heap/cppgc/visitor.cc
+  ${D}/src/heap/cppgc/worklist.h
+  ${D}/src/heap/cppgc/write-barrier.cc
+  $<${cppgc_enable_caged_heap}:
+  ${D}/include/cppgc/internal/caged-heap-local-data.h
+  ${D}/src/heap/cppgc/caged-heap-local-data.cc
+  ${D}/src/heap/cppgc/caged-heap.cc
+  ${D}/src/heap/cppgc/caged-heap.h
+  >
+  )
+target_config(cppgc_base
+  PUBLIC v8_features v8_disable_exceptions internal_config cppgc_base_config
+  )
+target_link_libraries(cppgc_base
+  PUBLIC v8_cppgc_shared v8_libbase
+  )
+
 include(${test_cmake_dir}/third_party_googletest.cmake)
-include(${test_cmake_dir}/unittests.cmake)
+include(${test_cmake_dir}/test_unittests.cmake)
 include(${test_cmake_dir}/testing_gtest.cmake)
 include(${test_cmake_dir}/testing_gmock.cmake)
-include(${test_cmake_dir}/test_cctest.cmake)
+#include(${test_cmake_dir}/test_cctest.cmake)
 include(${test_cmake_dir}/third_party_zlib.cmake)
+include(${test_cmake_dir}/third_party_zlib_google.cmake)
 
 
