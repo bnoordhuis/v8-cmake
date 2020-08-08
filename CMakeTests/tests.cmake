@@ -104,8 +104,72 @@ config(external_config
 
 config(v8_header_features)
 
+#
+# When capturing configuration information, we have an empty file that we
+# regenerate each time CMake rebuilds the project.  We then set dependents
+# up to rebuild the config info
+#
+file(WRITE ${PROJECT_BINARY_DIR}/empty.cc)
+
 set(clang-or-not-win $<OR:${is-clang},$<NOT:${is-win}>>)
 set(not-clang-and-win $<AND:$<NOT:${is-clang}>,${is-win}>)
+
+#
+# v8_dump_build_config
+#
+set(target_cpu
+  $<${is-ia32}:x86>
+  $<${is-x64}:x64>
+  $<${is-arm}:arm>
+  $<${is-arm64}:arm64>
+  $<${is-ppc}:ppc>
+  $<${is-ppc64}:ppc64>
+  $<${is-mips}:mips>
+  $<${is-mips64}:mips64>
+  $<${is-mipsel}:mipsel>
+  $<${is-mips64el}:mips64el>
+  $<${is-s390}:s390>
+  $<${is-s390x}:s390x>
+  )
+string(REGEX REPLACE "[\r\n \t]+" "" target_cpu ${target_cpu})
+
+set(current_cpu ${target_cpu})
+set(v8_current_cpu ${target_cpu})
+set(v8_target_cpu ${target_cpu})
+
+set(build_config_file v8_build_config.json)
+
+add_custom_target(v8_dump_build_config DEPENDS ${PROJECT_BINARY_DIR}/${build_config_file})
+add_custom_command(
+  OUTPUT ${PROJECT_BINARY_DIR}/${build_config_file}
+  DEPENDS ${PROJECT_BINARY_DIR}/empty.cc
+  COMMAND python ${PROJECT_SOURCE_DIR}/v8/tools/testrunner/utils/dump_build_config.py
+    ${PROJECT_BINARY_DIR}/${build_config_file}
+    "current_cpu=\"${current_cpu}\""
+    "dcheck_always_on=false"
+    "is_android=false"
+    "is_asan=false"
+    "is_cfi=false"
+    "is_clang=true"   # todo - fixme
+    "is_component_build=false"
+    "is_debug=false"
+    "is_full_debug=false"
+    "is_gcov_coverage=false"
+    "is_msan=false"
+    "is_tsan=false"
+    "is_ubsan_vptr=false"
+    "target_cpu=\"${target_cpu}\""
+    "v8_current_cpu=\"${v8_current_cpu}\""
+    "v8_enable_i18n_support=$<IF:$<BOOL:${V8_ENABLE_I18N}>,true,false>"
+    "v8_enable_verify_predictable=false"
+    "v8_target_cpu=\"${v8_target_cpu}\""
+    "v8_enable_verify_csa=false"
+    "v8_enable_pointer_compression=$<IF:$<BOOL:${V8_ENABLE_POINTER_COMPRESSION}>,true,false>"
+    "v8_enable_lite_mode=false"
+  WORKING_DIRECTORY ${PROJECT_BINARY_DIR}
+  COMMENT "Action: v8_dump_build_config"
+  VERBATIM
+)
 
 
 add_library(wasm_test_common OBJECT
@@ -117,6 +181,7 @@ add_library(wasm_test_common OBJECT
 target_config(wasm_test_common
   PRIVATE
     v8_features
+    v8_disable_exceptions
     external_config
     internal_config_base
   )
@@ -135,24 +200,12 @@ target_sources(wasm_module_runner
     ${PROJECT_SOURCE_DIR}/v8/test/common/wasm/wasm-module-runner.cc
     ${PROJECT_SOURCE_DIR}/v8/test/common/wasm/wasm-module-runner.h
   )
-target_compile_definitions(wasm_module_runner
+target_config(wasm_module_runner
   PRIVATE
-    ${v8_defines}
-    ${disable-exceptions-defines}
-    ${internal_config_base_defines}
-    ${external_config_defines}
-  )
-target_compile_options(wasm_module_runner
-  PRIVATE
-    ${disable-exceptions-flags}
-    ${internal_config_base_flags}
-    ${external_config_flags}
-  )
-target_include_directories(wasm_module_runner
-  PRIVATE
-    ${v8_includes}
-    ${internal_config_base_includes}
-    ${external_config_includes}
+    v8_features
+    v8_disable_exceptions
+    internal_config_base
+    external_config
   )
 target_link_libraries(wasm_module_runner PRIVATE
   v8-bytecodes-builtin-list # generate_bytecode_builtins_list
@@ -179,7 +232,7 @@ target_sources(torque_ls_base
   ${PROJECT_SOURCE_DIR}/v8/src/torque/ls/message.h
   )
 target_config(torque_ls_base
-  PRIVATE internal_config
+  PRIVATE internal_config v8_enable_exceptions
   )
 target_link_libraries(torque_ls_base
   PRIVATE
@@ -205,7 +258,7 @@ add_library(v8_cppgc_shared OBJECT
   $<${not-clang-and-win}:$<${is-arm64}:${D}/src/heap/base/asm/arm64/push_registers_masm.S>>
   )
 target_config(v8_cppgc_shared
-  PRIVATE internal_config
+  PRIVATE v8_features v8_disable_exceptions internal_config
   )
 target_link_libraries(v8_cppgc_shared
   PUBLIC
@@ -320,8 +373,10 @@ include(${test_cmake_dir}/third_party_googletest.cmake)
 include(${test_cmake_dir}/test_unittests.cmake)
 include(${test_cmake_dir}/testing_gtest.cmake)
 include(${test_cmake_dir}/testing_gmock.cmake)
-#include(${test_cmake_dir}/test_cctest.cmake)
+include(${test_cmake_dir}/test_cctest.cmake)
 include(${test_cmake_dir}/third_party_zlib.cmake)
 include(${test_cmake_dir}/third_party_zlib_google.cmake)
+include(${test_cmake_dir}/tools_debug_helper.cmake)
+include(${test_cmake_dir}/test_mkgrokdump.cmake)
 
 

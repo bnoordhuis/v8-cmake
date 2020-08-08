@@ -78,6 +78,7 @@ target_link_libraries(cppgc_unittests
     v8_libbase
     gmock gtest
   )
+add_dependencies(cppgc_unittests v8_dump_build_config)
 
 # Skip unittests_sources as these comprise the entire executable. Instead
 # make them sources for unittests
@@ -318,8 +319,18 @@ target_sources(unittests
     $<${is-win}:
       ${D}/wasm/trap-handler-win-unittest.cc
     >
+  $<TARGET_OBJECTS:wasm_test_common>
+  $<TARGET_OBJECTS:v8_cppgc_shared>
+  $<TARGET_OBJECTS:cppgc_base>
   )
-target_config(unittests PRIVATE v8_features v8_disable_exceptions cppgc_base_config external_config internal_config_base)
+target_config(unittests
+  PRIVATE
+    v8_features
+    v8_disable_exceptions
+    cppgc_base_config
+    external_config
+    internal_config_base
+  )
 target_compile_options(unittests
   PRIVATE
     $<${is-clang}:-Wno-narrowing>
@@ -338,4 +349,5 @@ target_link_libraries(unittests PRIVATE
   #crdtp_test
   #gmock gtest
   )
-#add_dependencies(unittests v8_for_testing)
+add_dependencies(unittests v8_dump_build_config)
+

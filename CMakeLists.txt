@@ -65,6 +65,7 @@ set(is-s390x 0)
 
 option(V8_ENABLE_CONCURRENT_MARKING "Enable concurrent marking" ON)
 option(V8_ENABLE_I18N "Enable Internationalization support")
+option(V8_ENABLE_POINTER_COMPRESSION "Enable pointer compression" ON)
 
 set(v8_defines
   $<${is-darwin}:V8_HAVE_TARGET_OS>
@@ -77,13 +78,24 @@ set(v8_defines
   $<${is-win}:NOMINMAX>
   $<$<AND:${is-win},${is-x64}>:V8_OS_WIN_X64>
   $<$<BOOL:${V8_ENABLE_CONCURRENT_MARKING}>:V8_CONCURRENT_MARKING>
+  $<$<BOOL:${V8_ENABLE_POINTER_COMPRESSION}>:V8_COMPRESS_POINTERS>
   $<${is-win}:V8_OS_WIN32>
   V8_ARRAY_BUFFER_EXTENSION
+  V8_SNAPSHOT_COMPRESSION
 )
 
 set(is-clang
   $<OR:$<CXX_COMPILER_ID:AppleClang>,$<CXX_COMPILER_ID:Clang>>
   )
+
+add_compile_options(
+  $<${is-clang}:-mllvm>
+  $<${is-clang}:-basicaa-recphi=0>
+  $<${is-clang}:-fstack-protector>
+  $<$<NOT:${is-win}>:-fno-strict-aliasing>
+  $<$<AND:${is-clang},$<NOT:${is-win}>>:-fno-trigraphs>
+  $<${is-posix}:-fno-omit-frame-pointer>
+)
 
 set(v8_includes
   ${PROJECT_SOURCE_DIR}/v8
@@ -203,11 +215,15 @@ file(GLOB wasm-baseline-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS
 file(GLOB zone-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/zone/*.cc)
 
 list(REMOVE_ITEM builtin-sources
+  v8/src/builtins/builtins-internal-gen.cc
   v8/src/builtins/builtins-intl-gen.cc
   v8/src/builtins/builtins-intl.cc
 )
-
 list(REMOVE_ITEM diagnostic-sources v8/src/diagnostics/unwinding-info-win64.cc)
+list(REMOVE_ITEM extensions-sources
+  v8/src/extensions/vtunedomain-support-extension.cc
+  v8/src/extensions/vtunedomain-support-extension.h
+  )
 list(REMOVE_ITEM object-sources ${i18n-sources})
 list(REMOVE_ITEM regexp-sources v8/src/regexp/gen-regexp-special-case.cc)
 list(REMOVE_ITEM runtime-sources v8/src/runtime/runtime-intl.cc)
@@ -329,7 +345,10 @@ target_compile_definitions(v8_base_without_compiler
     ${disable-exceptions-defines}
     ${cppgc_base_config_defines}
   )
-target_compile_options(v8_base_without_compiler PRIVATE ${disable-exceptions-flags})
+target_compile_options(v8_base_without_compiler
+  PRIVATE
+    ${disable-exceptions-flags}
+  )
 
 target_include_directories(v8_base_without_compiler
   PRIVATE
@@ -457,9 +476,9 @@ target_link_libraries(v8_initializers PRIVATE v8_torque_generated v8-bytecodes-b
 # Note: v8_use_multi_snapshots not currently supported.
 add_library(
   v8_snapshot STATIC
+  v8/src/init/setup-isolate-deserialize.cc
   ${PROJECT_BINARY_DIR}/embedded.S
   ${PROJECT_BINARY_DIR}/snapshot.cc
-  v8/src/init/setup-isolate-deserialize.cc
 )
 
 target_compile_definitions(v8_snapshot PRIVATE ${v8_defines} ${disable-exceptions-defines})
@@ -608,9 +627,12 @@ target_sources(v8_libplatform
     v8/src/libplatform/tracing/tracing-controller.cc
     v8/src/libplatform/worker-thread.cc
 )
-
-target_compile_definitions(v8_libplatform PRIVATE ${v8_defines} ${disable-exceptions-defines})
-target_compile_options(v8_libplatform PRIVATE ${disable-exceptions-flags})
+target_compile_definitions(v8_libplatform
+  PRIVATE ${v8_features} ${disable-exceptions-defines}
+  )
+target_compile_options(v8_libplatform
+  PRIVATE ${disable-exceptions-flags}
+  )
 target_include_directories(v8_libplatform
   PUBLIC
     ${PROJECT_SOURCE_DIR}/v8/include
@@ -676,8 +698,7 @@ set_property(SOURCE v8/src/base/utils/random-number-generator.cc
   APPEND PROPERTY COMPILE_DEFINITIONS _CRT_RAND_S
 )
 
-target_compile_definitions(v8_libbase PRIVATE $<${is-win}:UNICODE> ${v8_defines} ${disable-exceptions-defines})
-target_compile_options(v8_libbase PRIVATE ${disable-exceptions-flags})
+target_compile_definitions(v8_libbase PRIVATE $<${is-win}:UNICODE> ${v8_defines})
 target_include_directories(v8_libbase PRIVATE ${v8_includes})
 target_link_libraries(v8_libbase
   PRIVATE
@@ -704,8 +725,12 @@ add_executable(
   v8/src/interpreter/bytecode-operands.cc
   v8/src/interpreter/bytecodes.cc
 )
-
-target_compile_definitions(bytecode_builtins_list_generator PRIVATE ${v8_defines})
+target_compile_options(bytecode_builtins_list_generator
+  PRIVATE ${disable-exceptions-flags}
+  )
+target_compile_definitions(bytecode_builtins_list_generator
+  PRIVATE ${v8_defines} ${disable-exceptions-defines}
+  )
 target_include_directories(bytecode_builtins_list_generator
   PRIVATE
     ${v8_includes}
@@ -752,12 +777,14 @@ list(TRANSFORM torque_files PREPEND v8/ OUTPUT_VARIABLE torque_files_abs)
 set(torque_generated_dir ${PROJECT_BINARY_DIR}/torque-generated)
 set(torque_outputs
   ${torque_generated_dir}/class-debug-readers-tq.cc
+  ${torque_generated_dir}/class-debug-readers-tq.h
   ${torque_generated_dir}/class-definitions-tq.cc
   ${torque_generated_dir}/class-verifiers-tq.cc
   ${torque_generated_dir}/exported-macros-assembler-tq.cc
   ${torque_generated_dir}/factory-tq.cc
   ${torque_generated_dir}/factory-tq.inc
   ${torque_generated_dir}/interface-descriptors-tq.inc
+  ${torque_generated_dir}/instance-types-tq.h
   ${torque_generated_dir}/objects-printer-tq.cc
   ${torque_generated_dir}/objects-body-descriptors-tq-inl.inc
 )

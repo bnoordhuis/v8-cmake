@@ -14,14 +14,15 @@ target_sources(cctest
     $<TARGET_OBJECTS:wasm_test_common>
   )
 target_config(cctest
-  PRIVATE v8_features v8_disable_exceptions external_config internal_config_base v8_tracing_config cctest_config)
-
+  PRIVATE v8_features v8_disable_exceptions internal_config_base v8_tracing_config cctest_config)
 target_link_libraries(cctest PRIVATE
   v8_compiler
   v8_snapshot
   v8_initializers
   v8_libplatform
+  v8_debug_helper
   )
+add_dependencies(cctest v8_dump_build_config)
 
 add_library(cctest_sources OBJECT)
 target_sources(cctest_sources
@@ -344,7 +345,6 @@ target_config(cctest_sources
     internal_config_base
     v8_tracing_config
   )
-
 target_compile_options(cctest_sources PRIVATE $<${is-clang}:-Wno-narrowing>)
 target_include_directories(cctest_sources PRIVATE ${PROJECT_BINARY_DIR}/inspector)
 
@@ -356,6 +356,6 @@ target_link_libraries(cctest_sources
     v8_libplatform
     #wasm_module_runner
     #wasm_test_common
-    #v8_debug_helper
+    v8_debug_helper
   )
 add_dependencies(cctest_sources v8_inspector)
