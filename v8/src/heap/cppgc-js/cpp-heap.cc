@@ -9,11 +9,16 @@
 #include "include/v8.h"
 #include "src/base/macros.h"
 #include "src/base/platform/time.h"
+#include "src/execution/isolate.h"
 #include "src/flags/flags.h"
+#include "src/heap/base/stack.h"
+#include "src/heap/cppgc-js/unified-heap-marking-state.h"
+#include "src/heap/cppgc-js/unified-heap-marking-visitor.h"
 #include "src/heap/cppgc/gc-info-table.h"
 #include "src/heap/cppgc/heap-base.h"
-#include "src/heap/cppgc/heap-object-header-inl.h"
+#include "src/heap/cppgc/heap-object-header.h"
 #include "src/heap/cppgc/marker.h"
+#include "src/heap/cppgc/marking-state.h"
 #include "src/heap/cppgc/marking-visitor.h"
 #include "src/heap/cppgc/object-allocator.h"
 #include "src/heap/cppgc/prefinalizer-handler.h"
@@ -58,29 +63,49 @@ class CppgcPlatformAdapter final : public cppgc::Platform {
   v8::Isolate* isolate_;
 };
 
-class UnifiedHeapMarker : public cppgc::internal::Marker {
+class UnifiedHeapMarker final : public cppgc::internal::MarkerBase {
  public:
-  explicit UnifiedHeapMarker(cppgc::internal::HeapBase& heap);
+  explicit UnifiedHeapMarker(Heap& v8_heap, cppgc::internal::HeapBase& heap);
+
+  ~UnifiedHeapMarker() final = default;
 
   void AddObject(void*);
 
-  // TODO(chromium:1056170): Implement unified heap specific
-  // CreateMutatorThreadMarkingVisitor and AdvanceMarkingWithDeadline.
+ protected:
+  cppgc::Visitor& visitor() final { return marking_visitor_; }
+  cppgc::internal::ConservativeTracingVisitor& conservative_visitor() final {
+    return conservative_marking_visitor_;
+  }
+  ::heap::base::StackVisitor& stack_visitor() final {
+    return conservative_marking_visitor_;
+  }
+
+ private:
+  UnifiedHeapMarkingState unified_heap_mutator_marking_state_;
+  UnifiedHeapMarkingVisitor marking_visitor_;
+  cppgc::internal::ConservativeMarkingVisitor conservative_marking_visitor_;
 };
 
-UnifiedHeapMarker::UnifiedHeapMarker(cppgc::internal::HeapBase& heap)
-    : cppgc::internal::Marker(heap) {}
+UnifiedHeapMarker::UnifiedHeapMarker(Heap& v8_heap,
+                                     cppgc::internal::HeapBase& heap)
+    : cppgc::internal::MarkerBase(heap),
+      unified_heap_mutator_marking_state_(v8_heap),
+      marking_visitor_(heap, mutator_marking_state_,
+                       unified_heap_mutator_marking_state_),
+      conservative_marking_visitor_(heap, mutator_marking_state_,
+                                    marking_visitor_) {}
 
 void UnifiedHeapMarker::AddObject(void* object) {
-  auto& header = cppgc::internal::HeapObjectHeader::FromPayload(object);
-  marking_visitor_->MarkObject(header);
+  mutator_marking_state_.MarkAndPush(
+      cppgc::internal::HeapObjectHeader::FromPayload(object));
 }
 
 }  // namespace
 
 CppHeap::CppHeap(v8::Isolate* isolate, size_t custom_spaces)
     : cppgc::internal::HeapBase(std::make_shared<CppgcPlatformAdapter>(isolate),
-                                custom_spaces) {
+                                custom_spaces),
+      isolate_(*reinterpret_cast<Isolate*>(isolate)) {
   CHECK(!FLAG_incremental_marking_wrappers);
 }
 
@@ -96,7 +121,7 @@ void CppHeap::RegisterV8References(
 }
 
 void CppHeap::TracePrologue(TraceFlags flags) {
-  marker_ = std::make_unique<UnifiedHeapMarker>(AsBase());
+  marker_.reset(new UnifiedHeapMarker(*isolate_.heap(), AsBase()));
   const UnifiedHeapMarker::MarkingConfig marking_config{
       UnifiedHeapMarker::MarkingConfig::CollectionType::kMajor,
       cppgc::Heap::StackState::kNoHeapPointers,
@@ -131,6 +156,11 @@ void CppHeap::TraceEpilogue(TraceSummary* trace_summary) {
     marker()->ProcessWeakness();
     prefinalizer_handler()->InvokePreFinalizers();
   }
+  marker_.reset();
+  // TODO(chromium:1056170): replace build flag with dedicated flag.
+#if DEBUG
+  VerifyMarking(cppgc::Heap::StackState::kNoHeapPointers);
+#endif
   {
     NoGCScope no_gc(*this);
     sweeper().Start(cppgc::internal::Sweeper::Config::kAtomic);

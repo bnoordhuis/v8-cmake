@@ -5,6 +5,8 @@
 #ifndef V8_WASM_WASM_OPCODES_H_
 #define V8_WASM_WASM_OPCODES_H_
 
+#include <memory>
+
 #include "src/common/globals.h"
 #include "src/common/message-template.h"
 #include "src/wasm/value-type.h"
@@ -21,24 +23,26 @@ std::ostream& operator<<(std::ostream& os, const FunctionSig& function);
 bool IsJSCompatibleSignature(const FunctionSig* sig, const WasmFeatures&);
 
 // Control expressions and blocks.
-#define FOREACH_CONTROL_OPCODE(V)        \
-  V(Unreachable, 0x00, _)                \
-  V(Nop, 0x01, _)                        \
-  V(Block, 0x02, _)                      \
-  V(Loop, 0x03, _)                       \
-  V(If, 0x04, _)                         \
-  V(Else, 0x05, _)                       \
-  V(Try, 0x06, _ /* eh_prototype */)     \
-  V(Catch, 0x07, _ /* eh_prototype */)   \
-  V(Throw, 0x08, _ /* eh_prototype */)   \
-  V(Rethrow, 0x09, _ /* eh_prototype */) \
-  V(BrOnExn, 0x0a, _ /* eh prototype */) \
-  V(End, 0x0b, _)                        \
-  V(Br, 0x0c, _)                         \
-  V(BrIf, 0x0d, _)                       \
-  V(BrTable, 0x0e, _)                    \
-  V(Return, 0x0f, _)                     \
-  V(Let, 0x17, _ /* gc prototype */)     \
+#define FOREACH_CONTROL_OPCODE(V)                         \
+  V(Unreachable, 0x00, _)                                 \
+  V(Nop, 0x01, _)                                         \
+  V(Block, 0x02, _)                                       \
+  V(Loop, 0x03, _)                                        \
+  V(If, 0x04, _)                                          \
+  V(Else, 0x05, _)                                        \
+  V(Try, 0x06, _ /* eh_prototype */)                      \
+  V(Catch, 0x07, _ /* eh_prototype */)                    \
+  V(Throw, 0x08, _ /* eh_prototype */)                    \
+  V(Rethrow, 0x09, _ /* eh_prototype */)                  \
+  V(BrOnExn, 0x0a, _ /* eh prototype */)                  \
+  V(End, 0x0b, _)                                         \
+  V(Br, 0x0c, _)                                          \
+  V(BrIf, 0x0d, _)                                        \
+  V(BrTable, 0x0e, _)                                     \
+  V(Return, 0x0f, _)                                      \
+  V(CallRef, 0x14, _ /* typed_funcref prototype */)       \
+  V(ReturnCallRef, 0x15, _ /* typed_funcref prototype */) \
+  V(Let, 0x17, _ /* typed_funcref prototype */)           \
   V(BrOnNull, 0xd4, _ /* gc prototype */)
 
 // Constants, locals, globals, and calls.
@@ -64,7 +68,7 @@ bool IsJSCompatibleSignature(const FunctionSig* sig, const WasmFeatures&);
   V(RefNull, 0xd0, _)            \
   V(RefIsNull, 0xd1, _)          \
   V(RefFunc, 0xd2, _)            \
-  V(RefAsNonNull, 0xd3, _)
+  V(RefAsNonNull, 0xd3, _ /* typed_funcref prototype */)
 
 // Load memory expressions.
 #define FOREACH_LOAD_MEM_OPCODE(V) \
@@ -283,6 +287,8 @@ bool IsJSCompatibleSignature(const FunctionSig* sig, const WasmFeatures&);
   V(S64x2LoadSplat, 0xfd0a, s_i)   \
   V(S128StoreMem, 0xfd0b, v_is)
 
+#define FOREACH_SIMD_CONST_OPCODE(V) V(S128Const, 0xfd0c, _)
+
 #define FOREACH_SIMD_MASK_OPERAND_OPCODE(V) V(S8x16Shuffle, 0xfd0d, s_ss)
 
 #define FOREACH_SIMD_MVP_0_OPERAND_OPCODE(V) \
@@ -434,6 +440,10 @@ bool IsJSCompatibleSignature(const FunctionSig* sig, const WasmFeatures&);
   V(F32x4SConvertI32x4, 0xfdfa, s_s)         \
   V(F32x4UConvertI32x4, 0xfdfb, s_s)
 
+#define FOREACH_SIMD_POST_MVP_MEM_OPCODE(V) \
+  V(S128LoadMem32Zero, 0xfdfc, s_i)         \
+  V(S128LoadMem64Zero, 0xfdfd, s_i)
+
 #define FOREACH_SIMD_POST_MVP_OPCODE(V) \
   V(I8x16Mul, 0xfd75, s_ss)             \
   V(I8x16BitMask, 0xfd64, i_s)          \
@@ -455,8 +465,8 @@ bool IsJSCompatibleSignature(const FunctionSig* sig, const WasmFeatures&);
   V(I64x2MinU, 0xfdd7, s_ss)            \
   V(I64x2MaxS, 0xfde2, s_ss)            \
   V(I64x2MaxU, 0xfdee, s_ss)            \
-  V(F32x4Qfma, 0xfdfc, s_sss)           \
-  V(F32x4Qfms, 0xfdfd, s_sss)           \
+  V(F32x4Qfma, 0xfdb4, s_sss)           \
+  V(F32x4Qfms, 0xfdd4, s_sss)           \
   V(F64x2Qfma, 0xfdfe, s_sss)           \
   V(F64x2Qfms, 0xfdff, s_sss)           \
   V(I16x8AddHoriz, 0xfdaf, s_ss)        \
@@ -596,18 +606,14 @@ bool IsJSCompatibleSignature(const FunctionSig* sig, const WasmFeatures&);
   V(I64AtomicCompareExchange16U, 0xfe4d, l_ill) \
   V(I64AtomicCompareExchange32U, 0xfe4e, l_ill)
 
-// Opcode values are guesswork for now, see:
-// https://docs.google.com/document/d/1DklC3qVuOdLHSXB5UXghM_syCh-4cMinQ50ICiXnK3Q/edit
 #define FOREACH_GC_OPCODE(V)     \
-  V(StructNew, 0xfb00, _)        \
-  V(StructNewSub, 0xfb01, _)     \
+  V(StructNewWithRtt, 0xfb01, _) \
   V(StructNewDefault, 0xfb02, _) \
   V(StructGet, 0xfb03, _)        \
   V(StructGetS, 0xfb04, _)       \
   V(StructGetU, 0xfb05, _)       \
   V(StructSet, 0xfb06, _)        \
-  V(ArrayNew, 0xfb10, _)         \
-  V(ArrayNewSub, 0xfb11, _)      \
+  V(ArrayNewWithRtt, 0xfb11, _)  \
   V(ArrayNewDefault, 0xfb12, _)  \
   V(ArrayGet, 0xfb13, _)         \
   V(ArrayGetS, 0xfb14, _)        \
@@ -641,6 +647,8 @@ bool IsJSCompatibleSignature(const FunctionSig* sig, const WasmFeatures&);
   FOREACH_SIMD_1_OPERAND_OPCODE(V)    \
   FOREACH_SIMD_MASK_OPERAND_OPCODE(V) \
   FOREACH_SIMD_MEM_OPCODE(V)          \
+  FOREACH_SIMD_POST_MVP_MEM_OPCODE(V) \
+  FOREACH_SIMD_CONST_OPCODE(V)        \
   FOREACH_ATOMIC_OPCODE(V)            \
   FOREACH_ATOMIC_0_OPERAND_OPCODE(V)  \
   FOREACH_NUMERIC_OPCODE(V)           \
@@ -746,47 +754,127 @@ class V8_EXPORT_PRIVATE WasmOpcodes {
 };
 
 // Representation of an initializer expression.
-struct WasmInitExpr {
-  enum WasmInitKind {
+class WasmInitExpr {
+ public:
+  enum Operator {
     kNone,
-    kGlobalIndex,
+    kGlobalGet,
     kI32Const,
     kI64Const,
     kF32Const,
     kF64Const,
+    kS128Const,
     kRefNullConst,
     kRefFuncConst,
-  } kind;
+    kRttCanon,
+    kRttSub
+  };
 
-  union {
+  union Immediate {
     int32_t i32_const;
     int64_t i64_const;
     float f32_const;
     double f64_const;
-    uint32_t global_index;
-    uint32_t function_index;
-  } val;
+    std::array<uint8_t, kSimd128Size> s128_const;
+    uint32_t index;
+    HeapType::Representation heap_type;
+  };
 
-  WasmInitExpr() : kind(kNone) {}
-  explicit WasmInitExpr(int32_t v) : kind(kI32Const) { val.i32_const = v; }
-  explicit WasmInitExpr(int64_t v) : kind(kI64Const) { val.i64_const = v; }
-  explicit WasmInitExpr(float v) : kind(kF32Const) { val.f32_const = v; }
-  explicit WasmInitExpr(double v) : kind(kF64Const) { val.f64_const = v; }
-
-  explicit WasmInitExpr(WasmInitKind kind) : kind(kind) {
-    DCHECK_EQ(kind, kRefNullConst);
+  WasmInitExpr() : kind_(kNone) { immediate_.i32_const = 0; }
+  explicit WasmInitExpr(int32_t v) : kind_(kI32Const) {
+    immediate_.i32_const = v;
+  }
+  explicit WasmInitExpr(int64_t v) : kind_(kI64Const) {
+    immediate_.i64_const = v;
+  }
+  explicit WasmInitExpr(float v) : kind_(kF32Const) {
+    immediate_.f32_const = v;
+  }
+  explicit WasmInitExpr(double v) : kind_(kF64Const) {
+    immediate_.f64_const = v;
+  }
+  explicit WasmInitExpr(uint8_t v[kSimd128Size]) : kind_(kS128Const) {
+    memcpy(immediate_.s128_const.data(), v, kSimd128Size);
   }
 
-  WasmInitExpr(WasmInitKind kind, uint32_t index) : kind(kind) {
-    if (kind == kGlobalIndex) {
-      val.global_index = index;
-    } else if (kind == kRefFuncConst) {
-      val.function_index = index;
-    } else {
-      // For the other types, the other initializers should be used.
-      UNREACHABLE();
+  MOVE_ONLY_NO_DEFAULT_CONSTRUCTOR(WasmInitExpr);
+
+  static WasmInitExpr GlobalGet(uint32_t index) {
+    WasmInitExpr expr;
+    expr.kind_ = kGlobalGet;
+    expr.immediate_.index = index;
+    return expr;
+  }
+
+  static WasmInitExpr RefFuncConst(uint32_t index) {
+    WasmInitExpr expr;
+    expr.kind_ = kRefFuncConst;
+    expr.immediate_.index = index;
+    return expr;
+  }
+
+  static WasmInitExpr RefNullConst(HeapType::Representation heap_type) {
+    WasmInitExpr expr;
+    expr.kind_ = kRefNullConst;
+    expr.immediate_.heap_type = heap_type;
+    return expr;
+  }
+
+  static WasmInitExpr RttCanon(HeapType::Representation heap_type) {
+    WasmInitExpr expr;
+    expr.kind_ = kRttCanon;
+    expr.immediate_.heap_type = heap_type;
+    return expr;
+  }
+
+  static WasmInitExpr RttSub(HeapType::Representation heap_type,
+                             WasmInitExpr supertype) {
+    WasmInitExpr expr;
+    expr.kind_ = kRttSub;
+    expr.immediate_.heap_type = heap_type;
+    expr.operand_ = std::make_unique<WasmInitExpr>(std::move(supertype));
+    return expr;
+  }
+
+  Immediate immediate() const { return immediate_; }
+  Operator kind() const { return kind_; }
+  WasmInitExpr* operand() const { return operand_.get(); }
+
+  bool operator==(const WasmInitExpr& other) const {
+    if (kind() != other.kind()) return false;
+    switch (kind()) {
+      case kNone:
+        return true;
+      case kGlobalGet:
+      case kRefFuncConst:
+        return immediate().index == other.immediate().index;
+      case kI32Const:
+        return immediate().i32_const == other.immediate().i32_const;
+      case kI64Const:
+        return immediate().i64_const == other.immediate().i64_const;
+      case kF32Const:
+        return immediate().f32_const == other.immediate().f32_const;
+      case kF64Const:
+        return immediate().f64_const == other.immediate().f64_const;
+      case kS128Const:
+        return immediate().s128_const == other.immediate().s128_const;
+      case kRefNullConst:
+      case kRttCanon:
+        return immediate().heap_type == other.immediate().heap_type;
+      case kRttSub:
+        return immediate().heap_type == other.immediate().heap_type &&
+               *operand() == *other.operand();
     }
   }
+
+  V8_INLINE bool operator!=(const WasmInitExpr& other) {
+    return !(*this == other);
+  }
+
+ private:
+  Immediate immediate_;
+  Operator kind_;
+  std::unique_ptr<WasmInitExpr> operand_ = nullptr;
 };
 
 }  // namespace wasm

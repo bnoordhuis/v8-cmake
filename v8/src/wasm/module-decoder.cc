@@ -9,6 +9,7 @@
 #include "src/flags/flags.h"
 #include "src/init/v8.h"
 #include "src/logging/counters.h"
+#include "src/logging/metrics.h"
 #include "src/objects/objects-inl.h"
 #include "src/utils/ostreams.h"
 #include "src/wasm/decoder.h"
@@ -104,33 +105,6 @@ bool validate_utf8(Decoder* decoder, WireBytesRef string) {
   return unibrow::Utf8::ValidateEncoding(
       decoder->start() + decoder->GetBufferRelativeOffset(string.offset()),
       string.length());
-}
-
-ValueType TypeOf(const WasmModule* module, const WasmInitExpr& expr) {
-  switch (expr.kind) {
-    case WasmInitExpr::kNone:
-      return kWasmStmt;
-    case WasmInitExpr::kGlobalIndex:
-      return expr.val.global_index < module->globals.size()
-                 ? module->globals[expr.val.global_index].type
-                 : kWasmStmt;
-    case WasmInitExpr::kI32Const:
-      return kWasmI32;
-    case WasmInitExpr::kI64Const:
-      return kWasmI64;
-    case WasmInitExpr::kF32Const:
-      return kWasmF32;
-    case WasmInitExpr::kF64Const:
-      return kWasmF64;
-    case WasmInitExpr::kRefFuncConst:
-      return ValueType::Ref(kHeapFunc, kNonNullable);
-    case WasmInitExpr::kRefNullConst:
-      // It is not possible to retrieve the full {ValueType} of a {WasmInitExpr}
-      // of kind {kRefNullConst}. As WasmInitExpr of kind {krefNullConst} is
-      // only valid in globals, the {ValueType} has to be retrieved from the
-      // global definition itself.
-      UNREACHABLE();
-  }
 }
 
 // Reads a length-prefixed string, checking that it is within bounds. Returns
@@ -290,6 +264,27 @@ class WasmSectionIterator {
       decoder_->consume_bytes(remaining, "section payload");
     }
   }
+};
+
+class AutoSubmitMetrics : public v8::metrics::WasmModuleDecoded {
+ public:
+  AutoSubmitMetrics(std::shared_ptr<metrics::Recorder> recorder,
+                    v8::metrics::Recorder::ContextId context_id)
+      : recorder_(std::move(recorder)),
+        context_id_(context_id),
+        timed_scope_(this,
+                     &v8::metrics::WasmModuleDecoded::wall_clock_time_in_us) {}
+
+  ~AutoSubmitMetrics() {
+    timed_scope_.Stop();
+    recorder_->DelayMainThreadEvent<v8::metrics::WasmModuleDecoded>(
+        *this, context_id_);
+  }
+
+ private:
+  std::shared_ptr<metrics::Recorder> recorder_;
+  v8::metrics::Recorder::ContextId context_id_;
+  metrics::TimedScope<v8::metrics::WasmModuleDecoded> timed_scope_;
 };
 
 }  // namespace
@@ -560,8 +555,7 @@ class ModuleDecoderImpl : public Decoder {
       uint8_t kind = consume_u8("type kind");
       switch (kind) {
         case kWasmFunctionTypeCode: {
-          const FunctionSig* s = consume_sig(module_->signature_zone.get(),
-                                             DeferIndexCheckMode::kDeferCheck);
+          const FunctionSig* s = consume_sig(module_->signature_zone.get());
           module_->add_signature(s);
           break;
         }
@@ -591,27 +585,6 @@ class ModuleDecoderImpl : public Decoder {
       }
     }
     module_->signature_map.Freeze();
-    VerifyDeferredTypeOffsets();
-  }
-
-  // TODO(7748): When typed function references are allowed, this should be
-  // deleted altogether and replaced by an inline in-bounds check.
-  void VerifyDeferredTypeOffsets() {
-    for (auto& type_offset : deferred_check_type_index_) {
-      uint32_t type_index = type_offset.first;
-      uint32_t code_offset = type_offset.second;
-      if (type_index >= module_->type_kinds.size()) {
-        errorf(code_offset, "reference to undeclared struct/array #%u",
-               type_index);
-        break;
-      }
-      uint8_t type = module_->type_kinds[type_index];
-      if (type == kWasmFunctionTypeCode) {
-        errorf(code_offset, "cannot build reference to function type index #%u",
-               type_index);
-        break;
-      }
-    }
   }
 
   void DecodeImportSection() {
@@ -663,9 +636,10 @@ class ModuleDecoderImpl : public Decoder {
           table->type = type;
           uint8_t flags = validate_table_flags("element count");
           consume_resizable_limits(
-              "element count", "elements", FLAG_wasm_max_table_size,
+              "element count", "elements", std::numeric_limits<uint32_t>::max(),
               &table->initial_size, &table->has_maximum_size,
-              FLAG_wasm_max_table_size, &table->maximum_size, flags);
+              std::numeric_limits<uint32_t>::max(), &table->maximum_size,
+              flags);
           break;
         }
         case kExternalMemory: {
@@ -749,12 +723,18 @@ class ModuleDecoderImpl : public Decoder {
       if (!AddTable(module_.get())) break;
       module_->tables.emplace_back();
       WasmTable* table = &module_->tables.back();
+      const byte* type_position = pc();
       table->type = consume_reference_type();
+      if (!table->type.is_nullable()) {
+        // TODO(7748): Implement other table types.
+        error(type_position,
+              "Currently, only nullable references are allowed as table types");
+      }
       uint8_t flags = validate_table_flags("table elements");
       consume_resizable_limits(
-          "table elements", "elements", FLAG_wasm_max_table_size,
+          "table elements", "elements", std::numeric_limits<uint32_t>::max(),
           &table->initial_size, &table->has_maximum_size,
-          FLAG_wasm_max_table_size, &table->maximum_size, flags);
+          std::numeric_limits<uint32_t>::max(), &table->maximum_size, flags);
     }
   }
 
@@ -926,7 +906,7 @@ class ModuleDecoderImpl : public Decoder {
                          this->module_.get())) {
           errorf(pos,
                  "Invalid element segment. Table %u is not a super-type of %s",
-                 table_index, type.type_name().c_str());
+                 table_index, type.name().c_str());
           break;
         }
       }
@@ -934,7 +914,7 @@ class ModuleDecoderImpl : public Decoder {
       uint32_t num_elem =
           consume_count("number of elements", max_table_init_entries());
       if (status == WasmElemSegment::kStatusActive) {
-        module_->elem_segments.emplace_back(table_index, offset);
+        module_->elem_segments.emplace_back(table_index, std::move(offset));
       } else {
         module_->elem_segments.emplace_back(
             status == WasmElemSegment::kStatusDeclarative);
@@ -1037,7 +1017,7 @@ class ModuleDecoderImpl : public Decoder {
       uint32_t source_offset = pc_offset();
 
       if (is_active) {
-        module_->data_segments.emplace_back(dest_addr);
+        module_->data_segments.emplace_back(std::move(dest_addr));
       } else {
         module_->data_segments.emplace_back();
       }
@@ -1231,6 +1211,14 @@ class ModuleDecoderImpl : public Decoder {
     if (ok() && CheckMismatchedCounts()) {
       CalculateGlobalOffsets(module_.get());
     }
+
+    if (metrics_) {
+      metrics_->success = ok() && !intermediate_error_.has_error();
+      metrics_->module_size_in_bytes = end() - start();
+      metrics_->function_count = module_->num_declared_functions;
+      metrics_.reset();
+    }
+
     ModuleResult result = toResult(std::move(module_));
     if (verify_functions && result.ok() && intermediate_error_.has_error()) {
       // Copy error message and location.
@@ -1274,6 +1262,13 @@ class ModuleDecoderImpl : public Decoder {
     if (FLAG_dump_wasm_module) DumpModule(orig_bytes);
 
     if (decoder.failed()) {
+      if (metrics_) {
+        metrics_->success = false;
+        metrics_->module_size_in_bytes = orig_bytes.length();
+        metrics_->function_count = module_->num_declared_functions;
+        metrics_.reset();
+      }
+
       return decoder.toResult<std::unique_ptr<WasmModule>>(nullptr);
     }
 
@@ -1288,7 +1283,7 @@ class ModuleDecoderImpl : public Decoder {
     pc_ = start_;
     expect_u8("type form", kWasmFunctionTypeCode);
     if (!ok()) return FunctionResult{std::move(intermediate_error_)};
-    function->sig = consume_sig(zone, DeferIndexCheckMode::kNoCheck);
+    function->sig = consume_sig(zone);
     function->code = {off(pc_), static_cast<uint32_t>(end_ - pc_)};
 
     if (ok())
@@ -1306,8 +1301,7 @@ class ModuleDecoderImpl : public Decoder {
   const FunctionSig* DecodeFunctionSignature(Zone* zone, const byte* start) {
     pc_ = start;
     if (!expect_u8("type form", kWasmFunctionTypeCode)) return nullptr;
-    const FunctionSig* result =
-        consume_sig(zone, DeferIndexCheckMode::kNoCheck);
+    const FunctionSig* result = consume_sig(zone);
     return ok() ? result : nullptr;
   }
 
@@ -1326,6 +1320,32 @@ class ModuleDecoderImpl : public Decoder {
   void SetCounters(Counters* counters) {
     DCHECK_NULL(counters_);
     counters_ = counters;
+  }
+
+  void EnableMetricsRecording(
+      std::shared_ptr<metrics::Recorder> metrics_recorder,
+      v8::metrics::Recorder::ContextId context_id,
+      DecodingMethod decoding_method) {
+    metrics_ = std::make_unique<AutoSubmitMetrics>(std::move(metrics_recorder),
+                                                   context_id);
+    switch (decoding_method) {
+      case DecodingMethod::kSync:
+        break;
+      case DecodingMethod::kAsync:
+        metrics_->async = true;
+        break;
+      case DecodingMethod::kSyncStream:
+        metrics_->streamed = true;
+        break;
+      case DecodingMethod::kAsyncStream:
+        metrics_->async = true;
+        metrics_->streamed = true;
+        break;
+      case DecodingMethod::kDeserialize:
+        // TODO(ecmziegler): verify if we need to add a deserialized metric flag
+        // in the next UKM update.
+        break;
+    }
   }
 
  private:
@@ -1353,6 +1373,50 @@ class ModuleDecoderImpl : public Decoder {
   // reporting once the whole type section is parsed.
   std::unordered_map<uint32_t, int> deferred_check_type_index_;
   ModuleOrigin origin_;
+  std::unique_ptr<AutoSubmitMetrics> metrics_;
+
+  ValueType TypeOf(const WasmInitExpr& expr) {
+    switch (expr.kind()) {
+      case WasmInitExpr::kNone:
+        return kWasmStmt;
+      case WasmInitExpr::kGlobalGet:
+        return expr.immediate().index < module_->globals.size()
+                   ? module_->globals[expr.immediate().index].type
+                   : kWasmStmt;
+      case WasmInitExpr::kI32Const:
+        return kWasmI32;
+      case WasmInitExpr::kI64Const:
+        return kWasmI64;
+      case WasmInitExpr::kF32Const:
+        return kWasmF32;
+      case WasmInitExpr::kF64Const:
+        return kWasmF64;
+      case WasmInitExpr::kS128Const:
+        return kWasmS128;
+      case WasmInitExpr::kRefFuncConst: {
+        uint32_t heap_type =
+            enabled_features_.has_typed_funcref()
+                ? module_->functions[expr.immediate().index].sig_index
+                : HeapType::kFunc;
+        return ValueType::Ref(heap_type, kNonNullable);
+      }
+      case WasmInitExpr::kRefNullConst:
+        return ValueType::Ref(expr.immediate().heap_type, kNullable);
+      case WasmInitExpr::kRttCanon:
+        // TODO(7748): If heaptype is "anyref" (not introduced yet),
+        // then this should be uint8_t{0}.
+        return ValueType::Rtt(expr.immediate().heap_type, uint8_t{1});
+      case WasmInitExpr::kRttSub: {
+        ValueType operand_type = TypeOf(*expr.operand());
+        if (operand_type.is_rtt()) {
+          return ValueType::Rtt(expr.immediate().heap_type,
+                                operand_type.depth() + 1);
+        } else {
+          return kWasmStmt;
+        }
+      }
+    }
+  }
 
   bool has_seen_unordered_section(SectionCode section_code) {
     return seen_unordered_sections_ & (1 << section_code);
@@ -1393,8 +1457,8 @@ class ModuleDecoderImpl : public Decoder {
     global->mutability = consume_mutability();
     const byte* pos = pc();
     global->init = consume_init_expr(module, global->type);
-    if (global->init.kind == WasmInitExpr::kGlobalIndex) {
-      uint32_t other_index = global->init.val.global_index;
+    if (global->init.kind() == WasmInitExpr::kGlobalGet) {
+      uint32_t other_index = global->init.immediate().index;
       if (other_index >= index) {
         errorf(pos,
                "invalid global index in init expression, "
@@ -1404,8 +1468,8 @@ class ModuleDecoderImpl : public Decoder {
         errorf(pos,
                "type mismatch in global initialization "
                "(from global #%u), expected %s, got %s",
-               other_index, global->type.type_name().c_str(),
-               module->globals[other_index].type.type_name().c_str());
+               other_index, global->type.name().c_str(),
+               module->globals[other_index].type.name().c_str());
       }
     }
   }
@@ -1603,115 +1667,200 @@ class ModuleDecoderImpl : public Decoder {
     return true;
   }
 
+  // TODO(manoskouk): This is copy-modified from function-body-decoder-impl.h.
+  // We should find a way to share this code.
+  V8_INLINE bool Validate(const byte* pc, HeapTypeImmediate<kValidate>& imm) {
+    if (V8_UNLIKELY(imm.type.is_bottom())) {
+      error(pc, "invalid heap type");
+      return false;
+    }
+    if (V8_UNLIKELY(!(imm.type.is_generic() ||
+                      module_->has_type(imm.type.ref_index())))) {
+      errorf(pc, "Type index %u is out of bounds", imm.type.ref_index());
+      return false;
+    }
+    return true;
+  }
+
   WasmInitExpr consume_init_expr(WasmModule* module, ValueType expected) {
-    const byte* pos = pc();
-    uint8_t opcode = consume_u8("opcode");
-    WasmInitExpr expr;
-    uint32_t len = 0;
-    switch (opcode) {
-      case kExprGlobalGet: {
-        GlobalIndexImmediate<Decoder::kValidate> imm(this, pc() - 1);
-        if (module->globals.size() <= imm.index) {
-          error("global index is out of bounds");
-          expr.kind = WasmInitExpr::kNone;
-          expr.val.i32_const = 0;
+    constexpr Decoder::ValidateFlag validate = Decoder::kValidate;
+    WasmOpcode opcode = kExprNop;
+    std::vector<WasmInitExpr> stack;
+    while (pc() < end() && opcode != kExprEnd) {
+      uint32_t len = 1;
+      opcode = static_cast<WasmOpcode>(read_u8<validate>(pc(), "opcode"));
+      switch (opcode) {
+        case kExprGlobalGet: {
+          GlobalIndexImmediate<validate> imm(this, pc() + 1);
+          len = 1 + imm.length;
+          if (V8_UNLIKELY(module->globals.size() <= imm.index)) {
+            error(pc() + 1, "global index is out of bounds");
+            return {};
+          }
+          WasmGlobal* global = &module->globals[imm.index];
+          if (V8_UNLIKELY(global->mutability || !global->imported)) {
+            error(pc() + 1,
+                  "only immutable imported globals can be used in initializer "
+                  "expressions");
+            return {};
+          }
+          stack.push_back(WasmInitExpr::GlobalGet(imm.index));
           break;
         }
-        WasmGlobal* global = &module->globals[imm.index];
-        if (global->mutability || !global->imported) {
-          error(
-              "only immutable imported globals can be used in initializer "
-              "expressions");
-          expr.kind = WasmInitExpr::kNone;
-          expr.val.i32_const = 0;
+        case kExprI32Const: {
+          ImmI32Immediate<Decoder::kValidate> imm(this, pc() + 1);
+          stack.emplace_back(imm.value);
+          len = 1 + imm.length;
           break;
         }
-        expr.kind = WasmInitExpr::kGlobalIndex;
-        expr.val.global_index = imm.index;
-        len = imm.length;
-        break;
-      }
-      case kExprI32Const: {
-        ImmI32Immediate<Decoder::kValidate> imm(this, pc() - 1);
-        expr.kind = WasmInitExpr::kI32Const;
-        expr.val.i32_const = imm.value;
-        len = imm.length;
-        break;
-      }
-      case kExprF32Const: {
-        ImmF32Immediate<Decoder::kValidate> imm(this, pc() - 1);
-        expr.kind = WasmInitExpr::kF32Const;
-        expr.val.f32_const = imm.value;
-        len = imm.length;
-        break;
-      }
-      case kExprI64Const: {
-        ImmI64Immediate<Decoder::kValidate> imm(this, pc() - 1);
-        expr.kind = WasmInitExpr::kI64Const;
-        expr.val.i64_const = imm.value;
-        len = imm.length;
-        break;
-      }
-      case kExprF64Const: {
-        ImmF64Immediate<Decoder::kValidate> imm(this, pc() - 1);
-        expr.kind = WasmInitExpr::kF64Const;
-        expr.val.f64_const = imm.value;
-        len = imm.length;
-        break;
-      }
-      case kExprRefNull: {
-        if (enabled_features_.has_reftypes() || enabled_features_.has_eh()) {
-          RefNullImmediate<Decoder::kValidate> imm(WasmFeatures::All(), this,
-                                                   pc() - 1);
-          if (!imm.type.is_reference_type()) {
-            errorf(pc() - 1, "ref.null is not supported for %s",
-                   imm.type.type_name().c_str());
-            break;
-          }
-          expr.kind = WasmInitExpr::kRefNullConst;
-          len = imm.length;
-          if (expected != kWasmStmt &&
-              !IsSubtypeOf(imm.type, expected, module_.get())) {
-            errorf(pos, "type error in init expression, expected %s, got %s",
-                   expected.type_name().c_str(), imm.type.type_name().c_str());
-          }
+        case kExprF32Const: {
+          ImmF32Immediate<Decoder::kValidate> imm(this, pc() + 1);
+          stack.emplace_back(imm.value);
+          len = 1 + imm.length;
           break;
         }
-        V8_FALLTHROUGH;
-      }
-      case kExprRefFunc: {
-        if (enabled_features_.has_reftypes()) {
-          FunctionIndexImmediate<Decoder::kValidate> imm(this, pc() - 1);
-          if (module->functions.size() <= imm.index) {
-            errorf(pc() - 1, "invalid function index: %u", imm.index);
-            break;
+        case kExprI64Const: {
+          ImmI64Immediate<Decoder::kValidate> imm(this, pc() + 1);
+          stack.emplace_back(imm.value);
+          len = 1 + imm.length;
+          break;
+        }
+        case kExprF64Const: {
+          ImmF64Immediate<Decoder::kValidate> imm(this, pc() + 1);
+          stack.emplace_back(imm.value);
+          len = 1 + imm.length;
+          break;
+        }
+        case kExprRefNull: {
+          if (V8_UNLIKELY(!enabled_features_.has_reftypes() &&
+                          !enabled_features_.has_eh())) {
+            errorf(pc(),
+                   "invalid opcode 0x%x in global initializer, enable with "
+                   "--experimental-wasm-reftypes or --experimental-wasm-eh",
+                   kExprRefNull);
+            return {};
           }
-          expr.kind = WasmInitExpr::kRefFuncConst;
-          expr.val.function_index = imm.index;
+          HeapTypeImmediate<Decoder::kValidate> imm(enabled_features_, this,
+                                                    pc() + 1);
+          len = 1 + imm.length;
+          if (!Validate(pc() + 1, imm)) return {};
+          stack.push_back(
+              WasmInitExpr::RefNullConst(imm.type.representation()));
+          break;
+        }
+        case kExprRefFunc: {
+          if (V8_UNLIKELY(!enabled_features_.has_reftypes())) {
+            errorf(pc(),
+                   "invalid opcode 0x%x in global initializer, enable with "
+                   "--experimental-wasm-reftypes",
+                   kExprRefFunc);
+            return {};
+          }
+
+          FunctionIndexImmediate<Decoder::kValidate> imm(this, pc() + 1);
+          len = 1 + imm.length;
+          if (V8_UNLIKELY(module->functions.size() <= imm.index)) {
+            errorf(pc(), "invalid function index: %u", imm.index);
+            return {};
+          }
+          stack.push_back(WasmInitExpr::RefFuncConst(imm.index));
           // Functions referenced in the globals section count as "declared".
           module->functions[imm.index].declared = true;
-          len = imm.length;
           break;
         }
-        V8_FALLTHROUGH;
+        case kSimdPrefix: {
+          // No need to check for Simd in enabled_features_ here; we either
+          // failed to validate the global's type earlier, or will fail in
+          // the type check or stack height check at the end.
+          opcode = read_prefixed_opcode<validate>(pc(), &len);
+          if (V8_UNLIKELY(opcode != kExprS128Const)) {
+            errorf(pc(), "invalid SIMD opcode 0x%x in global initializer",
+                   opcode);
+            return {};
+          }
+
+          Simd128Immediate<validate> imm(this, pc() + len + 1);
+          len += 1 + kSimd128Size;
+          stack.emplace_back(imm.value);
+          break;
+        }
+        case kGCPrefix: {
+          // No need to check for GC in enabled_features_ here; we either
+          // failed to validate the global's type earlier, or will fail in
+          // the type check or stack height check at the end.
+          opcode = read_prefixed_opcode<validate>(pc(), &len);
+          switch (opcode) {
+            case kExprRttCanon: {
+              HeapTypeImmediate<validate> imm(enabled_features_, this,
+                                              pc() + 2);
+              len += 1 + imm.length;
+              if (!Validate(pc() + 2, imm)) return {};
+              stack.push_back(
+                  WasmInitExpr::RttCanon(imm.type.representation()));
+              break;
+            }
+            case kExprRttSub: {
+              HeapTypeImmediate<validate> imm(enabled_features_, this,
+                                              pc() + 2);
+              len += 1 + imm.length;
+              if (!Validate(pc() + 2, imm)) return {};
+              if (stack.empty()) {
+                error(pc(), "calling rtt.sub without arguments");
+                return {};
+              }
+              WasmInitExpr parent = std::move(stack.back());
+              stack.pop_back();
+              ValueType parent_type = TypeOf(parent);
+              if (V8_UNLIKELY(
+                      parent_type.kind() != ValueType::kRtt ||
+                      !IsSubtypeOf(
+                          ValueType::Ref(imm.type, kNonNullable),
+                          ValueType::Ref(parent_type.heap_type(), kNonNullable),
+                          module_.get()))) {
+                error(pc(), "rtt.sub requires a supertype rtt on stack");
+                return {};
+              }
+              stack.push_back(WasmInitExpr::RttSub(imm.type.representation(),
+                                                   std::move(parent)));
+              break;
+            }
+            default: {
+              errorf(pc(), "invalid opcode 0x%x in global initializer", opcode);
+              return {};
+            }
+          }
+          break;  // case kGCPrefix
+        }
+        case kExprEnd:
+          break;
+        default: {
+          errorf(pc(), "invalid opcode 0x%x in global initializer", opcode);
+          return {};
+        }
       }
-      default: {
-        error("invalid opcode in initialization expression");
-        expr.kind = WasmInitExpr::kNone;
-        expr.val.i32_const = 0;
-      }
-    }
-    consume_bytes(len, "init code");
-    if (!expect_u8("end opcode", kExprEnd)) {
-      expr.kind = WasmInitExpr::kNone;
+      pc_ += len;
     }
 
-    // The type check of ref.null is special, and already done above.
-    if (expected != kWasmStmt && opcode != kExprRefNull &&
-        !IsSubtypeOf(TypeOf(module, expr), expected, module_.get())) {
-      errorf(pos, "type error in init expression, expected %s, got %s",
-             expected.type_name().c_str(),
-             TypeOf(module, expr).type_name().c_str());
+    if (V8_UNLIKELY(pc() > end())) {
+      error(end(), "Global initializer extending beyond code end");
+      return {};
+    }
+    if (V8_UNLIKELY(opcode != kExprEnd)) {
+      error(pc(), "Global initializer is missing 'end'");
+      return {};
+    }
+    if (V8_UNLIKELY(stack.size() != 1)) {
+      errorf(pc(),
+             "Found 'end' in global initalizer, but %s expressions were "
+             "found on the stack",
+             stack.size() > 1 ? "more than one" : "no");
+      return {};
+    }
+
+    WasmInitExpr expr = std::move(stack.back());
+    if (expected != kWasmStmt && !IsSubtypeOf(TypeOf(expr), expected, module)) {
+      errorf(pc(), "type error in init expression, expected %s, got %s",
+             expected.name().c_str(), TypeOf(expr).name().c_str());
     }
     return expr;
   }
@@ -1729,6 +1878,11 @@ class ModuleDecoderImpl : public Decoder {
         this, this->pc(), &type_length,
         origin_ == kWasmOrigin ? enabled_features_ : WasmFeatures::None());
     if (result == kWasmBottom) error(pc_, "invalid value type");
+    // We use capacity() over size() so this function works
+    // mid-DecodeTypeSection.
+    if (result.has_index() && result.ref_index() >= module_->types.capacity()) {
+      errorf(pc(), "Type index %u is out of bounds", result.ref_index());
+    }
     consume_bytes(type_length, "value type");
     return result;
   }
@@ -1769,28 +1923,17 @@ class ModuleDecoderImpl : public Decoder {
     }
   }
 
-  enum DeferIndexCheckMode { kNoCheck, kDeferCheck };
-
-  void defer_index_check(ValueType type) {
-    if (type.has_index()) {
-      deferred_check_type_index_.emplace(type.ref_index(), pc_offset());
-    }
-  }
-
-  const FunctionSig* consume_sig(Zone* zone, DeferIndexCheckMode defer_check) {
+  const FunctionSig* consume_sig(Zone* zone) {
     // Parse parameter types.
     uint32_t param_count =
         consume_count("param count", kV8MaxWasmFunctionParams);
     if (failed()) return nullptr;
     std::vector<ValueType> params;
     for (uint32_t i = 0; ok() && i < param_count; ++i) {
-      ValueType param = consume_value_type();
-      if (defer_check == DeferIndexCheckMode::kDeferCheck) {
-        defer_index_check(param);
-      }
-      params.push_back(param);
+      params.push_back(consume_value_type());
     }
     std::vector<ValueType> returns;
+
     // Parse return types.
     const size_t max_return_count = enabled_features_.has_mv()
                                         ? kV8MaxWasmFunctionMultiReturns
@@ -1798,13 +1941,8 @@ class ModuleDecoderImpl : public Decoder {
     uint32_t return_count = consume_count("return count", max_return_count);
     if (failed()) return nullptr;
     for (uint32_t i = 0; ok() && i < return_count; ++i) {
-      ValueType ret = consume_value_type();
-      if (defer_check == DeferIndexCheckMode::kDeferCheck) {
-        defer_index_check(ret);
-      }
-      returns.push_back(ret);
+      returns.push_back(consume_value_type());
     }
-
     if (failed()) return nullptr;
 
     // FunctionSig stores the return types first.
@@ -1813,7 +1951,7 @@ class ModuleDecoderImpl : public Decoder {
     for (uint32_t i = 0; i < return_count; ++i) buffer[b++] = returns[i];
     for (uint32_t i = 0; i < param_count; ++i) buffer[b++] = params[i];
 
-    return new (zone) FunctionSig(return_count, param_count, buffer);
+    return zone->New<FunctionSig>(return_count, param_count, buffer);
   }
 
   const StructType* consume_struct(Zone* zone) {
@@ -1824,25 +1962,23 @@ class ModuleDecoderImpl : public Decoder {
     bool* mutabilities = zone->NewArray<bool>(field_count);
     for (uint32_t i = 0; ok() && i < field_count; ++i) {
       ValueType field = consume_storage_type();
-      defer_index_check(field);
       fields[i] = field;
       bool mutability = consume_mutability();
       mutabilities[i] = mutability;
     }
     if (failed()) return nullptr;
     uint32_t* offsets = zone->NewArray<uint32_t>(field_count);
-    return new (zone) StructType(field_count, offsets, fields, mutabilities);
+    return zone->New<StructType>(field_count, offsets, fields, mutabilities);
   }
 
   const ArrayType* consume_array(Zone* zone) {
     ValueType field = consume_storage_type();
     if (failed()) return nullptr;
-    defer_index_check(field);
     bool mutability = consume_mutability();
     if (!mutability) {
       error(this->pc() - 1, "immutable arrays are not supported yet");
     }
-    return new (zone) ArrayType(field, mutability);
+    return zone->New<ArrayType>(field, mutability);
   }
 
   // Consume the attribute field of an exception.
@@ -1925,8 +2061,8 @@ class ModuleDecoderImpl : public Decoder {
     if (flag != 0 && !enabled_features_.has_bulk_memory() &&
         !enabled_features_.has_reftypes()) {
       error(
-          "Invalid segment flag. Did you forget "
-          "--experimental-wasm-bulk-memory or --experimental-wasm-reftypes?");
+          "Invalid segment flag. Enable with --experimental-wasm-bulk-memory "
+          "or --experimental-wasm-reftypes");
       return;
     }
     if ((flag & kFullMask) != flag) {
@@ -1941,6 +2077,10 @@ class ModuleDecoderImpl : public Decoder {
 
     if (*status == WasmElemSegment::kStatusActive) {
       *offset = consume_init_expr(module_.get(), kWasmI32);
+      if (offset->kind() == WasmInitExpr::kNone) {
+        // Failed to parse offset initializer, return early.
+        return;
+      }
     }
 
     if (*status == WasmElemSegment::kStatusActive && !has_table_index) {
@@ -2027,8 +2167,7 @@ class ModuleDecoderImpl : public Decoder {
     if (failed()) return index;
     switch (opcode) {
       case kExprRefNull: {
-        RefNullImmediate<kValidate> imm(WasmFeatures::All(), this,
-                                        this->pc() - 1);
+        HeapTypeImmediate<kValidate> imm(WasmFeatures::All(), this, this->pc());
         consume_bytes(imm.length, "ref.null immediate");
         index = WasmElemSegment::kNullIndex;
         break;
@@ -2046,16 +2185,18 @@ class ModuleDecoderImpl : public Decoder {
   }
 };
 
-ModuleResult DecodeWasmModule(const WasmFeatures& enabled,
-                              const byte* module_start, const byte* module_end,
-                              bool verify_functions, ModuleOrigin origin,
-                              Counters* counters,
-                              AccountingAllocator* allocator) {
+ModuleResult DecodeWasmModule(
+    const WasmFeatures& enabled, const byte* module_start,
+    const byte* module_end, bool verify_functions, ModuleOrigin origin,
+    Counters* counters, std::shared_ptr<metrics::Recorder> metrics_recorder,
+    v8::metrics::Recorder::ContextId context_id, DecodingMethod decoding_method,
+    AccountingAllocator* allocator) {
   size_t size = module_end - module_start;
   CHECK_LE(module_start, module_end);
-  if (size >= kV8MaxWasmModuleSize) {
-    return ModuleResult{WasmError{0, "size > maximum module size (%zu): %zu",
-                                  kV8MaxWasmModuleSize, size}};
+  size_t max_size = max_module_size();
+  if (size > max_size) {
+    return ModuleResult{
+        WasmError{0, "size > maximum module size (%zu): %zu", max_size, size}};
   }
   // TODO(bradnelson): Improve histogram handling of size_t.
   auto size_counter =
@@ -2064,6 +2205,8 @@ ModuleResult DecodeWasmModule(const WasmFeatures& enabled,
   // Signatures are stored in zone memory, which have the same lifetime
   // as the {module}.
   ModuleDecoderImpl decoder(enabled, module_start, module_end, origin);
+  decoder.EnableMetricsRecording(std::move(metrics_recorder), context_id,
+                                 decoding_method);
   return decoder.DecodeModule(counters, allocator, verify_functions);
 }
 
@@ -2076,11 +2219,14 @@ const std::shared_ptr<WasmModule>& ModuleDecoder::shared_module() const {
   return impl_->shared_module();
 }
 
-void ModuleDecoder::StartDecoding(Counters* counters,
-                                  AccountingAllocator* allocator,
-                                  ModuleOrigin origin) {
+void ModuleDecoder::StartDecoding(
+    Counters* counters, std::shared_ptr<metrics::Recorder> metrics_recorder,
+    v8::metrics::Recorder::ContextId context_id, AccountingAllocator* allocator,
+    ModuleOrigin origin) {
   DCHECK_NULL(impl_);
   impl_.reset(new ModuleDecoderImpl(enabled_features_, origin));
+  impl_->EnableMetricsRecording(std::move(metrics_recorder), context_id,
+                                DecodingMethod::kAsyncStream);
   impl_->StartDecoding(counters, allocator);
 }
 

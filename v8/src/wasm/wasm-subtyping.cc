@@ -4,6 +4,7 @@
 
 #include "src/wasm/wasm-subtyping.h"
 
+#include "src/base/platform/mutex.h"
 #include "src/wasm/wasm-module.h"
 
 namespace v8 {
@@ -61,6 +62,33 @@ bool IsStructTypeEquivalent(uint32_t type_index_1, uint32_t type_index_2,
   }
   return true;
 }
+bool IsFunctionTypeEquivalent(uint32_t type_index_1, uint32_t type_index_2,
+                              const WasmModule* module) {
+  if (module->type_kinds[type_index_1] != kWasmFunctionTypeCode ||
+      module->type_kinds[type_index_2] != kWasmFunctionTypeCode) {
+    return false;
+  }
+  const FunctionSig* sig1 = module->types[type_index_1].function_sig;
+  const FunctionSig* sig2 = module->types[type_index_2].function_sig;
+
+  if (sig1->parameter_count() != sig2->parameter_count() ||
+      sig1->return_count() != sig2->return_count()) {
+    return false;
+  }
+
+  auto iter1 = sig1->all();
+  auto iter2 = sig2->all();
+
+  // Temporarily cache type equivalence for the recursive call.
+  module->cache_type_equivalence(type_index_1, type_index_2);
+  for (int i = 0; i < iter1.size(); i++) {
+    if (iter1[i] != iter2[i]) {
+      module->uncache_type_equivalence(type_index_1, type_index_2);
+      return false;
+    }
+  }
+  return true;
+}
 
 bool IsEquivalent(ValueType type1, ValueType type2, const WasmModule* module) {
   if (type1 == type2) return true;
@@ -75,7 +103,8 @@ bool IsEquivalent(ValueType type1, ValueType type2, const WasmModule* module) {
     return true;
   }
   return IsArrayTypeEquivalent(type1.ref_index(), type2.ref_index(), module) ||
-         IsStructTypeEquivalent(type1.ref_index(), type2.ref_index(), module);
+         IsStructTypeEquivalent(type1.ref_index(), type2.ref_index(), module) ||
+         IsFunctionTypeEquivalent(type1.ref_index(), type2.ref_index(), module);
 }
 
 bool IsStructSubtype(uint32_t subtype_index, uint32_t supertype_index,
@@ -129,32 +158,62 @@ bool IsArraySubtype(uint32_t subtype_index, uint32_t supertype_index,
     return true;
   }
 }
+
+// TODO(7748): Expand this with function subtyping.
+bool IsFunctionSubtype(uint32_t subtype_index, uint32_t supertype_index,
+                       const WasmModule* module) {
+  return IsFunctionTypeEquivalent(subtype_index, supertype_index, module);
+}
+
 }  // namespace
 
-// TODO(7748): Extend this with function and any-heap subtyping.
-V8_EXPORT_PRIVATE bool IsSubtypeOfHeap(HeapType subtype, HeapType supertype,
-                                       const WasmModule* module) {
-  DCHECK(!module->has_signature(subtype) && !module->has_signature(supertype));
-  if (subtype == supertype) {
+// TODO(7748): Extend this with any-heap subtyping.
+V8_NOINLINE V8_EXPORT_PRIVATE bool IsSubtypeOfImpl(ValueType subtype,
+                                                   ValueType supertype,
+                                                   const WasmModule* module) {
+  bool compatible_references = (subtype.kind() == ValueType::kOptRef &&
+                                supertype.kind() == ValueType::kOptRef) ||
+                               (subtype.kind() == ValueType::kRef &&
+                                (supertype.kind() == ValueType::kOptRef ||
+                                 supertype.kind() == ValueType::kRef));
+  if (!compatible_references) return false;
+
+  HeapType sub_heap = subtype.heap_type();
+  HeapType super_heap = supertype.heap_type();
+
+  if (sub_heap == super_heap) {
     return true;
   }
-  // eqref is a supertype of all reference types except funcref.
-  if (supertype == kHeapEq) {
-    return subtype != kHeapFunc;
+  // eqref is a supertype of i31ref, array, and struct types.
+  if (super_heap.representation() == HeapType::kEq) {
+    return (sub_heap.is_index() &&
+            !module->has_signature(sub_heap.ref_index())) ||
+           sub_heap.representation() == HeapType::kI31;
   }
+
+  // funcref is a supertype of all function types.
+  if (super_heap.representation() == HeapType::kFunc) {
+    return sub_heap.is_index() && module->has_signature(sub_heap.ref_index());
+  }
+
   // At the moment, generic heap types are not subtyping-related otherwise.
-  if (is_generic_heap_type(subtype) || is_generic_heap_type(supertype)) {
+  if (sub_heap.is_generic() || super_heap.is_generic()) {
     return false;
   }
 
-  if (module->is_cached_subtype(subtype, supertype)) {
+  // Accessing the caches for subtyping and equivalence from multiple background
+  // threads is protected by a lock.
+  base::RecursiveMutexGuard type_cache_access(module->type_cache_mutex());
+  if (module->is_cached_subtype(sub_heap.ref_index(), super_heap.ref_index())) {
     return true;
   }
-  return IsStructSubtype(subtype, supertype, module) ||
-         IsArraySubtype(subtype, supertype, module);
+  return IsStructSubtype(sub_heap.ref_index(), super_heap.ref_index(),
+                         module) ||
+         IsArraySubtype(sub_heap.ref_index(), super_heap.ref_index(), module) ||
+         IsFunctionSubtype(sub_heap.ref_index(), super_heap.ref_index(),
+                           module);
 }
 
-// TODO(7748): Extend this with function subtyping.
 ValueType CommonSubtype(ValueType a, ValueType b, const WasmModule* module) {
   if (a == b) return a;
   if (IsSubtypeOf(a, b, module)) return a;

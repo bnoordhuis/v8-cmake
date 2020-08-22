@@ -68,10 +68,8 @@ TNode<JSArrayBuffer> TypedArrayBuiltinsAssembler::AllocateEmptyOnHeapBuffer(
   StoreJSArrayBufferBackingStore(
       buffer,
       EncodeExternalPointer(ReinterpretCast<RawPtrT>(IntPtrConstant(0))));
-  if (V8_ARRAY_BUFFER_EXTENSION_BOOL) {
     StoreObjectFieldNoWriteBarrier(buffer, JSArrayBuffer::kExtensionOffset,
                                    IntPtrConstant(0));
-  }
   for (int offset = JSArrayBuffer::kHeaderSize;
        offset < JSArrayBuffer::kSizeWithEmbedderFields; offset += kTaggedSize) {
     StoreObjectFieldNoWriteBarrier(buffer, offset, SmiConstant(0));
@@ -231,28 +229,6 @@ TNode<JSFunction> TypedArrayBuiltinsAssembler::GetDefaultConstructor(
 
   return CAST(
       LoadContextElement(LoadNativeContext(context), context_slot.value()));
-}
-
-TNode<JSArrayBuffer> TypedArrayBuiltinsAssembler::GetBuffer(
-    TNode<Context> context, TNode<JSTypedArray> array) {
-  Label call_runtime(this), done(this);
-  TVARIABLE(Object, var_result);
-
-  TNode<JSArrayBuffer> buffer = LoadJSArrayBufferViewBuffer(array);
-  GotoIf(IsDetachedBuffer(buffer), &call_runtime);
-  TNode<RawPtrT> backing_store = LoadJSArrayBufferBackingStorePtr(buffer);
-  GotoIf(WordEqual(backing_store, IntPtrConstant(0)), &call_runtime);
-  var_result = buffer;
-  Goto(&done);
-
-  BIND(&call_runtime);
-  {
-    var_result = CallRuntime(Runtime::kTypedArrayGetBuffer, context, array);
-    Goto(&done);
-  }
-
-  BIND(&done);
-  return CAST(var_result.value());
 }
 
 TNode<JSTypedArray> TypedArrayBuiltinsAssembler::ValidateTypedArray(

@@ -13,12 +13,10 @@
 #include "src/base/platform/mutex.h"
 #include "src/heap/cppgc/free-list.h"
 #include "src/heap/cppgc/globals.h"
-#include "src/heap/cppgc/heap-object-header-inl.h"
 #include "src/heap/cppgc/heap-object-header.h"
 #include "src/heap/cppgc/heap-page.h"
 #include "src/heap/cppgc/heap-space.h"
 #include "src/heap/cppgc/heap-visitor.h"
-#include "src/heap/cppgc/object-start-bitmap-inl.h"
 #include "src/heap/cppgc/object-start-bitmap.h"
 #include "src/heap/cppgc/raw-heap.h"
 #include "src/heap/cppgc/sanitizers.h"
@@ -59,7 +57,7 @@ class ObjectStartBitmapVerifier
     return true;
   }
 
-  ObjectStartBitmap* bitmap_ = nullptr;
+  PlatformAwareObjectStartBitmap* bitmap_ = nullptr;
   HeapObjectHeader* prev_ = nullptr;
 };
 
@@ -183,7 +181,7 @@ typename FinalizationBuilder::ResultType SweepNormalPage(NormalPage* page) {
   constexpr auto kAtomicAccess = HeapObjectHeader::AccessMode::kAtomic;
   FinalizationBuilder builder(page);
 
-  ObjectStartBitmap& bitmap = page->object_start_bitmap();
+  PlatformAwareObjectStartBitmap& bitmap = page->object_start_bitmap();
   bitmap.Clear();
 
   Address start_of_gap = page->PayloadStart();

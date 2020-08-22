@@ -9,6 +9,7 @@
 #include "src/execution/isolate-inl.h"
 #include "src/init/bootstrapper.h"
 #include "src/objects/module-inl.h"
+#include "src/objects/string-set-inl.h"
 
 namespace v8 {
 namespace internal {
@@ -16,7 +17,7 @@ namespace internal {
 Handle<ScriptContextTable> ScriptContextTable::Extend(
     Handle<ScriptContextTable> table, Handle<Context> script_context) {
   Handle<ScriptContextTable> result;
-  int used = table->used();
+  int used = table->synchronized_used();
   int length = table->length();
   CHECK(used >= 0 && length > 0 && used < length);
   if (used + kFirstContextSlotIndex == length) {
@@ -29,10 +30,10 @@ Handle<ScriptContextTable> ScriptContextTable::Extend(
   } else {
     result = table;
   }
-  result->set_used(used + 1);
-
   DCHECK(script_context->IsScriptContext());
   result->set(used + kFirstContextSlotIndex, *script_context);
+
+  result->synchronized_set_used(used + 1);
   return result;
 }
 
@@ -51,7 +52,7 @@ bool ScriptContextTable::Lookup(Isolate* isolate, ScriptContextTable table,
   DisallowHeapAllocation no_gc;
   // Static variables cannot be in script contexts.
   IsStaticFlag is_static_flag;
-  for (int i = 0; i < table.used(); i++) {
+  for (int i = 0; i < table.synchronized_used(); i++) {
     Context context = table.get_context(i);
     DCHECK(context.IsScriptContext());
     int slot_index = ScopeInfo::ContextSlotIndex(
@@ -411,7 +412,7 @@ Handle<Object> Context::Lookup(Handle<Context> context, Handle<String> name,
 }
 
 void NativeContext::AddOptimizedCode(Code code) {
-  DCHECK(code.kind() == Code::OPTIMIZED_FUNCTION);
+  DCHECK(CodeKindCanDeoptimize(code.kind()));
   DCHECK(code.next_code_link().IsUndefined());
   code.set_next_code_link(get(OPTIMIZED_CODE_LIST));
   set(OPTIMIZED_CODE_LIST, code, UPDATE_WEAK_WRITE_BARRIER);

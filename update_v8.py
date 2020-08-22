@@ -39,11 +39,11 @@ def git(*args, **kwargs):
 
 
 def isv8(dep):
-  return 'v8' == dep['path']
+  return '' == dep['path']
 
 
 def repodir(dep):
-  return abspath(join(options.tmpdir, dep['path'].replace('/', '_')))
+  return abspath(join(options.tmpdir, 'v8', dep['path'].replace('/', '_')))
 
 
 def repodir_exists(dep):
@@ -129,7 +129,7 @@ def update_all():
   git('rm', arg, '-r', 'v8')
 
   for dep in deps:
-    cmd = '(cd {} && {} archive --format=tar --prefix={}/ {}) | {} x'.format(
+    cmd = '(cd {} && {} archive --format=tar --prefix=v8/{}/ {}) | {} x'.format(
         repodir(dep), options.git, dep['path'], dep['commit'], options.tar)
     if dry_run:
       print(cmd)

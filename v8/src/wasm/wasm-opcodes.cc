@@ -38,6 +38,18 @@ bool IsJSCompatibleSignature(const FunctionSig* sig,
     }
 
     if (type == kWasmS128) return false;
+
+    if (type.is_object_reference_type()) {
+      uint32_t representation = type.heap_representation();
+      // TODO(7748): Once there's a story for JS interop for struct/array types,
+      // allow them here.
+      if (!(representation == HeapType::kExtern ||
+            representation == HeapType::kExn ||
+            representation == HeapType::kFunc ||
+            representation == HeapType::kEq)) {
+        return false;
+      }
+    }
   }
   return true;
 }

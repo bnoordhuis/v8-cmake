@@ -10,6 +10,7 @@
 #include "src/objects/string.h"
 #include "src/utils/utils.h"
 #include "src/zone/zone-containers.h"
+#include "src/zone/zone-list.h"
 #include "src/zone/zone.h"
 
 namespace v8 {
@@ -105,7 +106,7 @@ class CharacterRange {
   static inline ZoneList<CharacterRange>* List(Zone* zone,
                                                CharacterRange range) {
     ZoneList<CharacterRange>* list =
-        new (zone) ZoneList<CharacterRange>(1, zone);
+        zone->New<ZoneList<CharacterRange>>(1, zone);
     list->Add(range, zone);
     return list;
   }

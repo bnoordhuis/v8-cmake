@@ -95,6 +95,8 @@ namespace compiler {
   V(PPC_Int32ToFloat32)              \
   V(PPC_Int32ToDouble)               \
   V(PPC_Uint32ToFloat32)             \
+  V(PPC_Float32ToInt32)              \
+  V(PPC_Float32ToUint32)             \
   V(PPC_Uint32ToDouble)              \
   V(PPC_Float32ToDouble)             \
   V(PPC_Float64SilenceNaN)           \
@@ -200,6 +202,11 @@ namespace compiler {
   V(PPC_F64x2Ne)                     \
   V(PPC_F64x2Le)                     \
   V(PPC_F64x2Lt)                     \
+  V(PPC_F64x2Abs)                    \
+  V(PPC_F64x2Neg)                    \
+  V(PPC_F64x2Sqrt)                   \
+  V(PPC_F64x2Qfma)                   \
+  V(PPC_F64x2Qfms)                   \
   V(PPC_F32x4Splat)                  \
   V(PPC_F32x4ExtractLane)            \
   V(PPC_F32x4ReplaceLane)            \
@@ -211,6 +218,13 @@ namespace compiler {
   V(PPC_F32x4Ne)                     \
   V(PPC_F32x4Lt)                     \
   V(PPC_F32x4Le)                     \
+  V(PPC_F32x4Abs)                    \
+  V(PPC_F32x4Neg)                    \
+  V(PPC_F32x4RecipApprox)            \
+  V(PPC_F32x4RecipSqrtApprox)        \
+  V(PPC_F32x4Sqrt)                   \
+  V(PPC_F32x4SConvertI32x4)          \
+  V(PPC_F32x4UConvertI32x4)          \
   V(PPC_I64x2Splat)                  \
   V(PPC_I64x2ExtractLane)            \
   V(PPC_I64x2ReplaceLane)            \
@@ -230,6 +244,7 @@ namespace compiler {
   V(PPC_I64x2Shl)                    \
   V(PPC_I64x2ShrS)                   \
   V(PPC_I64x2ShrU)                   \
+  V(PPC_I64x2Neg)                    \
   V(PPC_I32x4Splat)                  \
   V(PPC_I32x4ExtractLane)            \
   V(PPC_I32x4ReplaceLane)            \
@@ -250,6 +265,16 @@ namespace compiler {
   V(PPC_I32x4Shl)                    \
   V(PPC_I32x4ShrS)                   \
   V(PPC_I32x4ShrU)                   \
+  V(PPC_I32x4Neg)                    \
+  V(PPC_I32x4Abs)                    \
+  V(PPC_I32x4SConvertF32x4)          \
+  V(PPC_I32x4UConvertF32x4)          \
+  V(PPC_I32x4SConvertI16x8Low)       \
+  V(PPC_I32x4SConvertI16x8High)      \
+  V(PPC_I32x4UConvertI16x8Low)       \
+  V(PPC_I32x4UConvertI16x8High)      \
+  V(PPC_F32x4Qfma)                   \
+  V(PPC_F32x4Qfms)                   \
   V(PPC_I16x8Splat)                  \
   V(PPC_I16x8ExtractLaneU)           \
   V(PPC_I16x8ExtractLaneS)           \
@@ -271,6 +296,19 @@ namespace compiler {
   V(PPC_I16x8Shl)                    \
   V(PPC_I16x8ShrS)                   \
   V(PPC_I16x8ShrU)                   \
+  V(PPC_I16x8Neg)                    \
+  V(PPC_I16x8Abs)                    \
+  V(PPC_I16x8SConvertI32x4)          \
+  V(PPC_I16x8UConvertI32x4)          \
+  V(PPC_I16x8SConvertI8x16Low)       \
+  V(PPC_I16x8SConvertI8x16High)      \
+  V(PPC_I16x8UConvertI8x16Low)       \
+  V(PPC_I16x8UConvertI8x16High)      \
+  V(PPC_I16x8AddSaturateS)           \
+  V(PPC_I16x8SubSaturateS)           \
+  V(PPC_I16x8AddSaturateU)           \
+  V(PPC_I16x8SubSaturateU)           \
+  V(PPC_I16x8RoundingAverageU)       \
   V(PPC_I8x16Splat)                  \
   V(PPC_I8x16ExtractLaneU)           \
   V(PPC_I8x16ExtractLaneS)           \
@@ -291,6 +329,25 @@ namespace compiler {
   V(PPC_I8x16Shl)                    \
   V(PPC_I8x16ShrS)                   \
   V(PPC_I8x16ShrU)                   \
+  V(PPC_I8x16Neg)                    \
+  V(PPC_I8x16Abs)                    \
+  V(PPC_I8x16SConvertI16x8)          \
+  V(PPC_I8x16UConvertI16x8)          \
+  V(PPC_I8x16AddSaturateS)           \
+  V(PPC_I8x16SubSaturateS)           \
+  V(PPC_I8x16AddSaturateU)           \
+  V(PPC_I8x16SubSaturateU)           \
+  V(PPC_I8x16RoundingAverageU)       \
+  V(PPC_S8x16Shuffle)                \
+  V(PPC_S8x16Swizzle)                \
+  V(PPC_V64x2AnyTrue)                \
+  V(PPC_V32x4AnyTrue)                \
+  V(PPC_V16x8AnyTrue)                \
+  V(PPC_V8x16AnyTrue)                \
+  V(PPC_V64x2AllTrue)                \
+  V(PPC_V32x4AllTrue)                \
+  V(PPC_V16x8AllTrue)                \
+  V(PPC_V8x16AllTrue)                \
   V(PPC_S128And)                     \
   V(PPC_S128Or)                      \
   V(PPC_S128Xor)                     \

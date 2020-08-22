@@ -8,7 +8,6 @@
 #include "src/base/macros.h"
 #include "src/builtins/accessors.h"
 #include "src/common/globals.h"
-#include "src/execution/local-isolate-wrapper.h"
 #include "src/handles/handles.h"
 #include "src/init/heap-symbols.h"
 #include "src/objects/objects-definitions.h"
@@ -20,8 +19,6 @@ namespace internal {
 
 // Forward declarations.
 enum ElementsKind : uint8_t;
-class OffThreadHeap;
-class OffThreadIsolate;
 template <typename T>
 class Handle;
 class Heap;
@@ -112,12 +109,12 @@ class Symbol;
   V(Map, small_ordered_hash_set_map, SmallOrderedHashSetMap)                   \
   V(Map, small_ordered_name_dictionary_map, SmallOrderedNameDictionaryMap)     \
   V(Map, source_text_module_map, SourceTextModuleMap)                          \
-  V(Map, string_table_map, StringTableMap)                                     \
   V(Map, synthetic_module_map, SyntheticModuleMap)                             \
   V(Map, uncompiled_data_without_preparse_data_map,                            \
     UncompiledDataWithoutPreparseDataMap)                                      \
   V(Map, uncompiled_data_with_preparse_data_map,                               \
     UncompiledDataWithPreparseDataMap)                                         \
+  V(Map, wasm_type_info_map, WasmTypeInfoMap)                                  \
   V(Map, weak_fixed_array_map, WeakFixedArrayMap)                              \
   V(Map, weak_array_list_map, WeakArrayListMap)                                \
   V(Map, ephemeron_hash_table_map, EphemeronHashTableMap)                      \
@@ -207,6 +204,10 @@ class Symbol;
   /* Maps */                                                                   \
   V(Map, external_map, ExternalMap)                                            \
   V(Map, message_object_map, JSMessageObjectMap)                               \
+  V(Map, wasm_rttcanon_eqref_map, WasmRttEqrefMap)                             \
+  V(Map, wasm_rttcanon_externref_map, WasmRttExternrefMap)                     \
+  V(Map, wasm_rttcanon_funcref_map, WasmRttFuncrefMap)                         \
+  V(Map, wasm_rttcanon_i31ref_map, WasmRttI31refMap)                           \
   /* Canonical empty values */                                                 \
   V(Script, empty_script, EmptyScript)                                         \
   V(FeedbackCell, many_closures_cell, ManyClosuresCell)                        \
@@ -363,7 +364,6 @@ class Symbol;
 #define MUTABLE_ROOT_LIST(V)                \
   STRONG_MUTABLE_IMMOVABLE_ROOT_LIST(V)     \
   STRONG_MUTABLE_MOVABLE_ROOT_LIST(V)       \
-  V(StringTable, string_table, StringTable) \
   SMI_ROOT_LIST(V)
 
 #define ROOT_LIST(V)     \
@@ -393,9 +393,13 @@ enum class RootIndex : uint16_t {
 
   // The strong roots visited by the garbage collector (not including read-only
   // roots).
+#define ROOT(...) +1
+  kMutableRootsCount = 0
+      STRONG_MUTABLE_IMMOVABLE_ROOT_LIST(ROOT)
+      STRONG_MUTABLE_MOVABLE_ROOT_LIST(ROOT),
+#undef ROOT
   kFirstStrongRoot = kLastReadOnlyRoot + 1,
-  // (kStringTable is not a strong root).
-  kLastStrongRoot = kStringTable - 1,
+  kLastStrongRoot = kFirstStrongRoot + kMutableRootsCount - 1,
 
   // All of the strong roots plus the read-only roots.
   kFirstStrongOrReadOnlyRoot = kFirstRoot,
@@ -406,7 +410,7 @@ enum class RootIndex : uint16_t {
   kLastImmortalImmovableRoot =
       kFirstImmortalImmovableRoot + kImmortalImmovableRootsCount - 1,
 
-  kFirstSmiRoot = kStringTable + 1,
+  kFirstSmiRoot = kLastStrongRoot + 1,
   kLastSmiRoot = kLastRoot
 };
 // clang-format on
@@ -429,6 +433,12 @@ class RootsTable {
     size_t index = static_cast<size_t>(root_index);
     DCHECK_LT(index, kEntriesCount);
     return roots_[index];
+  }
+
+  FullObjectSlot slot(RootIndex root_index) {
+    size_t index = static_cast<size_t>(root_index);
+    DCHECK_LT(index, kEntriesCount);
+    return FullObjectSlot(&roots_[index]);
   }
 
   static const char* name(RootIndex root_index) {
@@ -464,42 +474,42 @@ class RootsTable {
   }
 
   // Used for iterating over all of the read-only and mutable strong roots.
-  FullObjectSlot strong_or_read_only_roots_begin() {
+  FullObjectSlot strong_or_read_only_roots_begin() const {
     STATIC_ASSERT(static_cast<size_t>(RootIndex::kLastReadOnlyRoot) ==
                   static_cast<size_t>(RootIndex::kFirstStrongRoot) - 1);
     return FullObjectSlot(
         &roots_[static_cast<size_t>(RootIndex::kFirstStrongOrReadOnlyRoot)]);
   }
-  FullObjectSlot strong_or_read_only_roots_end() {
+  FullObjectSlot strong_or_read_only_roots_end() const {
     return FullObjectSlot(
         &roots_[static_cast<size_t>(RootIndex::kLastStrongOrReadOnlyRoot) + 1]);
   }
 
   // The read-only, strong and Smi roots as defined by these accessors are all
   // disjoint.
-  FullObjectSlot read_only_roots_begin() {
+  FullObjectSlot read_only_roots_begin() const {
     return FullObjectSlot(
         &roots_[static_cast<size_t>(RootIndex::kFirstReadOnlyRoot)]);
   }
-  FullObjectSlot read_only_roots_end() {
+  FullObjectSlot read_only_roots_end() const {
     return FullObjectSlot(
         &roots_[static_cast<size_t>(RootIndex::kLastReadOnlyRoot) + 1]);
   }
 
-  FullObjectSlot strong_roots_begin() {
+  FullObjectSlot strong_roots_begin() const {
     return FullObjectSlot(
         &roots_[static_cast<size_t>(RootIndex::kFirstStrongRoot)]);
   }
-  FullObjectSlot strong_roots_end() {
+  FullObjectSlot strong_roots_end() const {
     return FullObjectSlot(
         &roots_[static_cast<size_t>(RootIndex::kLastStrongRoot) + 1]);
   }
 
-  FullObjectSlot smi_roots_begin() {
+  FullObjectSlot smi_roots_begin() const {
     return FullObjectSlot(
         &roots_[static_cast<size_t>(RootIndex::kFirstSmiRoot)]);
   }
-  FullObjectSlot smi_roots_end() {
+  FullObjectSlot smi_roots_end() const {
     return FullObjectSlot(
         &roots_[static_cast<size_t>(RootIndex::kLastSmiRoot) + 1]);
   }
@@ -516,9 +526,11 @@ class RootsTable {
   friend class Isolate;
   friend class Heap;
   friend class Factory;
+  friend class PointerCompressedReadOnlyArtifacts;
   friend class ReadOnlyHeap;
   friend class ReadOnlyRoots;
   friend class RootsSerializer;
+  friend class SoleReadOnlyHeap;
 };
 
 class ReadOnlyRoots {
@@ -527,11 +539,8 @@ class ReadOnlyRoots {
       static_cast<size_t>(RootIndex::kReadOnlyRootsCount);
 
   V8_INLINE explicit ReadOnlyRoots(Heap* heap);
-  V8_INLINE explicit ReadOnlyRoots(OffThreadHeap* heap);
   V8_INLINE explicit ReadOnlyRoots(Isolate* isolate);
-  V8_INLINE explicit ReadOnlyRoots(OffThreadIsolate* isolate);
-  V8_INLINE explicit ReadOnlyRoots(LocalIsolateWrapper wrapper);
-  V8_INLINE explicit ReadOnlyRoots(LocalHeapWrapper wrapper);
+  V8_INLINE explicit ReadOnlyRoots(LocalIsolate* isolate);
 
 #define ROOT_ACCESSOR(Type, name, CamelName)     \
   V8_INLINE class Type name() const;             \

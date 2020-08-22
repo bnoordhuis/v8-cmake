@@ -601,6 +601,24 @@ class Foreign::BodyDescriptor final : public BodyDescriptorBase {
   static inline int SizeOf(Map map, HeapObject object) { return kSize; }
 };
 
+class WasmTypeInfo::BodyDescriptor final : public BodyDescriptorBase {
+ public:
+  static bool IsValidSlot(Map map, HeapObject obj, int offset) {
+    UNREACHABLE();
+  }
+
+  template <typename ObjectVisitor>
+  static inline void IterateBody(Map map, HeapObject obj, int object_size,
+                                 ObjectVisitor* v) {
+    Foreign::BodyDescriptor::IterateBody<ObjectVisitor>(map, obj, object_size,
+                                                        v);
+    IteratePointer(obj, kParentOffset, v);
+    IteratePointer(obj, kSubtypesOffset, v);
+  }
+
+  static inline int SizeOf(Map map, HeapObject object) { return kSize; }
+};
+
 class ExternalOneByteString::BodyDescriptor final : public BodyDescriptorBase {
  public:
   static bool IsValidSlot(Map map, HeapObject obj, int offset) { return false; }
@@ -836,8 +854,7 @@ class WasmStruct::BodyDescriptor final : public BodyDescriptorBase {
     wasm::StructType* type = WasmStruct::GcSafeType(map);
     for (uint32_t i = 0; i < type->field_count(); i++) {
       if (!type->field(i).is_reference_type()) continue;
-      int offset =
-          WasmStruct::kHeaderSize + static_cast<int>(type->field_offset(i));
+      int offset = static_cast<int>(type->field_offset(i));
       v->VisitPointer(wasm_struct, wasm_struct.RawField(offset));
     }
   }
@@ -928,7 +945,6 @@ ReturnType BodyDescriptorApply(InstanceType type, T1 p1, T2 p2, T3 p3, T4 p4) {
     case GLOBAL_DICTIONARY_TYPE:
     case NUMBER_DICTIONARY_TYPE:
     case SIMPLE_NUMBER_DICTIONARY_TYPE:
-    case STRING_TABLE_TYPE:
     case SCOPE_INFO_TYPE:
     case SCRIPT_CONTEXT_TABLE_TYPE:
       return Op::template apply<FixedArray::BodyDescriptor>(p1, p2, p3, p4);
@@ -970,6 +986,8 @@ ReturnType BodyDescriptorApply(InstanceType type, T1 p1, T2 p2, T3 p3, T4 p4) {
       return Op::template apply<WasmArray::BodyDescriptor>(p1, p2, p3, p4);
     case WASM_STRUCT_TYPE:
       return Op::template apply<WasmStruct::BodyDescriptor>(p1, p2, p3, p4);
+    case WASM_TYPE_INFO_TYPE:
+      return Op::template apply<WasmTypeInfo::BodyDescriptor>(p1, p2, p3, p4);
     case JS_OBJECT_TYPE:
     case JS_ERROR_TYPE:
     case JS_ARGUMENTS_OBJECT_TYPE:
@@ -1013,6 +1031,7 @@ ReturnType BodyDescriptorApply(InstanceType type, T1 p1, T2 p2, T3 p3, T4 p4) {
     case JS_RELATIVE_TIME_FORMAT_TYPE:
     case JS_SEGMENT_ITERATOR_TYPE:
     case JS_SEGMENTER_TYPE:
+    case JS_SEGMENTS_TYPE:
 #endif  // V8_INTL_SUPPORT
     case WASM_EXCEPTION_OBJECT_TYPE:
     case WASM_GLOBAL_OBJECT_TYPE:

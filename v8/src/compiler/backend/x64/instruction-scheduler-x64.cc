@@ -293,7 +293,9 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kX64S128Xor:
     case kX64S128Not:
     case kX64S128Select:
+    case kX64S128Const:
     case kX64S128Zero:
+    case kX64S128AllOnes:
     case kX64S128AndNot:
     case kX64V64x2AnyTrue:
     case kX64V64x2AllTrue:
@@ -386,6 +388,8 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kX64I32x4Load16x4U:
     case kX64I64x2Load32x2S:
     case kX64I64x2Load32x2U:
+    case kX64S128LoadMem32Zero:
+    case kX64S128LoadMem64Zero:
       return instr->HasOutput() ? kIsLoadOperation : kHasSideEffect;
 
     case kX64Peek:

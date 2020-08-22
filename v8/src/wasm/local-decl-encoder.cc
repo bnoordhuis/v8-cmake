@@ -11,10 +11,13 @@ namespace v8 {
 namespace internal {
 namespace wasm {
 
+// This struct is just a type tag for Zone::NewArray<T>(size_t) call.
+struct LocalDeclEncoderBuffer {};
+
 void LocalDeclEncoder::Prepend(Zone* zone, const byte** start,
                                const byte** end) const {
   size_t size = (*end - *start);
-  byte* buffer = reinterpret_cast<byte*>(zone->New(Size() + size));
+  byte* buffer = zone->NewArray<byte, LocalDeclEncoderBuffer>(Size() + size);
   size_t pos = Emit(buffer);
   if (size > 0) {
     memcpy(buffer + pos, *start, size);
@@ -38,7 +41,7 @@ size_t LocalDeclEncoder::Emit(byte* buffer) const {
       ++pos;
     }
     if (locals_type.encoding_needs_heap_type()) {
-      LEBHelper::write_u32v(&pos, locals_type.heap_type_code());
+      LEBHelper::write_i32v(&pos, locals_type.heap_type().code());
     }
   }
   DCHECK_EQ(Size(), pos - buffer);
@@ -66,7 +69,7 @@ size_t LocalDeclEncoder::Size() const {
             1 +                                // Opcode
             (p.second.has_depth() ? 1 : 0) +   // Inheritance depth
             (p.second.encoding_needs_heap_type()
-                 ? LEBHelper::sizeof_u32v(p.second.heap_type_code())
+                 ? LEBHelper::sizeof_i32v(p.second.heap_type().code())
                  : 0);  // ref. index
   }
   return size;

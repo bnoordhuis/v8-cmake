@@ -46,9 +46,7 @@ constexpr int32_t kHighWordOffset = 4;
 // fp-4 holds the stack marker, fp-8 is the instance parameter.
 constexpr int kInstanceOffset = 8;
 
-inline MemOperand GetStackSlot(int offset) {
-  return MemOperand(offset > 0 ? fp : sp, -offset);
-}
+inline MemOperand GetStackSlot(int offset) { return MemOperand(fp, -offset); }
 
 inline MemOperand GetHalfStackSlot(int offset, RegPairHalf half) {
   int32_t half_offset =
@@ -277,6 +275,29 @@ int LiftoffAssembler::PrepareStackFrame() {
   return offset;
 }
 
+void LiftoffAssembler::PrepareTailCall(int num_callee_stack_params,
+                                       int stack_param_delta) {
+  UseScratchRegisterScope temps(this);
+  Register scratch = temps.Acquire();
+
+  // Push the return address and frame pointer to complete the stack frame.
+  Lw(scratch, MemOperand(fp, 4));
+  Push(scratch);
+  Lw(scratch, MemOperand(fp, 0));
+  Push(scratch);
+
+  // Shift the whole frame upwards.
+  int slot_count = num_callee_stack_params + 2;
+  for (int i = slot_count - 1; i >= 0; --i) {
+    Lw(scratch, MemOperand(sp, i * 4));
+    Sw(scratch, MemOperand(fp, (i - stack_param_delta) * 4));
+  }
+
+  // Set the new stack and frame pointer.
+  addiu(sp, fp, -stack_param_delta * 4);
+  Pop(ra, fp);
+}
+
 void LiftoffAssembler::PatchPrepareStackFrame(int offset, int frame_size) {
   // We can't run out of space, just pass anything big enough to not cause the
   // assembler to try to grow the buffer.
@@ -366,11 +387,12 @@ void LiftoffAssembler::FillInstanceInto(Register dst) {
 
 void LiftoffAssembler::LoadTaggedPointer(Register dst, Register src_addr,
                                          Register offset_reg,
-                                         uint32_t offset_imm,
+                                         int32_t offset_imm,
                                          LiftoffRegList pinned) {
+  DCHECK_GE(offset_imm, 0);
   STATIC_ASSERT(kTaggedSize == kInt32Size);
-  Load(LiftoffRegister(dst), src_addr, offset_reg, offset_imm,
-       LoadType::kI32Load, pinned);
+  Load(LiftoffRegister(dst), src_addr, offset_reg,
+       static_cast<uint32_t>(offset_imm), LoadType::kI32Load, pinned);
 }
 
 void LiftoffAssembler::Load(LiftoffRegister dst, Register src_addr,
@@ -600,6 +622,11 @@ void LiftoffAssembler::StoreCallerFrameSlot(LiftoffRegister src,
   liftoff::Store(this, fp, offset, src, type);
 }
 
+void LiftoffAssembler::LoadReturnStackSlot(LiftoffRegister dst, int offset,
+                                           ValueType type) {
+  liftoff::Load(this, dst, sp, offset, type);
+}
+
 void LiftoffAssembler::MoveStackValue(uint32_t dst_offset, uint32_t src_offset,
                                       ValueType type) {
   DCHECK_NE(dst_offset, src_offset);
@@ -715,7 +742,7 @@ void LiftoffAssembler::FillStackSlotsWithZero(int start, int size) {
 
     Label loop;
     bind(&loop);
-    Sw(zero_reg, MemOperand(a0, kSystemPointerSize));
+    Sw(zero_reg, MemOperand(a0));
     addiu(a0, a0, kSystemPointerSize);
     BranchShort(&loop, ne, a0, Operand(a1));
 
@@ -1566,6 +1593,13 @@ void LiftoffAssembler::emit_f64_set_cond(Condition cond, Register dst,
   bind(&cont);
 }
 
+bool LiftoffAssembler::emit_select(LiftoffRegister dst, Register condition,
+                                   LiftoffRegister true_value,
+                                   LiftoffRegister false_value,
+                                   ValueType type) {
+  return false;
+}
+
 void LiftoffAssembler::LoadTransform(LiftoffRegister dst, Register src_addr,
                                      Register offset_reg, uint32_t offset_imm,
                                      LoadType type,
@@ -1577,7 +1611,8 @@ void LiftoffAssembler::LoadTransform(LiftoffRegister dst, Register src_addr,
 void LiftoffAssembler::emit_s8x16_shuffle(LiftoffRegister dst,
                                           LiftoffRegister lhs,
                                           LiftoffRegister rhs,
-                                          const uint8_t shuffle[16]) {
+                                          const uint8_t shuffle[16],
+                                          bool is_swizzle) {
   bailout(kSimd, "emit_s8x16_shuffle");
 }
 
@@ -1745,6 +1780,11 @@ void LiftoffAssembler::emit_f64x2_lt(LiftoffRegister dst, LiftoffRegister lhs,
 void LiftoffAssembler::emit_f64x2_le(LiftoffRegister dst, LiftoffRegister lhs,
                                      LiftoffRegister rhs) {
   bailout(kSimd, "emit_f64x2_le");
+}
+
+void LiftoffAssembler::emit_s128_const(LiftoffRegister dst,
+                                       const uint8_t imms[16]) {
+  bailout(kSimd, "emit_s128_const");
 }
 
 void LiftoffAssembler::emit_s128_not(LiftoffRegister dst, LiftoffRegister src) {
@@ -2560,6 +2600,10 @@ void LiftoffAssembler::CallNativeWasmCode(Address addr) {
   Call(addr, RelocInfo::WASM_CALL);
 }
 
+void LiftoffAssembler::TailCallNativeWasmCode(Address addr) {
+  Jump(addr, RelocInfo::WASM_CALL);
+}
+
 void LiftoffAssembler::CallIndirect(const wasm::FunctionSig* sig,
                                     compiler::CallDescriptor* call_descriptor,
                                     Register target) {
@@ -2568,6 +2612,15 @@ void LiftoffAssembler::CallIndirect(const wasm::FunctionSig* sig,
     Call(kScratchReg);
   } else {
     Call(target);
+  }
+}
+
+void LiftoffAssembler::TailCallIndirect(Register target) {
+  if (target == no_reg) {
+    Pop(kScratchReg);
+    Jump(kScratchReg);
+  } else {
+    Jump(target);
   }
 }
 

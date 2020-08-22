@@ -304,6 +304,15 @@ MaybeHandle<JSArray> Runtime::GetInternalProperties(Isolate* isolate,
     result->set(0, *primitive_value);
     result->set(1, js_value->value());
     return factory->NewJSArrayWithElements(result);
+  } else if (object->IsJSArrayBuffer()) {
+    Handle<JSArrayBuffer> js_array_buffer = Handle<JSArrayBuffer>::cast(object);
+    Handle<FixedArray> result = factory->NewFixedArray(1 * 2);
+
+    Handle<String> is_detached_str =
+        factory->NewStringFromAsciiChecked("[[IsDetached]]");
+    result->set(0, *is_detached_str);
+    result->set(1, isolate->heap()->ToBoolean(js_array_buffer->was_detached()));
+    return factory->NewJSArrayWithElements(result);
   }
   return factory->NewJSArray(0);
 }
@@ -848,10 +857,9 @@ RUNTIME_FUNCTION(Runtime_ProfileCreateSnapshotDataBlob) {
 
   // Track the embedded blob size as well.
   {
-    int embedded_blob_size = 0;
     i::EmbeddedData d = i::EmbeddedData::FromBlob();
-    embedded_blob_size = static_cast<int>(d.size());
-    PrintF("Embedded blob is %d bytes\n", embedded_blob_size);
+    PrintF("Embedded blob is %d bytes\n",
+           static_cast<int>(d.code_size() + d.metadata_size()));
   }
 
   FreeCurrentEmbeddedBlob();

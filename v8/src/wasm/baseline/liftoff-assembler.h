@@ -26,7 +26,7 @@ namespace internal {
 // Forward declarations.
 namespace compiler {
 class CallDescriptor;
-}
+}  // namespace compiler
 
 namespace wasm {
 
@@ -90,8 +90,14 @@ class LiftoffAssembler : public TurboAssembler {
     void MakeStack() { loc_ = kStack; }
 
     void MakeRegister(LiftoffRegister r) {
-      reg_ = r;
       loc_ = kRegister;
+      reg_ = r;
+    }
+
+    void MakeConstant(int32_t i32_const) {
+      DCHECK(type_ == kWasmI32 || type_ == kWasmI64);
+      loc_ = kIntConst;
+      i32_const_ = i32_const;
     }
 
     // Copy src to this, except for offset, since src and this could have been
@@ -432,7 +438,13 @@ class LiftoffAssembler : public TurboAssembler {
     ParallelRegisterMoveTuple(Dst dst, Src src, ValueType type)
         : dst(dst), src(src), type(type) {}
   };
-  void ParallelRegisterMove(Vector<ParallelRegisterMoveTuple>);
+
+  void ParallelRegisterMove(Vector<const ParallelRegisterMoveTuple>);
+
+  void ParallelRegisterMove(
+      std::initializer_list<ParallelRegisterMoveTuple> moves) {
+    ParallelRegisterMove(VectorOf(moves));
+  }
 
   void MoveToReturnLocations(const FunctionSig*,
                              compiler::CallDescriptor* descriptor);
@@ -451,6 +463,8 @@ class LiftoffAssembler : public TurboAssembler {
   // which can later be patched (via {PatchPrepareStackFrame)} when the size of
   // the frame is known.
   inline int PrepareStackFrame();
+  inline void PrepareTailCall(int num_callee_stack_params,
+                              int stack_param_delta);
   inline void PatchPrepareStackFrame(int offset, int frame_size);
   inline void FinishCode();
   inline void AbortCompilation();
@@ -465,7 +479,7 @@ class LiftoffAssembler : public TurboAssembler {
   inline void SpillInstance(Register instance);
   inline void FillInstanceInto(Register dst);
   inline void LoadTaggedPointer(Register dst, Register src_addr,
-                                Register offset_reg, uint32_t offset_imm,
+                                Register offset_reg, int32_t offset_imm,
                                 LiftoffRegList pinned);
   inline void Load(LiftoffRegister dst, Register src_addr, Register offset_reg,
                    uint32_t offset_imm, LoadType type, LiftoffRegList pinned,
@@ -518,6 +532,7 @@ class LiftoffAssembler : public TurboAssembler {
                                   ValueType);
   inline void StoreCallerFrameSlot(LiftoffRegister, uint32_t caller_slot_idx,
                                    ValueType);
+  inline void LoadReturnStackSlot(LiftoffRegister, int offset, ValueType);
   inline void MoveStackValue(uint32_t dst_offset, uint32_t src_offset,
                              ValueType);
 
@@ -730,13 +745,19 @@ class LiftoffAssembler : public TurboAssembler {
   inline void emit_f64_set_cond(Condition condition, Register dst,
                                 DoubleRegister lhs, DoubleRegister rhs);
 
+  // Optional select support: Returns false if generic code (via branches)
+  // should be emitted instead.
+  inline bool emit_select(LiftoffRegister dst, Register condition,
+                          LiftoffRegister true_value,
+                          LiftoffRegister false_value, ValueType type);
+
   inline void LoadTransform(LiftoffRegister dst, Register src_addr,
                             Register offset_reg, uint32_t offset_imm,
                             LoadType type, LoadTransformationKind transform,
                             uint32_t* protected_load_pc);
   inline void emit_s8x16_shuffle(LiftoffRegister dst, LiftoffRegister lhs,
-                                 LiftoffRegister rhs,
-                                 const uint8_t shuffle[16]);
+                                 LiftoffRegister rhs, const uint8_t shuffle[16],
+                                 bool is_swizzle);
   inline void emit_s8x16_swizzle(LiftoffRegister dst, LiftoffRegister lhs,
                                  LiftoffRegister rhs);
   inline void emit_i8x16_splat(LiftoffRegister dst, LiftoffRegister src);
@@ -797,6 +818,7 @@ class LiftoffAssembler : public TurboAssembler {
                             LiftoffRegister rhs);
   inline void emit_f64x2_le(LiftoffRegister dst, LiftoffRegister lhs,
                             LiftoffRegister rhs);
+  inline void emit_s128_const(LiftoffRegister dst, const uint8_t imms[16]);
   inline void emit_s128_not(LiftoffRegister dst, LiftoffRegister src);
   inline void emit_s128_and(LiftoffRegister dst, LiftoffRegister lhs,
                             LiftoffRegister rhs);
@@ -1076,10 +1098,12 @@ class LiftoffAssembler : public TurboAssembler {
                     int stack_bytes, ExternalReference ext_ref);
 
   inline void CallNativeWasmCode(Address addr);
+  inline void TailCallNativeWasmCode(Address addr);
   // Indirect call: If {target == no_reg}, then pop the target from the stack.
   inline void CallIndirect(const FunctionSig* sig,
                            compiler::CallDescriptor* call_descriptor,
                            Register target);
+  inline void TailCallIndirect(Register target);
   inline void CallRuntimeStub(WasmCode::RuntimeStubId sid);
 
   // Reserve space in the current frame, store address to space in {addr}.

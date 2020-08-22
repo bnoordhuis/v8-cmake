@@ -143,6 +143,7 @@ list(APPEND i18n-sources
   v8/src/objects/js-relative-time-format.cc
   v8/src/objects/js-segment-iterator.cc
   v8/src/objects/js-segmenter.cc
+  v8/src/objects/js-segments.cc
   v8/src/runtime/runtime-intl.cc
   v8/src/strings/char-predicates.cc
 )
@@ -178,7 +179,7 @@ file(GLOB numbers-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/sr
 file(GLOB object-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/objects/*.cc)
 file(GLOB parsing-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/parsing/*.cc)
 file(GLOB profiler-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/profiler/*.cc)
-file(GLOB regexp-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/regexp/*.cc)
+file(GLOB regexp-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/regexp/*.cc v8/src/regexp/experimental/*.cc)
 file(GLOB runtime-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/runtime/*.cc)
 file(GLOB snapshot-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/snapshot/*.cc)
 file(GLOB strings-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/strings/*.cc)

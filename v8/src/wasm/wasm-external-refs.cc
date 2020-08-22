@@ -411,6 +411,22 @@ void simd_float_round_wrapper(Address data) {
   }
 }
 
+void f64x2_ceil_wrapper(Address data) {
+  simd_float_round_wrapper<double, &ceil>(data);
+}
+
+void f64x2_floor_wrapper(Address data) {
+  simd_float_round_wrapper<double, &floor>(data);
+}
+
+void f64x2_trunc_wrapper(Address data) {
+  simd_float_round_wrapper<double, &trunc>(data);
+}
+
+void f64x2_nearest_int_wrapper(Address data) {
+  simd_float_round_wrapper<double, &nearbyint>(data);
+}
+
 void f32x4_ceil_wrapper(Address data) {
   simd_float_round_wrapper<float, &ceilf>(data);
 }
@@ -421,6 +437,10 @@ void f32x4_floor_wrapper(Address data) {
 
 void f32x4_trunc_wrapper(Address data) {
   simd_float_round_wrapper<float, &truncf>(data);
+}
+
+void f32x4_nearest_int_wrapper(Address data) {
+  simd_float_round_wrapper<float, &nearbyintf>(data);
 }
 
 namespace {

@@ -427,6 +427,23 @@ class Assembler : public AssemblerBase {
 #undef DECLARE_PPC_X_INSTRUCTIONS_EH_S_FORM
 #undef DECLARE_PPC_X_INSTRUCTIONS_EH_L_FORM
 
+#define DECLARE_PPC_XX2_INSTRUCTIONS(name, instr_name, instr_value)      \
+  inline void name(const Simd128Register rt, const Simd128Register rb) { \
+    xx2_form(instr_name, rt, rb);                                        \
+  }
+
+  inline void xx2_form(Instr instr, Simd128Register t, Simd128Register b) {
+    // Using VR (high VSR) registers.
+    int BX = 1;
+    int TX = 1;
+
+    emit(instr | (t.code() & 0x1F) * B21 | (b.code() & 0x1F) * B11 | BX * B1 |
+         TX);
+  }
+
+  PPC_XX2_OPCODE_A_FORM_LIST(DECLARE_PPC_XX2_INSTRUCTIONS)
+#undef DECLARE_PPC_XX2_INSTRUCTIONS
+
 #define DECLARE_PPC_XX3_INSTRUCTIONS(name, instr_name, instr_value)  \
   inline void name(const DoubleRegister rt, const DoubleRegister ra, \
                    const DoubleRegister rb) {                        \
@@ -457,6 +474,10 @@ class Assembler : public AssemblerBase {
                    const Simd128Register rb) {                            \
     vx_form(instr_name, rt, ra, rb);                                      \
   }
+#define DECLARE_PPC_VX_INSTRUCTIONS_C_FORM(name, instr_name, instr_value) \
+  inline void name(const Simd128Register rt, const Simd128Register rb) {  \
+    vx_form(instr_name, rt, rb);                                          \
+  }
 
   inline void vx_form(Instr instr, Simd128Register rt, Simd128Register rb,
                       const Operand& imm) {
@@ -466,11 +487,16 @@ class Assembler : public AssemblerBase {
                       Simd128Register rb) {
     emit(instr | rt.code() * B21 | ra.code() * B16 | rb.code() * B11);
   }
+  inline void vx_form(Instr instr, Simd128Register rt, Simd128Register rb) {
+    emit(instr | rt.code() * B21 | rb.code() * B11);
+  }
 
   PPC_VX_OPCODE_A_FORM_LIST(DECLARE_PPC_VX_INSTRUCTIONS_A_FORM)
   PPC_VX_OPCODE_B_FORM_LIST(DECLARE_PPC_VX_INSTRUCTIONS_B_FORM)
+  PPC_VX_OPCODE_C_FORM_LIST(DECLARE_PPC_VX_INSTRUCTIONS_C_FORM)
 #undef DECLARE_PPC_VX_INSTRUCTIONS_A_FORM
 #undef DECLARE_PPC_VX_INSTRUCTIONS_B_FORM
+#undef DECLARE_PPC_VX_INSTRUCTIONS_C_FORM
 
 #define DECLARE_PPC_VA_INSTRUCTIONS_A_FORM(name, instr_name, instr_value) \
   inline void name(const Simd128Register rt, const Simd128Register ra,    \
@@ -940,6 +966,7 @@ class Assembler : public AssemblerBase {
            RCBit rc = LeaveRC);
   void fctiwz(const DoubleRegister frt, const DoubleRegister frb);
   void fctiw(const DoubleRegister frt, const DoubleRegister frb);
+  void fctiwuz(const DoubleRegister frt, const DoubleRegister frb);
   void frin(const DoubleRegister frt, const DoubleRegister frb,
             RCBit rc = LeaveRC);
   void friz(const DoubleRegister frt, const DoubleRegister frb,
@@ -992,6 +1019,8 @@ class Assembler : public AssemblerBase {
   void mfvsrd(const Register ra, const Simd128Register r);
   void mfvsrwz(const Register ra, const Simd128Register r);
   void mtvsrd(const Simd128Register rt, const Register ra);
+  void lxvd(const Simd128Register rt, const MemOperand& src);
+  void stxvd(const Simd128Register rt, const MemOperand& src);
 
   // Pseudo instructions
 

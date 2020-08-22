@@ -5,9 +5,9 @@
 #ifndef V8_WASM_BASELINE_X64_LIFTOFF_ASSEMBLER_X64_H_
 #define V8_WASM_BASELINE_X64_LIFTOFF_ASSEMBLER_X64_H_
 
-#include "src/wasm/baseline/liftoff-assembler.h"
-
 #include "src/codegen/assembler.h"
+#include "src/wasm/baseline/liftoff-assembler.h"
+#include "src/wasm/simd-shuffle.h"
 
 namespace v8 {
 namespace internal {
@@ -35,9 +35,7 @@ static_assert((kLiftoffAssemblerFpCacheRegs &
 // rbp-8 holds the stack marker, rbp-16 is the instance parameter.
 constexpr int kInstanceOffset = 16;
 
-inline Operand GetStackSlot(int offset) {
-  return Operand(offset > 0 ? rbp : rsp, -offset);
-}
+inline Operand GetStackSlot(int offset) { return Operand(rbp, -offset); }
 
 // TODO(clemensb): Make this a constexpr variable once Operand is constexpr.
 inline Operand GetInstanceOperand() { return GetStackSlot(kInstanceOffset); }
@@ -95,6 +93,9 @@ inline void Store(LiftoffAssembler* assm, Operand dst, LiftoffRegister src,
     case ValueType::kF64:
       assm->Movsd(dst, src.fp());
       break;
+    case ValueType::kS128:
+      assm->Movdqu(dst, src.fp());
+      break;
     default:
       UNREACHABLE();
   }
@@ -132,6 +133,24 @@ int LiftoffAssembler::PrepareStackFrame() {
   sub_sp_32(0);
   DCHECK_EQ(liftoff::kSubSpSize, pc_offset() - offset);
   return offset;
+}
+
+void LiftoffAssembler::PrepareTailCall(int num_callee_stack_params,
+                                       int stack_param_delta) {
+  // Push the return address and frame pointer to complete the stack frame.
+  pushq(Operand(rbp, 8));
+  pushq(Operand(rbp, 0));
+
+  // Shift the whole frame upwards.
+  const int slot_count = num_callee_stack_params + 2;
+  for (int i = slot_count - 1; i >= 0; --i) {
+    movq(kScratchRegister, Operand(rsp, i * 8));
+    movq(Operand(rbp, (i - stack_param_delta) * 8), kScratchRegister);
+  }
+
+  // Set the new stack and frame pointer.
+  leaq(rsp, Operand(rbp, -stack_param_delta * 8));
+  popq(rbp);
 }
 
 void LiftoffAssembler::PatchPrepareStackFrame(int offset, int frame_size) {
@@ -241,12 +260,14 @@ void LiftoffAssembler::FillInstanceInto(Register dst) {
 
 void LiftoffAssembler::LoadTaggedPointer(Register dst, Register src_addr,
                                          Register offset_reg,
-                                         uint32_t offset_imm,
+                                         int32_t offset_imm,
                                          LiftoffRegList pinned) {
+  DCHECK_GE(offset_imm, 0);
   if (emit_debug_code() && offset_reg != no_reg) {
     AssertZeroExtended(offset_reg);
   }
-  Operand src_op = liftoff::GetMemOp(this, src_addr, offset_reg, offset_imm);
+  Operand src_op = liftoff::GetMemOp(this, src_addr, offset_reg,
+                                     static_cast<uint32_t>(offset_imm));
   LoadTaggedPointerField(dst, src_op);
 }
 
@@ -699,6 +720,12 @@ void LiftoffAssembler::StoreCallerFrameSlot(LiftoffRegister src,
   liftoff::Store(this, dst, src, type);
 }
 
+void LiftoffAssembler::LoadReturnStackSlot(LiftoffRegister reg, int offset,
+                                           ValueType type) {
+  Operand src(rsp, offset);
+  liftoff::Load(this, reg, src, type);
+}
+
 void LiftoffAssembler::MoveStackValue(uint32_t dst_offset, uint32_t src_offset,
                                       ValueType type) {
   DCHECK_NE(dst_offset, src_offset);
@@ -789,26 +816,7 @@ void LiftoffAssembler::Spill(int offset, WasmValue value) {
 }
 
 void LiftoffAssembler::Fill(LiftoffRegister reg, int offset, ValueType type) {
-  Operand src = liftoff::GetStackSlot(offset);
-  switch (type.kind()) {
-    case ValueType::kI32:
-      movl(reg.gp(), src);
-      break;
-    case ValueType::kI64:
-      movq(reg.gp(), src);
-      break;
-    case ValueType::kF32:
-      Movss(reg.fp(), src);
-      break;
-    case ValueType::kF64:
-      Movsd(reg.fp(), src);
-      break;
-    case ValueType::kS128:
-      Movdqu(reg.fp(), src);
-      break;
-    default:
-      UNREACHABLE();
-  }
+  liftoff::Load(this, reg, liftoff::GetStackSlot(offset), type);
 }
 
 void LiftoffAssembler::FillI64Half(Register, int offset, RegPairHalf) {
@@ -2037,6 +2045,33 @@ void LiftoffAssembler::emit_f64_set_cond(Condition cond, Register dst,
                                                       rhs);
 }
 
+bool LiftoffAssembler::emit_select(LiftoffRegister dst, Register condition,
+                                   LiftoffRegister true_value,
+                                   LiftoffRegister false_value,
+                                   ValueType type) {
+  if (type != kWasmI32 && type != kWasmI64) return false;
+
+  testl(condition, condition);
+
+  if (type == kWasmI32) {
+    if (dst == false_value) {
+      cmovl(not_zero, dst.gp(), true_value.gp());
+    } else {
+      if (dst != true_value) movl(dst.gp(), true_value.gp());
+      cmovl(zero, dst.gp(), false_value.gp());
+    }
+  } else {
+    if (dst == false_value) {
+      cmovq(not_zero, dst.gp(), true_value.gp());
+    } else {
+      if (dst != true_value) movq(dst.gp(), true_value.gp());
+      cmovq(zero, dst.gp(), false_value.gp());
+    }
+  }
+
+  return true;
+}
+
 // TODO(fanchenk): Distinguish mov* if data bypass delay matter.
 namespace liftoff {
 template <void (Assembler::*avx_op)(XMMRegister, XMMRegister, XMMRegister),
@@ -2244,7 +2279,26 @@ void LiftoffAssembler::LoadTransform(LiftoffRegister dst, Register src_addr,
 void LiftoffAssembler::emit_s8x16_shuffle(LiftoffRegister dst,
                                           LiftoffRegister lhs,
                                           LiftoffRegister rhs,
-                                          const uint8_t shuffle[16]) {
+                                          const uint8_t shuffle[16],
+                                          bool is_swizzle) {
+  if (is_swizzle) {
+    uint32_t imms[4];
+    // Shuffles that use just 1 operand are called swizzles, rhs can be ignored.
+    wasm::SimdShuffle::Pack16Lanes(imms, shuffle);
+    TurboAssembler::Move(kScratchDoubleReg, make_uint64(imms[3], imms[2]),
+                         make_uint64(imms[1], imms[0]));
+    if (CpuFeatures::IsSupported(AVX)) {
+      CpuFeatureScope scope(this, AVX);
+      vpshufb(dst.fp(), lhs.fp(), kScratchDoubleReg);
+    } else {
+      if (dst != lhs) {
+        movups(dst.fp(), lhs.fp());
+      }
+      pshufb(dst.fp(), kScratchDoubleReg);
+    }
+    return;
+  }
+
   LiftoffRegister tmp_simd =
       GetUnusedRegister(kFpReg, LiftoffRegList::ForRegs(dst, lhs, rhs));
   Movups(kScratchDoubleReg, lhs.fp());
@@ -2561,6 +2615,15 @@ void LiftoffAssembler::emit_f64x2_le(LiftoffRegister dst, LiftoffRegister lhs,
   liftoff::EmitSimdNonCommutativeBinOp<&Assembler::vcmplepd,
                                        &Assembler::cmplepd>(this, dst, lhs,
                                                             rhs);
+}
+
+void LiftoffAssembler::emit_s128_const(LiftoffRegister dst,
+                                       const uint8_t imms[16]) {
+  uint64_t vals[2];
+  memcpy(vals, imms, sizeof(vals));
+  TurboAssembler::Move(dst.fp(), vals[0]);
+  movq(kScratchRegister, vals[1]);
+  Pinsrq(dst.fp(), kScratchRegister, int8_t{1});
 }
 
 void LiftoffAssembler::emit_s128_not(LiftoffRegister dst, LiftoffRegister src) {
@@ -3871,6 +3934,10 @@ void LiftoffAssembler::CallNativeWasmCode(Address addr) {
   near_call(addr, RelocInfo::WASM_CALL);
 }
 
+void LiftoffAssembler::TailCallNativeWasmCode(Address addr) {
+  near_jmp(addr, RelocInfo::WASM_CALL);
+}
+
 void LiftoffAssembler::CallIndirect(const wasm::FunctionSig* sig,
                                     compiler::CallDescriptor* call_descriptor,
                                     Register target) {
@@ -3882,6 +3949,18 @@ void LiftoffAssembler::CallIndirect(const wasm::FunctionSig* sig,
     RetpolineCall(target);
   } else {
     call(target);
+  }
+}
+
+void LiftoffAssembler::TailCallIndirect(Register target) {
+  if (target == no_reg) {
+    popq(kScratchRegister);
+    target = kScratchRegister;
+  }
+  if (FLAG_untrusted_code_mitigations) {
+    RetpolineJump(target);
+  } else {
+    jmp(target);
   }
 }
 

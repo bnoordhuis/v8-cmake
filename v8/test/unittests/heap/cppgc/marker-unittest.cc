@@ -8,7 +8,7 @@
 #include "include/cppgc/internal/pointer-policies.h"
 #include "include/cppgc/member.h"
 #include "include/cppgc/persistent.h"
-#include "src/heap/cppgc/heap-object-header-inl.h"
+#include "src/heap/cppgc/heap-object-header.h"
 #include "src/heap/cppgc/marking-visitor.h"
 #include "src/heap/cppgc/stats-collector.h"
 #include "test/unittests/heap/cppgc/tests.h"
@@ -222,9 +222,9 @@ TEST_F(MarkerTest, InConstructionObjectIsEventuallyMarkedEmptyStack) {
   GCedWithCallback* object = MakeGarbageCollected<GCedWithCallback>(
       GetAllocationHandle(), [&marker](GCedWithCallback* obj) {
         Member<GCedWithCallback> member(obj);
-        marker.GetMarkingVisitorForTesting()->Trace(member);
+        marker.VisitorForTesting().Trace(member);
       });
-  EXPECT_FALSE(HeapObjectHeader::FromPayload(object).IsMarked());
+  EXPECT_TRUE(HeapObjectHeader::FromPayload(object).IsMarked());
   marker.FinishMarking({MarkingConfig::CollectionType::kMajor,
                         MarkingConfig::StackState::kMayContainHeapPointers});
   EXPECT_TRUE(HeapObjectHeader::FromPayload(object).IsMarked());
@@ -239,8 +239,8 @@ TEST_F(MarkerTest, InConstructionObjectIsEventuallyMarkedNonEmptyStack) {
   MakeGarbageCollected<GCedWithCallback>(
       GetAllocationHandle(), [&marker](GCedWithCallback* obj) {
         Member<GCedWithCallback> member(obj);
-        marker.GetMarkingVisitorForTesting()->Trace(member);
-        EXPECT_FALSE(HeapObjectHeader::FromPayload(obj).IsMarked());
+        marker.VisitorForTesting().Trace(member);
+        EXPECT_TRUE(HeapObjectHeader::FromPayload(obj).IsMarked());
         marker.FinishMarking(config);
         EXPECT_TRUE(HeapObjectHeader::FromPayload(obj).IsMarked());
       });

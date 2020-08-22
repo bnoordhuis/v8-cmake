@@ -188,7 +188,7 @@ RUNTIME_FUNCTION(Runtime_DeoptimizeFunction) {
   if (!function_object->IsJSFunction()) return CrashUnlessFuzzing(isolate);
   Handle<JSFunction> function = Handle<JSFunction>::cast(function_object);
 
-  if (function->IsOptimized()) {
+  if (function->HasAttachedOptimizedCode()) {
     Deoptimizer::DeoptimizeFunction(*function);
   }
 
@@ -206,7 +206,7 @@ RUNTIME_FUNCTION(Runtime_DeoptimizeNow) {
   if (!it.done()) function = handle(it.frame()->function(), isolate);
   if (function.is_null()) return CrashUnlessFuzzing(isolate);
 
-  if (function->IsOptimized()) {
+  if (function->HasAttachedOptimizedCode()) {
     Deoptimizer::DeoptimizeFunction(*function);
   }
 
@@ -250,6 +250,12 @@ RUNTIME_FUNCTION(Runtime_IsConcurrentRecompilationSupported) {
       isolate->concurrent_recompilation_enabled());
 }
 
+RUNTIME_FUNCTION(Runtime_DynamicMapChecksEnabled) {
+  SealHandleScope shs(isolate);
+  DCHECK_EQ(0, args.length());
+  return isolate->heap()->ToBoolean(FLAG_dynamic_map_checks);
+}
+
 RUNTIME_FUNCTION(Runtime_OptimizeFunctionOnNextCall) {
   HandleScope scope(isolate);
 
@@ -269,7 +275,8 @@ RUNTIME_FUNCTION(Runtime_OptimizeFunctionOnNextCall) {
   }
 
   // If function isn't compiled, compile it now.
-  IsCompiledScope is_compiled_scope(function->shared().is_compiled_scope());
+  IsCompiledScope is_compiled_scope(
+      function->shared().is_compiled_scope(isolate));
   if (!is_compiled_scope.is_compiled() &&
       !Compiler::Compile(function, Compiler::CLEAR_EXCEPTION,
                          &is_compiled_scope)) {
@@ -290,8 +297,9 @@ RUNTIME_FUNCTION(Runtime_OptimizeFunctionOnNextCall) {
     PendingOptimizationTable::MarkedForOptimization(isolate, function);
   }
 
-  if (function->HasOptimizedCode()) {
-    DCHECK(function->IsOptimized() || function->ChecksOptimizationMarker());
+  if (function->HasAvailableOptimizedCode()) {
+    DCHECK(function->HasAttachedOptimizedCode() ||
+           function->ChecksOptimizationMarker());
     if (FLAG_testing_d8_test_runner) {
       PendingOptimizationTable::FunctionWasOptimized(isolate, function);
     }
@@ -338,7 +346,8 @@ bool EnsureFeedbackVector(Handle<JSFunction> function) {
   if (function->has_feedback_vector()) return true;
 
   // If function isn't compiled, compile it now.
-  IsCompiledScope is_compiled_scope(function->shared().is_compiled_scope());
+  IsCompiledScope is_compiled_scope(
+      function->shared().is_compiled_scope(function->GetIsolate()));
   // If the JSFunction isn't compiled but it has a initialized feedback cell
   // then no need to compile. CompileLazy builtin would handle these cases by
   // installing the code from SFI. Calling compile here may cause another
@@ -440,8 +449,9 @@ RUNTIME_FUNCTION(Runtime_OptimizeOsr) {
     PendingOptimizationTable::MarkedForOptimization(isolate, function);
   }
 
-  if (function->HasOptimizedCode()) {
-    DCHECK(function->IsOptimized() || function->ChecksOptimizationMarker());
+  if (function->HasAvailableOptimizedCode()) {
+    DCHECK(function->HasAttachedOptimizedCode() ||
+           function->ChecksOptimizationMarker());
     // If function is already optimized, remove the bytecode array from the
     // pending optimize for test table and return.
     if (FLAG_testing_d8_test_runner) {
@@ -458,7 +468,8 @@ RUNTIME_FUNCTION(Runtime_OptimizeOsr) {
     function->ShortPrint(scope.file());
     PrintF(scope.file(), " for non-concurrent optimization]\n");
   }
-  IsCompiledScope is_compiled_scope(function->shared().is_compiled_scope());
+  IsCompiledScope is_compiled_scope(
+      function->shared().is_compiled_scope(isolate));
   JSFunction::EnsureFeedbackVector(function, &is_compiled_scope);
   function->MarkForOptimization(ConcurrencyMode::kNotConcurrent);
 
@@ -480,8 +491,8 @@ RUNTIME_FUNCTION(Runtime_NeverOptimizeFunction) {
   if (!function_object->IsJSFunction()) return CrashUnlessFuzzing(isolate);
   Handle<JSFunction> function = Handle<JSFunction>::cast(function_object);
   SharedFunctionInfo sfi = function->shared();
-  if (sfi.abstract_code().kind() != AbstractCode::INTERPRETED_FUNCTION &&
-      sfi.abstract_code().kind() != AbstractCode::BUILTIN) {
+  if (sfi.abstract_code().kind() != CodeKind::INTERPRETED_FUNCTION &&
+      sfi.abstract_code().kind() != CodeKind::BUILTIN) {
     return CrashUnlessFuzzing(isolate);
   }
   sfi.DisableOptimization(BailoutReason::kNeverOptimize);
@@ -546,7 +557,7 @@ RUNTIME_FUNCTION(Runtime_GetOptimizationStatus) {
     status |= static_cast<int>(OptimizationStatus::kOptimizingConcurrently);
   }
 
-  if (function->IsOptimized()) {
+  if (function->HasAttachedOptimizedCode()) {
     if (function->code().marked_for_deoptimization()) {
       status |= static_cast<int>(OptimizationStatus::kMarkedForDeoptimization);
     } else {
@@ -556,7 +567,7 @@ RUNTIME_FUNCTION(Runtime_GetOptimizationStatus) {
       status |= static_cast<int>(OptimizationStatus::kTurboFanned);
     }
   }
-  if (function->IsInterpreted()) {
+  if (function->ActiveTierIsIgnition()) {
     status |= static_cast<int>(OptimizationStatus::kInterpreted);
   }
 
@@ -740,12 +751,7 @@ RUNTIME_FUNCTION(Runtime_SimulateNewspaceFull) {
   return ReadOnlyRoots(isolate).undefined_value();
 }
 
-RUNTIME_FUNCTION(Runtime_DebugPrint) {
-  SealHandleScope shs(isolate);
-  DCHECK_EQ(1, args.length());
-
-  MaybeObject maybe_object(*args.address_of_arg_at(0));
-
+static void DebugPrintImpl(MaybeObject maybe_object) {
   StdoutStream os;
   if (maybe_object->IsCleared()) {
     os << "[weak cleared]";
@@ -767,7 +773,32 @@ RUNTIME_FUNCTION(Runtime_DebugPrint) {
 #endif
   }
   os << std::endl;
+}
 
+RUNTIME_FUNCTION(Runtime_DebugPrint) {
+  SealHandleScope shs(isolate);
+  DCHECK_EQ(1, args.length());
+
+  MaybeObject maybe_object(*args.address_of_arg_at(0));
+  DebugPrintImpl(maybe_object);
+  return args[0];
+}
+
+RUNTIME_FUNCTION(Runtime_DebugPrintPtr) {
+  SealHandleScope shs(isolate);
+  StdoutStream os;
+  DCHECK_EQ(1, args.length());
+
+  MaybeObject maybe_object(*args.address_of_arg_at(0));
+  if (!maybe_object.IsCleared()) {
+    Object object = maybe_object.GetHeapObjectOrSmi();
+    size_t pointer;
+    if (object.ToIntegerIndex(&pointer)) {
+      MaybeObject from_pointer(static_cast<Address>(pointer));
+      DebugPrintImpl(from_pointer);
+    }
+  }
+  // We don't allow the converted pointer to leak out to JavaScript.
   return args[0];
 }
 
@@ -1128,7 +1159,7 @@ RUNTIME_FUNCTION(Runtime_IsWasmCode) {
   SealHandleScope shs(isolate);
   DCHECK_EQ(1, args.length());
   CONVERT_ARG_CHECKED(JSFunction, function, 0);
-  bool is_js_to_wasm = function.code().kind() == Code::JS_TO_WASM_FUNCTION;
+  bool is_js_to_wasm = function.code().kind() == CodeKind::JS_TO_WASM_FUNCTION;
   return isolate->heap()->ToBoolean(is_js_to_wasm);
 }
 
@@ -1295,30 +1326,29 @@ RUNTIME_FUNCTION(Runtime_SerializeDeserializeNow) {
   return ReadOnlyRoots(isolate).undefined_value();
 }
 
-// Take a compiled wasm module and serialize it into an array buffer, which is
-// then returned.
+// Wait until the given module is fully tiered up, then serialize it into an
+// array buffer.
 RUNTIME_FUNCTION(Runtime_SerializeWasmModule) {
   HandleScope scope(isolate);
   DCHECK_EQ(1, args.length());
   CONVERT_ARG_HANDLE_CHECKED(WasmModuleObject, module_obj, 0);
 
   wasm::NativeModule* native_module = module_obj->native_module();
+  native_module->compilation_state()->WaitForTopTierFinished();
+  DCHECK(!native_module->compilation_state()->failed());
+
   wasm::WasmSerializer wasm_serializer(native_module);
   size_t byte_length = wasm_serializer.GetSerializedNativeModuleSize();
 
-  MaybeHandle<JSArrayBuffer> result =
-      isolate->factory()->NewJSArrayBufferAndBackingStore(
-          byte_length, InitializedFlag::kUninitialized);
+  Handle<JSArrayBuffer> array_buffer =
+      isolate->factory()
+          ->NewJSArrayBufferAndBackingStore(byte_length,
+                                            InitializedFlag::kUninitialized)
+          .ToHandleChecked();
 
-  Handle<JSArrayBuffer> array_buffer;
-  if (result.ToHandle(&array_buffer) &&
-      wasm_serializer.SerializeNativeModule(
-          {reinterpret_cast<uint8_t*>(array_buffer->backing_store()),
-           byte_length})) {
-    return *array_buffer;
-  }
-
-  UNREACHABLE();
+  CHECK(wasm_serializer.SerializeNativeModule(
+      {static_cast<uint8_t*>(array_buffer->backing_store()), byte_length}));
+  return *array_buffer;
 }
 
 // Take an array buffer and attempt to reconstruct a compiled wasm module.
@@ -1349,19 +1379,6 @@ RUNTIME_FUNCTION(Runtime_DeserializeWasmModule) {
     return ReadOnlyRoots(isolate).undefined_value();
   }
   return *module_object;
-}
-
-// Create a new Module object using the same NativeModule.
-RUNTIME_FUNCTION(Runtime_CloneWasmModule) {
-  HandleScope scope(isolate);
-  DCHECK_EQ(1, args.length());
-  CONVERT_ARG_HANDLE_CHECKED(WasmModuleObject, module_object, 0);
-
-  Handle<WasmModuleObject> new_module_object =
-      isolate->wasm_engine()->ImportNativeModule(
-          isolate, module_object->shared_native_module(), {});
-
-  return *new_module_object;
 }
 
 RUNTIME_FUNCTION(Runtime_HeapObjectVerify) {
@@ -1564,7 +1581,10 @@ RUNTIME_FUNCTION(Runtime_EnableCodeLoggingForTesting) {
     void CodeDisableOptEvent(Handle<AbstractCode> code,
                              Handle<SharedFunctionInfo> shared) final {}
     void CodeDeoptEvent(Handle<Code> code, DeoptimizeKind kind, Address pc,
-                        int fp_to_sp_delta) final {}
+                        int fp_to_sp_delta, bool reuse_code) final {}
+    void CodeDependencyChangeEvent(Handle<Code> code,
+                                   Handle<SharedFunctionInfo> shared,
+                                   const char* reason) final {}
 
     bool is_listening_to_code_events() final { return true; }
   };

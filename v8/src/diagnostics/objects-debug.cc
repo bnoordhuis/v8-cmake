@@ -2,8 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/objects/objects.h"
-
 #include "src/codegen/assembler-inl.h"
 #include "src/date/date.h"
 #include "src/diagnostics/disasm.h"
@@ -32,6 +30,7 @@
 #include "src/objects/js-array-inl.h"
 #include "src/objects/layout-descriptor.h"
 #include "src/objects/objects-inl.h"
+#include "src/objects/objects.h"
 #include "src/roots/roots.h"
 #ifdef V8_INTL_SUPPORT
 #include "src/objects/js-break-iterator-inl.h"
@@ -55,6 +54,7 @@
 #include "src/objects/js-relative-time-format-inl.h"
 #include "src/objects/js-segment-iterator-inl.h"
 #include "src/objects/js-segmenter-inl.h"
+#include "src/objects/js-segments-inl.h"
 #endif  // V8_INTL_SUPPORT
 #include "src/objects/js-weak-refs-inl.h"
 #include "src/objects/literal-objects-inl.h"
@@ -179,7 +179,6 @@ void HeapObject::HeapObjectVerify(Isolate* isolate) {
     case GLOBAL_DICTIONARY_TYPE:
     case NUMBER_DICTIONARY_TYPE:
     case SIMPLE_NUMBER_DICTIONARY_TYPE:
-    case STRING_TABLE_TYPE:
     case EPHEMERON_HASH_TABLE_TYPE:
     case FIXED_ARRAY_TYPE:
     case SCOPE_INFO_TYPE:
@@ -250,6 +249,9 @@ void HeapObject::HeapObjectVerify(Isolate* isolate) {
       TORQUE_INSTANCE_CHECKERS_SINGLE_FULLY_DEFINED(MAKE_TORQUE_CASE)
       TORQUE_INSTANCE_CHECKERS_MULTIPLE_FULLY_DEFINED(MAKE_TORQUE_CASE)
 #undef MAKE_TORQUE_CASE
+
+    case FOREIGN_TYPE:
+      break;  // No interesting fields.
 
     case ALLOCATION_SITE_TYPE:
       AllocationSite::cast(*this).AllocationSiteVerify(isolate);
@@ -808,12 +810,12 @@ void JSFunction::JSFunctionVerify(Isolate* isolate) {
 }
 
 void SharedFunctionInfo::SharedFunctionInfoVerify(Isolate* isolate) {
-  // TODO(leszeks): Add a TorqueGeneratedClassVerifier for OffThreadIsolate.
+  // TODO(leszeks): Add a TorqueGeneratedClassVerifier for LocalIsolate.
   TorqueGeneratedClassVerifiers::SharedFunctionInfoVerify(*this, isolate);
   this->SharedFunctionInfoVerify(ReadOnlyRoots(isolate));
 }
 
-void SharedFunctionInfo::SharedFunctionInfoVerify(OffThreadIsolate* isolate) {
+void SharedFunctionInfo::SharedFunctionInfoVerify(LocalIsolate* isolate) {
   this->SharedFunctionInfoVerify(ReadOnlyRoots(isolate));
 }
 
@@ -1217,6 +1219,42 @@ void JSRegExp::JSRegExpVerify(Isolate* isolate) {
       CHECK(arr.get(JSRegExp::kAtomPatternIndex).IsString());
       break;
     }
+    case JSRegExp::EXPERIMENTAL: {
+      FixedArray arr = FixedArray::cast(data());
+      Smi uninitialized = Smi::FromInt(JSRegExp::kUninitializedValue);
+
+      Object latin1_code = arr.get(JSRegExp::kIrregexpLatin1CodeIndex);
+      Object uc16_code = arr.get(JSRegExp::kIrregexpUC16CodeIndex);
+      Object experimental_pattern =
+          arr.get(JSRegExp::kExperimentalPatternIndex);
+      if (latin1_code.IsCode()) {
+        // `this` should be a compiled regexp.
+        CHECK(latin1_code.IsCode());
+        CHECK_EQ(Code::cast(latin1_code).builtin_index(),
+                 Builtins::kRegExpExperimentalTrampoline);
+
+        CHECK(uc16_code.IsCode());
+        CHECK_EQ(Code::cast(uc16_code).builtin_index(),
+                 Builtins::kRegExpExperimentalTrampoline);
+
+        CHECK(experimental_pattern.IsString());
+      } else {
+        CHECK_EQ(latin1_code, uninitialized);
+        CHECK_EQ(uc16_code, uninitialized);
+        CHECK_EQ(experimental_pattern, uninitialized);
+      }
+
+      CHECK_EQ(arr.get(JSRegExp::kIrregexpMaxRegisterCountIndex),
+               uninitialized);
+      // TODO(mbid,v8:10765): Once the EXPERIMENTAL regexps support captures,
+      // the capture count should be allowed to be a Smi >= 0.
+      CHECK_EQ(arr.get(JSRegExp::kIrregexpCaptureCountIndex), Smi::FromInt(0));
+      CHECK_EQ(arr.get(JSRegExp::kIrregexpCaptureNameMapIndex), uninitialized);
+      CHECK_EQ(arr.get(JSRegExp::kIrregexpTicksUntilTierUpIndex),
+               uninitialized);
+      CHECK_EQ(arr.get(JSRegExp::kIrregexpBacktrackLimit), uninitialized);
+      break;
+    }
     case JSRegExp::IRREGEXP: {
       bool can_be_interpreted = RegExp::CanGenerateBytecode();
 
@@ -1442,8 +1480,10 @@ void WasmInstanceObject::WasmInstanceObjectVerify(Isolate* isolate) {
 void WasmExportedFunctionData::WasmExportedFunctionDataVerify(
     Isolate* isolate) {
   TorqueGeneratedClassVerifiers::WasmExportedFunctionDataVerify(*this, isolate);
-  CHECK(wrapper_code().kind() == Code::JS_TO_WASM_FUNCTION ||
-        wrapper_code().kind() == Code::C_WASM_ENTRY);
+  CHECK(wrapper_code().kind() == CodeKind::JS_TO_WASM_FUNCTION ||
+        wrapper_code().kind() == CodeKind::C_WASM_ENTRY ||
+        (wrapper_code().is_builtin() &&
+         wrapper_code().builtin_index() == Builtins::kGenericJSToWasmWrapper));
 }
 
 USE_TORQUE_VERIFIER(WasmModuleObject)

@@ -132,7 +132,7 @@ void IC::TraceIC(const char* type, Handle<Object> name, State old_state,
   ic_info.type += type;
 
   int code_offset = 0;
-  if (function.IsInterpreted()) {
+  if (function.ActiveTierIsIgnition()) {
     code_offset = InterpretedFrame::GetBytecodeOffset(frame->fp());
   } else {
     code_offset =
@@ -600,7 +600,8 @@ bool IC::UpdatePolymorphicIC(Handle<Name> name,
   int number_of_valid_maps =
       number_of_maps - deprecated_maps - (handler_to_overwrite != -1);
 
-  if (number_of_valid_maps >= FLAG_max_polymorphic_map_count) return false;
+  if (number_of_valid_maps >= FLAG_max_valid_polymorphic_map_count)
+    return false;
   if (number_of_maps == 0 && state() != MONOMORPHIC && state() != POLYMORPHIC) {
     return false;
   }
@@ -822,14 +823,15 @@ Handle<Object> LoadIC::ComputeHandler(LookupIterator* lookup) {
       if (Accessors::IsJSObjectFieldAccessor(isolate(), map, lookup->name(),
                                              &index)) {
         TRACE_HANDLER_STATS(isolate(), LoadIC_LoadFieldDH);
-        return LoadHandler::LoadField(isolate(), index);
+        return LoadHandler::LoadField(isolate(), index, map->elements_kind());
       }
       if (holder->IsJSModuleNamespace()) {
         Handle<ObjectHashTable> exports(
             Handle<JSModuleNamespace>::cast(holder)->module().exports(),
             isolate());
-        InternalIndex entry = exports->FindEntry(
-            roots, lookup->name(), Smi::ToInt(lookup->name()->GetHash()));
+        InternalIndex entry =
+            exports->FindEntry(isolate(), roots, lookup->name(),
+                               Smi::ToInt(lookup->name()->GetHash()));
         // We found the accessor, so the entry must exist.
         DCHECK(entry.is_found());
         int index = ObjectHashTable::EntryToValueIndex(entry);
@@ -954,7 +956,8 @@ Handle<Object> LoadIC::ComputeHandler(LookupIterator* lookup) {
       } else {
         DCHECK_EQ(kField, lookup->property_details().location());
         FieldIndex field = lookup->GetFieldIndex();
-        smi_handler = LoadHandler::LoadField(isolate(), field);
+        smi_handler =
+            LoadHandler::LoadField(isolate(), field, map->elements_kind());
         TRACE_HANDLER_STATS(isolate(), LoadIC_LoadFieldDH);
         if (receiver_is_holder) return smi_handler;
         TRACE_HANDLER_STATS(isolate(), LoadIC_LoadFieldFromPrototypeDH);
@@ -980,7 +983,8 @@ Handle<Object> LoadIC::ComputeHandler(LookupIterator* lookup) {
               value->IsSmi() ? MaybeObjectHandle(*value, isolate())
                              : MaybeObjectHandle::Weak(*value, isolate());
 
-          smi_handler = LoadHandler::LoadConstantFromPrototype(isolate());
+          smi_handler = LoadHandler::LoadConstantFromPrototype(
+              isolate(), map->elements_kind());
           TRACE_HANDLER_STATS(isolate(), LoadIC_LoadConstantFromPrototypeDH);
           return LoadHandler::LoadFromPrototype(isolate(), map, holder,
                                                 smi_handler, weak_value);
@@ -1078,7 +1082,7 @@ void KeyedLoadIC::UpdateLoadElement(Handle<HeapObject> receiver,
   // If the maximum number of receiver maps has been exceeded, use the generic
   // version of the IC.
   if (static_cast<int>(target_receiver_maps.size()) >
-      FLAG_max_polymorphic_map_count) {
+      FLAG_max_valid_polymorphic_map_count) {
     set_slow_stub_reason("max polymorph exceeded");
     return;
   }
@@ -1899,7 +1903,7 @@ void KeyedStoreIC::UpdateStoreElement(Handle<Map> receiver_map,
   // If the maximum number of receiver maps has been exceeded, use the
   // megamorphic version of the IC.
   if (static_cast<int>(target_maps_and_handlers.size()) >
-      FLAG_max_polymorphic_map_count) {
+      FLAG_max_valid_polymorphic_map_count) {
     return;
   }
 

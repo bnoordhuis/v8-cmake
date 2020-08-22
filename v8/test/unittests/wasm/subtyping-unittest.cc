@@ -10,15 +10,11 @@ namespace internal {
 namespace wasm {
 namespace subtyping_unittest {
 
-class WasmSubtypingTest : public TestWithZone {};
+class WasmSubtypingTest : public ::testing::Test {};
 using FieldInit = std::pair<ValueType, bool>;
 
-ValueType ref(uint32_t index) {
-  return ValueType::Ref(static_cast<HeapType>(index), kNonNullable);
-}
-ValueType optRef(uint32_t index) {
-  return ValueType::Ref(static_cast<HeapType>(index), kNullable);
-}
+ValueType ref(uint32_t index) { return ValueType::Ref(index, kNonNullable); }
+ValueType optRef(uint32_t index) { return ValueType::Ref(index, kNullable); }
 
 FieldInit mut(ValueType type) { return FieldInit(type, true); }
 FieldInit immut(ValueType type) { return FieldInit(type, false); }
@@ -33,14 +29,13 @@ void DefineStruct(WasmModule* module, std::initializer_list<FieldInit> fields) {
 }
 
 void DefineArray(WasmModule* module, FieldInit element_type) {
-  module->add_array_type(new (module->signature_zone.get()) ArrayType(
+  module->add_array_type(module->signature_zone->New<ArrayType>(
       element_type.first, element_type.second));
 }
 
 TEST_F(WasmSubtypingTest, Subtyping) {
   v8::internal::AccountingAllocator allocator;
-
-  WasmModule module_(std::make_unique<Zone>(*(zone())));
+  WasmModule module_(std::make_unique<Zone>(&allocator, ZONE_NAME));
 
   WasmModule* module = &module_;
 
@@ -55,10 +50,11 @@ TEST_F(WasmSubtypingTest, Subtyping) {
   /* 8 */ DefineStruct(module, {mut(kWasmI32), immut(optRef(8))});
   /* 9 */ DefineStruct(module, {mut(kWasmI32), immut(optRef(8))});
 
-  ValueType numeric_types[] = {kWasmI32, kWasmI64, kWasmF32, kWasmF64};
+  ValueType numeric_types[] = {kWasmI32, kWasmI64, kWasmF32, kWasmF64,
+                               kWasmS128};
   ValueType ref_types[] = {kWasmExternRef, kWasmFuncRef, kWasmExnRef,
-                           kWasmEqRef,     optRef(0),    ref(0),
-                           optRef(2),      ref(2)};
+                           kWasmEqRef,     kWasmI31Ref,  optRef(0),
+                           ref(0),         optRef(2),    ref(2)};
 
   // Value types are unrelated, except if they are equal.
   for (ValueType subtype : numeric_types) {
@@ -76,15 +72,20 @@ TEST_F(WasmSubtypingTest, Subtyping) {
   }
 
   for (ValueType ref_type : ref_types) {
-    // Reference types are a subtype of eqref, except funcref.
+    // Concrete reference types and i31ref are subtypes of eqref,
+    // exnref/externref/funcref are not.
     CHECK_EQ(IsSubtypeOf(ref_type, kWasmEqRef, module),
-             ref_type != kWasmFuncRef);
+             ref_type != kWasmFuncRef && ref_type != kWasmExternRef &&
+                 ref_type != kWasmExnRef);
     // Each reference type is a subtype of itself.
     CHECK(IsSubtypeOf(ref_type, ref_type, module));
   }
 
-  for (ValueType type_1 : {kWasmExternRef, kWasmFuncRef, kWasmExnRef}) {
-    for (ValueType type_2 : {kWasmExternRef, kWasmFuncRef, kWasmExnRef}) {
+  // The rest of ref. types are unrelated.
+  for (ValueType type_1 :
+       {kWasmExternRef, kWasmFuncRef, kWasmExnRef, kWasmI31Ref}) {
+    for (ValueType type_2 :
+         {kWasmExternRef, kWasmFuncRef, kWasmExnRef, kWasmI31Ref}) {
       CHECK_EQ(IsSubtypeOf(type_1, type_2, module), type_1 == type_2);
     }
   }

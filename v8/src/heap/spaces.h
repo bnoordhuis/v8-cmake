@@ -12,6 +12,7 @@
 #include "src/base/iterator.h"
 #include "src/base/macros.h"
 #include "src/common/globals.h"
+#include "src/heap/allocation-observer.h"
 #include "src/heap/base-space.h"
 #include "src/heap/basic-memory-chunk.h"
 #include "src/heap/free-list.h"
@@ -37,7 +38,6 @@ class Isolate;
 class LargeObjectSpace;
 class LargePage;
 class LinearAllocationArea;
-class LocalArrayBufferTracker;
 class Page;
 class PagedSpace;
 class SemiSpace;
@@ -111,7 +111,6 @@ class V8_EXPORT_PRIVATE Space : public BaseSpace {
  public:
   Space(Heap* heap, AllocationSpace id, FreeList* free_list)
       : BaseSpace(heap, id),
-        allocation_observers_paused_(false),
         free_list_(std::unique_ptr<FreeList>(free_list)) {
     external_backing_store_bytes_ =
         new std::atomic<size_t>[ExternalBackingStoreType::kNumTypes];
@@ -137,13 +136,6 @@ class V8_EXPORT_PRIVATE Space : public BaseSpace {
   virtual void ResumeAllocationObservers();
 
   virtual void StartNextInlineAllocationStep() {}
-
-  void AllocationStep(int bytes_since_last, Address soon_object, int size);
-
-  // An AllocationStep equivalent to be called after merging a contiguous
-  // chunk of an off-thread space into this space. The chunk is treated as a
-  // single allocation-folding group.
-  void AllocationStepAfterMerge(Address first_object_in_chunk, int size);
 
   // Returns size of objects. Can differ from the allocated size
   // (e.g. see OldLargeObjectSpace).
@@ -191,20 +183,13 @@ class V8_EXPORT_PRIVATE Space : public BaseSpace {
 #endif
 
  protected:
-  intptr_t GetNextInlineAllocationStepSize();
-  bool AllocationObserversActive() {
-    return !allocation_observers_paused_ && !allocation_observers_.empty();
-  }
-
-  std::vector<AllocationObserver*> allocation_observers_;
+  AllocationCounter allocation_counter_;
 
   // The List manages the pages that belong to the given space.
   heap::List<MemoryChunk> memory_chunk_list_;
 
   // Tracks off-heap memory used by this space.
   std::atomic<size_t>* external_backing_store_bytes_;
-
-  bool allocation_observers_paused_;
 
   std::unique_ptr<FreeList> free_list_;
 
@@ -280,10 +265,6 @@ class Page : public MemoryChunk {
       callback(categories_[i]);
     }
   }
-
-  void AllocateLocalTracker();
-  inline LocalArrayBufferTracker* local_tracker() { return local_tracker_; }
-  bool contains_array_buffers();
 
   size_t AvailableInFreeList();
 
@@ -376,13 +357,20 @@ class PageRange {
 // space.
 class LinearAllocationArea {
  public:
-  LinearAllocationArea() : top_(kNullAddress), limit_(kNullAddress) {}
-  LinearAllocationArea(Address top, Address limit) : top_(top), limit_(limit) {}
+  LinearAllocationArea()
+      : start_(kNullAddress), top_(kNullAddress), limit_(kNullAddress) {}
+  LinearAllocationArea(Address top, Address limit)
+      : start_(top), top_(top), limit_(limit) {}
 
   void Reset(Address top, Address limit) {
+    start_ = top;
     set_top(top);
     set_limit(limit);
   }
+
+  void MoveStartToTop() { start_ = top_; }
+
+  V8_INLINE Address start() const { return start_; }
 
   V8_INLINE void set_top(Address top) {
     SLOW_DCHECK(top == kNullAddress || (top & kHeapObjectTagMask) == 0);
@@ -411,6 +399,8 @@ class LinearAllocationArea {
 #endif
 
  private:
+  // Current allocation top.
+  Address start_;
   // Current allocation top.
   Address top_;
   // Current allocation limit.
@@ -489,11 +479,11 @@ class LocalAllocationBuffer {
 class SpaceWithLinearArea : public Space {
  public:
   SpaceWithLinearArea(Heap* heap, AllocationSpace id, FreeList* free_list)
-      : Space(heap, id, free_list), top_on_previous_step_(0) {
+      : Space(heap, id, free_list) {
     allocation_info_.Reset(kNullAddress, kNullAddress);
   }
 
-  virtual bool SupportsInlineAllocation() = 0;
+  virtual bool SupportsAllocationObserver() = 0;
 
   // Returns the allocation pointer in this space.
   Address top() { return allocation_info_.top(); }
@@ -507,12 +497,19 @@ class SpaceWithLinearArea : public Space {
     return allocation_info_.limit_address();
   }
 
+  // Methods needed for allocation observers.
   V8_EXPORT_PRIVATE void AddAllocationObserver(
       AllocationObserver* observer) override;
   V8_EXPORT_PRIVATE void RemoveAllocationObserver(
       AllocationObserver* observer) override;
   V8_EXPORT_PRIVATE void ResumeAllocationObservers() override;
   V8_EXPORT_PRIVATE void PauseAllocationObservers() override;
+
+  V8_EXPORT_PRIVATE void AdvanceAllocationObservers();
+  V8_EXPORT_PRIVATE void InvokeAllocationObservers(Address soon_object,
+                                                   size_t size_in_bytes,
+                                                   size_t aligned_size_in_bytes,
+                                                   size_t allocation_size);
 
   // When allocation observers are active we may use a lower limit to allow the
   // observers to 'interrupt' earlier than the natural limit. Given a linear
@@ -528,35 +525,11 @@ class SpaceWithLinearArea : public Space {
   void PrintAllocationsOrigins();
 
  protected:
-  // If we are doing inline allocation in steps, this method performs the 'step'
-  // operation. top is the memory address of the bump pointer at the last
-  // inline allocation (i.e. it determines the numbers of bytes actually
-  // allocated since the last step.) top_for_next_step is the address of the
-  // bump pointer where the next byte is going to be allocated from. top and
-  // top_for_next_step may be different when we cross a page boundary or reset
-  // the space.
-  // TODO(ofrobots): clarify the precise difference between this and
-  // Space::AllocationStep.
-  void InlineAllocationStep(Address top, Address top_for_next_step,
-                            Address soon_object, size_t size);
-  V8_EXPORT_PRIVATE void StartNextInlineAllocationStep() override;
-
   // TODO(ofrobots): make these private after refactoring is complete.
   LinearAllocationArea allocation_info_;
-  Address top_on_previous_step_;
 
   size_t allocations_origins_[static_cast<int>(
       AllocationOrigin::kNumberOfAllocationOrigins)] = {0};
-};
-
-class V8_EXPORT_PRIVATE PauseAllocationObserversScope {
- public:
-  explicit PauseAllocationObserversScope(Heap* heap);
-  ~PauseAllocationObserversScope();
-
- private:
-  Heap* heap_;
-  DISALLOW_COPY_AND_ASSIGN(PauseAllocationObserversScope);
 };
 
 }  // namespace internal

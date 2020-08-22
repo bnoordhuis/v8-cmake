@@ -60,7 +60,7 @@ MaybeHandle<JSObject> CreateFunctionTablesObject(
   for (int table_index = 0; table_index < tables->length(); ++table_index) {
     auto func_table =
         handle(WasmTableObject::cast(tables->get(table_index)), isolate);
-    if (func_table->type().heap_type() != kHeapFunc) continue;
+    if (!func_table->type().is_reference_to(HeapType::kFunc)) continue;
 
     Handle<String> table_name;
     if (!WasmInstanceObject::GetTableNameOrNull(isolate, instance, table_index)
@@ -130,9 +130,9 @@ Handle<Object> WasmValueToValueObject(Isolate* isolate, WasmValue value) {
       break;
     }
     case ValueType::kOptRef: {
-      if (value.type().heap_type() == kHeapExtern) {
+      if (value.type().is_reference_to(HeapType::kExtern)) {
         return isolate->factory()->NewWasmValue(
-            static_cast<int32_t>(kHeapExtern), value.to_externref());
+            static_cast<int32_t>(HeapType::kExtern), value.to_externref());
       } else {
         // TODO(7748): Implement.
         UNIMPLEMENTED();
@@ -160,31 +160,27 @@ MaybeHandle<String> GetLocalNameString(Isolate* isolate,
   return isolate->factory()->NewStringFromUtf8(name);
 }
 
-// Generate a sorted and deduplicated list of byte offsets for this function's
-// current positions on the stack.
-std::vector<int> StackFramePositions(int func_index, Isolate* isolate) {
-  std::vector<int> byte_offsets;
-  for (StackTraceFrameIterator it(isolate); !it.done(); it.Advance()) {
-    if (!it.is_wasm()) continue;
-    WasmFrame* frame = WasmFrame::cast(it.frame());
-    if (static_cast<int>(frame->function_index()) != func_index) continue;
-    WasmCode* wasm_code = frame->wasm_code();
-    if (!wasm_code->is_liftoff()) continue;
-    byte_offsets.push_back(frame->byte_offset());
-  }
-  std::sort(byte_offsets.begin(), byte_offsets.end());
-  auto last = std::unique(byte_offsets.begin(), byte_offsets.end());
-  byte_offsets.erase(last, byte_offsets.end());
-  return byte_offsets;
-}
-
 enum ReturnLocation { kAfterBreakpoint, kAfterWasmCall };
 
-Address FindNewPC(WasmCode* wasm_code, int byte_offset,
+Address FindNewPC(WasmFrame* frame, WasmCode* wasm_code, int byte_offset,
                   ReturnLocation return_location) {
   Vector<const uint8_t> new_pos_table = wasm_code->source_positions();
 
   DCHECK_LE(0, byte_offset);
+
+  // Find the size of the call instruction by computing the distance from the
+  // source position entry to the return address.
+  WasmCode* old_code = frame->wasm_code();
+  int pc_offset = static_cast<int>(frame->pc() - old_code->instruction_start());
+  Vector<const uint8_t> old_pos_table = old_code->source_positions();
+  SourcePositionTableIterator old_it(old_pos_table);
+  int call_offset = -1;
+  while (!old_it.done() && old_it.code_offset() < pc_offset) {
+    call_offset = old_it.code_offset();
+    old_it.Advance();
+  }
+  DCHECK_LE(0, call_offset);
+  int call_instruction_size = pc_offset - call_offset;
 
   // If {return_location == kAfterBreakpoint} we search for the first code
   // offset which is marked as instruction (i.e. not the breakpoint).
@@ -197,7 +193,8 @@ Address FindNewPC(WasmCode* wasm_code, int byte_offset,
   if (return_location == kAfterBreakpoint) {
     while (!it.is_statement()) it.Advance();
     DCHECK_EQ(byte_offset, it.source_position().ScriptOffset());
-    return wasm_code->instruction_start() + it.code_offset();
+    return wasm_code->instruction_start() + it.code_offset() +
+           call_instruction_size;
   }
 
   DCHECK_EQ(kAfterWasmCall, return_location);
@@ -206,7 +203,7 @@ Address FindNewPC(WasmCode* wasm_code, int byte_offset,
     code_offset = it.code_offset();
     it.Advance();
   } while (!it.done() && it.source_position().ScriptOffset() == byte_offset);
-  return wasm_code->instruction_start() + code_offset;
+  return wasm_code->instruction_start() + code_offset + call_instruction_size;
 }
 
 }  // namespace
@@ -221,7 +218,7 @@ void DebugSideTable::Print(std::ostream& os) const {
 void DebugSideTable::Entry::Print(std::ostream& os) const {
   os << std::setw(6) << std::hex << pc_offset_ << std::dec << " [";
   for (auto& value : values_) {
-    os << " " << value.type.type_name() << ":";
+    os << " " << value.type.name() << ":";
     switch (value.kind) {
       case kConstant:
         os << "const#" << value.i32_const;
@@ -405,8 +402,8 @@ class DebugInfoImpl {
     return local_names_->GetName(func_index, local_index);
   }
 
-  WasmCode* RecompileLiftoffWithBreakpoints(
-      int func_index, Vector<int> offsets, Vector<int> extra_source_positions) {
+  WasmCode* RecompileLiftoffWithBreakpoints(int func_index,
+                                            Vector<int> offsets) {
     DCHECK(!mutex_.TryLock());  // Mutex is held externally.
     // Recompile the function with Liftoff, setting the new breakpoints.
     // Not thread-safe. The caller is responsible for locking {mutex_}.
@@ -418,14 +415,14 @@ class DebugInfoImpl {
                       wire_bytes.begin() + function->code.end_offset()};
     std::unique_ptr<DebugSideTable> debug_sidetable;
 
-    ForDebugging for_debugging =
-        offsets.size() == 1 && offsets[0] == 0 ? kForStepping : kForDebugging;
+    ForDebugging for_debugging = offsets.size() == 1 && offsets[0] == 0
+                                     ? kForStepping
+                                     : kWithBreakpoints;
     Counters* counters = nullptr;
     WasmFeatures unused_detected;
     WasmCompilationResult result = ExecuteLiftoffCompilation(
         native_module_->engine()->allocator(), &env, body, func_index,
-        for_debugging, counters, &unused_detected, offsets, &debug_sidetable,
-        extra_source_positions);
+        for_debugging, counters, &unused_detected, offsets, &debug_sidetable);
     // Liftoff compilation failure is a FATAL error. We rely on complete Liftoff
     // support for debugging.
     if (!result.succeeded()) FATAL("Liftoff compilation failed");
@@ -445,11 +442,6 @@ class DebugInfoImpl {
     // Put the code ref scope outside of the mutex, so we don't unnecessarily
     // hold the mutex while freeing code.
     WasmCodeRefScope wasm_code_ref_scope;
-
-    // Generate additional source positions for current stack frame positions.
-    // These source positions are used to find return addresses in the new code.
-    std::vector<int> stack_frame_positions =
-        StackFramePositions(func_index, isolate);
 
     // Hold the mutex while modifying breakpoints, to ensure consistency when
     // multiple isolates set/remove breakpoints at the same time.
@@ -479,19 +471,16 @@ class DebugInfoImpl {
                                        all_breakpoints.end(), offset);
     bool breakpoint_exists =
         insertion_point != all_breakpoints.end() && *insertion_point == offset;
-    // If the breakpoint was already set before *and* we don't need any special
-    // positions for OSR, then we can just reuse the old code. Otherwise,
-    // recompile it. In any case, rewrite this isolate's stack to make sure that
-    // it uses up-to-date code containing the breakpoint.
+    // If the breakpoint was already set before, then we can just reuse the old
+    // code. Otherwise, recompile it. In any case, rewrite this isolate's stack
+    // to make sure that it uses up-to-date code containing the breakpoint.
     WasmCode* new_code;
-    if (breakpoint_exists && stack_frame_positions.empty()) {
+    if (breakpoint_exists) {
       new_code = native_module_->GetCode(func_index);
     } else {
-      // Add the new offset to the set of all breakpoints, then recompile.
-      if (!breakpoint_exists) all_breakpoints.insert(insertion_point, offset);
-      new_code =
-          RecompileLiftoffWithBreakpoints(func_index, VectorOf(all_breakpoints),
-                                          VectorOf(stack_frame_positions));
+      all_breakpoints.insert(insertion_point, offset);
+      new_code = RecompileLiftoffWithBreakpoints(func_index,
+                                                 VectorOf(all_breakpoints));
     }
     UpdateReturnAddresses(isolate, new_code, isolate_data.stepping_frame);
   }
@@ -510,13 +499,8 @@ class DebugInfoImpl {
   void UpdateBreakpoints(int func_index, Vector<int> breakpoints,
                          Isolate* isolate, StackFrameId stepping_frame) {
     DCHECK(!mutex_.TryLock());  // Mutex is held externally.
-    // Generate additional source positions for current stack frame positions.
-    // These source positions are used to find return addresses in the new code.
-    std::vector<int> stack_frame_positions =
-        StackFramePositions(func_index, isolate);
-
-    WasmCode* new_code = RecompileLiftoffWithBreakpoints(
-        func_index, breakpoints, VectorOf(stack_frame_positions));
+    WasmCode* new_code =
+        RecompileLiftoffWithBreakpoints(func_index, breakpoints);
     UpdateReturnAddresses(isolate, new_code, stepping_frame);
   }
 
@@ -526,11 +510,9 @@ class DebugInfoImpl {
     WasmCodeRefScope wasm_code_ref_scope;
     DCHECK(frame->wasm_code()->is_liftoff());
     // Generate an additional source position for the current byte offset.
-    int byte_offset = frame->byte_offset();
     base::MutexGuard guard(&mutex_);
     WasmCode* new_code = RecompileLiftoffWithBreakpoints(
-        frame->function_index(), VectorOf(&offset, 1),
-        VectorOf(&byte_offset, 1));
+        frame->function_index(), VectorOf(&offset, 1));
     UpdateReturnAddress(frame, new_code, return_location);
   }
 
@@ -576,6 +558,18 @@ class DebugInfoImpl {
   }
 
   void RemoveBreakpoint(int func_index, int position, Isolate* isolate) {
+    // TODO(thibaudm): Cannot remove the breakpoint we are currently paused at,
+    // because the new code would be missing the call instruction and the
+    // corresponding source position that we rely on for OSR.
+    StackTraceFrameIterator it(isolate);
+    if (!it.done() && it.is_wasm()) {
+      WasmFrame* frame = WasmFrame::cast(it.frame());
+      if (static_cast<int32_t>(frame->function_index()) == func_index &&
+          frame->position() == position) {
+        return;
+      }
+    }
+
     // Put the code ref scope outside of the mutex, so we don't unnecessarily
     // hold the mutex while freeing code.
     WasmCodeRefScope wasm_code_ref_scope;
@@ -646,7 +640,7 @@ class DebugInfoImpl {
       std::vector<int>& removed = entry.second;
       std::vector<int> remaining = FindAllBreakpoints(func_index);
       if (HasRemovedBreakpoints(removed, remaining)) {
-        RecompileLiftoffWithBreakpoints(func_index, VectorOf(remaining), {});
+        RecompileLiftoffWithBreakpoints(func_index, VectorOf(remaining));
       }
     }
   }
@@ -697,7 +691,8 @@ class DebugInfoImpl {
     FunctionBody func_body{function->sig, 0, function_bytes.begin(),
                            function_bytes.end()};
     std::unique_ptr<DebugSideTable> debug_side_table =
-        GenerateLiftoffDebugSideTable(allocator, &env, func_body);
+        GenerateLiftoffDebugSideTable(allocator, &env, func_body,
+                                      code->index());
     DebugSideTable* ret = debug_side_table.get();
 
     // Check cache again, maybe another thread concurrently generated a debug
@@ -807,7 +802,8 @@ class DebugInfoImpl {
 #ifdef DEBUG
     int old_position = frame->position();
 #endif
-    Address new_pc = FindNewPC(new_code, frame->byte_offset(), return_location);
+    Address new_pc =
+        FindNewPC(frame, new_code, frame->byte_offset(), return_location);
     PointerAuthentication::ReplacePC(frame->pc_address(), new_pc,
                                      kSystemPointerSize);
     // The frame position should still be the same after OSR.
@@ -1073,6 +1069,14 @@ bool WasmScript::ClearBreakPoint(Handle<Script> script, int position,
     // Make sure last array element is empty as a result.
     breakpoint_infos->set_undefined(breakpoint_infos->length() - 1);
   }
+
+  // Remove the breakpoint from DebugInfo and recompile.
+  wasm::NativeModule* native_module = script->wasm_native_module();
+  const wasm::WasmModule* module = native_module->module();
+  int func_index = GetContainingWasmFunction(module, position);
+  native_module->GetDebugInfo()->RemoveBreakpoint(func_index, position,
+                                                  isolate);
+
   return true;
 }
 

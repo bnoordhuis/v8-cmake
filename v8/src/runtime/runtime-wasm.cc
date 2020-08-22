@@ -66,12 +66,13 @@ Context GetNativeContextFromWasmInstanceOnStackTop(Isolate* isolate) {
 class ClearThreadInWasmScope {
  public:
   ClearThreadInWasmScope() {
-    DCHECK_EQ(trap_handler::IsTrapHandlerEnabled(),
-              trap_handler::IsThreadInWasm());
+    DCHECK_IMPLIES(trap_handler::IsTrapHandlerEnabled(),
+                   trap_handler::IsThreadInWasm());
     trap_handler::ClearThreadInWasm();
   }
   ~ClearThreadInWasmScope() {
-    DCHECK(!trap_handler::IsThreadInWasm());
+    DCHECK_IMPLIES(trap_handler::IsTrapHandlerEnabled(),
+                   !trap_handler::IsThreadInWasm());
     trap_handler::SetThreadInWasm();
   }
 };
@@ -206,6 +207,20 @@ RUNTIME_FUNCTION(Runtime_WasmCompileLazy) {
   Address entrypoint = native_module->GetCallTargetForFunction(func_index);
 
   return Object(entrypoint);
+}
+
+RUNTIME_FUNCTION(Runtime_WasmTriggerTierUp) {
+  HandleScope scope(isolate);
+  DCHECK_EQ(1, args.length());
+  CONVERT_ARG_HANDLE_CHECKED(WasmInstanceObject, instance, 0);
+
+  FrameFinder<WasmFrame, StackFrame::EXIT> frame_finder(isolate);
+  int func_index = frame_finder.frame()->function_index();
+  auto* native_module = instance->module_object().native_module();
+
+  wasm::TriggerTierUp(isolate, native_module, func_index);
+
+  return ReadOnlyRoots(isolate).undefined_value();
 }
 
 // Should be called from within a handle scope
@@ -461,8 +476,10 @@ RUNTIME_FUNCTION(Runtime_WasmDebugBreak) {
   auto* debug_info = frame->native_module()->GetDebugInfo();
   if (debug_info->IsStepping(frame)) {
     debug_info->ClearStepping(isolate);
+    StepAction stepAction = isolate->debug()->last_step_action();
     isolate->debug()->ClearStepping();
-    isolate->debug()->OnDebugBreak(isolate->factory()->empty_fixed_array());
+    isolate->debug()->OnDebugBreak(isolate->factory()->empty_fixed_array(),
+                                   stepAction);
     return ReadOnlyRoots(isolate).undefined_value();
   }
 
@@ -472,25 +489,26 @@ RUNTIME_FUNCTION(Runtime_WasmDebugBreak) {
   if (WasmScript::CheckBreakPoints(isolate, script, position)
           .ToHandle(&breakpoints)) {
     debug_info->ClearStepping(isolate);
+    StepAction stepAction = isolate->debug()->last_step_action();
     isolate->debug()->ClearStepping();
     if (isolate->debug()->break_points_active()) {
       // We hit one or several breakpoints. Notify the debug listeners.
-      isolate->debug()->OnDebugBreak(breakpoints);
+      isolate->debug()->OnDebugBreak(breakpoints, stepAction);
     }
-  } else {
-    // Unused breakpoint. Possible scenarios:
-    // 1. We hit a breakpoint that was already removed,
-    // 2. We hit a stepping breakpoint after resuming,
-    // 3. We hit a stepping breakpoint during a stepOver on a recursive call.
-    // 4. The breakpoint was set in a different isolate.
-    // We can handle the first three cases by simply removing the breakpoint (if
-    // it exists), since this will also recompile the function without the
-    // stepping breakpoints.
-    // TODO(thibaudm/clemensb): handle case 4.
-    debug_info->RemoveBreakpoint(frame->function_index(), position, isolate);
   }
 
   return ReadOnlyRoots(isolate).undefined_value();
+}
+
+RUNTIME_FUNCTION(Runtime_WasmAllocateRtt) {
+  ClearThreadInWasmScope flag_scope;
+  HandleScope scope(isolate);
+  DCHECK_EQ(2, args.length());
+  CONVERT_UINT32_ARG_CHECKED(type_index, 0);
+  CONVERT_ARG_HANDLE_CHECKED(Map, parent, 1);
+  Handle<WasmInstanceObject> instance(GetWasmInstanceOnStackTop(isolate),
+                                      isolate);
+  return *wasm::AllocateSubRtt(isolate, instance, type_index, parent);
 }
 
 }  // namespace internal

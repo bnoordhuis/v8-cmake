@@ -402,6 +402,13 @@ class WasmGenerator {
     builder_->EmitWithPrefix(Op);
   }
 
+  void simd_const(DataRange* data) {
+    builder_->EmitWithPrefix(kExprS128Const);
+    for (int i = 0; i < kSimd128Size; i++) {
+      builder_->EmitByte(data->get<byte>());
+    }
+  }
+
   template <WasmOpcode Op, int lanes, ValueType::Kind... Args>
   void simd_lane_op(DataRange* data) {
     Generate<Args...>(data);
@@ -422,9 +429,16 @@ class WasmGenerator {
     builder_->Emit(kExprDrop);
   }
 
+  enum CallDirect : bool { kCallDirect = true, kCallIndirect = false };
+
   template <ValueType::Kind wanted_type>
   void call(DataRange* data) {
-    call(data, ValueType::Primitive(wanted_type));
+    call(data, ValueType::Primitive(wanted_type), kCallDirect);
+  }
+
+  template <ValueType::Kind wanted_type>
+  void call_indirect(DataRange* data) {
+    call(data, ValueType::Primitive(wanted_type), kCallIndirect);
   }
 
   void Convert(ValueType src, ValueType dst) {
@@ -466,15 +480,40 @@ class WasmGenerator {
     }
   }
 
-  void call(DataRange* data, ValueType wanted_type) {
-    int func_index = data->get<uint8_t>() % functions_.size();
-    FunctionSig* sig = functions_[func_index];
+  void call(DataRange* data, ValueType wanted_type, CallDirect call_direct) {
+    uint8_t random_byte = data->get<uint8_t>();
+    int func_index = random_byte % functions_.size();
+    uint32_t sig_index = functions_[func_index];
+    FunctionSig* sig = builder_->builder()->GetSignature(sig_index);
     // Generate arguments.
     for (size_t i = 0; i < sig->parameter_count(); ++i) {
       Generate(sig->GetParam(i), data);
     }
     // Emit call.
-    builder_->EmitWithU32V(kExprCallFunction, func_index);
+    // If the return types of the callee happen to match the return types of the
+    // caller, generate a tail call.
+    bool use_return_call = random_byte > 127;
+    if (use_return_call &&
+        std::equal(sig->returns().begin(), sig->returns().end(),
+                   builder_->signature()->returns().begin(),
+                   builder_->signature()->returns().end())) {
+      if (call_direct) {
+        builder_->EmitWithU32V(kExprReturnCall, func_index);
+      } else {
+        builder_->EmitI32Const(func_index);
+        builder_->EmitWithU32V(kExprReturnCallIndirect, sig_index);
+        builder_->EmitByte(0);  // Table index.
+      }
+      return;
+    } else {
+      if (call_direct) {
+        builder_->EmitWithU32V(kExprCallFunction, func_index);
+      } else {
+        builder_->EmitI32Const(func_index);
+        builder_->EmitWithU32V(kExprCallIndirect, sig_index);
+        builder_->EmitByte(0);  // Table index.
+      }
+    }
     if (sig->return_count() == 0 && wanted_type != kWasmStmt) {
       // The call did not generate a value. Thus just generate it here.
       Generate(wanted_type, data);
@@ -640,8 +679,7 @@ class WasmGenerator {
   };
 
  public:
-  WasmGenerator(WasmFunctionBuilder* fn,
-                const std::vector<FunctionSig*>& functions,
+  WasmGenerator(WasmFunctionBuilder* fn, const std::vector<uint32_t>& functions,
                 const std::vector<ValueType>& globals,
                 const std::vector<uint8_t>& mutable_globals, DataRange* data)
       : builder_(fn),
@@ -684,7 +722,7 @@ class WasmGenerator {
  private:
   WasmFunctionBuilder* builder_;
   std::vector<std::vector<ValueType>> blocks_;
-  const std::vector<FunctionSig*>& functions_;
+  const std::vector<uint32_t>& functions_;
   std::vector<ValueType> locals_;
   std::vector<ValueType> globals_;
   std::vector<uint8_t> mutable_globals_;  // indexes into {globals_}.
@@ -748,6 +786,7 @@ void WasmGenerator::Generate<ValueType::kStmt>(DataRange* data) {
       &WasmGenerator::drop,
 
       &WasmGenerator::call<ValueType::kStmt>,
+      &WasmGenerator::call_indirect<ValueType::kStmt>,
 
       &WasmGenerator::set_local,
       &WasmGenerator::set_global};
@@ -920,7 +959,8 @@ void WasmGenerator::Generate<ValueType::kI32>(DataRange* data) {
                          ValueType::kI32>,
       &WasmGenerator::select_with_type<ValueType::kI32>,
 
-      &WasmGenerator::call<ValueType::kI32>};
+      &WasmGenerator::call<ValueType::kI32>,
+      &WasmGenerator::call_indirect<ValueType::kI32>};
 
   GenerateOneOf(alternatives, data);
 }
@@ -1061,7 +1101,8 @@ void WasmGenerator::Generate<ValueType::kI64>(DataRange* data) {
                          ValueType::kI32>,
       &WasmGenerator::select_with_type<ValueType::kI64>,
 
-      &WasmGenerator::call<ValueType::kI64>};
+      &WasmGenerator::call<ValueType::kI64>,
+      &WasmGenerator::call_indirect<ValueType::kI64>};
 
   GenerateOneOf(alternatives, data);
 }
@@ -1118,7 +1159,8 @@ void WasmGenerator::Generate<ValueType::kF32>(DataRange* data) {
                          ValueType::kI32>,
       &WasmGenerator::select_with_type<ValueType::kF32>,
 
-      &WasmGenerator::call<ValueType::kF32>};
+      &WasmGenerator::call<ValueType::kF32>,
+      &WasmGenerator::call_indirect<ValueType::kF32>};
 
   GenerateOneOf(alternatives, data);
 }
@@ -1175,7 +1217,8 @@ void WasmGenerator::Generate<ValueType::kF64>(DataRange* data) {
                          ValueType::kI32>,
       &WasmGenerator::select_with_type<ValueType::kF64>,
 
-      &WasmGenerator::call<ValueType::kF64>};
+      &WasmGenerator::call<ValueType::kF64>,
+      &WasmGenerator::call_indirect<ValueType::kF64>};
 
   GenerateOneOf(alternatives, data);
 }
@@ -1192,6 +1235,7 @@ void WasmGenerator::Generate<ValueType::kS128>(DataRange* data) {
   }
 
   constexpr GenerateFn alternatives[] = {
+      &WasmGenerator::simd_const,
       &WasmGenerator::simd_lane_op<kExprI8x16ReplaceLane, 16, ValueType::kS128,
                                    ValueType::kI32>,
       &WasmGenerator::simd_lane_op<kExprI16x8ReplaceLane, 8, ValueType::kS128,
@@ -1613,14 +1657,16 @@ class WasmCompileFuzzer : public WasmExecutionFuzzer {
     WasmModuleBuilder builder(zone);
 
     DataRange range(data);
-    std::vector<FunctionSig*> function_signatures;
-    function_signatures.push_back(sigs.i_iii());
+    std::vector<uint32_t> function_signatures;
+    function_signatures.push_back(builder.AddSignature(sigs.i_iii()));
 
     static_assert(kMaxFunctions >= 1, "need min. 1 function");
     int num_functions = 1 + (range.get<uint8_t>() % kMaxFunctions);
 
     for (int i = 1; i < num_functions; ++i) {
-      function_signatures.push_back(GenerateSig(zone, &range));
+      FunctionSig* sig = GenerateSig(zone, &range);
+      uint32_t signature_index = builder.AddSignature(sig);
+      function_signatures.push_back(signature_index);
     }
 
     int num_globals = range.get<uint8_t>() % (kMaxGlobals + 1);
@@ -1642,7 +1688,7 @@ class WasmCompileFuzzer : public WasmExecutionFuzzer {
       DataRange function_range =
           i == num_functions - 1 ? std::move(range) : range.split();
 
-      FunctionSig* sig = function_signatures[i];
+      FunctionSig* sig = builder.GetSignature(function_signatures[i]);
       WasmFunctionBuilder* f = builder.AddFunction(sig);
 
       WasmGenerator gen(f, function_signatures, globals, mutable_globals,
@@ -1653,6 +1699,11 @@ class WasmCompileFuzzer : public WasmExecutionFuzzer {
 
       f->Emit(kExprEnd);
       if (i == 0) builder.AddExport(CStrVector("main"), f);
+    }
+
+    builder.AllocateIndirectFunctions(num_functions);
+    for (int i = 0; i < num_functions; ++i) {
+      builder.SetIndirectFunction(i, i);
     }
 
     builder.SetMaxMemorySize(32);
@@ -1675,6 +1726,7 @@ class WasmCompileFuzzer : public WasmExecutionFuzzer {
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
   constexpr bool require_valid = true;
   EXPERIMENTAL_FLAG_SCOPE(reftypes);
+  EXPERIMENTAL_FLAG_SCOPE(return_call);
   WasmCompileFuzzer().FuzzWasmModule({data, size}, require_valid);
   return 0;
 }

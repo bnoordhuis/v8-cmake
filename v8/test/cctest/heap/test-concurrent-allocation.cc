@@ -14,7 +14,7 @@
 #include "src/handles/persistent-handles.h"
 #include "src/heap/concurrent-allocator-inl.h"
 #include "src/heap/heap.h"
-#include "src/heap/local-heap.h"
+#include "src/heap/local-heap-inl.h"
 #include "src/heap/safepoint.h"
 #include "src/objects/heap-number.h"
 #include "src/objects/heap-object.h"
@@ -48,16 +48,15 @@ class ConcurrentAllocationThread final : public v8::base::Thread {
 
   void Run() override {
     LocalHeap local_heap(heap_);
-    ConcurrentAllocator* allocator = local_heap.old_space_allocator();
 
     for (int i = 0; i < kNumIterations; i++) {
-      Address address = allocator->AllocateOrFail(
-          kSmallObjectSize, AllocationAlignment::kWordAligned,
-          AllocationOrigin::kRuntime);
+      Address address = local_heap.AllocateRawOrFail(
+          kSmallObjectSize, AllocationType::kOld, AllocationOrigin::kRuntime,
+          AllocationAlignment::kWordAligned);
       CreateFixedArray(heap_, address, kSmallObjectSize);
-      address = allocator->AllocateOrFail(kMediumObjectSize,
-                                          AllocationAlignment::kWordAligned,
-                                          AllocationOrigin::kRuntime);
+      address = local_heap.AllocateRawOrFail(
+          kMediumObjectSize, AllocationType::kOld, AllocationOrigin::kRuntime,
+          AllocationAlignment::kWordAligned);
       CreateFixedArray(heap_, address, kMediumObjectSize);
       if (i % 10 == 0) {
         local_heap.Safepoint();
@@ -75,6 +74,7 @@ UNINITIALIZED_TEST(ConcurrentAllocationInOldSpace) {
   FLAG_max_old_space_size = 32;
   FLAG_concurrent_allocation = true;
   FLAG_local_heaps = true;
+  FLAG_stress_concurrent_allocation = false;
 
   v8::Isolate::CreateParams create_params;
   create_params.array_buffer_allocator = CcTest::array_buffer_allocator();
@@ -89,6 +89,68 @@ UNINITIALIZED_TEST(ConcurrentAllocationInOldSpace) {
 
   for (int i = 0; i < kThreads; i++) {
     auto thread = std::make_unique<ConcurrentAllocationThread>(
+        i_isolate->heap(), &pending);
+    CHECK(thread->Start());
+    threads.push_back(std::move(thread));
+  }
+
+  while (pending > 0) {
+    v8::platform::PumpMessageLoop(i::V8::GetCurrentPlatform(), isolate);
+  }
+
+  for (auto& thread : threads) {
+    thread->Join();
+  }
+
+  isolate->Dispose();
+}
+
+class LargeObjectConcurrentAllocationThread final : public v8::base::Thread {
+ public:
+  explicit LargeObjectConcurrentAllocationThread(Heap* heap,
+                                                 std::atomic<int>* pending)
+      : v8::base::Thread(base::Thread::Options("ThreadWithLocalHeap")),
+        heap_(heap),
+        pending_(pending) {}
+
+  void Run() override {
+    LocalHeap local_heap(heap_);
+    const size_t kLargeObjectSize = kMaxRegularHeapObjectSize * 2;
+
+    for (int i = 0; i < kNumIterations; i++) {
+      Address address = local_heap.AllocateRawOrFail(
+          kLargeObjectSize, AllocationType::kOld, AllocationOrigin::kRuntime,
+          AllocationAlignment::kWordAligned);
+      CreateFixedArray(heap_, address, kLargeObjectSize);
+      local_heap.Safepoint();
+    }
+
+    pending_->fetch_sub(1);
+  }
+
+  Heap* heap_;
+  std::atomic<int>* pending_;
+};
+
+UNINITIALIZED_TEST(ConcurrentAllocationInLargeSpace) {
+  FLAG_max_old_space_size = 32;
+  FLAG_concurrent_allocation = true;
+  FLAG_local_heaps = true;
+  FLAG_stress_concurrent_allocation = false;
+
+  v8::Isolate::CreateParams create_params;
+  create_params.array_buffer_allocator = CcTest::array_buffer_allocator();
+  v8::Isolate* isolate = v8::Isolate::New(create_params);
+  Isolate* i_isolate = reinterpret_cast<Isolate*>(isolate);
+
+  std::vector<std::unique_ptr<LargeObjectConcurrentAllocationThread>> threads;
+
+  const int kThreads = 4;
+
+  std::atomic<int> pending(kThreads);
+
+  for (int i = 0; i < kThreads; i++) {
+    auto thread = std::make_unique<LargeObjectConcurrentAllocationThread>(
         i_isolate->heap(), &pending);
     CHECK(thread->Start());
     threads.push_back(std::move(thread));
@@ -120,7 +182,6 @@ class ConcurrentBlackAllocationThread final : public v8::base::Thread {
 
   void Run() override {
     LocalHeap local_heap(heap_);
-    ConcurrentAllocator* allocator = local_heap.old_space_allocator();
 
     for (int i = 0; i < kNumIterations; i++) {
       if (i == kWhiteIterations) {
@@ -128,14 +189,14 @@ class ConcurrentBlackAllocationThread final : public v8::base::Thread {
         sema_white_->Signal();
         sema_marking_started_->Wait();
       }
-      Address address = allocator->AllocateOrFail(
-          kSmallObjectSize, AllocationAlignment::kWordAligned,
-          AllocationOrigin::kRuntime);
+      Address address = local_heap.AllocateRawOrFail(
+          kSmallObjectSize, AllocationType::kOld, AllocationOrigin::kRuntime,
+          AllocationAlignment::kWordAligned);
       objects_->push_back(address);
       CreateFixedArray(heap_, address, kSmallObjectSize);
-      address = allocator->AllocateOrFail(kMediumObjectSize,
-                                          AllocationAlignment::kWordAligned,
-                                          AllocationOrigin::kRuntime);
+      address = local_heap.AllocateRawOrFail(
+          kMediumObjectSize, AllocationType::kOld, AllocationOrigin::kRuntime,
+          AllocationAlignment::kWordAligned);
       objects_->push_back(address);
       CreateFixedArray(heap_, address, kMediumObjectSize);
     }

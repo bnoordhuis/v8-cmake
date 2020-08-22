@@ -5,7 +5,6 @@
 #include "src/heap/memory-chunk.h"
 
 #include "src/base/platform/platform.h"
-#include "src/heap/array-buffer-tracker.h"
 #include "src/heap/code-object-registry.h"
 #include "src/heap/memory-allocator.h"
 #include "src/heap/memory-chunk-inl.h"
@@ -25,61 +24,6 @@ void MemoryChunk::DiscardUnusedMemory(Address addr, size_t size) {
     CHECK(page_allocator->DiscardSystemPages(
         reinterpret_cast<void*>(memory_area.begin()), memory_area.size()));
   }
-}
-
-size_t MemoryChunkLayout::CodePageGuardStartOffset() {
-  // We are guarding code pages: the first OS page after the header
-  // will be protected as non-writable.
-  return ::RoundUp(Page::kHeaderSize, MemoryAllocator::GetCommitPageSize());
-}
-
-size_t MemoryChunkLayout::CodePageGuardSize() {
-  return MemoryAllocator::GetCommitPageSize();
-}
-
-intptr_t MemoryChunkLayout::ObjectStartOffsetInCodePage() {
-  // We are guarding code pages: the first OS page after the header
-  // will be protected as non-writable.
-  return CodePageGuardStartOffset() + CodePageGuardSize();
-}
-
-intptr_t MemoryChunkLayout::ObjectEndOffsetInCodePage() {
-  // We are guarding code pages: the last OS page will be protected as
-  // non-writable.
-  return Page::kPageSize -
-         static_cast<int>(MemoryAllocator::GetCommitPageSize());
-}
-
-size_t MemoryChunkLayout::AllocatableMemoryInCodePage() {
-  size_t memory = ObjectEndOffsetInCodePage() - ObjectStartOffsetInCodePage();
-  DCHECK_LE(kMaxRegularHeapObjectSize, memory);
-  return memory;
-}
-
-intptr_t MemoryChunkLayout::ObjectStartOffsetInDataPage() {
-  return RoundUp(MemoryChunk::kHeaderSize, kTaggedSize);
-}
-
-size_t MemoryChunkLayout::ObjectStartOffsetInMemoryChunk(
-    AllocationSpace space) {
-  if (space == CODE_SPACE) {
-    return ObjectStartOffsetInCodePage();
-  }
-  return ObjectStartOffsetInDataPage();
-}
-
-size_t MemoryChunkLayout::AllocatableMemoryInDataPage() {
-  size_t memory = MemoryChunk::kPageSize - ObjectStartOffsetInDataPage();
-  DCHECK_LE(kMaxRegularHeapObjectSize, memory);
-  return memory;
-}
-
-size_t MemoryChunkLayout::AllocatableMemoryInMemoryChunk(
-    AllocationSpace space) {
-  if (space == CODE_SPACE) {
-    return AllocatableMemoryInCodePage();
-  }
-  return AllocatableMemoryInDataPage();
 }
 
 void MemoryChunk::InitializationMemoryFence() {
@@ -178,7 +122,6 @@ MemoryChunk* MemoryChunk::Initialize(BasicMemoryChunk* basic_chunk, Heap* heap,
   chunk->write_unprotect_counter_ = 0;
   chunk->mutex_ = new base::Mutex();
   chunk->young_generation_bitmap_ = nullptr;
-  chunk->local_tracker_ = nullptr;
 
   chunk->external_backing_store_bytes_[ExternalBackingStoreType::kArrayBuffer] =
       0;
@@ -211,6 +154,10 @@ MemoryChunk* MemoryChunk::Initialize(BasicMemoryChunk* basic_chunk, Heap* heap,
   }
 
   chunk->possibly_empty_buckets_.Initialize();
+
+#ifdef DEBUG
+  ValidateOffsets(chunk);
+#endif
 
   return chunk;
 }
@@ -269,7 +216,6 @@ void MemoryChunk::ReleaseAllocatedMemoryNeededForWritableChunk() {
   ReleaseInvalidatedSlots<OLD_TO_NEW>();
   ReleaseInvalidatedSlots<OLD_TO_OLD>();
 
-  if (local_tracker_ != nullptr) ReleaseLocalTracker();
   if (young_generation_bitmap_ != nullptr) ReleaseYoungGenerationBitmap();
 
   if (!IsLargePage()) {
@@ -280,7 +226,6 @@ void MemoryChunk::ReleaseAllocatedMemoryNeededForWritableChunk() {
 
 void MemoryChunk::ReleaseAllAllocatedMemory() {
   ReleaseAllocatedMemoryNeededForWritableChunk();
-  if (marking_bitmap_ != nullptr) ReleaseMarkingBitmap();
 }
 
 template V8_EXPORT_PRIVATE SlotSet* MemoryChunk::AllocateSlotSet<OLD_TO_NEW>();
@@ -427,12 +372,6 @@ bool MemoryChunk::RegisteredObjectWithInvalidatedSlots(HeapObject object) {
          invalidated_slots<type>()->end();
 }
 
-void MemoryChunk::ReleaseLocalTracker() {
-  DCHECK_NOT_NULL(local_tracker_);
-  delete local_tracker_;
-  local_tracker_ = nullptr;
-}
-
 void MemoryChunk::AllocateYoungGenerationBitmap() {
   DCHECK_NULL(young_generation_bitmap_);
   young_generation_bitmap_ = static_cast<Bitmap*>(calloc(1, Bitmap::kSize));
@@ -443,6 +382,59 @@ void MemoryChunk::ReleaseYoungGenerationBitmap() {
   free(young_generation_bitmap_);
   young_generation_bitmap_ = nullptr;
 }
+
+#ifdef DEBUG
+void MemoryChunk::ValidateOffsets(MemoryChunk* chunk) {
+  // Note that we cannot use offsetof because MemoryChunk is not a POD.
+  DCHECK_EQ(reinterpret_cast<Address>(&chunk->slot_set_) - chunk->address(),
+            MemoryChunkLayout::kSlotSetOffset);
+  DCHECK_EQ(reinterpret_cast<Address>(&chunk->progress_bar_) - chunk->address(),
+            MemoryChunkLayout::kProgressBarOffset);
+  DCHECK_EQ(
+      reinterpret_cast<Address>(&chunk->live_byte_count_) - chunk->address(),
+      MemoryChunkLayout::kLiveByteCountOffset);
+  DCHECK_EQ(
+      reinterpret_cast<Address>(&chunk->sweeping_slot_set_) - chunk->address(),
+      MemoryChunkLayout::kSweepingSlotSetOffset);
+  DCHECK_EQ(
+      reinterpret_cast<Address>(&chunk->typed_slot_set_) - chunk->address(),
+      MemoryChunkLayout::kTypedSlotSetOffset);
+  DCHECK_EQ(
+      reinterpret_cast<Address>(&chunk->invalidated_slots_) - chunk->address(),
+      MemoryChunkLayout::kInvalidatedSlotsOffset);
+  DCHECK_EQ(reinterpret_cast<Address>(&chunk->mutex_) - chunk->address(),
+            MemoryChunkLayout::kMutexOffset);
+  DCHECK_EQ(reinterpret_cast<Address>(&chunk->concurrent_sweeping_) -
+                chunk->address(),
+            MemoryChunkLayout::kConcurrentSweepingOffset);
+  DCHECK_EQ(reinterpret_cast<Address>(&chunk->page_protection_change_mutex_) -
+                chunk->address(),
+            MemoryChunkLayout::kPageProtectionChangeMutexOffset);
+  DCHECK_EQ(reinterpret_cast<Address>(&chunk->write_unprotect_counter_) -
+                chunk->address(),
+            MemoryChunkLayout::kWriteUnprotectCounterOffset);
+  DCHECK_EQ(reinterpret_cast<Address>(&chunk->external_backing_store_bytes_) -
+                chunk->address(),
+            MemoryChunkLayout::kExternalBackingStoreBytesOffset);
+  DCHECK_EQ(reinterpret_cast<Address>(&chunk->list_node_) - chunk->address(),
+            MemoryChunkLayout::kListNodeOffset);
+  DCHECK_EQ(reinterpret_cast<Address>(&chunk->categories_) - chunk->address(),
+            MemoryChunkLayout::kCategoriesOffset);
+  DCHECK_EQ(
+      reinterpret_cast<Address>(&chunk->young_generation_live_byte_count_) -
+          chunk->address(),
+      MemoryChunkLayout::kYoungGenerationLiveByteCountOffset);
+  DCHECK_EQ(reinterpret_cast<Address>(&chunk->young_generation_bitmap_) -
+                chunk->address(),
+            MemoryChunkLayout::kYoungGenerationBitmapOffset);
+  DCHECK_EQ(reinterpret_cast<Address>(&chunk->code_object_registry_) -
+                chunk->address(),
+            MemoryChunkLayout::kCodeObjectRegistryOffset);
+  DCHECK_EQ(reinterpret_cast<Address>(&chunk->possibly_empty_buckets_) -
+                chunk->address(),
+            MemoryChunkLayout::kPossiblyEmptyBucketsOffset);
+}
+#endif
 
 }  // namespace internal
 }  // namespace v8

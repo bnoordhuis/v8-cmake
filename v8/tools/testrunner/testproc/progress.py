@@ -10,17 +10,11 @@ import datetime
 import json
 import os
 import platform
-import subprocess
 import sys
 import time
-from . import util
 
 from . import base
-
-
-# Base dir of the build products for Release and Debug.
-OUT_DIR = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), '..', '..', '..', 'out'))
+from . import util
 
 
 def print_failure_header(test):
@@ -113,6 +107,28 @@ class SimpleProgressIndicator(ProgressIndicator):
       print("===")
 
 
+class StreamProgressIndicator(ProgressIndicator):
+  def __init__(self):
+    super(StreamProgressIndicator, self).__init__()
+    self._requirement = base.DROP_PASS_OUTPUT
+
+  def _on_result_for(self, test, result):
+      if not result.has_unexpected_output:
+        self.print('PASS', test)
+      elif result.output.HasCrashed():
+        self.print("CRASH", test)
+      elif result.output.HasTimedOut():
+        self.print("TIMEOUT", test)
+      else:
+        if test.is_fail:
+          self.print("UNEXPECTED PASS", test)
+        else:
+          self.print("FAIL", test)
+
+  def print(self, prefix, test):
+    print('%s: %ss' % (prefix, test))
+    sys.stdout.flush()
+
 class VerboseProgressIndicator(SimpleProgressIndicator):
   def __init__(self):
     super(VerboseProgressIndicator, self).__init__()
@@ -143,16 +159,10 @@ class VerboseProgressIndicator(SimpleProgressIndicator):
   # feedback channel from the workers, providing which tests are currently run.
   def _print_processes_linux(self):
     if platform.system() == 'Linux':
-      try:
-        cmd = 'ps -aux | grep "%s"' % OUT_DIR
-        output = subprocess.check_output(cmd, shell=True)
-        self._print('List of processes:')
-        for line in (output or '').splitlines():
-          # Show command with pid, but other process info cut off.
-          self._print('pid: %s cmd: %s' %
-                      (line.split()[1], line[line.index(OUT_DIR):]))
-      except:
-        pass
+      self._print('List of processes:')
+      for pid, cmd in util.list_processes_linux():
+        # Show command with pid, but other process info cut off.
+        self._print('pid: %d cmd: %s' % (pid, cmd))
 
   def _ensure_delay(self, delay):
     return time.time() - self._last_printed_time > delay

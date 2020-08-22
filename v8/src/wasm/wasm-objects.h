@@ -12,6 +12,7 @@
 #include "src/codegen/signature.h"
 #include "src/debug/debug.h"
 #include "src/heap/heap.h"
+#include "src/objects/js-function.h"
 #include "src/objects/objects.h"
 #include "src/wasm/struct-types.h"
 #include "src/wasm/value-type.h"
@@ -401,6 +402,7 @@ class V8_EXPORT_PRIVATE WasmInstanceObject : public JSObject {
   DECL_PRIMITIVE_ACCESSORS(data_segment_sizes, uint32_t*)
   DECL_PRIMITIVE_ACCESSORS(dropped_elem_segments, byte*)
   DECL_PRIMITIVE_ACCESSORS(hook_on_function_call_address, Address)
+  DECL_PRIMITIVE_ACCESSORS(num_liftoff_function_calls_array, uint32_t*)
 
   // Clear uninitialized padding space. This ensures that the snapshot content
   // is deterministic. Depending on the V8 build mode there could be no padding.
@@ -448,6 +450,7 @@ class V8_EXPORT_PRIVATE WasmInstanceObject : public JSObject {
   V(kDataSegmentSizesOffset, kSystemPointerSize)                          \
   V(kDroppedElemSegmentsOffset, kSystemPointerSize)                       \
   V(kHookOnFunctionCallAddressOffset, kSystemPointerSize)                 \
+  V(kNumLiftoffFunctionCallsArrayOffset, kSystemPointerSize)              \
   V(kHeaderSize, 0)
 
   DEFINE_FIELD_OFFSET_CONSTANTS(JSObject::kHeaderSize,
@@ -646,7 +649,7 @@ class WasmExportedFunction : public JSFunction {
 
   Address GetWasmCallTarget();
 
-  const wasm::FunctionSig* sig();
+  V8_EXPORT_PRIVATE const wasm::FunctionSig* sig();
 
   DECL_CAST(WasmExportedFunction)
   OBJECT_CONSTRUCTORS(WasmExportedFunction, JSFunction);
@@ -765,6 +768,7 @@ class WasmExportedFunctionData : public Struct {
   DECL_ACCESSORS(c_wrapper_code, Object)
   DECL_ACCESSORS(wasm_call_target, Object)
   DECL_INT_ACCESSORS(packed_args_size)
+  DECL_INT_ACCESSORS(signature_type)
 
   DECL_CAST(WasmExportedFunctionData)
 
@@ -894,6 +898,18 @@ class AsmWasmData : public Struct {
   OBJECT_CONSTRUCTORS(AsmWasmData, Struct);
 };
 
+class WasmTypeInfo : public TorqueGeneratedWasmTypeInfo<WasmTypeInfo, Foreign> {
+ public:
+  inline void clear_foreign_address(Isolate* isolate);
+
+  DECL_CAST(WasmTypeInfo)
+  DECL_PRINTER(WasmTypeInfo)
+
+  class BodyDescriptor;
+
+  TQ_OBJECT_CONSTRUCTORS(WasmTypeInfo)
+};
+
 class WasmStruct : public TorqueGeneratedWasmStruct<WasmStruct, HeapObject> {
  public:
   static inline wasm::StructType* type(Map map);
@@ -927,6 +943,20 @@ class WasmArray : public TorqueGeneratedWasmArray<WasmArray, HeapObject> {
 };
 
 #undef DECL_OPTIONAL_ACCESSORS
+
+namespace wasm {
+
+Handle<Map> CreateStructMap(Isolate* isolate, const WasmModule* module,
+                            int struct_index, Handle<Map> rtt_parent);
+Handle<Map> CreateArrayMap(Isolate* isolate, const WasmModule* module,
+                           int array_index, Handle<Map> rtt_parent);
+Handle<Map> CreateGenericRtt(Isolate* isolate, const WasmModule* module,
+                             Handle<Map> rtt_parent);
+Handle<Map> AllocateSubRtt(Isolate* isolate,
+                           Handle<WasmInstanceObject> instance, uint32_t type,
+                           Handle<Map> parent);
+
+}  // namespace wasm
 
 }  // namespace internal
 }  // namespace v8

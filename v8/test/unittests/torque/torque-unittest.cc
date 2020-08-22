@@ -677,6 +677,23 @@ TEST(Torque, EnumInTypeswitch) {
 )");
 }
 
+TEST(Torque, EnumTypeAnnotations) {
+  ExpectSuccessfulCompilation(R"(
+    type Type1 extends intptr;
+    type Type2 extends intptr;
+    extern enum MyEnum extends intptr {
+      kValue1: Type1,
+      kValue2: Type2,
+      kValue3
+    }
+    @export macro Foo() {
+      const _a: Type1 = MyEnum::kValue1;
+      const _b: Type2 = MyEnum::kValue2;
+      const _c: intptr = MyEnum::kValue3;
+    }
+  )");
+}
+
 TEST(Torque, ConstClassFields) {
   ExpectSuccessfulCompilation(R"(
     class Foo extends HeapObject {
@@ -847,6 +864,97 @@ TEST(Torque, FieldAccessOnNonClassType) {
     }
   )",
       HasSubstr("map"));
+}
+
+TEST(Torque, UnusedImplicit) {
+  ExpectSuccessfulCompilation(R"(
+    @export
+    macro Test1(implicit c: Smi)(a: Object): Object { return a; }
+    @export
+    macro Test2(b: Object) { Test1(b);  }
+  )");
+
+  ExpectFailingCompilation(
+      R"(
+    macro Test1(implicit c: Smi)(_a: Object): Smi { return c; }
+    @export
+    macro Test2(b: Smi) { Test1(b);  }
+  )",
+      HasSubstr("undefined expression of type Smi: the implicit "
+                "parameter 'c' is not defined when invoking Test1 at"));
+
+  ExpectFailingCompilation(
+      R"(
+    extern macro Test3(implicit c: Smi)(Object): Smi;
+    @export
+    macro Test4(b: Smi) { Test3(b);  }
+  )",
+      HasSubstr("unititialized implicit parameters can only be passed to "
+                "Torque-defined macros: the implicit parameter 'c' is not "
+                "defined when invoking Test3"));
+  ExpectSuccessfulCompilation(
+      R"(
+    macro Test7<T: type>(implicit c: Smi)(o: T): Smi;
+    Test7<Smi>(implicit c: Smi)(o: Smi): Smi { return o; }
+    @export
+    macro Test8(b: Smi) { Test7(b); }
+  )");
+
+  ExpectFailingCompilation(
+      R"(
+    macro Test6<T: type>(_o: T): T;
+    macro Test6<T: type>(implicit c: T)(_o: T): T {
+      return c;
+    }
+    macro Test7<T: type>(o: T): Smi;
+    Test7<Smi>(o: Smi): Smi { return Test6<Smi>(o); }
+    @export
+    macro Test8(b: Smi) { Test7(b); }
+  )",
+      HasSubstr("\nambiguous callable : \n  Test6(Smi)\ncandidates are:\n  "
+                "Test6(Smi): Smi\n  Test6(implicit Smi)(Smi): Smi"));
+}
+
+TEST(Torque, ImplicitTemplateParameterInference) {
+  ExpectSuccessfulCompilation(R"(
+    macro Foo(_x: Map) {}
+    macro Foo(_x: Smi) {}
+    macro GenericMacro<T: type>(implicit x: T)() {
+      Foo(x);
+    }
+    @export
+    macro Test1(implicit x: Smi)() { GenericMacro(); }
+    @export
+    macro Test2(implicit x: Map)() { GenericMacro();  }
+  )");
+
+  ExpectFailingCompilation(
+      R"(
+    // Wrap in namespace to avoid redeclaration error.
+    namespace foo {
+    macro Foo(implicit x: Map)() {}
+    }
+    macro Foo(implicit x: Smi)() {}
+    namespace foo{
+    @export
+    macro Test(implicit x: Smi)() { Foo(); }
+    }
+  )",
+      HasSubstr("ambiguous callable"));
+
+  ExpectFailingCompilation(
+      R"(
+    // Wrap in namespace to avoid redeclaration error.
+    namespace foo {
+    macro Foo(implicit x: Map)() {}
+    }
+    macro Foo(implicit x: Smi)() {}
+    namespace foo{
+    @export
+    macro Test(implicit x: Map)() { Foo(); }
+    }
+  )",
+      HasSubstr("ambiguous callable"));
 }
 
 }  // namespace torque

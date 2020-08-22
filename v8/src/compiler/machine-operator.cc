@@ -70,6 +70,10 @@ std::ostream& operator<<(std::ostream& os, LoadTransformation rep) {
       return os << "kI64x2Load32x2S";
     case LoadTransformation::kI64x2Load32x2U:
       return os << "kI64x2Load32x2U";
+    case LoadTransformation::kS128LoadMem32Zero:
+      return os << "kS128LoadMem32Zero";
+    case LoadTransformation::kS128LoadMem64Zero:
+      return os << "kS128LoadMem64Zero";
   }
   UNREACHABLE();
 }
@@ -231,8 +235,6 @@ ShiftKind ShiftKindOf(Operator const* op) {
   V(ChangeFloat64ToUint64, Operator::kNoProperties, 1, 0, 1)               \
   V(TruncateFloat64ToInt64, Operator::kNoProperties, 1, 0, 1)              \
   V(TruncateFloat64ToUint32, Operator::kNoProperties, 1, 0, 1)             \
-  V(TruncateFloat32ToInt32, Operator::kNoProperties, 1, 0, 1)              \
-  V(TruncateFloat32ToUint32, Operator::kNoProperties, 1, 0, 1)             \
   V(TryTruncateFloat32ToInt64, Operator::kNoProperties, 1, 0, 2)           \
   V(TryTruncateFloat64ToInt64, Operator::kNoProperties, 1, 0, 2)           \
   V(TryTruncateFloat32ToUint64, Operator::kNoProperties, 1, 0, 2)          \
@@ -570,7 +572,9 @@ ShiftKind ShiftKindOf(Operator const* op) {
   V(I32x4Load16x4S)            \
   V(I32x4Load16x4U)            \
   V(I64x2Load32x2S)            \
-  V(I64x2Load32x2U)
+  V(I64x2Load32x2U)            \
+  V(S128LoadMem32Zero)         \
+  V(S128LoadMem64Zero)
 
 #define ATOMIC_U32_TYPE_LIST(V) \
   V(Uint8)                      \
@@ -965,8 +969,8 @@ struct StackPointerGreaterThanOperator : public Operator1<StackCheckKind> {
 
 struct CommentOperator : public Operator1<const char*> {
   explicit CommentOperator(const char* msg)
-      : Operator1(IrOpcode::kComment, Operator::kNoThrow, "Comment", 0, 1, 1, 0,
-                  1, 0, msg) {}
+      : Operator1(IrOpcode::kComment, Operator::kNoThrow | Operator::kNoWrite,
+                  "Comment", 0, 1, 1, 0, 1, 0, msg) {}
 };
 
 MachineOperatorBuilder::MachineOperatorBuilder(
@@ -1006,6 +1010,55 @@ const Operator* MachineOperatorBuilder::UnalignedStore(
       break;
   }
   UNREACHABLE();
+}
+
+template <TruncateKind kind>
+struct TruncateFloat32ToUint32Operator : Operator1<TruncateKind> {
+  TruncateFloat32ToUint32Operator()
+      : Operator1(IrOpcode::kTruncateFloat32ToUint32, Operator::kPure,
+                  "TruncateFloat32ToUint32", 1, 0, 0, 1, 0, 0, kind) {}
+};
+
+const Operator* MachineOperatorBuilder::TruncateFloat32ToUint32(
+    TruncateKind kind) {
+  switch (kind) {
+    case TruncateKind::kArchitectureDefault:
+      return GetCachedOperator<TruncateFloat32ToUint32Operator<
+          TruncateKind::kArchitectureDefault>>();
+    case TruncateKind::kSetOverflowToMin:
+      return GetCachedOperator<
+          TruncateFloat32ToUint32Operator<TruncateKind::kSetOverflowToMin>>();
+  }
+}
+
+template <TruncateKind kind>
+struct TruncateFloat32ToInt32Operator : Operator1<TruncateKind> {
+  TruncateFloat32ToInt32Operator()
+      : Operator1(IrOpcode::kTruncateFloat32ToInt32, Operator::kPure,
+                  "TruncateFloat32ToInt32", 1, 0, 0, 1, 0, 0, kind) {}
+};
+
+const Operator* MachineOperatorBuilder::TruncateFloat32ToInt32(
+    TruncateKind kind) {
+  switch (kind) {
+    case TruncateKind::kArchitectureDefault:
+      return GetCachedOperator<
+          TruncateFloat32ToInt32Operator<TruncateKind::kArchitectureDefault>>();
+    case TruncateKind::kSetOverflowToMin:
+      return GetCachedOperator<
+          TruncateFloat32ToInt32Operator<TruncateKind::kSetOverflowToMin>>();
+  }
+}
+
+size_t hash_value(TruncateKind kind) { return static_cast<size_t>(kind); }
+
+std::ostream& operator<<(std::ostream& os, TruncateKind kind) {
+  switch (kind) {
+    case TruncateKind::kArchitectureDefault:
+      return os << "kArchitectureDefault";
+    case TruncateKind::kSetOverflowToMin:
+      return os << "kSetOverflowToMin";
+  }
 }
 
 #define PURE(Name, properties, value_input_count, control_input_count,     \
@@ -1084,7 +1137,7 @@ const Operator* MachineOperatorBuilder::StackSlot(int size, int alignment) {
   STACK_SLOT_CACHED_SIZES_ALIGNMENTS_LIST(CASE_CACHED_SIZE)
 
 #undef CASE_CACHED_SIZE
-  return new (zone_) StackSlotOperator(size, alignment);
+  return zone_->New<StackSlotOperator>(size, alignment);
 }
 
 const Operator* MachineOperatorBuilder::StackSlot(MachineRepresentation rep,
@@ -1187,7 +1240,7 @@ const Operator* MachineOperatorBuilder::DebugBreak() {
 }
 
 const Operator* MachineOperatorBuilder::Comment(const char* msg) {
-  return new (zone_) CommentOperator(msg);
+  return zone_->New<CommentOperator>(msg);
 }
 
 const Operator* MachineOperatorBuilder::MemBarrier() {
@@ -1466,7 +1519,7 @@ const Operator* MachineOperatorBuilder::Word64PoisonOnSpeculation() {
   const Operator* MachineOperatorBuilder::Type##ExtractLane##Sign(             \
       int32_t lane_index) {                                                    \
     DCHECK(0 <= lane_index && lane_index < lane_count);                        \
-    return new (zone_) Operator1<int32_t>(                                     \
+    return zone_->New<Operator1<int32_t>>(                                     \
         IrOpcode::k##Type##ExtractLane##Sign, Operator::kPure, "Extract lane", \
         1, 0, 0, 1, 0, 0, lane_index);                                         \
   }
@@ -1480,13 +1533,13 @@ EXTRACT_LANE_OP(I8x16, U, 16)
 EXTRACT_LANE_OP(I8x16, S, 16)
 #undef EXTRACT_LANE_OP
 
-#define REPLACE_LANE_OP(Type, lane_count)                                   \
-  const Operator* MachineOperatorBuilder::Type##ReplaceLane(                \
-      int32_t lane_index) {                                                 \
-    DCHECK(0 <= lane_index && lane_index < lane_count);                     \
-    return new (zone_)                                                      \
-        Operator1<int32_t>(IrOpcode::k##Type##ReplaceLane, Operator::kPure, \
-                           "Replace lane", 2, 0, 0, 1, 0, 0, lane_index);   \
+#define REPLACE_LANE_OP(Type, lane_count)                                     \
+  const Operator* MachineOperatorBuilder::Type##ReplaceLane(                  \
+      int32_t lane_index) {                                                   \
+    DCHECK(0 <= lane_index && lane_index < lane_count);                       \
+    return zone_->New<Operator1<int32_t>>(IrOpcode::k##Type##ReplaceLane,     \
+                                          Operator::kPure, "Replace lane", 2, \
+                                          0, 0, 1, 0, 0, lane_index);         \
   }
 SIMD_LANE_OP_LIST(REPLACE_LANE_OP)
 #undef REPLACE_LANE_OP
@@ -1494,26 +1547,26 @@ SIMD_LANE_OP_LIST(REPLACE_LANE_OP)
 const Operator* MachineOperatorBuilder::I64x2ReplaceLaneI32Pair(
     int32_t lane_index) {
   DCHECK(0 <= lane_index && lane_index < 2);
-  return new (zone_)
-      Operator1<int32_t>(IrOpcode::kI64x2ReplaceLaneI32Pair, Operator::kPure,
-                         "Replace lane", 3, 0, 0, 1, 0, 0, lane_index);
+  return zone_->New<Operator1<int32_t>>(IrOpcode::kI64x2ReplaceLaneI32Pair,
+                                        Operator::kPure, "Replace lane", 3, 0,
+                                        0, 1, 0, 0, lane_index);
 }
 
-bool operator==(S8x16ShuffleParameter const& lhs,
-                S8x16ShuffleParameter const& rhs) {
-  return (lhs.shuffle() == rhs.shuffle());
+bool operator==(S128ImmediateParameter const& lhs,
+                S128ImmediateParameter const& rhs) {
+  return (lhs.immediate() == rhs.immediate());
 }
 
-bool operator!=(S8x16ShuffleParameter const& lhs,
-                S8x16ShuffleParameter const& rhs) {
+bool operator!=(S128ImmediateParameter const& lhs,
+                S128ImmediateParameter const& rhs) {
   return !(lhs == rhs);
 }
 
-size_t hash_value(S8x16ShuffleParameter const& p) {
-  return base::hash_range(p.shuffle().begin(), p.shuffle().end());
+size_t hash_value(S128ImmediateParameter const& p) {
+  return base::hash_range(p.immediate().begin(), p.immediate().end());
 }
 
-std::ostream& operator<<(std::ostream& os, S8x16ShuffleParameter const& p) {
+std::ostream& operator<<(std::ostream& os, S128ImmediateParameter const& p) {
   for (int i = 0; i < 16; i++) {
     const char* separator = (i < 15) ? "," : "";
     os << static_cast<uint32_t>(p[i]) << separator;
@@ -1521,16 +1574,23 @@ std::ostream& operator<<(std::ostream& os, S8x16ShuffleParameter const& p) {
   return os;
 }
 
-S8x16ShuffleParameter const& S8x16ShuffleParameterOf(Operator const* op) {
-  DCHECK_EQ(IrOpcode::kS8x16Shuffle, op->opcode());
-  return OpParameter<S8x16ShuffleParameter>(op);
+S128ImmediateParameter const& S128ImmediateParameterOf(Operator const* op) {
+  DCHECK(IrOpcode::kS8x16Shuffle == op->opcode() ||
+         IrOpcode::kS128Const == op->opcode());
+  return OpParameter<S128ImmediateParameter>(op);
+}
+
+const Operator* MachineOperatorBuilder::S128Const(const uint8_t value[16]) {
+  return zone_->New<Operator1<S128ImmediateParameter>>(
+      IrOpcode::kS128Const, Operator::kPure, "Immediate", 0, 0, 0, 1, 0, 0,
+      S128ImmediateParameter(value));
 }
 
 const Operator* MachineOperatorBuilder::S8x16Shuffle(
     const uint8_t shuffle[16]) {
-  return new (zone_) Operator1<S8x16ShuffleParameter>(
+  return zone_->New<Operator1<S128ImmediateParameter>>(
       IrOpcode::kS8x16Shuffle, Operator::kPure, "Shuffle", 2, 0, 0, 1, 0, 0,
-      S8x16ShuffleParameter(shuffle));
+      S128ImmediateParameter(shuffle));
 }
 
 StackCheckKind StackCheckKindOf(Operator const* op) {

@@ -2,8 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/objects/objects.h"
-
 #include <iomanip>
 #include <memory>
 
@@ -27,6 +25,7 @@
 #include "src/objects/js-array-buffer-inl.h"
 #include "src/objects/js-array-inl.h"
 #include "src/objects/objects-inl.h"
+#include "src/objects/objects.h"
 #include "src/snapshot/embedded/embedded-data.h"
 #ifdef V8_INTL_SUPPORT
 #include "src/objects/js-break-iterator-inl.h"
@@ -50,6 +49,7 @@
 #include "src/objects/js-relative-time-format-inl.h"
 #include "src/objects/js-segment-iterator-inl.h"
 #include "src/objects/js-segmenter-inl.h"
+#include "src/objects/js-segments-inl.h"
 #endif  // V8_INTL_SUPPORT
 #include "src/compiler/node.h"
 #include "src/objects/js-weak-refs-inl.h"
@@ -60,6 +60,7 @@
 #include "src/objects/promise-inl.h"
 #include "src/objects/property-descriptor-object-inl.h"
 #include "src/objects/stack-frame-info-inl.h"
+#include "src/objects/string-set-inl.h"
 #include "src/objects/struct-inl.h"
 #include "src/objects/template-objects-inl.h"
 #include "src/objects/transitions-inl.h"
@@ -151,6 +152,8 @@ void HeapObject::HeapObjectPrint(std::ostream& os) {  // NOLINT
       NativeContext::cast(*this).NativeContextPrint(os);
       break;
     case HASH_TABLE_TYPE:
+      ObjectHashTable::cast(*this).ObjectHashTablePrint(os);
+      break;
     case ORDERED_HASH_MAP_TYPE:
     case ORDERED_HASH_SET_TYPE:
     case ORDERED_NAME_DICTIONARY_TYPE:
@@ -158,9 +161,6 @@ void HeapObject::HeapObjectPrint(std::ostream& os) {  // NOLINT
     case GLOBAL_DICTIONARY_TYPE:
     case SIMPLE_NUMBER_DICTIONARY_TYPE:
       FixedArray::cast(*this).FixedArrayPrint(os);
-      break;
-    case STRING_TABLE_TYPE:
-      ObjectHashTable::cast(*this).ObjectHashTablePrint(os);
       break;
     case NUMBER_DICTIONARY_TYPE:
       NumberDictionary::cast(*this).NumberDictionaryPrint(os);
@@ -220,6 +220,9 @@ void HeapObject::HeapObjectPrint(std::ostream& os) {  // NOLINT
       TORQUE_INSTANCE_CHECKERS_MULTIPLE_FULLY_DEFINED(MAKE_TORQUE_CASE)
 #undef MAKE_TORQUE_CASE
 
+    case FOREIGN_TYPE:
+      Foreign::cast(*this).ForeignPrint(os);
+      break;
     case ALLOCATION_SITE_TYPE:
       AllocationSite::cast(*this).AllocationSitePrint(os);
       break;
@@ -1268,7 +1271,7 @@ void JSFunction::JSFunctionPrint(std::ostream& os) {  // NOLINT
 
   // Print Builtin name for builtin functions
   int builtin_index = code().builtin_index();
-  if (Builtins::IsBuiltinId(builtin_index) && !IsInterpreted()) {
+  if (Builtins::IsBuiltinId(builtin_index)) {
     os << "\n - builtin: " << isolate->builtins()->name(builtin_index);
   }
 
@@ -1280,7 +1283,7 @@ void JSFunction::JSFunctionPrint(std::ostream& os) {  // NOLINT
   os << "\n - kind: " << shared().kind();
   os << "\n - context: " << Brief(context());
   os << "\n - code: " << Brief(code());
-  if (IsInterpreted()) {
+  if (ActiveTierIsIgnition()) {
     os << "\n - interpreted";
     if (shared().HasBytecodeArray()) {
       os << "\n - bytecode: " << shared().GetBytecodeArray();
@@ -1366,11 +1369,7 @@ void SharedFunctionInfo::SharedFunctionInfoPrint(std::ostream& os) {  // NOLINT
   os << "\n - language_mode: " << language_mode();
   os << "\n - data: " << Brief(function_data());
   os << "\n - code (from data): ";
-  if (Heap::InOffThreadSpace(*this)) {
-    os << "<not available off-thread>";
-  } else {
     os << Brief(GetCode());
-  }
   PrintSourceCode(os);
   // Script files are often large, thus only print their {Brief} representation.
   os << "\n - script: " << Brief(script());
@@ -1651,6 +1650,13 @@ void AsmWasmData::AsmWasmDataPrint(std::ostream& os) {  // NOLINT
   os << "\n";
 }
 
+void WasmTypeInfo::WasmTypeInfoPrint(std::ostream& os) {  // NOLINT
+  PrintHeader(os, "WasmTypeInfo");
+  os << "\n - type address: " << reinterpret_cast<void*>(foreign_address());
+  os << "\n - parent: " << Brief(parent());
+  os << "\n";
+}
+
 void WasmStruct::WasmStructPrint(std::ostream& os) {  // NOLINT
   PrintHeader(os, "WasmStruct");
   wasm::StructType* struct_type = type();
@@ -1692,7 +1698,7 @@ void WasmArray::WasmArrayPrint(std::ostream& os) {  // NOLINT
   PrintHeader(os, "WasmArray");
   wasm::ArrayType* array_type = type();
   uint32_t len = length();
-  os << "\n - type: " << array_type->element_type().type_name();
+  os << "\n - type: " << array_type->element_type().name();
   os << "\n - length: " << len;
   Address data_ptr = ptr() + WasmArray::kHeaderSize - kHeapObjectTag;
   switch (array_type->element_type().kind()) {
@@ -1791,6 +1797,7 @@ void WasmExportedFunctionData::WasmExportedFunctionDataPrint(
 
 void WasmJSFunctionData::WasmJSFunctionDataPrint(std::ostream& os) {  // NOLINT
   PrintHeader(os, "WasmJSFunctionData");
+  os << "\n - callable: " << Brief(callable());
   os << "\n - wrapper_code: " << Brief(wrapper_code());
   os << "\n";
 }
@@ -1815,8 +1822,11 @@ void WasmTableObject::WasmTableObjectPrint(std::ostream& os) {  // NOLINT
 
 void WasmGlobalObject::WasmGlobalObjectPrint(std::ostream& os) {  // NOLINT
   PrintHeader(os, "WasmGlobalObject");
-  os << "\n - untagged_buffer: " << Brief(untagged_buffer());
-  os << "\n - tagged_buffer: " << Brief(tagged_buffer());
+  if (type().is_reference_type()) {
+    os << "\n - tagged_buffer: " << Brief(tagged_buffer());
+  } else {
+    os << "\n - untagged_buffer: " << Brief(untagged_buffer());
+  }
   os << "\n - offset: " << offset();
   os << "\n - raw_type: " << raw_type();
   os << "\n - is_mutable: " << is_mutable();
@@ -2094,16 +2104,23 @@ void JSRelativeTimeFormat::JSRelativeTimeFormatPrint(
 void JSSegmentIterator::JSSegmentIteratorPrint(std::ostream& os) {  // NOLINT
   JSObjectPrintHeader(os, *this, "JSSegmentIterator");
   os << "\n - icu break iterator: " << Brief(icu_break_iterator());
-  os << "\n - unicode string: " << Brief(unicode_string());
-  os << "\n - granularity: " << GranularityAsString();
+  os << "\n - granularity: " << GranularityAsString(GetIsolate());
   os << "\n";
 }
 
 void JSSegmenter::JSSegmenterPrint(std::ostream& os) {  // NOLINT
   JSObjectPrintHeader(os, *this, "JSSegmenter");
   os << "\n - locale: " << Brief(locale());
-  os << "\n - granularity: " << GranularityAsString();
+  os << "\n - granularity: " << GranularityAsString(GetIsolate());
   os << "\n - icu break iterator: " << Brief(icu_break_iterator());
+  JSObjectPrintBody(os, *this);
+}
+
+void JSSegments::JSSegmentsPrint(std::ostream& os) {  // NOLINT
+  JSObjectPrintHeader(os, *this, "JSSegments");
+  os << "\n - icu break iterator: " << Brief(icu_break_iterator());
+  os << "\n - unicode string: " << Brief(unicode_string());
+  os << "\n - granularity: " << GranularityAsString(GetIsolate());
   JSObjectPrintBody(os, *this);
 }
 #endif  // V8_INTL_SUPPORT

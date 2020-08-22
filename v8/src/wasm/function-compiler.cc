@@ -150,7 +150,8 @@ WasmCompilationResult WasmCompilationUnit::ExecuteImportWrapperCompilation(
   auto kind = compiler::kDefaultImportCallKind;
   bool source_positions = is_asmjs_module(env->module);
   WasmCompilationResult result = compiler::CompileWasmImportCallWrapper(
-      engine, env, kind, sig, source_positions);
+      engine, env, kind, sig, source_positions,
+      static_cast<int>(sig->parameter_count()));
   return result;
 }
 
@@ -207,9 +208,6 @@ WasmCompilationResult WasmCompilationUnit::ExecuteFunctionCompilation(
           wasm_engine, env, func_body, func_index_, counters, detected);
       result.for_debugging = for_debugging_;
       break;
-
-    case ExecutionTier::kInterpreter:
-      UNREACHABLE();
   }
 
   return result;
@@ -267,28 +265,57 @@ void WasmCompilationUnit::CompileWasmFunction(Isolate* isolate,
   }
 }
 
+namespace {
+bool UseGenericWrapper(const FunctionSig* sig) {
+// Work only for 0 and 1 int32 param case for now.
+#if V8_TARGET_ARCH_X64
+  if (sig->parameters().size() > 1) {
+    return false;
+  }
+  if (sig->parameters().size() == 1 &&
+      sig->GetParam(0).kind() != ValueType::kI32) {
+    return false;
+  }
+  return FLAG_wasm_generic_wrapper && sig->returns().empty();
+#else
+  return false;
+#endif
+}
+}  // namespace
+
 JSToWasmWrapperCompilationUnit::JSToWasmWrapperCompilationUnit(
     Isolate* isolate, WasmEngine* wasm_engine, const FunctionSig* sig,
     bool is_import, const WasmFeatures& enabled_features)
     : is_import_(is_import),
       sig_(sig),
-      job_(compiler::NewJSToWasmCompilationJob(isolate, wasm_engine, sig,
-                                               is_import, enabled_features)) {}
+      use_generic_wrapper_(UseGenericWrapper(sig) && !is_import),
+      job_(use_generic_wrapper_
+               ? nullptr
+               : compiler::NewJSToWasmCompilationJob(
+                     isolate, wasm_engine, sig, is_import, enabled_features)) {}
 
 JSToWasmWrapperCompilationUnit::~JSToWasmWrapperCompilationUnit() = default;
 
 void JSToWasmWrapperCompilationUnit::Execute() {
   TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.wasm.detailed"),
                "wasm.CompileJSToWasmWrapper");
-  CompilationJob::Status status = job_->ExecuteJob(nullptr);
-  CHECK_EQ(status, CompilationJob::SUCCEEDED);
+  if (!use_generic_wrapper_) {
+    CompilationJob::Status status = job_->ExecuteJob(nullptr);
+    CHECK_EQ(status, CompilationJob::SUCCEEDED);
+  }
 }
 
 Handle<Code> JSToWasmWrapperCompilationUnit::Finalize(Isolate* isolate) {
-  CompilationJob::Status status = job_->FinalizeJob(isolate);
-  CHECK_EQ(status, CompilationJob::SUCCEEDED);
-  Handle<Code> code = job_->compilation_info()->code();
-  if (must_record_function_compilation(isolate)) {
+  Handle<Code> code;
+  if (use_generic_wrapper_) {
+    code =
+        isolate->builtins()->builtin_handle(Builtins::kGenericJSToWasmWrapper);
+  } else {
+    CompilationJob::Status status = job_->FinalizeJob(isolate);
+    CHECK_EQ(status, CompilationJob::SUCCEEDED);
+    code = job_->compilation_info()->code();
+  }
+  if (!use_generic_wrapper_ && must_record_function_compilation(isolate)) {
     RecordWasmHeapStubCompilation(
         isolate, code, "%s", job_->compilation_info()->GetDebugName().get());
   }

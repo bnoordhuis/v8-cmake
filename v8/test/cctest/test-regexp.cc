@@ -508,7 +508,7 @@ static bool NotWord(uc16 c) {
 static void TestCharacterClassEscapes(uc16 c, bool (pred)(uc16 c)) {
   Zone zone(CcTest::i_isolate()->allocator(), ZONE_NAME);
   ZoneList<CharacterRange>* ranges =
-      new(&zone) ZoneList<CharacterRange>(2, &zone);
+      zone.New<ZoneList<CharacterRange>>(2, &zone);
   CharacterRange::AddClassEscape(c, ranges, &zone);
   for (uc32 i = 0; i < (1 << 16); i++) {
     bool in_class = false;
@@ -642,8 +642,7 @@ static Handle<JSRegExp> CreateJSRegExp(Handle<String> source, Handle<Code> code,
   Handle<JSRegExp> regexp =
       Handle<JSRegExp>::cast(factory->NewJSObject(constructor));
 
-  factory->SetRegExpIrregexpData(regexp, JSRegExp::IRREGEXP, source,
-                                 JSRegExp::kNone, 0,
+  factory->SetRegExpIrregexpData(regexp, source, JSRegExp::kNone, 0,
                                  JSRegExp::kNoBacktrackLimit);
   regexp->SetDataAt(is_unicode ? JSRegExp::kIrregexpUC16CodeIndex
                                : JSRegExp::kIrregexpLatin1CodeIndex,
@@ -1415,7 +1414,7 @@ static void TestRangeCaseIndependence(Isolate* isolate, CharacterRange input,
   Zone zone(CcTest::i_isolate()->allocator(), ZONE_NAME);
   int count = expected.length();
   ZoneList<CharacterRange>* list =
-      new(&zone) ZoneList<CharacterRange>(count, &zone);
+      zone.New<ZoneList<CharacterRange>>(count, &zone);
   list->Add(input, &zone);
   CharacterRange::AddCaseEquivalents(isolate, &zone, list, false);
   list->Remove(0);  // Remove the input before checking results.
@@ -1486,8 +1485,7 @@ static bool InClass(uc32 c,
 
 TEST(UnicodeRangeSplitter) {
   Zone zone(CcTest::i_isolate()->allocator(), ZONE_NAME);
-  ZoneList<CharacterRange>* base =
-      new(&zone) ZoneList<CharacterRange>(1, &zone);
+  ZoneList<CharacterRange>* base = zone.New<ZoneList<CharacterRange>>(1, &zone);
   base->Add(CharacterRange::Everything(), &zone);
   UnicodeRangeSplitter splitter(base);
   // BMP
@@ -1530,8 +1528,7 @@ TEST(UnicodeRangeSplitter) {
 
 TEST(CanonicalizeCharacterSets) {
   Zone zone(CcTest::i_isolate()->allocator(), ZONE_NAME);
-  ZoneList<CharacterRange>* list =
-      new(&zone) ZoneList<CharacterRange>(4, &zone);
+  ZoneList<CharacterRange>* list = zone.New<ZoneList<CharacterRange>>(4, &zone);
   CharacterSet set(list);
 
   list->Add(CharacterRange::Range(10, 20), &zone);
@@ -2361,7 +2358,7 @@ TEST(UnicodePropertyEscapeCodeSize) {
   } else if (maybe_code.IsCode()) {
     // On x64, excessive inlining produced >360KB.
     CHECK_LT(Code::cast(maybe_code).Size(), kMaxSize);
-    CHECK_EQ(Code::cast(maybe_code).kind(), Code::REGEXP);
+    CHECK_EQ(Code::cast(maybe_code).kind(), CodeKind::REGEXP);
   } else {
     UNREACHABLE();
   }

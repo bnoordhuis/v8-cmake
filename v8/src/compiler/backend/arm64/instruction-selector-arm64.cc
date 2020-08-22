@@ -760,6 +760,11 @@ void InstructionSelector::VisitStore(Node* node) {
   WriteBarrierKind write_barrier_kind = store_rep.write_barrier_kind();
   MachineRepresentation rep = store_rep.representation();
 
+  if (FLAG_enable_unconditional_write_barriers &&
+      CanBeTaggedOrCompressedPointer(rep)) {
+    write_barrier_kind = kFullWriteBarrier;
+  }
+
   // TODO(arm64): I guess this could be done in a better way.
   if (write_barrier_kind != kNoWriteBarrier &&
       V8_LIKELY(!FLAG_disable_write_barriers)) {
@@ -1331,10 +1336,8 @@ void InstructionSelector::VisitWord64Ror(Node* node) {
   V(ChangeInt32ToFloat64, kArm64Int32ToFloat64)               \
   V(ChangeInt64ToFloat64, kArm64Int64ToFloat64)               \
   V(ChangeUint32ToFloat64, kArm64Uint32ToFloat64)             \
-  V(TruncateFloat32ToInt32, kArm64Float32ToInt32)             \
   V(ChangeFloat64ToInt32, kArm64Float64ToInt32)               \
   V(ChangeFloat64ToInt64, kArm64Float64ToInt64)               \
-  V(TruncateFloat32ToUint32, kArm64Float32ToUint32)           \
   V(ChangeFloat64ToUint32, kArm64Float64ToUint32)             \
   V(ChangeFloat64ToUint64, kArm64Float64ToUint64)             \
   V(TruncateFloat64ToInt64, kArm64Float64ToInt64)             \
@@ -1635,6 +1638,28 @@ void InstructionSelector::VisitUint32MulHigh(Node* node) {
   Emit(kArm64Lsr, g.DefineAsRegister(node), smull_operand, g.TempImmediate(32));
 }
 
+void InstructionSelector::VisitTruncateFloat32ToInt32(Node* node) {
+  Arm64OperandGenerator g(this);
+
+  InstructionCode opcode = kArm64Float32ToInt32;
+  TruncateKind kind = OpParameter<TruncateKind>(node->op());
+  opcode |= MiscField::encode(kind == TruncateKind::kSetOverflowToMin);
+
+  Emit(opcode, g.DefineAsRegister(node), g.UseRegister(node->InputAt(0)));
+}
+
+void InstructionSelector::VisitTruncateFloat32ToUint32(Node* node) {
+  Arm64OperandGenerator g(this);
+
+  InstructionCode opcode = kArm64Float32ToUint32;
+  TruncateKind kind = OpParameter<TruncateKind>(node->op());
+  if (kind == TruncateKind::kSetOverflowToMin) {
+    opcode |= MiscField::encode(true);
+  }
+
+  Emit(opcode, g.DefineAsRegister(node), g.UseRegister(node->InputAt(0)));
+}
+
 void InstructionSelector::VisitTryTruncateFloat32ToInt64(Node* node) {
   Arm64OperandGenerator g(this);
 
@@ -1884,22 +1909,25 @@ void InstructionSelector::EmitPrepareResults(
     Node* node) {
   Arm64OperandGenerator g(this);
 
-  int reverse_slot = 0;
+  int reverse_slot = 1;
   for (PushParameter output : *results) {
     if (!output.location.IsCallerFrameSlot()) continue;
-    reverse_slot += output.location.GetSizeInPointers();
     // Skip any alignment holes in nodes.
-    if (output.node == nullptr) continue;
-    DCHECK(!call_descriptor->IsCFunctionCall());
+    if (output.node != nullptr) {
+      DCHECK(!call_descriptor->IsCFunctionCall());
 
-    if (output.location.GetType() == MachineType::Float32()) {
-      MarkAsFloat32(output.node);
-    } else if (output.location.GetType() == MachineType::Float64()) {
-      MarkAsFloat64(output.node);
+      if (output.location.GetType() == MachineType::Float32()) {
+        MarkAsFloat32(output.node);
+      } else if (output.location.GetType() == MachineType::Float64()) {
+        MarkAsFloat64(output.node);
+      } else if (output.location.GetType() == MachineType::Simd128()) {
+        MarkAsSimd128(output.node);
+      }
+
+      Emit(kArm64Peek, g.DefineAsRegister(output.node),
+           g.UseImmediate(reverse_slot));
     }
-
-    Emit(kArm64Peek, g.DefineAsRegister(output.node),
-         g.UseImmediate(reverse_slot));
+    reverse_slot += output.location.GetSizeInPointers();
   }
 }
 
@@ -3305,6 +3333,24 @@ void InstructionSelector::VisitInt64AbsWithOverflow(Node* node) {
   V(S128Xor, kArm64S128Xor)                             \
   V(S128AndNot, kArm64S128AndNot)
 
+void InstructionSelector::VisitS128Const(Node* node) {
+  Arm64OperandGenerator g(this);
+  static const int kUint32Immediates = 4;
+  uint32_t val[kUint32Immediates];
+  STATIC_ASSERT(sizeof(val) == kSimd128Size);
+  memcpy(val, S128ImmediateParameterOf(node->op()).data(), kSimd128Size);
+  // If all bytes are zeros, avoid emitting code for generic constants
+  bool all_zeros = !(val[0] || val[1] || val[2] || val[3]);
+  InstructionOperand dst = g.DefineAsRegister(node);
+  if (all_zeros) {
+    Emit(kArm64S128Zero, dst);
+  } else {
+    Emit(kArm64S128Const, g.DefineAsRegister(node), g.UseImmediate(val[0]),
+         g.UseImmediate(val[1]), g.UseImmediate(val[2]),
+         g.UseImmediate(val[3]));
+  }
+}
+
 void InstructionSelector::VisitS128Zero(Node* node) {
   Arm64OperandGenerator g(this);
   Emit(kArm64S128Zero, g.DefineAsRegister(node));
@@ -3566,32 +3612,33 @@ void InstructionSelector::VisitS8x16Shuffle(Node* node) {
   Node* input0 = node->InputAt(0);
   Node* input1 = node->InputAt(1);
   uint8_t offset;
-  if (TryMatchConcat(shuffle, &offset)) {
+  if (wasm::SimdShuffle::TryMatchConcat(shuffle, &offset)) {
     Emit(kArm64S8x16Concat, g.DefineAsRegister(node), g.UseRegister(input0),
          g.UseRegister(input1), g.UseImmediate(offset));
     return;
   }
   int index = 0;
-  if (TryMatch32x4Shuffle(shuffle, shuffle32x4)) {
-    if (TryMatchDup<4>(shuffle, &index)) {
+  if (wasm::SimdShuffle::TryMatch32x4Shuffle(shuffle, shuffle32x4)) {
+    if (wasm::SimdShuffle::TryMatchSplat<4>(shuffle, &index)) {
       DCHECK_GT(4, index);
       Emit(kArm64S128Dup, g.DefineAsRegister(node), g.UseRegister(input0),
            g.UseImmediate(4), g.UseImmediate(index % 4));
-    } else if (TryMatchIdentity(shuffle)) {
+    } else if (wasm::SimdShuffle::TryMatchIdentity(shuffle)) {
       EmitIdentity(node);
     } else {
       Emit(kArm64S32x4Shuffle, g.DefineAsRegister(node), g.UseRegister(input0),
-           g.UseRegister(input1), g.UseImmediate(Pack4Lanes(shuffle32x4)));
+           g.UseRegister(input1),
+           g.UseImmediate(wasm::SimdShuffle::Pack4Lanes(shuffle32x4)));
     }
     return;
   }
-  if (TryMatchDup<8>(shuffle, &index)) {
+  if (wasm::SimdShuffle::TryMatchSplat<8>(shuffle, &index)) {
     DCHECK_GT(8, index);
     Emit(kArm64S128Dup, g.DefineAsRegister(node), g.UseRegister(input0),
          g.UseImmediate(8), g.UseImmediate(index % 8));
     return;
   }
-  if (TryMatchDup<16>(shuffle, &index)) {
+  if (wasm::SimdShuffle::TryMatchSplat<16>(shuffle, &index)) {
     DCHECK_GT(16, index);
     Emit(kArm64S128Dup, g.DefineAsRegister(node), g.UseRegister(input0),
          g.UseImmediate(16), g.UseImmediate(index % 16));
@@ -3601,10 +3648,10 @@ void InstructionSelector::VisitS8x16Shuffle(Node* node) {
   InstructionOperand src0, src1;
   ArrangeShuffleTable(&g, input0, input1, &src0, &src1);
   Emit(kArm64S8x16Shuffle, g.DefineAsRegister(node), src0, src1,
-       g.UseImmediate(Pack4Lanes(shuffle)),
-       g.UseImmediate(Pack4Lanes(shuffle + 4)),
-       g.UseImmediate(Pack4Lanes(shuffle + 8)),
-       g.UseImmediate(Pack4Lanes(shuffle + 12)));
+       g.UseImmediate(wasm::SimdShuffle::Pack4Lanes(shuffle)),
+       g.UseImmediate(wasm::SimdShuffle::Pack4Lanes(shuffle + 4)),
+       g.UseImmediate(wasm::SimdShuffle::Pack4Lanes(shuffle + 8)),
+       g.UseImmediate(wasm::SimdShuffle::Pack4Lanes(shuffle + 12)));
 }
 
 void InstructionSelector::VisitSignExtendWord8ToInt32(Node* node) {
@@ -3671,7 +3718,8 @@ InstructionSelector::SupportedMachineOperatorFlags() {
          MachineOperatorBuilder::kInt32DivIsSafe |
          MachineOperatorBuilder::kUint32DivIsSafe |
          MachineOperatorBuilder::kWord32ReverseBits |
-         MachineOperatorBuilder::kWord64ReverseBits;
+         MachineOperatorBuilder::kWord64ReverseBits |
+         MachineOperatorBuilder::kSatConversionIsSafe;
 }
 
 // static

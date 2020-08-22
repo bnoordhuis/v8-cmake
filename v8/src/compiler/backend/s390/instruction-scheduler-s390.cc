@@ -245,6 +245,7 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kS390_I32x4UConvertI16x8High:
     case kS390_I32x4Abs:
     case kS390_I32x4BitMask:
+    case kS390_I32x4DotI16x8S:
     case kS390_I16x8Splat:
     case kS390_I16x8ExtractLaneU:
     case kS390_I16x8ExtractLaneS:
@@ -323,7 +324,9 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kS390_S128And:
     case kS390_S128Or:
     case kS390_S128Xor:
+    case kS390_S128Const:
     case kS390_S128Zero:
+    case kS390_S128AllOnes:
     case kS390_S128Not:
     case kS390_S128Select:
     case kS390_S128AndNot:

@@ -239,18 +239,17 @@ InitializedHandleScope::InitializedHandleScope()
 
 InitializedHandleScope::~InitializedHandleScope() = default;
 
-HandleAndZoneScope::HandleAndZoneScope()
-    : main_zone_(new i::Zone(&allocator_, ZONE_NAME)) {}
+HandleAndZoneScope::HandleAndZoneScope(bool support_zone_compression)
+    : main_zone_(
+          new i::Zone(&allocator_, ZONE_NAME, support_zone_compression)) {}
 
 HandleAndZoneScope::~HandleAndZoneScope() = default;
-
-static constexpr bool kNativeContextDependent = false;
 
 i::Handle<i::JSFunction> Optimize(
     i::Handle<i::JSFunction> function, i::Zone* zone, i::Isolate* isolate,
     uint32_t flags, std::unique_ptr<i::compiler::JSHeapBroker>* out_broker) {
   i::Handle<i::SharedFunctionInfo> shared(function->shared(), isolate);
-  i::IsCompiledScope is_compiled_scope(shared->is_compiled_scope());
+  i::IsCompiledScope is_compiled_scope(shared->is_compiled_scope(isolate));
   CHECK(is_compiled_scope.is_compiled() ||
         i::Compiler::Compile(function, i::Compiler::CLEAR_EXCEPTION,
                              &is_compiled_scope));
@@ -258,7 +257,7 @@ i::Handle<i::JSFunction> Optimize(
   CHECK_NOT_NULL(zone);
 
   i::OptimizedCompilationInfo info(zone, isolate, shared, function,
-                                   kNativeContextDependent);
+                                   i::CodeKind::OPTIMIZED_FUNCTION);
 
   if (flags & i::OptimizedCompilationInfo::kInlining) {
     info.set_inlining();

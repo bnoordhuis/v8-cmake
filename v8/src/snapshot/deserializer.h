@@ -8,13 +8,13 @@
 #include <utility>
 #include <vector>
 
-#include "src/execution/local-isolate-wrapper.h"
 #include "src/objects/allocation-site.h"
 #include "src/objects/api-callbacks.h"
 #include "src/objects/backing-store.h"
 #include "src/objects/code.h"
 #include "src/objects/js-array.h"
 #include "src/objects/map.h"
+#include "src/objects/string-table.h"
 #include "src/objects/string.h"
 #include "src/snapshot/deserializer-allocator.h"
 #include "src/snapshot/serializer-deserializer.h"
@@ -48,7 +48,7 @@ class V8_EXPORT_PRIVATE Deserializer : public SerializerDeserializer {
   // Create a deserializer from a snapshot byte source.
   template <class Data>
   Deserializer(Data* data, bool deserializing_user_code)
-      : local_isolate_(nullptr),
+      : isolate_(nullptr),
         source_(data->Payload()),
         magic_number_(data->GetMagicNumber()),
         deserializing_user_code_(deserializing_user_code),
@@ -59,10 +59,7 @@ class V8_EXPORT_PRIVATE Deserializer : public SerializerDeserializer {
     backing_stores_.push_back({});
   }
 
-  void Initialize(Isolate* isolate) {
-    Initialize(LocalIsolateWrapper(isolate));
-  }
-  void Initialize(LocalIsolateWrapper isolate);
+  void Initialize(Isolate* isolate);
   void DeserializeDeferredObjects();
 
   // Create Log events for newly deserialized objects.
@@ -84,10 +81,7 @@ class V8_EXPORT_PRIVATE Deserializer : public SerializerDeserializer {
     CHECK_EQ(new_off_heap_array_buffers().size(), 0);
   }
 
-  LocalIsolateWrapper local_isolate() const { return local_isolate_; }
-  Isolate* isolate() const { return local_isolate().main_thread(); }
-  bool is_main_thread() const { return local_isolate().is_main_thread(); }
-  bool is_off_thread() const { return local_isolate().is_off_thread(); }
+  Isolate* isolate() const { return isolate_; }
 
   SnapshotByteSource* source() { return &source_; }
   const std::vector<AllocationSite>& new_allocation_sites() const {
@@ -102,9 +96,6 @@ class V8_EXPORT_PRIVATE Deserializer : public SerializerDeserializer {
   }
   const std::vector<CallHandlerInfo>& call_handler_infos() const {
     return call_handler_infos_;
-  }
-  const std::vector<Handle<String>>& new_internalized_strings() const {
-    return new_internalized_strings_;
   }
   const std::vector<Handle<Script>>& new_scripts() const {
     return new_scripts_;
@@ -159,10 +150,12 @@ class V8_EXPORT_PRIVATE Deserializer : public SerializerDeserializer {
   // A helper function for ReadData for reading external references.
   inline Address ReadExternalReferenceCase();
 
-  HeapObject ReadObject();
   HeapObject ReadObject(SnapshotSpace space_number);
   void ReadCodeObjectBody(SnapshotSpace space_number,
                           Address code_object_address);
+
+ protected:
+  HeapObject ReadObject();
 
  public:
   void VisitCodeTarget(Code host, RelocInfo* rinfo);
@@ -180,7 +173,7 @@ class V8_EXPORT_PRIVATE Deserializer : public SerializerDeserializer {
   HeapObject PostProcessNewObject(HeapObject obj, SnapshotSpace space);
 
   // Cached current isolate.
-  LocalIsolateWrapper local_isolate_;
+  Isolate* isolate_;
 
   // Objects from the attached object descriptions in the serialized user code.
   std::vector<Handle<HeapObject>> attached_objects_;
@@ -193,7 +186,6 @@ class V8_EXPORT_PRIVATE Deserializer : public SerializerDeserializer {
   std::vector<Code> new_code_objects_;
   std::vector<AccessorInfo> accessor_infos_;
   std::vector<CallHandlerInfo> call_handler_infos_;
-  std::vector<Handle<String>> new_internalized_strings_;
   std::vector<Handle<Script>> new_scripts_;
   std::vector<Handle<JSArrayBuffer>> new_off_heap_array_buffers_;
   std::vector<std::shared_ptr<BackingStore>> backing_stores_;
@@ -223,18 +215,17 @@ class V8_EXPORT_PRIVATE Deserializer : public SerializerDeserializer {
 // Used to insert a deserialized internalized string into the string table.
 class StringTableInsertionKey final : public StringTableKey {
  public:
-  explicit StringTableInsertionKey(String string);
+  explicit StringTableInsertionKey(Handle<String> string);
 
   bool IsMatch(String string) override;
 
-  V8_WARN_UNUSED_RESULT Handle<String> AsHandle(Isolate* isolate) override;
-
-  String string() const { return string_; }
+  V8_WARN_UNUSED_RESULT Handle<String> AsHandle(Isolate* isolate);
+  V8_WARN_UNUSED_RESULT Handle<String> AsHandle(LocalIsolate* isolate);
 
  private:
   uint32_t ComputeHashField(String string);
 
-  String string_;
+  Handle<String> string_;
   DISALLOW_HEAP_ALLOCATION(no_gc)
 };
 

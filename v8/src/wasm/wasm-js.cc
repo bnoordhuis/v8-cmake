@@ -214,9 +214,10 @@ i::wasm::ModuleWireBytes GetFirstArgumentAsBytes(
   if (length == 0) {
     thrower->CompileError("BufferSource argument is empty");
   }
-  if (length > i::wasm::kV8MaxWasmModuleSize) {
+  size_t max_length = i::wasm::max_module_size();
+  if (length > max_length) {
     thrower->RangeError("buffer source exceeds maximum size of %zu (is %zu)",
-                        i::wasm::kV8MaxWasmModuleSize, length);
+                        max_length, length);
   }
   if (thrower->error()) return i::wasm::ModuleWireBytes(nullptr, nullptr);
   return i::wasm::ModuleWireBytes(start, start + length);
@@ -1099,9 +1100,10 @@ void WebAssemblyTable(const v8::FunctionCallbackInfo<v8::Value>& args) {
   // The descriptor's 'maximum'.
   int64_t maximum = -1;
   bool has_maximum = true;
-  if (!GetOptionalIntegerProperty(
-          isolate, &thrower, context, descriptor, v8_str(isolate, "maximum"),
-          &has_maximum, &maximum, initial, i::wasm::max_table_init_entries())) {
+  if (!GetOptionalIntegerProperty(isolate, &thrower, context, descriptor,
+                                  v8_str(isolate, "maximum"), &has_maximum,
+                                  &maximum, initial,
+                                  std::numeric_limits<uint32_t>::max())) {
     return;
   }
 
@@ -1218,6 +1220,9 @@ bool GetValueType(Isolate* isolate, MaybeLocal<Value> maybe,
   } else if (enabled_features.has_eh() &&
              string->StringEquals(v8_str(isolate, "exnref"))) {
     *type = i::wasm::kWasmExnRef;
+  } else if (enabled_features.has_gc() &&
+             string->StringEquals(v8_str(isolate, "eqref"))) {
+    *type = i::wasm::kWasmEqRef;
   } else {
     // Unrecognized type.
     *type = i::wasm::kWasmStmt;
@@ -1336,9 +1341,9 @@ void WebAssemblyGlobal(const v8::FunctionCallbackInfo<v8::Value>& args) {
     }
     case i::wasm::ValueType::kRef:
     case i::wasm::ValueType::kOptRef: {
-      switch (type.heap_type()) {
-        case i::wasm::kHeapExtern:
-        case i::wasm::kHeapExn: {
+      switch (type.heap_representation()) {
+        case i::wasm::HeapType::kExtern:
+        case i::wasm::HeapType::kExn: {
           if (args.Length() < 2) {
             // When no initial value is provided, we have to use the WebAssembly
             // default value 'null', and not the JS default value 'undefined'.
@@ -1348,7 +1353,7 @@ void WebAssemblyGlobal(const v8::FunctionCallbackInfo<v8::Value>& args) {
           global_obj->SetExternRef(Utils::OpenHandle(*value));
           break;
         }
-        case i::wasm::kHeapFunc: {
+        case i::wasm::HeapType::kFunc: {
           if (args.Length() < 2) {
             // When no initial value is provided, we have to use the WebAssembly
             // default value 'null', and not the JS default value 'undefined'.
@@ -1364,7 +1369,7 @@ void WebAssemblyGlobal(const v8::FunctionCallbackInfo<v8::Value>& args) {
           }
           break;
         }
-        case i::wasm::kHeapEq:
+        case i::wasm::HeapType::kEq:
         default:
           // TODO(7748): Implement these.
           UNIMPLEMENTED();
@@ -1833,13 +1838,13 @@ void WebAssemblyGlobalGetValueCommon(
       break;
     case i::wasm::ValueType::kRef:
     case i::wasm::ValueType::kOptRef:
-      switch (receiver->type().heap_type()) {
-        case i::wasm::kHeapExtern:
-        case i::wasm::kHeapFunc:
-        case i::wasm::kHeapExn:
+      switch (receiver->type().heap_representation()) {
+        case i::wasm::HeapType::kExtern:
+        case i::wasm::HeapType::kFunc:
+        case i::wasm::HeapType::kExn:
           return_value.Set(Utils::ToLocal(receiver->GetRef()));
           break;
-        case i::wasm::kHeapEq:
+        case i::wasm::HeapType::kEq:
         default:
           // TODO(7748): Implement these.
           UNIMPLEMENTED();
@@ -1922,12 +1927,12 @@ void WebAssemblyGlobalSetValue(
       break;
     case i::wasm::ValueType::kRef:
     case i::wasm::ValueType::kOptRef:
-      switch (receiver->type().heap_type()) {
-        case i::wasm::kHeapExtern:
-        case i::wasm::kHeapExn:
+      switch (receiver->type().heap_representation()) {
+        case i::wasm::HeapType::kExtern:
+        case i::wasm::HeapType::kExn:
           receiver->SetExternRef(Utils::OpenHandle(*args[0]));
           break;
-        case i::wasm::kHeapFunc: {
+        case i::wasm::HeapType::kFunc: {
           if (!receiver->SetFuncRef(i_isolate, Utils::OpenHandle(*args[0]))) {
             thrower.TypeError(
                 "value of an funcref reference must be either null or an "
@@ -1936,7 +1941,7 @@ void WebAssemblyGlobalSetValue(
           break;
         }
 
-        case i::wasm::kHeapEq:
+        case i::wasm::HeapType::kEq:
         default:
           // TODO(7748): Implement these.
           UNIMPLEMENTED();

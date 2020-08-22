@@ -47,7 +47,7 @@ Typer::Typer(JSHeapBroker* broker, Flags flags, Graph* graph,
   singleton_false_ = operation_typer_.singleton_false();
   singleton_true_ = operation_typer_.singleton_true();
 
-  decorator_ = new (zone()) Decorator(this);
+  decorator_ = zone()->New<Decorator>(this);
   graph_->AddDecorator(decorator_);
 }
 
@@ -1196,6 +1196,8 @@ Type Typer::Visitor::TypeTypeOf(Node* node) {
   return Type::InternalizedString();
 }
 
+Type Typer::Visitor::TypeUpdateInterruptBudget(Node* node) { UNREACHABLE(); }
+
 // JS conversion operators.
 
 Type Typer::Visitor::TypeToBoolean(Node* node) {
@@ -1857,6 +1859,8 @@ Type Typer::Visitor::TypeJSLoadModule(Node* node) { return Type::Any(); }
 
 Type Typer::Visitor::TypeJSStoreModule(Node* node) { UNREACHABLE(); }
 
+Type Typer::Visitor::TypeJSGetImportMeta(Node* node) { return Type::Any(); }
+
 Type Typer::Visitor::TypeJSGeneratorStore(Node* node) { UNREACHABLE(); }
 
 Type Typer::Visitor::TypeJSGeneratorRestoreContinuation(Node* node) {
@@ -2082,6 +2086,7 @@ Type Typer::Visitor::TypeCheckInternalizedString(Node* node) {
 }
 
 Type Typer::Visitor::TypeCheckMaps(Node* node) { UNREACHABLE(); }
+Type Typer::Visitor::TypeDynamicCheckMaps(Node* node) { UNREACHABLE(); }
 
 Type Typer::Visitor::TypeCompareMaps(Node* node) { return Type::Boolean(); }
 
@@ -2301,6 +2306,10 @@ Type Typer::Visitor::TypeObjectIsUndetectable(Node* node) {
 }
 
 Type Typer::Visitor::TypeArgumentsLength(Node* node) {
+  return TypeCache::Get()->kArgumentsLengthType;
+}
+
+Type Typer::Visitor::TypeRestLength(Node* node) {
   return TypeCache::Get()->kArgumentsLengthType;
 }
 

@@ -8,10 +8,11 @@
 #include "src/base/platform/platform.h"
 #include "src/heap/base/stack.h"
 #include "src/heap/cppgc/globals.h"
-#include "src/heap/cppgc/heap-object-header-inl.h"
-#include "src/heap/cppgc/heap-page-inl.h"
+#include "src/heap/cppgc/heap-object-header.h"
+#include "src/heap/cppgc/heap-page.h"
 #include "src/heap/cppgc/heap-visitor.h"
 #include "src/heap/cppgc/marker.h"
+#include "src/heap/cppgc/marking-verifier.h"
 #include "src/heap/cppgc/page-memory.h"
 #include "src/heap/cppgc/prefinalizer-handler.h"
 #include "src/heap/cppgc/stats-collector.h"
@@ -83,6 +84,10 @@ HeapBase::NoGCScope::NoGCScope(HeapBase& heap) : heap_(heap) {
 }
 
 HeapBase::NoGCScope::~NoGCScope() { heap_.no_gc_scope_--; }
+
+void HeapBase::VerifyMarking(cppgc::Heap::StackState stack_state) {
+  MarkingVerifier verifier(*this, stack_state);
+}
 
 }  // namespace internal
 }  // namespace cppgc

@@ -5,10 +5,12 @@
 #include "src/zone/zone.h"
 
 #include <cstring>
+#include <memory>
 
 #include "src/init/v8.h"
 #include "src/sanitizer/asan.h"
 #include "src/utils/utils.h"
+#include "src/zone/type-stats.h"
 
 namespace v8 {
 namespace internal {
@@ -27,15 +29,11 @@ constexpr size_t kASanRedzoneBytes = 0;
 
 }  // namespace
 
-Zone::Zone(AccountingAllocator* allocator, const char* name)
-    : allocation_size_(0),
-      segment_bytes_allocated_(0),
-      position_(0),
-      limit_(0),
-      allocator_(allocator),
-      segment_head_(nullptr),
+Zone::Zone(AccountingAllocator* allocator, const char* name,
+           bool support_compression)
+    : allocator_(allocator),
       name_(name),
-      sealed_(false) {
+      supports_compression_(support_compression) {
   allocator_->TraceZoneCreation(this);
 }
 
@@ -98,12 +96,15 @@ void Zone::DeleteAll() {
                                 current->capacity());
 
     segment_bytes_allocated_ -= size;
-    allocator_->ReturnSegment(current);
+    allocator_->ReturnSegment(current, supports_compression());
     current = next;
   }
 
   position_ = limit_ = 0;
   allocation_size_ = 0;
+#ifdef V8_ENABLE_PRECISE_ZONE_STATS
+  allocation_size_for_tracing_ = 0;
+#endif
 }
 
 Address Zone::NewExpand(size_t size) {
@@ -140,8 +141,8 @@ Address Zone::NewExpand(size_t size) {
     V8::FatalProcessOutOfMemory(nullptr, "Zone");
     return kNullAddress;
   }
-
-  Segment* segment = allocator_->AllocateSegment(new_size);
+  Segment* segment =
+      allocator_->AllocateSegment(new_size, supports_compression());
   if (segment == nullptr) {
     V8::FatalProcessOutOfMemory(nullptr, "Zone");
     return kNullAddress;

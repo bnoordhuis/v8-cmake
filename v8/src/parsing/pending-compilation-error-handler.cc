@@ -10,9 +10,8 @@
 #include "src/debug/debug.h"
 #include "src/execution/isolate.h"
 #include "src/execution/messages.h"
-#include "src/execution/off-thread-isolate.h"
 #include "src/handles/handles.h"
-#include "src/heap/off-thread-factory-inl.h"
+#include "src/heap/local-heap-inl.h"
 #include "src/objects/objects-inl.h"
 
 namespace v8 {
@@ -21,17 +20,15 @@ namespace internal {
 void PendingCompilationErrorHandler::MessageDetails::SetString(
     Handle<String> string, Isolate* isolate) {
   DCHECK_NE(type_, kMainThreadHandle);
-  DCHECK_NE(type_, kOffThreadTransferHandle);
   type_ = kMainThreadHandle;
   arg_handle_ = string;
 }
 
 void PendingCompilationErrorHandler::MessageDetails::SetString(
-    Handle<String> string, OffThreadIsolate* isolate) {
+    Handle<String> string, LocalIsolate* isolate) {
   DCHECK_NE(type_, kMainThreadHandle);
-  DCHECK_NE(type_, kOffThreadTransferHandle);
-  type_ = kOffThreadTransferHandle;
-  arg_transfer_handle_ = isolate->TransferHandle(string);
+  type_ = kMainThreadHandle;
+  arg_handle_ = isolate->heap()->NewPersistentHandle(string);
 }
 
 template <typename LocalIsolate>
@@ -40,15 +37,18 @@ void PendingCompilationErrorHandler::MessageDetails::Prepare(
   switch (type_) {
     case kAstRawString:
       return SetString(arg_->string(), isolate);
+
     case kNone:
     case kConstCharString:
       // We can delay allocation until ArgumentString(isolate).
       // TODO(leszeks): We don't actually have to transfer this string, since
       // it's a root.
       return;
+
     case kMainThreadHandle:
-    case kOffThreadTransferHandle:
-      UNREACHABLE();
+      // The message details might already be prepared, so skip them if this is
+      // the case.
+      return;
   }
 }
 
@@ -57,8 +57,6 @@ Handle<String> PendingCompilationErrorHandler::MessageDetails::ArgumentString(
   switch (type_) {
     case kMainThreadHandle:
       return arg_handle_;
-    case kOffThreadTransferHandle:
-      return arg_transfer_handle_.ToHandle();
     case kNone:
       return isolate->factory()->undefined_string();
     case kConstCharString:
@@ -113,7 +111,7 @@ void PendingCompilationErrorHandler::PrepareWarnings(LocalIsolate* isolate) {
 }
 template void PendingCompilationErrorHandler::PrepareWarnings(Isolate* isolate);
 template void PendingCompilationErrorHandler::PrepareWarnings(
-    OffThreadIsolate* isolate);
+    LocalIsolate* isolate);
 
 void PendingCompilationErrorHandler::ReportWarnings(
     Isolate* isolate, Handle<Script> script) const {
@@ -145,8 +143,7 @@ template EXPORT_TEMPLATE_DEFINE(
     PrepareErrors(Isolate* isolate, AstValueFactory* ast_value_factory);
 template EXPORT_TEMPLATE_DEFINE(
     V8_EXPORT_PRIVATE) void PendingCompilationErrorHandler::
-    PrepareErrors(OffThreadIsolate* isolate,
-                  AstValueFactory* ast_value_factory);
+    PrepareErrors(LocalIsolate* isolate, AstValueFactory* ast_value_factory);
 
 void PendingCompilationErrorHandler::ReportErrors(Isolate* isolate,
                                                   Handle<Script> script) const {

@@ -682,6 +682,10 @@ class ImplementationVisitor {
                        const Arguments& arguments,
                        const TypeVector& specialization_types);
 
+  TypeArgumentInference InferSpecializationTypes(
+      GenericCallable* generic, const TypeVector& explicit_specialization_types,
+      const TypeVector& explicit_arguments);
+
   const Type* GetCommonType(const Type* left, const Type* right);
 
   VisitResult GenerateCopy(const VisitResult& to_copy);
@@ -693,7 +697,8 @@ class ImplementationVisitor {
                         const Type* parameter_type,
                         std::vector<VisitResult>* converted_arguments,
                         StackRange* argument_range,
-                        std::vector<std::string>* constexpr_arguments);
+                        std::vector<std::string>* constexpr_arguments,
+                        bool inline_macro);
 
   VisitResult GenerateCall(Callable* callable,
                            base::Optional<LocationReference> this_parameter,

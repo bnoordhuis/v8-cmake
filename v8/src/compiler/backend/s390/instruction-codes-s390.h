@@ -299,6 +299,7 @@ namespace compiler {
   V(S390_I32x4UConvertI16x8High)            \
   V(S390_I32x4Abs)                          \
   V(S390_I32x4BitMask)                      \
+  V(S390_I32x4DotI16x8S)                    \
   V(S390_I16x8Splat)                        \
   V(S390_I16x8ExtractLaneU)                 \
   V(S390_I16x8ExtractLaneS)                 \
@@ -377,7 +378,9 @@ namespace compiler {
   V(S390_S128And)                           \
   V(S390_S128Or)                            \
   V(S390_S128Xor)                           \
+  V(S390_S128Const)                         \
   V(S390_S128Zero)                          \
+  V(S390_S128AllOnes)                       \
   V(S390_S128Not)                           \
   V(S390_S128Select)                        \
   V(S390_S128AndNot)                        \

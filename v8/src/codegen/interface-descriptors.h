@@ -59,7 +59,6 @@ namespace internal {
   V(ContextOnly)                         \
   V(CppBuiltinAdaptor)                   \
   V(EphemeronKeyBarrier)                 \
-  V(FastNewFunctionContext)              \
   V(FastNewObject)                       \
   V(FrameDropperTrampoline)              \
   V(GetIteratorStackParameter)           \
@@ -79,7 +78,6 @@ namespace internal {
   V(LoadGlobalWithVector)                \
   V(LoadNoFeedback)                      \
   V(LoadWithVector)                      \
-  V(NewArgumentsElements)                \
   V(NoContext)                           \
   V(RecordWrite)                         \
   V(ResumeGenerator)                     \
@@ -838,17 +836,6 @@ class LoadGlobalWithVectorDescriptor : public LoadGlobalDescriptor {
 #endif
 };
 
-class FastNewFunctionContextDescriptor : public CallInterfaceDescriptor {
- public:
-  DEFINE_PARAMETERS(kScopeInfo, kSlots)
-  DEFINE_PARAMETER_TYPES(MachineType::AnyTagged(),  // kScopeInfo
-                         MachineType::Uint32())     // kSlots
-  DECLARE_DESCRIPTOR(FastNewFunctionContextDescriptor, CallInterfaceDescriptor)
-
-  static const Register ScopeInfoRegister();
-  static const Register SlotsRegister();
-};
-
 class FastNewObjectDescriptor : public CallInterfaceDescriptor {
  public:
   DEFINE_PARAMETERS(kTarget, kNewTarget)
@@ -968,7 +955,7 @@ class CallFunctionTemplateDescriptor : public CallInterfaceDescriptor {
 
 class CallWithSpreadDescriptor : public CallInterfaceDescriptor {
  public:
-  DEFINE_PARAMETERS(kTarget, kArgumentsCount, kSpread)
+  DEFINE_PARAMETERS_VARARGS(kTarget, kArgumentsCount, kSpread)
   DEFINE_PARAMETER_TYPES(MachineType::AnyTagged(),  // kTarget
                          MachineType::Int32(),      // kArgumentsCount
                          MachineType::AnyTagged())  // kSpread
@@ -978,8 +965,8 @@ class CallWithSpreadDescriptor : public CallInterfaceDescriptor {
 // TODO(jgruber): Pass the slot as UintPtr.
 class CallWithSpread_WithFeedbackDescriptor : public CallInterfaceDescriptor {
  public:
-  DEFINE_PARAMETERS(kTarget, kArgumentsCount, kSpread, kSlot,
-                    kMaybeFeedbackVector)
+  DEFINE_PARAMETERS_VARARGS(kTarget, kArgumentsCount, kSpread, kSlot,
+                            kMaybeFeedbackVector)
   DEFINE_PARAMETER_TYPES(MachineType::AnyTagged(),  // kTarget
                          MachineType::Int32(),      // kArgumentsCount
                          MachineType::AnyTagged(),  // kSpread
@@ -1280,15 +1267,6 @@ class GrowArrayElementsDescriptor : public CallInterfaceDescriptor {
 
   static const Register ObjectRegister();
   static const Register KeyRegister();
-};
-
-class NewArgumentsElementsDescriptor final : public CallInterfaceDescriptor {
- public:
-  DEFINE_PARAMETERS(kFrame, kLength, kMappedCount)
-  DEFINE_PARAMETER_TYPES(MachineType::Pointer(),       // kFrame
-                         MachineType::TaggedSigned(),  // kLength
-                         MachineType::TaggedSigned())  // kMappedCount
-  DECLARE_DESCRIPTOR(NewArgumentsElementsDescriptor, CallInterfaceDescriptor)
 };
 
 class V8_EXPORT_PRIVATE InterpreterDispatchDescriptor

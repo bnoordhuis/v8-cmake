@@ -33,6 +33,7 @@ from testrunner.testproc.rerun import RerunProc
 from testrunner.testproc.shard import ShardProc
 from testrunner.testproc.sigproc import SignalProc
 from testrunner.testproc.timeout import TimeoutProc
+from testrunner.testproc import util
 
 
 BASE_DIR = (
@@ -168,6 +169,7 @@ PROGRESS_INDICATORS = {
   'dots': progress.DotsProgressIndicator,
   'color': progress.ColorProgressIndicator,
   'mono': progress.MonochromeProgressIndicator,
+  'stream': progress.StreamProgressIndicator,
 }
 
 class TestRunnerError(Exception):
@@ -264,6 +266,9 @@ class BaseTestRunner(object):
         # Swarming doesn't print how isolated commands are called. Lets make
         # this less cryptic by printing it ourselves.
         print(' '.join(sys.argv))
+
+        # Kill stray processes from previous tasks on swarming.
+        util.kill_processes_linux()
 
       self._load_build_config(options)
       command.setup(self.target_os, options.device)
@@ -676,6 +681,7 @@ class BaseTestRunner(object):
       "arch": self.build_config.arch,
       "asan": self.build_config.asan,
       "byteorder": sys.byteorder,
+      "cfi_vptr": self.build_config.cfi_vptr,
       "dcheck_always_on": self.build_config.dcheck_always_on,
       "deopt_fuzzer": False,
       "endurance_fuzzer": False,

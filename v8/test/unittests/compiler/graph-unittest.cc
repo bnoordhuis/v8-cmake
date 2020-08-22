@@ -15,7 +15,8 @@ namespace internal {
 namespace compiler {
 
 GraphTest::GraphTest(int num_parameters)
-    : canonical_(isolate()),
+    : TestWithNativeContextAndZone(kCompressGraphZone),
+      canonical_(isolate()),
       common_(zone()),
       graph_(zone()),
       broker_(isolate(), zone()),

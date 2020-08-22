@@ -7,6 +7,8 @@
 #include <limits>
 
 #include "src/base/lazy-instance.h"
+#include "src/compiler/js-graph.h"
+#include "src/compiler/node-matchers.h"
 #include "src/compiler/operator.h"
 #include "src/handles/handles-inl.h"
 #include "src/objects/objects-inl.h"
@@ -26,6 +28,21 @@ constexpr Operator::Properties BinopProperties(Operator::Opcode opcode) {
 }
 
 }  // namespace
+
+namespace js_node_wrapper_utils {
+
+TNode<Oddball> UndefinedConstant(JSGraph* jsgraph) {
+  return TNode<Oddball>::UncheckedCast(jsgraph->UndefinedConstant());
+}
+
+}  // namespace js_node_wrapper_utils
+
+FeedbackCellRef JSCreateClosureNode::GetFeedbackCellRefChecked(
+    JSHeapBroker* broker) const {
+  HeapObjectMatcher m(feedback_cell());
+  CHECK(m.HasValue());
+  return FeedbackCellRef(broker, m.Value());
+}
 
 std::ostream& operator<<(std::ostream& os, CallFrequency const& f) {
   if (f.IsUnknown()) return os << "unknown";
@@ -514,7 +531,6 @@ bool operator==(CreateClosureParameters const& lhs,
                 CreateClosureParameters const& rhs) {
   return lhs.allocation() == rhs.allocation() &&
          lhs.code().location() == rhs.code().location() &&
-         lhs.feedback_cell().location() == rhs.feedback_cell().location() &&
          lhs.shared_info().location() == rhs.shared_info().location();
 }
 
@@ -526,14 +542,13 @@ bool operator!=(CreateClosureParameters const& lhs,
 
 
 size_t hash_value(CreateClosureParameters const& p) {
-  return base::hash_combine(p.allocation(), p.shared_info().location(),
-                            p.feedback_cell().location());
+  return base::hash_combine(p.allocation(), p.shared_info().location());
 }
 
 
 std::ostream& operator<<(std::ostream& os, CreateClosureParameters const& p) {
   return os << p.allocation() << ", " << Brief(*p.shared_info()) << ", "
-            << Brief(*p.feedback_cell()) << ", " << Brief(*p.code());
+            << Brief(*p.code());
 }
 
 
@@ -698,7 +713,7 @@ struct JSOperatorGlobalCache final {
 
 namespace {
 DEFINE_LAZY_LEAKY_OBJECT_GETTER(JSOperatorGlobalCache, GetJSOperatorGlobalCache)
-}
+}  // namespace
 
 JSOperatorBuilder::JSOperatorBuilder(Zone* zone)
     : cache_(*GetJSOperatorGlobalCache()), zone_(zone) {}
@@ -713,7 +728,7 @@ CACHED_OP_LIST(CACHED_OP)
 #define UNARY_OP(JSName, Name)                                                \
   const Operator* JSOperatorBuilder::Name(FeedbackSource const& feedback) {   \
     FeedbackParameter parameters(feedback);                                   \
-    return new (zone()) Operator1<FeedbackParameter>(                         \
+    return zone()->New<Operator1<FeedbackParameter>>(                         \
         IrOpcode::k##JSName, Operator::kNoProperties, #JSName, 2, 1, 1, 1, 1, \
         2, parameters);                                                       \
   }
@@ -724,7 +739,7 @@ JS_UNOP_WITH_FEEDBACK(UNARY_OP)
   const Operator* JSOperatorBuilder::Name(FeedbackSource const& feedback) {   \
     static constexpr auto kProperties = BinopProperties(IrOpcode::k##JSName); \
     FeedbackParameter parameters(feedback);                                   \
-    return new (zone()) Operator1<FeedbackParameter>(                         \
+    return zone()->New<Operator1<FeedbackParameter>>(                         \
         IrOpcode::k##JSName, kProperties, #JSName, 3, 1, 1, 1, 1,             \
         Operator::ZeroIfNoThrow(kProperties), parameters);                    \
   }
@@ -733,30 +748,42 @@ JS_BINOP_WITH_FEEDBACK(BINARY_OP)
 
 const Operator* JSOperatorBuilder::StoreDataPropertyInLiteral(
     const FeedbackSource& feedback) {
+  static constexpr int kObject = 1;
+  static constexpr int kName = 1;
+  static constexpr int kValue = 1;
+  static constexpr int kFlags = 1;
+  static constexpr int kFeedbackVector = 1;
+  static constexpr int kArity =
+      kObject + kName + kValue + kFlags + kFeedbackVector;
   FeedbackParameter parameters(feedback);
-  return new (zone()) Operator1<FeedbackParameter>(  // --
+  return zone()->New<Operator1<FeedbackParameter>>(  // --
       IrOpcode::kJSStoreDataPropertyInLiteral,
       Operator::kNoThrow,              // opcode
       "JSStoreDataPropertyInLiteral",  // name
-      4, 1, 1, 0, 1, 1,                // counts
+      kArity, 1, 1, 0, 1, 1,           // counts
       parameters);                     // parameter
 }
 
 const Operator* JSOperatorBuilder::StoreInArrayLiteral(
     const FeedbackSource& feedback) {
+  static constexpr int kArray = 1;
+  static constexpr int kIndex = 1;
+  static constexpr int kValue = 1;
+  static constexpr int kFeedbackVector = 1;
+  static constexpr int kArity = kArray + kIndex + kValue + kFeedbackVector;
   FeedbackParameter parameters(feedback);
-  return new (zone()) Operator1<FeedbackParameter>(  // --
+  return zone()->New<Operator1<FeedbackParameter>>(  // --
       IrOpcode::kJSStoreInArrayLiteral,
       Operator::kNoThrow,       // opcode
       "JSStoreInArrayLiteral",  // name
-      3, 1, 1, 0, 1, 1,         // counts
+      kArity, 1, 1, 0, 1, 1,    // counts
       parameters);              // parameter
 }
 
 const Operator* JSOperatorBuilder::CallForwardVarargs(size_t arity,
                                                       uint32_t start_index) {
   CallForwardVarargsParameters parameters(arity, start_index);
-  return new (zone()) Operator1<CallForwardVarargsParameters>(   // --
+  return zone()->New<Operator1<CallForwardVarargsParameters>>(   // --
       IrOpcode::kJSCallForwardVarargs, Operator::kNoProperties,  // opcode
       "JSCallForwardVarargs",                                    // name
       parameters.arity(), 1, 1, 1, 1, 2,                         // counts
@@ -769,7 +796,7 @@ const Operator* JSOperatorBuilder::Call(
     SpeculationMode speculation_mode, CallFeedbackRelation feedback_relation) {
   CallParameters parameters(arity, frequency, feedback, convert_mode,
                             speculation_mode, feedback_relation);
-  return new (zone()) Operator1<CallParameters>(   // --
+  return zone()->New<Operator1<CallParameters>>(   // --
       IrOpcode::kJSCall, Operator::kNoProperties,  // opcode
       "JSCall",                                    // name
       parameters.arity(), 1, 1, 1, 1, 2,           // inputs/outputs
@@ -779,12 +806,14 @@ const Operator* JSOperatorBuilder::Call(
 const Operator* JSOperatorBuilder::CallWithArrayLike(
     const CallFrequency& frequency, const FeedbackSource& feedback,
     SpeculationMode speculation_mode, CallFeedbackRelation feedback_relation) {
-  CallParameters parameters(2, frequency, feedback, ConvertReceiverMode::kAny,
-                            speculation_mode, feedback_relation);
-  return new (zone()) Operator1<CallParameters>(                // --
+  static constexpr int kTheArrayLikeObject = 1;
+  CallParameters parameters(
+      JSCallWithArrayLikeNode::ArityForArgc(kTheArrayLikeObject), frequency,
+      feedback, ConvertReceiverMode::kAny, speculation_mode, feedback_relation);
+  return zone()->New<Operator1<CallParameters>>(                // --
       IrOpcode::kJSCallWithArrayLike, Operator::kNoProperties,  // opcode
       "JSCallWithArrayLike",                                    // name
-      3, 1, 1, 1, 1, 2,                                         // counts
+      parameters.arity(), 1, 1, 1, 1, 2,                        // counts
       parameters);                                              // parameter
 }
 
@@ -797,7 +826,7 @@ const Operator* JSOperatorBuilder::CallWithSpread(
   CallParameters parameters(arity, frequency, feedback,
                             ConvertReceiverMode::kAny, speculation_mode,
                             feedback_relation);
-  return new (zone()) Operator1<CallParameters>(             // --
+  return zone()->New<Operator1<CallParameters>>(             // --
       IrOpcode::kJSCallWithSpread, Operator::kNoProperties,  // opcode
       "JSCallWithSpread",                                    // name
       parameters.arity(), 1, 1, 1, 1, 2,                     // counts
@@ -821,7 +850,7 @@ const Operator* JSOperatorBuilder::CallRuntime(const Runtime::Function* f,
                                                size_t arity) {
   CallRuntimeParameters parameters(f->function_id, arity);
   DCHECK(f->nargs == -1 || f->nargs == static_cast<int>(parameters.arity()));
-  return new (zone()) Operator1<CallRuntimeParameters>(   // --
+  return zone()->New<Operator1<CallRuntimeParameters>>(   // --
       IrOpcode::kJSCallRuntime, Operator::kNoProperties,  // opcode
       "JSCallRuntime",                                    // name
       parameters.arity(), 1, 1, f->result_size, 1, 2,     // inputs/outputs
@@ -831,7 +860,7 @@ const Operator* JSOperatorBuilder::CallRuntime(const Runtime::Function* f,
 const Operator* JSOperatorBuilder::ConstructForwardVarargs(
     size_t arity, uint32_t start_index) {
   ConstructForwardVarargsParameters parameters(arity, start_index);
-  return new (zone()) Operator1<ConstructForwardVarargsParameters>(   // --
+  return zone()->New<Operator1<ConstructForwardVarargsParameters>>(   // --
       IrOpcode::kJSConstructForwardVarargs, Operator::kNoProperties,  // opcode
       "JSConstructForwardVarargs",                                    // name
       parameters.arity(), 1, 1, 1, 1, 2,                              // counts
@@ -844,7 +873,7 @@ const Operator* JSOperatorBuilder::Construct(uint32_t arity,
                                              CallFrequency const& frequency,
                                              FeedbackSource const& feedback) {
   ConstructParameters parameters(arity, frequency, feedback);
-  return new (zone()) Operator1<ConstructParameters>(   // --
+  return zone()->New<Operator1<ConstructParameters>>(   // --
       IrOpcode::kJSConstruct, Operator::kNoProperties,  // opcode
       "JSConstruct",                                    // name
       parameters.arity(), 1, 1, 1, 1, 2,                // counts
@@ -853,9 +882,11 @@ const Operator* JSOperatorBuilder::Construct(uint32_t arity,
 
 const Operator* JSOperatorBuilder::ConstructWithArrayLike(
     CallFrequency const& frequency, FeedbackSource const& feedback) {
-  static constexpr uint32_t arity = 3;
-  ConstructParameters parameters(arity, frequency, feedback);
-  return new (zone()) Operator1<ConstructParameters>(  // --
+  static constexpr int kTheArrayLikeObject = 1;
+  ConstructParameters parameters(
+      JSConstructWithArrayLikeNode::ArityForArgc(kTheArrayLikeObject),
+      frequency, feedback);
+  return zone()->New<Operator1<ConstructParameters>>(  // --
       IrOpcode::kJSConstructWithArrayLike,             // opcode
       Operator::kNoProperties,                         // properties
       "JSConstructWithArrayLike",                      // name
@@ -867,7 +898,7 @@ const Operator* JSOperatorBuilder::ConstructWithSpread(
     uint32_t arity, CallFrequency const& frequency,
     FeedbackSource const& feedback) {
   ConstructParameters parameters(arity, frequency, feedback);
-  return new (zone()) Operator1<ConstructParameters>(             // --
+  return zone()->New<Operator1<ConstructParameters>>(             // --
       IrOpcode::kJSConstructWithSpread, Operator::kNoProperties,  // opcode
       "JSConstructWithSpread",                                    // name
       parameters.arity(), 1, 1, 1, 1, 2,                          // counts
@@ -876,54 +907,48 @@ const Operator* JSOperatorBuilder::ConstructWithSpread(
 
 const Operator* JSOperatorBuilder::LoadNamed(Handle<Name> name,
                                              const FeedbackSource& feedback) {
+  static constexpr int kObject = 1;
+  static constexpr int kFeedbackVector = 1;
+  static constexpr int kArity = kObject + kFeedbackVector;
   NamedAccess access(LanguageMode::kSloppy, name, feedback);
-  return new (zone()) Operator1<NamedAccess>(           // --
+  return zone()->New<Operator1<NamedAccess>>(           // --
       IrOpcode::kJSLoadNamed, Operator::kNoProperties,  // opcode
       "JSLoadNamed",                                    // name
-      1, 1, 1, 1, 1, 2,                                 // counts
+      kArity, 1, 1, 1, 1, 2,                            // counts
       access);                                          // parameter
 }
 
 const Operator* JSOperatorBuilder::LoadProperty(
     FeedbackSource const& feedback) {
   PropertyAccess access(LanguageMode::kSloppy, feedback);
-  return new (zone()) Operator1<PropertyAccess>(           // --
+  return zone()->New<Operator1<PropertyAccess>>(           // --
       IrOpcode::kJSLoadProperty, Operator::kNoProperties,  // opcode
       "JSLoadProperty",                                    // name
-      2, 1, 1, 1, 1, 2,                                    // counts
+      3, 1, 1, 1, 1, 2,                                    // counts
       access);                                             // parameter
 }
 
 const Operator* JSOperatorBuilder::GetIterator(
     FeedbackSource const& load_feedback, FeedbackSource const& call_feedback) {
   GetIteratorParameters access(load_feedback, call_feedback);
-  return new (zone()) Operator1<GetIteratorParameters>(   // --
+  return zone()->New<Operator1<GetIteratorParameters>>(   // --
       IrOpcode::kJSGetIterator, Operator::kNoProperties,  // opcode
       "JSGetIterator",                                    // name
-      1, 1, 1, 1, 1, 2,                                   // counts
+      2, 1, 1, 1, 1, 2,                                   // counts
       access);                                            // parameter
 }
 
 const Operator* JSOperatorBuilder::HasProperty(FeedbackSource const& feedback) {
   PropertyAccess access(LanguageMode::kSloppy, feedback);
-  return new (zone()) Operator1<PropertyAccess>(          // --
+  return zone()->New<Operator1<PropertyAccess>>(          // --
       IrOpcode::kJSHasProperty, Operator::kNoProperties,  // opcode
       "JSHasProperty",                                    // name
-      2, 1, 1, 1, 1, 2,                                   // counts
+      3, 1, 1, 1, 1, 2,                                   // counts
       access);                                            // parameter
 }
 
-const Operator* JSOperatorBuilder::InstanceOf(FeedbackSource const& feedback) {
-  FeedbackParameter parameter(feedback);
-  return new (zone()) Operator1<FeedbackParameter>(      // --
-      IrOpcode::kJSInstanceOf, Operator::kNoProperties,  // opcode
-      "JSInstanceOf",                                    // name
-      2, 1, 1, 1, 1, 2,                                  // counts
-      parameter);                                        // parameter
-}
-
 const Operator* JSOperatorBuilder::ForInNext(ForInMode mode) {
-  return new (zone()) Operator1<ForInMode>(             // --
+  return zone()->New<Operator1<ForInMode>>(             // --
       IrOpcode::kJSForInNext, Operator::kNoProperties,  // opcode
       "JSForInNext",                                    // name
       4, 1, 1, 1, 1, 2,                                 // counts
@@ -931,7 +956,7 @@ const Operator* JSOperatorBuilder::ForInNext(ForInMode mode) {
 }
 
 const Operator* JSOperatorBuilder::ForInPrepare(ForInMode mode) {
-  return new (zone()) Operator1<ForInMode>(     // --
+  return zone()->New<Operator1<ForInMode>>(     // --
       IrOpcode::kJSForInPrepare,                // opcode
       Operator::kNoWrite | Operator::kNoThrow,  // flags
       "JSForInPrepare",                         // name
@@ -940,7 +965,7 @@ const Operator* JSOperatorBuilder::ForInPrepare(ForInMode mode) {
 }
 
 const Operator* JSOperatorBuilder::GeneratorStore(int register_count) {
-  return new (zone()) Operator1<int>(                   // --
+  return zone()->New<Operator1<int>>(                   // --
       IrOpcode::kJSGeneratorStore, Operator::kNoThrow,  // opcode
       "JSGeneratorStore",                               // name
       3 + register_count, 1, 1, 0, 1, 0,                // counts
@@ -958,7 +983,7 @@ int GeneratorStoreValueCountOf(const Operator* op) {
 }
 
 const Operator* JSOperatorBuilder::GeneratorRestoreRegister(int index) {
-  return new (zone()) Operator1<int>(                             // --
+  return zone()->New<Operator1<int>>(                             // --
       IrOpcode::kJSGeneratorRestoreRegister, Operator::kNoThrow,  // opcode
       "JSGeneratorRestoreRegister",                               // name
       1, 1, 1, 1, 1, 0,                                           // counts
@@ -973,43 +998,51 @@ int RestoreRegisterIndexOf(const Operator* op) {
 const Operator* JSOperatorBuilder::StoreNamed(LanguageMode language_mode,
                                               Handle<Name> name,
                                               FeedbackSource const& feedback) {
+  static constexpr int kObject = 1;
+  static constexpr int kValue = 1;
+  static constexpr int kFeedbackVector = 1;
+  static constexpr int kArity = kObject + kValue + kFeedbackVector;
   NamedAccess access(language_mode, name, feedback);
-  return new (zone()) Operator1<NamedAccess>(            // --
+  return zone()->New<Operator1<NamedAccess>>(            // --
       IrOpcode::kJSStoreNamed, Operator::kNoProperties,  // opcode
       "JSStoreNamed",                                    // name
-      2, 1, 1, 0, 1, 2,                                  // counts
+      kArity, 1, 1, 0, 1, 2,                             // counts
       access);                                           // parameter
 }
 
 const Operator* JSOperatorBuilder::StoreProperty(
     LanguageMode language_mode, FeedbackSource const& feedback) {
   PropertyAccess access(language_mode, feedback);
-  return new (zone()) Operator1<PropertyAccess>(            // --
+  return zone()->New<Operator1<PropertyAccess>>(            // --
       IrOpcode::kJSStoreProperty, Operator::kNoProperties,  // opcode
       "JSStoreProperty",                                    // name
-      3, 1, 1, 0, 1, 2,                                     // counts
+      4, 1, 1, 0, 1, 2,                                     // counts
       access);                                              // parameter
 }
 
 const Operator* JSOperatorBuilder::StoreNamedOwn(
     Handle<Name> name, FeedbackSource const& feedback) {
+  static constexpr int kObject = 1;
+  static constexpr int kValue = 1;
+  static constexpr int kFeedbackVector = 1;
+  static constexpr int kArity = kObject + kValue + kFeedbackVector;
   StoreNamedOwnParameters parameters(name, feedback);
-  return new (zone()) Operator1<StoreNamedOwnParameters>(   // --
+  return zone()->New<Operator1<StoreNamedOwnParameters>>(   // --
       IrOpcode::kJSStoreNamedOwn, Operator::kNoProperties,  // opcode
       "JSStoreNamedOwn",                                    // name
-      2, 1, 1, 0, 1, 2,                                     // counts
+      kArity, 1, 1, 0, 1, 2,                                // counts
       parameters);                                          // parameter
 }
 
 const Operator* JSOperatorBuilder::DeleteProperty() {
-  return new (zone()) Operator(                              // --
+  return zone()->New<Operator>(                              // --
       IrOpcode::kJSDeleteProperty, Operator::kNoProperties,  // opcode
       "JSDeleteProperty",                                    // name
       3, 1, 1, 1, 1, 2);                                     // counts
 }
 
 const Operator* JSOperatorBuilder::CreateGeneratorObject() {
-  return new (zone()) Operator(                                     // --
+  return zone()->New<Operator>(                                     // --
       IrOpcode::kJSCreateGeneratorObject, Operator::kEliminatable,  // opcode
       "JSCreateGeneratorObject",                                    // name
       2, 1, 1, 1, 1, 0);                                            // counts
@@ -1018,27 +1051,32 @@ const Operator* JSOperatorBuilder::CreateGeneratorObject() {
 const Operator* JSOperatorBuilder::LoadGlobal(const Handle<Name>& name,
                                               const FeedbackSource& feedback,
                                               TypeofMode typeof_mode) {
+  static constexpr int kFeedbackVector = 1;
+  static constexpr int kArity = kFeedbackVector;
   LoadGlobalParameters parameters(name, feedback, typeof_mode);
-  return new (zone()) Operator1<LoadGlobalParameters>(   // --
+  return zone()->New<Operator1<LoadGlobalParameters>>(   // --
       IrOpcode::kJSLoadGlobal, Operator::kNoProperties,  // opcode
       "JSLoadGlobal",                                    // name
-      0, 1, 1, 1, 1, 2,                                  // counts
+      kArity, 1, 1, 1, 1, 2,                             // counts
       parameters);                                       // parameter
 }
 
 const Operator* JSOperatorBuilder::StoreGlobal(LanguageMode language_mode,
                                                const Handle<Name>& name,
                                                const FeedbackSource& feedback) {
+  static constexpr int kValue = 1;
+  static constexpr int kFeedbackVector = 1;
+  static constexpr int kArity = kValue + kFeedbackVector;
   StoreGlobalParameters parameters(language_mode, feedback, name);
-  return new (zone()) Operator1<StoreGlobalParameters>(   // --
+  return zone()->New<Operator1<StoreGlobalParameters>>(   // --
       IrOpcode::kJSStoreGlobal, Operator::kNoProperties,  // opcode
       "JSStoreGlobal",                                    // name
-      1, 1, 1, 0, 1, 2,                                   // counts
+      kArity, 1, 1, 0, 1, 2,                              // counts
       parameters);                                        // parameter
 }
 
 const Operator* JSOperatorBuilder::HasContextExtension(size_t depth) {
-  return new (zone()) Operator1<size_t>(        // --
+  return zone()->New<Operator1<size_t>>(        // --
       IrOpcode::kJSHasContextExtension,         // opcode
       Operator::kNoWrite | Operator::kNoThrow,  // flags
       "JSHasContextExtension",                  // name
@@ -1049,7 +1087,7 @@ const Operator* JSOperatorBuilder::HasContextExtension(size_t depth) {
 const Operator* JSOperatorBuilder::LoadContext(size_t depth, size_t index,
                                                bool immutable) {
   ContextAccess access(depth, index, immutable);
-  return new (zone()) Operator1<ContextAccess>(  // --
+  return zone()->New<Operator1<ContextAccess>>(  // --
       IrOpcode::kJSLoadContext,                  // opcode
       Operator::kNoWrite | Operator::kNoThrow,   // flags
       "JSLoadContext",                           // name
@@ -1060,7 +1098,7 @@ const Operator* JSOperatorBuilder::LoadContext(size_t depth, size_t index,
 
 const Operator* JSOperatorBuilder::StoreContext(size_t depth, size_t index) {
   ContextAccess access(depth, index, false);
-  return new (zone()) Operator1<ContextAccess>(  // --
+  return zone()->New<Operator1<ContextAccess>>(  // --
       IrOpcode::kJSStoreContext,                 // opcode
       Operator::kNoRead | Operator::kNoThrow,    // flags
       "JSStoreContext",                          // name
@@ -1069,7 +1107,7 @@ const Operator* JSOperatorBuilder::StoreContext(size_t depth, size_t index) {
 }
 
 const Operator* JSOperatorBuilder::LoadModule(int32_t cell_index) {
-  return new (zone()) Operator1<int32_t>(       // --
+  return zone()->New<Operator1<int32_t>>(       // --
       IrOpcode::kJSLoadModule,                  // opcode
       Operator::kNoWrite | Operator::kNoThrow,  // flags
       "JSLoadModule",                           // name
@@ -1077,8 +1115,16 @@ const Operator* JSOperatorBuilder::LoadModule(int32_t cell_index) {
       cell_index);                              // parameter
 }
 
+const Operator* JSOperatorBuilder::GetImportMeta() {
+  return zone()->New<Operator>(    // --
+      IrOpcode::kJSGetImportMeta,  // opcode
+      Operator::kNoProperties,     // flags
+      "JSGetImportMeta",           // name
+      0, 1, 1, 1, 1, 2);           // counts
+}
+
 const Operator* JSOperatorBuilder::StoreModule(int32_t cell_index) {
-  return new (zone()) Operator1<int32_t>(      // --
+  return zone()->New<Operator1<int32_t>>(      // --
       IrOpcode::kJSStoreModule,                // opcode
       Operator::kNoRead | Operator::kNoThrow,  // flags
       "JSStoreModule",                         // name
@@ -1087,7 +1133,7 @@ const Operator* JSOperatorBuilder::StoreModule(int32_t cell_index) {
 }
 
 const Operator* JSOperatorBuilder::CreateArguments(CreateArgumentsType type) {
-  return new (zone()) Operator1<CreateArgumentsType>(         // --
+  return zone()->New<Operator1<CreateArgumentsType>>(         // --
       IrOpcode::kJSCreateArguments, Operator::kEliminatable,  // opcode
       "JSCreateArguments",                                    // name
       1, 1, 0, 1, 1, 0,                                       // counts
@@ -1099,7 +1145,7 @@ const Operator* JSOperatorBuilder::CreateArray(
   // constructor, new_target, arg1, ..., argN
   int const value_input_count = static_cast<int>(arity) + 2;
   CreateArrayParameters parameters(arity, site);
-  return new (zone()) Operator1<CreateArrayParameters>(   // --
+  return zone()->New<Operator1<CreateArrayParameters>>(   // --
       IrOpcode::kJSCreateArray, Operator::kNoProperties,  // opcode
       "JSCreateArray",                                    // name
       value_input_count, 1, 1, 1, 1, 2,                   // counts
@@ -1108,7 +1154,7 @@ const Operator* JSOperatorBuilder::CreateArray(
 
 const Operator* JSOperatorBuilder::CreateArrayIterator(IterationKind kind) {
   CreateArrayIteratorParameters parameters(kind);
-  return new (zone()) Operator1<CreateArrayIteratorParameters>(   // --
+  return zone()->New<Operator1<CreateArrayIteratorParameters>>(   // --
       IrOpcode::kJSCreateArrayIterator, Operator::kEliminatable,  // opcode
       "JSCreateArrayIterator",                                    // name
       1, 1, 1, 1, 1, 0,                                           // counts
@@ -1117,7 +1163,7 @@ const Operator* JSOperatorBuilder::CreateArrayIterator(IterationKind kind) {
 
 const Operator* JSOperatorBuilder::CreateAsyncFunctionObject(
     int register_count) {
-  return new (zone()) Operator1<int>(          // --
+  return zone()->New<Operator1<int>>(          // --
       IrOpcode::kJSCreateAsyncFunctionObject,  // opcode
       Operator::kEliminatable,                 // flags
       "JSCreateAsyncFunctionObject",           // name
@@ -1129,7 +1175,7 @@ const Operator* JSOperatorBuilder::CreateCollectionIterator(
     CollectionKind collection_kind, IterationKind iteration_kind) {
   CreateCollectionIteratorParameters parameters(collection_kind,
                                                 iteration_kind);
-  return new (zone()) Operator1<CreateCollectionIteratorParameters>(
+  return zone()->New<Operator1<CreateCollectionIteratorParameters>>(
       IrOpcode::kJSCreateCollectionIterator, Operator::kEliminatable,
       "JSCreateCollectionIterator", 1, 1, 1, 1, 1, 0, parameters);
 }
@@ -1139,7 +1185,7 @@ const Operator* JSOperatorBuilder::CreateBoundFunction(size_t arity,
   // bound_target_function, bound_this, arg1, ..., argN
   int const value_input_count = static_cast<int>(arity) + 2;
   CreateBoundFunctionParameters parameters(arity, map);
-  return new (zone()) Operator1<CreateBoundFunctionParameters>(   // --
+  return zone()->New<Operator1<CreateBoundFunctionParameters>>(   // --
       IrOpcode::kJSCreateBoundFunction, Operator::kEliminatable,  // opcode
       "JSCreateBoundFunction",                                    // name
       value_input_count, 1, 1, 1, 1, 0,                           // counts
@@ -1147,14 +1193,15 @@ const Operator* JSOperatorBuilder::CreateBoundFunction(size_t arity,
 }
 
 const Operator* JSOperatorBuilder::CreateClosure(
-    Handle<SharedFunctionInfo> shared_info, Handle<FeedbackCell> feedback_cell,
-    Handle<Code> code, AllocationType allocation) {
-  CreateClosureParameters parameters(shared_info, feedback_cell, code,
-                                     allocation);
-  return new (zone()) Operator1<CreateClosureParameters>(   // --
+    Handle<SharedFunctionInfo> shared_info, Handle<Code> code,
+    AllocationType allocation) {
+  static constexpr int kFeedbackCell = 1;
+  static constexpr int kArity = kFeedbackCell;
+  CreateClosureParameters parameters(shared_info, code, allocation);
+  return zone()->New<Operator1<CreateClosureParameters>>(   // --
       IrOpcode::kJSCreateClosure, Operator::kEliminatable,  // opcode
       "JSCreateClosure",                                    // name
-      0, 1, 1, 1, 1, 0,                                     // counts
+      kArity, 1, 1, 1, 1, 0,                                // counts
       parameters);                                          // parameter
 }
 
@@ -1163,27 +1210,29 @@ const Operator* JSOperatorBuilder::CreateLiteralArray(
     FeedbackSource const& feedback, int literal_flags, int number_of_elements) {
   CreateLiteralParameters parameters(description, feedback, number_of_elements,
                                      literal_flags);
-  return new (zone()) Operator1<CreateLiteralParameters>(  // --
+  return zone()->New<Operator1<CreateLiteralParameters>>(  // --
       IrOpcode::kJSCreateLiteralArray,                     // opcode
       Operator::kNoProperties,                             // properties
       "JSCreateLiteralArray",                              // name
-      0, 1, 1, 1, 1, 2,                                    // counts
+      1, 1, 1, 1, 1, 2,                                    // counts
       parameters);                                         // parameter
 }
 
 const Operator* JSOperatorBuilder::CreateEmptyLiteralArray(
     FeedbackSource const& feedback) {
+  static constexpr int kFeedbackVector = 1;
+  static constexpr int kArity = kFeedbackVector;
   FeedbackParameter parameters(feedback);
-  return new (zone()) Operator1<FeedbackParameter>(  // --
+  return zone()->New<Operator1<FeedbackParameter>>(  // --
       IrOpcode::kJSCreateEmptyLiteralArray,          // opcode
       Operator::kEliminatable,                       // properties
       "JSCreateEmptyLiteralArray",                   // name
-      0, 1, 1, 1, 1, 0,                              // counts
+      kArity, 1, 1, 1, 1, 0,                         // counts
       parameters);                                   // parameter
 }
 
 const Operator* JSOperatorBuilder::CreateArrayFromIterable() {
-  return new (zone()) Operator(              // --
+  return zone()->New<Operator>(              // --
       IrOpcode::kJSCreateArrayFromIterable,  // opcode
       Operator::kNoProperties,               // properties
       "JSCreateArrayFromIterable",           // name
@@ -1196,11 +1245,11 @@ const Operator* JSOperatorBuilder::CreateLiteralObject(
     int number_of_properties) {
   CreateLiteralParameters parameters(constant_properties, feedback,
                                      number_of_properties, literal_flags);
-  return new (zone()) Operator1<CreateLiteralParameters>(  // --
+  return zone()->New<Operator1<CreateLiteralParameters>>(  // --
       IrOpcode::kJSCreateLiteralObject,                    // opcode
       Operator::kNoProperties,                             // properties
       "JSCreateLiteralObject",                             // name
-      0, 1, 1, 1, 1, 2,                                    // counts
+      1, 1, 1, 1, 1, 2,                                    // counts
       parameters);                                         // parameter
 }
 
@@ -1208,27 +1257,27 @@ const Operator* JSOperatorBuilder::GetTemplateObject(
     Handle<TemplateObjectDescription> description,
     Handle<SharedFunctionInfo> shared, FeedbackSource const& feedback) {
   GetTemplateObjectParameters parameters(description, shared, feedback);
-  return new (zone()) Operator1<GetTemplateObjectParameters>(  // --
+  return zone()->New<Operator1<GetTemplateObjectParameters>>(  // --
       IrOpcode::kJSGetTemplateObject,                          // opcode
       Operator::kEliminatable,                                 // properties
       "JSGetTemplateObject",                                   // name
-      0, 1, 1, 1, 1, 0,                                        // counts
+      1, 1, 1, 1, 1, 0,                                        // counts
       parameters);                                             // parameter
 }
 
 const Operator* JSOperatorBuilder::CloneObject(FeedbackSource const& feedback,
                                                int literal_flags) {
   CloneObjectParameters parameters(feedback, literal_flags);
-  return new (zone()) Operator1<CloneObjectParameters>(  // --
+  return zone()->New<Operator1<CloneObjectParameters>>(  // --
       IrOpcode::kJSCloneObject,                          // opcode
       Operator::kNoProperties,                           // properties
       "JSCloneObject",                                   // name
-      1, 1, 1, 1, 1, 2,                                  // counts
+      2, 1, 1, 1, 1, 2,                                  // counts
       parameters);                                       // parameter
 }
 
 const Operator* JSOperatorBuilder::StackCheck(StackCheckKind kind) {
-  return new (zone()) Operator1<StackCheckKind>(  // --
+  return zone()->New<Operator1<StackCheckKind>>(  // --
       IrOpcode::kJSStackCheck,                    // opcode
       Operator::kNoWrite,                         // properties
       "JSStackCheck",                             // name
@@ -1237,7 +1286,7 @@ const Operator* JSOperatorBuilder::StackCheck(StackCheckKind kind) {
 }
 
 const Operator* JSOperatorBuilder::CreateEmptyLiteralObject() {
-  return new (zone()) Operator(               // --
+  return zone()->New<Operator>(               // --
       IrOpcode::kJSCreateEmptyLiteralObject,  // opcode
       Operator::kNoProperties,                // properties
       "JSCreateEmptyLiteralObject",           // name
@@ -1249,11 +1298,11 @@ const Operator* JSOperatorBuilder::CreateLiteralRegExp(
     int literal_flags) {
   CreateLiteralParameters parameters(constant_pattern, feedback, -1,
                                      literal_flags);
-  return new (zone()) Operator1<CreateLiteralParameters>(  // --
+  return zone()->New<Operator1<CreateLiteralParameters>>(  // --
       IrOpcode::kJSCreateLiteralRegExp,                    // opcode
       Operator::kNoProperties,                             // properties
       "JSCreateLiteralRegExp",                             // name
-      0, 1, 1, 1, 1, 2,                                    // counts
+      1, 1, 1, 1, 1, 2,                                    // counts
       parameters);                                         // parameter
 }
 
@@ -1261,7 +1310,7 @@ const Operator* JSOperatorBuilder::CreateFunctionContext(
     Handle<ScopeInfo> scope_info, int slot_count, ScopeType scope_type) {
   CreateFunctionContextParameters parameters(scope_info, slot_count,
                                              scope_type);
-  return new (zone()) Operator1<CreateFunctionContextParameters>(   // --
+  return zone()->New<Operator1<CreateFunctionContextParameters>>(   // --
       IrOpcode::kJSCreateFunctionContext, Operator::kNoProperties,  // opcode
       "JSCreateFunctionContext",                                    // name
       0, 1, 1, 1, 1, 2,                                             // counts
@@ -1270,7 +1319,7 @@ const Operator* JSOperatorBuilder::CreateFunctionContext(
 
 const Operator* JSOperatorBuilder::CreateCatchContext(
     const Handle<ScopeInfo>& scope_info) {
-  return new (zone()) Operator1<Handle<ScopeInfo>>(
+  return zone()->New<Operator1<Handle<ScopeInfo>>>(
       IrOpcode::kJSCreateCatchContext, Operator::kNoProperties,  // opcode
       "JSCreateCatchContext",                                    // name
       1, 1, 1, 1, 1, 2,                                          // counts
@@ -1279,7 +1328,7 @@ const Operator* JSOperatorBuilder::CreateCatchContext(
 
 const Operator* JSOperatorBuilder::CreateWithContext(
     const Handle<ScopeInfo>& scope_info) {
-  return new (zone()) Operator1<Handle<ScopeInfo>>(
+  return zone()->New<Operator1<Handle<ScopeInfo>>>(
       IrOpcode::kJSCreateWithContext, Operator::kNoProperties,  // opcode
       "JSCreateWithContext",                                    // name
       1, 1, 1, 1, 1, 2,                                         // counts
@@ -1288,7 +1337,7 @@ const Operator* JSOperatorBuilder::CreateWithContext(
 
 const Operator* JSOperatorBuilder::CreateBlockContext(
     const Handle<ScopeInfo>& scope_info) {
-  return new (zone()) Operator1<Handle<ScopeInfo>>(              // --
+  return zone()->New<Operator1<Handle<ScopeInfo>>>(              // --
       IrOpcode::kJSCreateBlockContext, Operator::kNoProperties,  // opcode
       "JSCreateBlockContext",                                    // name
       0, 1, 1, 1, 1, 2,                                          // counts

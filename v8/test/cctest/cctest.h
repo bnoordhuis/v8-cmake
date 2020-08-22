@@ -40,6 +40,7 @@
 #include "src/flags/flags.h"
 #include "src/heap/factory.h"
 #include "src/init/v8.h"
+#include "src/objects/js-function.h"
 #include "src/objects/objects.h"
 #include "src/zone/accounting-allocator.h"
 
@@ -613,7 +614,7 @@ class InitializedHandleScope {
 
 class HandleAndZoneScope : public InitializedHandleScope {
  public:
-  HandleAndZoneScope();
+  explicit HandleAndZoneScope(bool support_zone_compression = false);
   ~HandleAndZoneScope();
 
   // Prefixing the below with main_ reduces a lot of naming clashes.

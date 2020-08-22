@@ -91,7 +91,7 @@ struct WasmException {
 struct WasmDataSegment {
   // Construct an active segment.
   explicit WasmDataSegment(WasmInitExpr dest_addr)
-      : dest_addr(dest_addr), active(true) {}
+      : dest_addr(std::move(dest_addr)), active(true) {}
 
   // Construct a passive segment, which has no dest_addr.
   WasmDataSegment() : active(false) {}
@@ -118,15 +118,15 @@ struct WasmElemSegment {
 
   // Construct an active segment.
   WasmElemSegment(uint32_t table_index, WasmInitExpr offset)
-      : type(ValueType::Ref(kHeapFunc, kNullable)),
+      : type(kWasmFuncRef),
         table_index(table_index),
-        offset(offset),
+        offset(std::move(offset)),
         status(kStatusActive) {}
 
   // Construct a passive or declarative segment, which has no table index or
   // offset.
   explicit WasmElemSegment(bool declarative)
-      : type(ValueType::Ref(kHeapFunc, kNullable)),
+      : type(kWasmFuncRef),
         table_index(0),
         status(declarative ? kStatusDeclarative : kStatusPassive) {}
 
@@ -296,6 +296,9 @@ struct V8_EXPORT_PRIVATE WasmModule {
   std::vector<TypeDefinition> types;    // by type index
   std::vector<uint8_t> type_kinds;      // by type index
   std::vector<uint32_t> signature_ids;  // by signature index
+
+  bool has_type(uint32_t index) const { return index < types.size(); }
+
   void add_signature(const FunctionSig* sig) {
     types.push_back(TypeDefinition(sig));
     type_kinds.push_back(kWasmFunctionTypeCode);
@@ -331,6 +334,7 @@ struct V8_EXPORT_PRIVATE WasmModule {
   bool has_array(uint32_t index) const {
     return index < types.size() && type_kinds[index] == kWasmArrayTypeCode;
   }
+  base::RecursiveMutex* type_cache_mutex() const { return &type_cache_mutex_; }
   bool is_cached_subtype(uint32_t subtype, uint32_t supertype) const {
     return subtyping_cache->count(std::make_pair(subtype, supertype)) == 1;
   }
@@ -381,6 +385,9 @@ struct V8_EXPORT_PRIVATE WasmModule {
   // Indexes are stored in increasing order.
   std::unique_ptr<ZoneUnorderedSet<std::pair<uint32_t, uint32_t>>>
       type_equivalence_cache;
+  // The above two caches are used from background compile jobs, so they
+  // must be protected from concurrent modifications:
+  mutable base::RecursiveMutex type_cache_mutex_;
 
   DISALLOW_COPY_AND_ASSIGN(WasmModule);
 };
@@ -531,10 +538,12 @@ class TruncatedUserString {
   char buffer_[kMaxLen];
 };
 
-// Print the signature into the given {buffer}. If {buffer} is non-empty, it
-// will be null-terminated, even if the signature is cut off. Returns the number
-// of characters written, excluding the terminating null-byte.
-size_t PrintSignature(Vector<char> buffer, const wasm::FunctionSig*);
+// Print the signature into the given {buffer}, using {delimiter} as separator
+// between parameter types and return types. If {buffer} is non-empty, it will
+// be null-terminated, even if the signature is cut off. Returns the number of
+// characters written, excluding the terminating null-byte.
+size_t PrintSignature(Vector<char> buffer, const wasm::FunctionSig*,
+                      char delimiter = ':');
 
 }  // namespace wasm
 }  // namespace internal

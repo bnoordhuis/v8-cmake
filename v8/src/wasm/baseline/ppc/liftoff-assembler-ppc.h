@@ -52,6 +52,11 @@ int LiftoffAssembler::PrepareStackFrame() {
   return 0;
 }
 
+void LiftoffAssembler::PrepareTailCall(int num_callee_stack_params,
+                                       int stack_param_delta) {
+  bailout(kUnsupportedArchitecture, "PrepareTailCall");
+}
+
 void LiftoffAssembler::PatchPrepareStackFrame(int offset, int frame_size) {
   bailout(kUnsupportedArchitecture, "PatchPrepareStackFrame");
 }
@@ -109,7 +114,7 @@ void LiftoffAssembler::FillInstanceInto(Register dst) {
 
 void LiftoffAssembler::LoadTaggedPointer(Register dst, Register src_addr,
                                          Register offset_reg,
-                                         uint32_t offset_imm,
+                                         int32_t offset_imm,
                                          LiftoffRegList pinned) {
   bailout(kUnsupportedArchitecture, "LoadTaggedPointer");
 }
@@ -196,6 +201,11 @@ void LiftoffAssembler::StoreCallerFrameSlot(LiftoffRegister src,
                                             uint32_t caller_slot_idx,
                                             ValueType type) {
   bailout(kUnsupportedArchitecture, "StoreCallerFrameSlot");
+}
+
+void LiftoffAssembler::LoadReturnStackSlot(LiftoffRegister dst, int offset,
+                                           ValueType type) {
+  bailout(kUnsupportedArchitecture, "LoadReturnStackSlot");
 }
 
 void LiftoffAssembler::MoveStackValue(uint32_t dst_offset, uint32_t src_offset,
@@ -537,6 +547,13 @@ void LiftoffAssembler::emit_f64_set_cond(Condition cond, Register dst,
                                          DoubleRegister lhs,
                                          DoubleRegister rhs) {
   bailout(kUnsupportedArchitecture, "emit_f64_set_cond");
+}
+
+bool LiftoffAssembler::emit_select(LiftoffRegister dst, Register condition,
+                                   LiftoffRegister true_value,
+                                   LiftoffRegister false_value,
+                                   ValueType type) {
+  return false;
 }
 
 void LiftoffAssembler::LoadTransform(LiftoffRegister dst, Register src_addr,
@@ -1000,7 +1017,8 @@ void LiftoffAssembler::emit_i16x8_extract_lane_s(LiftoffRegister dst,
 void LiftoffAssembler::emit_s8x16_shuffle(LiftoffRegister dst,
                                           LiftoffRegister lhs,
                                           LiftoffRegister rhs,
-                                          const uint8_t shuffle[16]) {
+                                          const uint8_t shuffle[16],
+                                          bool is_swizzle) {
   bailout(kSimd, "s8x16_shuffle");
 }
 
@@ -1245,6 +1263,11 @@ void LiftoffAssembler::emit_f64x2_le(LiftoffRegister dst, LiftoffRegister lhs,
   bailout(kUnsupportedArchitecture, "emit_f64x2_le");
 }
 
+void LiftoffAssembler::emit_s128_const(LiftoffRegister dst,
+                                       const uint8_t imms[16]) {
+  bailout(kUnsupportedArchitecture, "emit_s128_const");
+}
+
 void LiftoffAssembler::emit_s128_not(LiftoffRegister dst, LiftoffRegister src) {
   bailout(kUnsupportedArchitecture, "emit_s128_not");
 }
@@ -1452,10 +1475,18 @@ void LiftoffAssembler::CallNativeWasmCode(Address addr) {
   bailout(kUnsupportedArchitecture, "CallNativeWasmCode");
 }
 
+void LiftoffAssembler::TailCallNativeWasmCode(Address addr) {
+  bailout(kUnsupportedArchitecture, "TailCallNativeWasmCode");
+}
+
 void LiftoffAssembler::CallIndirect(const wasm::FunctionSig* sig,
                                     compiler::CallDescriptor* call_descriptor,
                                     Register target) {
   bailout(kUnsupportedArchitecture, "CallIndirect");
+}
+
+void LiftoffAssembler::TailCallIndirect(Register target) {
+  bailout(kUnsupportedArchitecture, "TailCallIndirect");
 }
 
 void LiftoffAssembler::CallRuntimeStub(WasmCode::RuntimeStubId sid) {

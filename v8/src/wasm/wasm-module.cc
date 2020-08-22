@@ -252,8 +252,7 @@ namespace {
 // reflective functions. Should be kept in sync with the {GetValueType} helper.
 Handle<String> ToValueTypeString(Isolate* isolate, ValueType type) {
   return isolate->factory()->InternalizeUtf8String(
-      type == kWasmFuncRef ? CStrVector("anyfunc")
-                           : VectorOf(type.type_name()));
+      type == kWasmFuncRef ? CStrVector("anyfunc") : VectorOf(type.name()));
 }
 }  // namespace
 
@@ -329,13 +328,13 @@ Handle<JSObject> GetTypeForTable(Isolate* isolate, ValueType type,
   Factory* factory = isolate->factory();
 
   Handle<String> element;
-  if (type.is_reference_to(kHeapFunc)) {
+  if (type.is_reference_to(HeapType::kFunc)) {
     // TODO(wasm): We should define the "anyfunc" string in one central
     // place and then use that constant everywhere.
     element = factory->InternalizeUtf8String("anyfunc");
   } else {
     DCHECK(WasmFeatures::FromFlags().has_reftypes() &&
-           type.is_reference_to(kHeapExtern));
+           type.is_reference_to(HeapType::kExtern));
     element = factory->InternalizeUtf8String("externref");
   }
 
@@ -636,7 +635,8 @@ size_t EstimateStoredSize(const WasmModule* module) {
          VectorSize(module->exceptions) + VectorSize(module->elem_segments);
 }
 
-size_t PrintSignature(Vector<char> buffer, const wasm::FunctionSig* sig) {
+size_t PrintSignature(Vector<char> buffer, const wasm::FunctionSig* sig,
+                      char delimiter) {
   if (buffer.empty()) return 0;
   size_t old_size = buffer.size();
   auto append_char = [&buffer](char c) {
@@ -647,7 +647,7 @@ size_t PrintSignature(Vector<char> buffer, const wasm::FunctionSig* sig) {
   for (wasm::ValueType t : sig->parameters()) {
     append_char(t.short_name());
   }
-  append_char(':');
+  append_char(delimiter);
   for (wasm::ValueType t : sig->returns()) {
     append_char(t.short_name());
   }

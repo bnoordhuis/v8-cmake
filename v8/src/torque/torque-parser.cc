@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "src/torque/torque-parser.h"
+
 #include <algorithm>
 #include <cctype>
 #include <set>
@@ -13,7 +15,6 @@
 #include "src/torque/constants.h"
 #include "src/torque/declarations.h"
 #include "src/torque/earley-parser.h"
-#include "src/torque/torque-parser.h"
 #include "src/torque/utils.h"
 
 namespace v8 {
@@ -36,14 +37,17 @@ struct TypeswitchCase {
   Statement* block;
 };
 
+struct EnumEntry {
+  Identifier* name;
+  base::Optional<TypeExpression*> type;
+};
+
 class BuildFlags : public ContextualClass<BuildFlags> {
  public:
   BuildFlags() {
     build_flags_["V8_SFI_HAS_UNIQUE_ID"] = V8_SFI_HAS_UNIQUE_ID;
     build_flags_["TAGGED_SIZE_8_BYTES"] = TAGGED_SIZE_8_BYTES;
     build_flags_["V8_DOUBLE_FIELDS_UNBOXING"] = V8_DOUBLE_FIELDS_UNBOXING;
-    build_flags_["V8_ARRAY_BUFFER_EXTENSION_BOOL"] =
-        V8_ARRAY_BUFFER_EXTENSION_BOOL;
     build_flags_["TRUE_FOR_TESTING"] = true;
     build_flags_["FALSE_FOR_TESTING"] = false;
   }
@@ -105,6 +109,13 @@ template <>
 V8_EXPORT_PRIVATE const ParseResultTypeId
     ParseResultHolder<NameAndTypeExpression>::id =
         ParseResultTypeId::kNameAndTypeExpression;
+template <>
+V8_EXPORT_PRIVATE const ParseResultTypeId ParseResultHolder<EnumEntry>::id =
+    ParseResultTypeId::kEnumEntry;
+template <>
+V8_EXPORT_PRIVATE const ParseResultTypeId
+    ParseResultHolder<std::vector<EnumEntry>>::id =
+        ParseResultTypeId::kStdVectorOfEnumEntry;
 template <>
 V8_EXPORT_PRIVATE const ParseResultTypeId
     ParseResultHolder<NameAndExpression>::id =
@@ -381,9 +392,13 @@ base::Optional<ParseResult> MakeMethodCall(ParseResultIterator* child_results) {
 
 base::Optional<ParseResult> MakeNewExpression(
     ParseResultIterator* child_results) {
+  bool pretenured = child_results->NextAs<bool>();
+
   auto type = child_results->NextAs<TypeExpression*>();
   auto initializers = child_results->NextAs<std::vector<NameAndExpression>>();
-  Expression* result = MakeNode<NewExpression>(type, std::move(initializers));
+
+  Expression* result =
+      MakeNode<NewExpression>(type, std::move(initializers), pretenured);
   return ParseResult{result};
 }
 
@@ -483,11 +498,20 @@ base::Optional<ParseResult> MakeParameterList(
 
 base::Optional<ParseResult> MakeAssertStatement(
     ParseResultIterator* child_results) {
-  auto kind = child_results->NextAs<Identifier*>()->value;
+  auto kind_string = child_results->NextAs<Identifier*>()->value;
   auto expr_with_source = child_results->NextAs<ExpressionWithSource>();
-  DCHECK(kind == "assert" || kind == "check");
+  AssertStatement::AssertKind kind;
+  if (kind_string == "assert") {
+    kind = AssertStatement::AssertKind::kAssert;
+  } else if (kind_string == "check") {
+    kind = AssertStatement::AssertKind::kCheck;
+  } else if (kind_string == "static_assert") {
+    kind = AssertStatement::AssertKind::kStaticAssert;
+  } else {
+    UNREACHABLE();
+  }
   Statement* result = MakeNode<AssertStatement>(
-      kind == "assert", expr_with_source.expression, expr_with_source.source);
+      kind, expr_with_source.expression, expr_with_source.source);
   return ParseResult{result};
 }
 
@@ -1215,7 +1239,7 @@ base::Optional<ParseResult> MakeEnumDeclaration(
       child_results->NextAs<base::Optional<TypeExpression*>>();
   auto constexpr_generates_opt =
       child_results->NextAs<base::Optional<std::string>>();
-  auto entries = child_results->NextAs<std::vector<Identifier*>>();
+  auto entries = child_results->NextAs<std::vector<EnumEntry>>();
   const bool is_open = child_results->NextAs<bool>();
   CurrentSourcePosition::Scope current_source_position(
       child_results->matched_input().pos);
@@ -1254,9 +1278,10 @@ base::Optional<ParseResult> MakeEnumDeclaration(
       name_type_expression->pos = name_identifier->pos;
 
       std::vector<Declaration*> entry_decls;
-      for (const auto& entry_name_identifier : entries) {
+      for (const auto& entry : entries) {
         entry_decls.push_back(MakeNode<AbstractTypeDeclaration>(
-            entry_name_identifier, false, name_type_expression, base::nullopt));
+            entry.name, false, entry.type.value_or(name_type_expression),
+            base::nullopt));
       }
 
       result.push_back(type_decl);
@@ -1273,12 +1298,13 @@ base::Optional<ParseResult> MakeEnumDeclaration(
       //   type Enum = Enum::kEntry0 | ... | Enum::kEntryN;
       TypeExpression* union_type = nullptr;
       std::vector<Declaration*> entry_decls;
-      for (const auto& entry_name_identifier : entries) {
+      for (const auto& entry : entries) {
         entry_decls.push_back(MakeNode<AbstractTypeDeclaration>(
-            entry_name_identifier, false, base_type_expression, base::nullopt));
+            entry.name, false, entry.type.value_or(*base_type_expression),
+            base::nullopt));
 
         auto entry_type = MakeNode<BasicTypeExpression>(
-            std::vector<std::string>{name}, entry_name_identifier->value,
+            std::vector<std::string>{name}, entry.name->value,
             std::vector<TypeExpression*>{});
         if (union_type) {
           union_type = MakeNode<UnionTypeExpression>(union_type, entry_type);
@@ -1343,10 +1369,10 @@ base::Optional<ParseResult> MakeEnumDeclaration(
     EnumDescription enum_description{CurrentSourcePosition::Get(), name,
                                      constexpr_generates, is_open};
     std::vector<Declaration*> entry_decls;
-    for (const auto& entry_name_identifier : entries) {
-      const std::string entry_name = entry_name_identifier->value;
+    for (const auto& entry : entries) {
+      const std::string entry_name = entry.name->value;
       const std::string entry_constexpr_type =
-          std::string(CONSTEXPR_TYPE_PREFIX) + entry_name;
+          CONSTEXPR_TYPE_PREFIX + entry_name;
       enum_description.entries.push_back(constexpr_generates +
                                          "::" + entry_name);
 
@@ -1354,15 +1380,49 @@ base::Optional<ParseResult> MakeEnumDeclaration(
           MakeNode<Identifier>(entry_constexpr_type), false,
           constexpr_type_expression, constexpr_generates));
 
-      // namespace Enum {
-      //   const kEntry0: constexpr kEntry0 constexpr 'Enum::kEntry0';
-      // }
-      entry_decls.push_back(MakeNode<ExternConstDeclaration>(
-          entry_name_identifier,
-          MakeNode<BasicTypeExpression>(std::vector<std::string>{},
-                                        entry_constexpr_type,
-                                        std::vector<TypeExpression*>{}),
-          constexpr_generates + "::" + entry_name));
+      bool generate_typed_constant = entry.type.has_value();
+      if (generate_typed_constant) {
+        // namespace Enum {
+        //   const constexpr_constant_kEntry0: constexpr kEntry0 constexpr
+        //   'Enum::kEntry0'; const kEntry0 = %RawDownCast<T,
+        //   Base>(FromConstexpr<Enum>(constexpr_constant_kEntry0));
+        // }
+        if (!generate_nonconstexpr) {
+          Error(
+              "Enum constants with custom types require an enum with an "
+              "extends clause.")
+              .Position((*entry.type)->pos);
+        }
+        Identifier* constexpr_constant_name =
+            MakeNode<Identifier>("constexpr constant " + entry_name);
+        entry_decls.push_back(MakeNode<ExternConstDeclaration>(
+            constexpr_constant_name,
+            MakeNode<BasicTypeExpression>(std::vector<std::string>{},
+                                          entry_constexpr_type,
+                                          std::vector<TypeExpression*>{}),
+            constexpr_generates + "::" + entry_name));
+        entry_decls.push_back(MakeNode<ConstDeclaration>(
+            entry.name, *entry.type,
+            MakeNode<IntrinsicCallExpression>(
+                MakeNode<Identifier>("%RawDownCast"),
+                std::vector<TypeExpression*>{*entry.type,
+                                             *base_type_expression},
+                std::vector<Expression*>{MakeCall(
+                    MakeNode<Identifier>("FromConstexpr"), {type_expr},
+                    {MakeNode<IdentifierExpression>(std::vector<std::string>{},
+                                                    constexpr_constant_name)},
+                    {})})));
+      } else {
+        // namespace Enum {
+        //   const kEntry0: constexpr kEntry0 constexpr 'Enum::kEntry0';
+        // }
+        entry_decls.push_back(MakeNode<ExternConstDeclaration>(
+            entry.name,
+            MakeNode<BasicTypeExpression>(std::vector<std::string>{},
+                                          entry_constexpr_type,
+                                          std::vector<TypeExpression*>{}),
+            constexpr_generates + "::" + entry_name));
+      }
 
       // FromConstexpr<Enum, Enum::constexpr kEntry0>(
       //   : Enum::constexpr kEntry0): Enum
@@ -1815,6 +1875,12 @@ base::Optional<ParseResult> MakeNameAndType(
   return ParseResult{NameAndTypeExpression{name, type}};
 }
 
+base::Optional<ParseResult> MakeEnumEntry(ParseResultIterator* child_results) {
+  auto name = child_results->NextAs<Identifier*>();
+  auto type = child_results->NextAs<base::Optional<TypeExpression*>>();
+  return ParseResult{EnumEntry{name, type}};
+}
+
 base::Optional<ParseResult> MakeNameAndExpression(
     ParseResultIterator* child_results) {
   auto name = child_results->NextAs<Identifier*>();
@@ -2230,6 +2296,13 @@ struct TorqueGrammar : Grammar {
       MakeIntrinsicCallExpression)};
 
   // Result: Expression*
+  Symbol newExpression = {
+      Rule({Token("new"),
+            CheckIf(Sequence({Token("("), Token("Pretenured"), Token(")")})),
+            &simpleType, &initializerList},
+           MakeNewExpression)};
+
+  // Result: Expression*
   Symbol primaryExpression = {
       Rule({&callExpression}),
       Rule({&callMethodExpression}),
@@ -2243,7 +2316,7 @@ struct TorqueGrammar : Grammar {
       Rule({&decimalLiteral}, MakeNumberLiteralExpression),
       Rule({&stringLiteral}, MakeStringLiteralExpression),
       Rule({&simpleType, &initializerList}, MakeStructExpression),
-      Rule({Token("new"), &simpleType, &initializerList}, MakeNewExpression),
+      Rule({&newExpression}),
       Rule({Token("("), expression, Token(")")})};
 
   // Result: Expression*
@@ -2342,6 +2415,9 @@ struct TorqueGrammar : Grammar {
   Symbol* optionalTypeSpecifier =
       Optional<TypeExpression*>(Sequence({Token(":"), &type}));
 
+  // Result: EnumEntry
+  Symbol enumEntry = {Rule({&name, optionalTypeSpecifier}, MakeEnumEntry)};
+
   // Result: Statement*
   Symbol varDeclaration = {
       Rule({OneOf({"let", "const"}), &name, optionalTypeSpecifier},
@@ -2389,8 +2465,8 @@ struct TorqueGrammar : Grammar {
           MakeTypeswitchStatement),
       Rule({Token("try"), &block, List<TryHandler*>(&tryHandler)},
            MakeTryLabelExpression),
-      Rule({OneOf({"assert", "check"}), Token("("), &expressionWithSource,
-            Token(")"), Token(";")},
+      Rule({OneOf({"assert", "check", "static_assert"}), Token("("),
+            &expressionWithSource, Token(")"), Token(";")},
            MakeAssertStatement),
       Rule({Token("while"), Token("("), expression, Token(")"), &statement},
            MakeWhileStatement),
@@ -2505,7 +2581,7 @@ struct TorqueGrammar : Grammar {
             Optional<TypeExpression*>(Sequence({Token("extends"), &type})),
             Optional<std::string>(
                 Sequence({Token("constexpr"), &externalString})),
-            Token("{"), NonemptyList<Identifier*>(&name, Token(",")),
+            Token("{"), NonemptyList<EnumEntry>(&enumEntry, Token(",")),
             CheckIf(Sequence({Token(","), Token("...")})), Token("}")},
            MakeEnumDeclaration),
       Rule({Token("namespace"), &identifier, Token("{"), &declarationList,

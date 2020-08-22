@@ -41,9 +41,7 @@ namespace liftoff {
 
 constexpr int kInstanceOffset = 2 * kSystemPointerSize;
 
-inline MemOperand GetStackSlot(int offset) {
-  return MemOperand(offset > 0 ? fp : sp, -offset);
-}
+inline MemOperand GetStackSlot(int offset) { return MemOperand(fp, -offset); }
 
 inline MemOperand GetInstanceOperand() { return GetStackSlot(kInstanceOffset); }
 
@@ -90,11 +88,10 @@ inline CPURegister AcquireByType(UseScratchRegisterScope* temps,
   }
 }
 
+template <typename T>
 inline MemOperand GetMemOp(LiftoffAssembler* assm,
                            UseScratchRegisterScope* temps, Register addr,
-                           Register offset, uint32_t offset_imm) {
-  // Wasm memory is limited to a size <4GB.
-  DCHECK(is_uint32(offset_imm));
+                           Register offset, T offset_imm) {
   if (offset.is_valid()) {
     if (offset_imm == 0) return MemOperand(addr.X(), offset.W(), UXTW);
     Register tmp = temps->AcquireW();
@@ -181,6 +178,30 @@ int LiftoffAssembler::PrepareStackFrame() {
   InstructionAccurateScope scope(this, 1);
   sub(sp, sp, 0);
   return offset;
+}
+
+void LiftoffAssembler::PrepareTailCall(int num_callee_stack_params,
+                                       int stack_param_delta) {
+  UseScratchRegisterScope temps(this);
+  Register scratch = temps.AcquireX();
+
+  // Push the return address and frame pointer to complete the stack frame.
+  sub(sp, sp, 16);
+  ldr(scratch, MemOperand(fp, 8));
+  Poke(scratch, 8);
+  ldr(scratch, MemOperand(fp, 0));
+  Poke(scratch, 0);
+
+  // Shift the whole frame upwards.
+  int slot_count = num_callee_stack_params + 2;
+  for (int i = slot_count - 1; i >= 0; --i) {
+    ldr(scratch, MemOperand(sp, i * 8));
+    str(scratch, MemOperand(fp, (i - stack_param_delta) * 8));
+  }
+
+  // Set the new stack and frame pointer.
+  Sub(sp, fp, stack_param_delta * 8);
+  Pop<kAuthLR>(fp, lr);
 }
 
 void LiftoffAssembler::PatchPrepareStackFrame(int offset, int frame_size) {
@@ -313,7 +334,7 @@ void LiftoffAssembler::FillInstanceInto(Register dst) {
 
 void LiftoffAssembler::LoadTaggedPointer(Register dst, Register src_addr,
                                          Register offset_reg,
-                                         uint32_t offset_imm,
+                                         int32_t offset_imm,
                                          LiftoffRegList pinned) {
   UseScratchRegisterScope temps(this);
   MemOperand src_op =
@@ -695,6 +716,11 @@ void LiftoffAssembler::StoreCallerFrameSlot(LiftoffRegister src,
                                             ValueType type) {
   int32_t offset = (caller_slot_idx + 1) * LiftoffAssembler::kStackSlotSize;
   Str(liftoff::GetRegFromType(src, type), MemOperand(fp, offset));
+}
+
+void LiftoffAssembler::LoadReturnStackSlot(LiftoffRegister dst, int offset,
+                                           ValueType type) {
+  Ldr(liftoff::GetRegFromType(dst, type), MemOperand(sp, offset));
 }
 
 void LiftoffAssembler::MoveStackValue(uint32_t dst_offset, uint32_t src_offset,
@@ -1409,6 +1435,13 @@ void LiftoffAssembler::emit_f64_set_cond(Condition cond, Register dst,
   }
 }
 
+bool LiftoffAssembler::emit_select(LiftoffRegister dst, Register condition,
+                                   LiftoffRegister true_value,
+                                   LiftoffRegister false_value,
+                                   ValueType type) {
+  return false;
+}
+
 void LiftoffAssembler::LoadTransform(LiftoffRegister dst, Register src_addr,
                                      Register offset_reg, uint32_t offset_imm,
                                      LoadType type,
@@ -1995,7 +2028,8 @@ void LiftoffAssembler::emit_i16x8_max_u(LiftoffRegister dst,
 void LiftoffAssembler::emit_s8x16_shuffle(LiftoffRegister dst,
                                           LiftoffRegister lhs,
                                           LiftoffRegister rhs,
-                                          const uint8_t shuffle[16]) {
+                                          const uint8_t shuffle[16],
+                                          bool is_swizzle) {
   VRegister src1 = lhs.fp();
   VRegister src2 = rhs.fp();
   VRegister temp = dst.fp();
@@ -2328,6 +2362,13 @@ void LiftoffAssembler::emit_f64x2_le(LiftoffRegister dst, LiftoffRegister lhs,
   Fcmge(dst.fp().V2D(), rhs.fp().V2D(), lhs.fp().V2D());
 }
 
+void LiftoffAssembler::emit_s128_const(LiftoffRegister dst,
+                                       const uint8_t imms[16]) {
+  uint64_t vals[2];
+  memcpy(vals, imms, sizeof(vals));
+  Movi(dst.fp().V16B(), vals[1], vals[0]);
+}
+
 void LiftoffAssembler::emit_s128_not(LiftoffRegister dst, LiftoffRegister src) {
   Mvn(dst.fp().V16B(), src.fp().V16B());
 }
@@ -2582,6 +2623,10 @@ void LiftoffAssembler::CallNativeWasmCode(Address addr) {
   Call(addr, RelocInfo::WASM_CALL);
 }
 
+void LiftoffAssembler::TailCallNativeWasmCode(Address addr) {
+  Jump(addr, RelocInfo::WASM_CALL);
+}
+
 void LiftoffAssembler::CallIndirect(const wasm::FunctionSig* sig,
                                     compiler::CallDescriptor* call_descriptor,
                                     Register target) {
@@ -2589,6 +2634,17 @@ void LiftoffAssembler::CallIndirect(const wasm::FunctionSig* sig,
   // that target will always be in a register.
   DCHECK(target.is_valid());
   Call(target);
+}
+
+void LiftoffAssembler::TailCallIndirect(Register target) {
+  DCHECK(target.is_valid());
+  // When control flow integrity is enabled, the target is a "bti c"
+  // instruction, which enforces that the jump instruction is either a "blr", or
+  // a "br" with x16 or x17 as its destination.
+  UseScratchRegisterScope temps(this);
+  temps.Exclude(x17);
+  Mov(x17, target);
+  Jump(x17);
 }
 
 void LiftoffAssembler::CallRuntimeStub(WasmCode::RuntimeStubId sid) {

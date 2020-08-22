@@ -9,6 +9,7 @@
 #include "include/cppgc/trace-trait.h"
 #include "src/base/macros.h"
 #include "src/heap/cppgc/heap.h"
+#include "src/heap/cppgc/liveness-broker.h"
 #include "test/unittests/heap/cppgc/tests.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
@@ -41,8 +42,6 @@ class OtherPayload {
 class GCedMixinApplication : public GCed,
                              public OtherPayload,
                              public GCedMixin {
-  USING_GARBAGE_COLLECTED_MIXIN();
-
  public:
   void Trace(cppgc::Visitor* visitor) const override {
     GCed::Trace(visitor);

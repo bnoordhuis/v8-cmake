@@ -5,7 +5,6 @@
 #include "src/heap/new-spaces.h"
 
 #include "src/heap/array-buffer-sweeper.h"
-#include "src/heap/array-buffer-tracker-inl.h"
 #include "src/heap/heap-inl.h"
 #include "src/heap/incremental-marking.h"
 #include "src/heap/mark-compact.h"
@@ -21,7 +20,6 @@ Page* SemiSpace::InitializePage(MemoryChunk* chunk) {
   chunk->SetFlag(in_to_space ? MemoryChunk::TO_PAGE : MemoryChunk::FROM_PAGE);
   Page* page = static_cast<Page*>(chunk);
   page->SetYoungGenerationPageFlags(heap()->incremental_marking()->IsMarking());
-  page->AllocateLocalTracker();
   page->list_node().Initialize();
 #ifdef ENABLE_MINOR_MC
   if (FLAG_minor_mc) {
@@ -465,8 +463,7 @@ bool NewSpace::Rebalance() {
 }
 
 void NewSpace::UpdateLinearAllocationArea() {
-  // Make sure there is no unaccounted allocations.
-  DCHECK(!AllocationObserversActive() || top_on_previous_step_ == top());
+  AdvanceAllocationObservers();
 
   Address new_top = to_space_.page_low();
   BasicMemoryChunk::UpdateHighWaterMark(allocation_info_.top());
@@ -475,13 +472,12 @@ void NewSpace::UpdateLinearAllocationArea() {
   // See the corresponding loads in ConcurrentMarking::Run.
   original_limit_.store(limit(), std::memory_order_relaxed);
   original_top_.store(top(), std::memory_order_release);
-  StartNextInlineAllocationStep();
   DCHECK_SEMISPACE_ALLOCATION_INFO(allocation_info_, to_space_);
+
+  UpdateInlineAllocationLimit(0);
 }
 
 void NewSpace::ResetLinearAllocationArea() {
-  // Do a step to account for memory allocated so far before resetting.
-  InlineAllocationStep(top(), top(), kNullAddress, 0);
   to_space_.Reset();
   UpdateLinearAllocationArea();
   // Clear all mark-bits in the to-space.
@@ -496,6 +492,8 @@ void NewSpace::ResetLinearAllocationArea() {
 
 void NewSpace::UpdateInlineAllocationLimit(size_t min_size) {
   Address new_limit = ComputeLimit(top(), to_space_.page_high(), min_size);
+  DCHECK_LE(top(), new_limit);
+  DCHECK_LE(new_limit, to_space_.page_high());
   allocation_info_.set_limit(new_limit);
   DCHECK_SEMISPACE_ALLOCATION_INFO(allocation_info_, to_space_);
 }
@@ -503,9 +501,6 @@ void NewSpace::UpdateInlineAllocationLimit(size_t min_size) {
 bool NewSpace::AddFreshPage() {
   Address top = allocation_info_.top();
   DCHECK(!OldSpace::IsAtPageStart(top));
-
-  // Do a step to account for memory allocated on previous page.
-  InlineAllocationStep(top, top, kNullAddress, 0);
 
   if (!to_space_.AdvancePage()) {
     // No more pages left to advance.
@@ -528,39 +523,91 @@ bool NewSpace::AddFreshPageSynchronized() {
 
 bool NewSpace::EnsureAllocation(int size_in_bytes,
                                 AllocationAlignment alignment) {
+  AdvanceAllocationObservers();
+
   Address old_top = allocation_info_.top();
   Address high = to_space_.page_high();
   int filler_size = Heap::GetFillToAlign(old_top, alignment);
   int aligned_size_in_bytes = size_in_bytes + filler_size;
 
-  if (old_top + aligned_size_in_bytes > high) {
-    // Not enough room in the page, try to allocate a new one.
-    if (!AddFreshPage()) {
-      return false;
-    }
-
-    old_top = allocation_info_.top();
-    high = to_space_.page_high();
-    filler_size = Heap::GetFillToAlign(old_top, alignment);
+  if (old_top + aligned_size_in_bytes <= high) {
+    UpdateInlineAllocationLimit(aligned_size_in_bytes);
+    return true;
   }
+
+  // Not enough room in the page, try to allocate a new one.
+  if (!AddFreshPage()) {
+    return false;
+  }
+
+  old_top = allocation_info_.top();
+  high = to_space_.page_high();
+  filler_size = Heap::GetFillToAlign(old_top, alignment);
+  aligned_size_in_bytes = size_in_bytes + filler_size;
 
   DCHECK(old_top + aligned_size_in_bytes <= high);
-
-  if (allocation_info_.limit() < high) {
-    // Either the limit has been lowered because linear allocation was disabled
-    // or because incremental marking wants to get a chance to do a step,
-    // or because idle scavenge job wants to get a chance to post a task.
-    // Set the new limit accordingly.
-    Address new_top = old_top + aligned_size_in_bytes;
-    Address soon_object = old_top + filler_size;
-    InlineAllocationStep(new_top, new_top, soon_object, size_in_bytes);
-    UpdateInlineAllocationLimit(aligned_size_in_bytes);
-  }
+  UpdateInlineAllocationLimit(aligned_size_in_bytes);
   return true;
 }
 
 std::unique_ptr<ObjectIterator> NewSpace::GetObjectIterator(Heap* heap) {
   return std::unique_ptr<ObjectIterator>(new SemiSpaceObjectIterator(this));
+}
+
+AllocationResult NewSpace::AllocateRawSlow(int size_in_bytes,
+                                           AllocationAlignment alignment,
+                                           AllocationOrigin origin) {
+#ifdef V8_HOST_ARCH_32_BIT
+  return alignment != kWordAligned
+             ? AllocateRawAligned(size_in_bytes, alignment, origin)
+             : AllocateRawUnaligned(size_in_bytes, origin);
+#else
+#ifdef V8_COMPRESS_POINTERS
+  // TODO(ishell, v8:8875): Consider using aligned allocations once the
+  // allocation alignment inconsistency is fixed. For now we keep using
+  // unaligned access since both x64 and arm64 architectures (where pointer
+  // compression is supported) allow unaligned access to doubles and full words.
+#endif  // V8_COMPRESS_POINTERS
+  return AllocateRawUnaligned(size_in_bytes, origin);
+#endif
+}
+
+AllocationResult NewSpace::AllocateRawUnaligned(int size_in_bytes,
+                                                AllocationOrigin origin) {
+  if (!EnsureAllocation(size_in_bytes, kWordAligned)) {
+    return AllocationResult::Retry();
+  }
+
+  DCHECK_EQ(allocation_info_.start(), allocation_info_.top());
+
+  AllocationResult result = AllocateFastUnaligned(size_in_bytes, origin);
+  DCHECK(!result.IsRetry());
+
+  InvokeAllocationObservers(result.ToAddress(), size_in_bytes, size_in_bytes,
+                            size_in_bytes);
+
+  return result;
+}
+
+AllocationResult NewSpace::AllocateRawAligned(int size_in_bytes,
+                                              AllocationAlignment alignment,
+                                              AllocationOrigin origin) {
+  if (!EnsureAllocation(size_in_bytes, alignment)) {
+    return AllocationResult::Retry();
+  }
+
+  DCHECK_EQ(allocation_info_.start(), allocation_info_.top());
+
+  int aligned_size_in_bytes;
+
+  AllocationResult result = AllocateFastAligned(
+      size_in_bytes, &aligned_size_in_bytes, alignment, origin);
+  DCHECK(!result.IsRetry());
+
+  InvokeAllocationObservers(result.ToAddress(), size_in_bytes,
+                            aligned_size_in_bytes, aligned_size_in_bytes);
+
+  return result;
 }
 
 #ifdef VERIFY_HEAP
@@ -610,13 +657,6 @@ void NewSpace::Verify(Isolate* isolate) {
         ExternalString external_string = ExternalString::cast(object);
         size_t size = external_string.ExternalPayloadSize();
         external_space_bytes[ExternalBackingStoreType::kExternalString] += size;
-      } else if (object.IsJSArrayBuffer()) {
-        JSArrayBuffer array_buffer = JSArrayBuffer::cast(object);
-        if (ArrayBufferTracker::IsTracked(array_buffer)) {
-          size_t size = ArrayBufferTracker::Lookup(heap(), array_buffer)
-                            ->PerIsolateAccountingLength();
-          external_space_bytes[ExternalBackingStoreType::kArrayBuffer] += size;
-        }
       }
 
       current += size;
@@ -628,18 +668,14 @@ void NewSpace::Verify(Isolate* isolate) {
   }
 
   for (int i = 0; i < kNumTypes; i++) {
-    if (V8_ARRAY_BUFFER_EXTENSION_BOOL &&
-        i == ExternalBackingStoreType::kArrayBuffer)
-      continue;
+    if (i == ExternalBackingStoreType::kArrayBuffer) continue;
     ExternalBackingStoreType t = static_cast<ExternalBackingStoreType>(i);
     CHECK_EQ(external_space_bytes[t], ExternalBackingStoreBytes(t));
   }
 
-  if (V8_ARRAY_BUFFER_EXTENSION_BOOL) {
     size_t bytes = heap()->array_buffer_sweeper()->young().BytesSlow();
     CHECK_EQ(bytes,
              ExternalBackingStoreBytes(ExternalBackingStoreType::kArrayBuffer));
-  }
 
   // Check semi-spaces.
   CHECK_EQ(from_space_.id(), kFromSpace);

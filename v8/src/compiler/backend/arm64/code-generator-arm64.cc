@@ -736,7 +736,10 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         __ Jump(wasm_code, constant.rmode());
       } else {
         Register target = i.InputRegister(0);
-        __ Jump(target);
+        UseScratchRegisterScope temps(tasm());
+        temps.Exclude(x17);
+        __ Mov(x17, target);
+        __ Jump(x17);
       }
       unwinding_info_writer_.MarkBlockWillExit();
       frame_access_state()->ClearSPDelta();
@@ -749,7 +752,10 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       DCHECK_IMPLIES(
           HasCallDescriptorFlag(instr, CallDescriptor::kFixedTargetRegister),
           reg == kJavaScriptCallCodeStartRegister);
-      __ Jump(reg);
+      UseScratchRegisterScope temps(tasm());
+      temps.Exclude(x17);
+      __ Mov(x17, reg);
+      __ Jump(x17);
       unwinding_info_writer_.MarkBlockWillExit();
       frame_access_state()->ClearSPDelta();
       frame_access_state()->SetFrameAccessToDefault();
@@ -944,7 +950,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         offset = Operand(i.InputRegister(1));
       }
       Register value = i.InputRegister(2);
-      auto ool = new (zone()) OutOfLineRecordWrite(
+      auto ool = zone()->New<OutOfLineRecordWrite>(
           this, object, offset, value, mode, DetermineStubCallMode(),
           &unwinding_info_writer_);
       __ StoreTaggedField(value, MemOperand(object, offset));
@@ -1352,9 +1358,11 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         LocationOperand* op = LocationOperand::cast(instr->OutputAt(0));
         if (op->representation() == MachineRepresentation::kFloat64) {
           __ Ldr(i.OutputDoubleRegister(), MemOperand(fp, offset));
-        } else {
-          DCHECK_EQ(MachineRepresentation::kFloat32, op->representation());
+        } else if (op->representation() == MachineRepresentation::kFloat32) {
           __ Ldr(i.OutputFloatRegister(), MemOperand(fp, offset));
+        } else {
+          DCHECK_EQ(MachineRepresentation::kSimd128, op->representation());
+          __ Ldr(i.OutputSimd128Register(), MemOperand(fp, offset));
         }
       } else {
         __ Ldr(i.OutputRegister(), MemOperand(fp, offset));
@@ -1512,24 +1520,32 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kArm64Float64ToFloat32:
       __ Fcvt(i.OutputDoubleRegister().S(), i.InputDoubleRegister(0));
       break;
-    case kArm64Float32ToInt32:
+    case kArm64Float32ToInt32: {
       __ Fcvtzs(i.OutputRegister32(), i.InputFloat32Register(0));
-      // Avoid INT32_MAX as an overflow indicator and use INT32_MIN instead,
-      // because INT32_MIN allows easier out-of-bounds detection.
-      __ Cmn(i.OutputRegister32(), 1);
-      __ Csinc(i.OutputRegister32(), i.OutputRegister32(), i.OutputRegister32(),
-               vc);
+      bool set_overflow_to_min_i32 = MiscField::decode(instr->opcode());
+      if (set_overflow_to_min_i32) {
+        // Avoid INT32_MAX as an overflow indicator and use INT32_MIN instead,
+        // because INT32_MIN allows easier out-of-bounds detection.
+        __ Cmn(i.OutputRegister32(), 1);
+        __ Csinc(i.OutputRegister32(), i.OutputRegister32(),
+                 i.OutputRegister32(), vc);
+      }
       break;
+    }
     case kArm64Float64ToInt32:
       __ Fcvtzs(i.OutputRegister32(), i.InputDoubleRegister(0));
       break;
-    case kArm64Float32ToUint32:
+    case kArm64Float32ToUint32: {
       __ Fcvtzu(i.OutputRegister32(), i.InputFloat32Register(0));
-      // Avoid UINT32_MAX as an overflow indicator and use 0 instead,
-      // because 0 allows easier out-of-bounds detection.
-      __ Cmn(i.OutputRegister32(), 1);
-      __ Adc(i.OutputRegister32(), i.OutputRegister32(), Operand(0));
+      bool set_overflow_to_min_u32 = MiscField::decode(instr->opcode());
+      if (set_overflow_to_min_u32) {
+        // Avoid UINT32_MAX as an overflow indicator and use 0 instead,
+        // because 0 allows easier out-of-bounds detection.
+        __ Cmn(i.OutputRegister32(), 1);
+        __ Adc(i.OutputRegister32(), i.OutputRegister32(), Operand(0));
+      }
       break;
+    }
     case kArm64Float64ToUint32:
       __ Fcvtzu(i.OutputRegister32(), i.InputDoubleRegister(0));
       break;
@@ -2445,8 +2461,15 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ Mov(dst.W(), tmp.V8H(), 0);
       break;
     }
+    case kArm64S128Const: {
+      uint64_t imm1 = make_uint64(i.InputUint32(1), i.InputUint32(0));
+      uint64_t imm2 = make_uint64(i.InputUint32(3), i.InputUint32(2));
+      __ Movi(i.OutputSimd128Register().V16B(), imm2, imm1);
+      break;
+    }
     case kArm64S128Zero: {
-      __ Movi(i.OutputSimd128Register().V16B(), 0);
+      VRegister dst = i.OutputSimd128Register().V16B();
+      __ Eor(dst, dst, dst);
       break;
     }
       SIMD_BINOP_CASE(kArm64S128And, And, 16B);
@@ -2547,9 +2570,9 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         DCHECK(AreConsecutive(src0, src1));
       }
       int64_t imm1 =
-          (i.InputInt32(2) & mask) | ((i.InputInt32(3) & mask) << 32);
+          make_uint64(i.InputInt32(3) & mask, i.InputInt32(2) & mask);
       int64_t imm2 =
-          (i.InputInt32(4) & mask) | ((i.InputInt32(5) & mask) << 32);
+          make_uint64(i.InputInt32(5) & mask, i.InputInt32(4) & mask);
       UseScratchRegisterScope scope(tasm());
       VRegister temp = scope.AcquireV(kFormat16B);
       __ Movi(temp, imm2, imm1);
@@ -2773,7 +2796,7 @@ void CodeGenerator::AssembleArchTrap(Instruction* instr,
         // is added to the native module and copied into wasm code space.
         __ Call(static_cast<Address>(trap_id), RelocInfo::WASM_STUB_CALL);
         ReferenceMap* reference_map =
-            new (gen_->zone()) ReferenceMap(gen_->zone());
+            gen_->zone()->New<ReferenceMap>(gen_->zone());
         gen_->RecordSafepoint(reference_map, Safepoint::kNoLazyDeopt);
         if (FLAG_debug_code) {
           // The trap code should never return.
@@ -2784,7 +2807,7 @@ void CodeGenerator::AssembleArchTrap(Instruction* instr,
     Instruction* instr_;
     CodeGenerator* gen_;
   };
-  auto ool = new (zone()) OutOfLineTrap(this, instr);
+  auto ool = zone()->New<OutOfLineTrap>(this, instr);
   Label* tlabel = ool->entry();
   Condition cc = FlagsConditionToCondition(condition);
   __ B(cc, tlabel);
@@ -2942,7 +2965,7 @@ void CodeGenerator::AssembleConstructFrame() {
 
       __ Call(wasm::WasmCode::kWasmStackOverflow, RelocInfo::WASM_STUB_CALL);
       // We come from WebAssembly, there are no references for the GC.
-      ReferenceMap* reference_map = new (zone()) ReferenceMap(zone());
+      ReferenceMap* reference_map = zone()->New<ReferenceMap>(zone());
       RecordSafepoint(reference_map, Safepoint::kNoLazyDeopt);
       if (FLAG_debug_code) {
         __ Brk(0);

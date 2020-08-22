@@ -1,45 +1,45 @@
 [
   {
     "url": "https://chromium.googlesource.com/v8/v8.git",
-    "commit": "4dc61d3cd02f0a2462cc655095db1e99ad9047d2",
+    "commit": "58073be96a5485b2844246ea4d8d4b57bc6f3179",
     "/* comment */": "Dependency v8 must be first.",
-    "branch": "branch-heads/8.5",
-    "path": "v8"
+    "branch": "branch-heads/8.6",
+    "path": ""
   },
   {
     "url": "https://chromium.googlesource.com/external/github.com/google/googletest.git",
     "commit": "4fe018038f87675c083d0cfb6a6b57c274fb1753",
     "branch": "master",
-    "path": "v8/third_party/googletest/src"
+    "path": "third_party/googletest/src"
   },
   {
     "url": "https://chromium.googlesource.com/chromium/src/third_party/jinja2.git",
-    "commit": "3f90fa05c85718505e28c9c3426c1ba52843b9b7",
+    "commit": "61cfe2ac6c9108534c43b4039a95a0980251f266",
     "branch": "master",
-    "path": "v8/third_party/jinja2"
+    "path": "third_party/jinja2"
   },
   {
     "url": "https://chromium.googlesource.com/chromium/src/base/trace_event/common.git",
-    "commit": "ef3586804494b7e402b6c1791d5dccdf2971afff",
+    "commit": "23ef5333a357fc7314630ef88b44c3a545881dee",
     "branch": "master",
-    "path": "v8/base/trace_event/common"
+    "path": "base/trace_event/common"
   },
   {
     "url": "https://chromium.googlesource.com/chromium/src/third_party/zlib.git",
-    "commit": "02daed1bb93a34cf89d68913f88708228e12a0ab",
+    "commit": "d53accfbd0382a98ad7378045631866449b5f92e",
     "branch": "master",
-    "path": "v8/third_party/zlib"
+    "path": "third_party/zlib"
   },
   {
     "url": "https://chromium.googlesource.com/chromium/src/third_party/markupsafe.git",
-    "commit": "8f45f5cfa0009d2a70589bcda0349b8cb2b72783",
+    "commit": "f2fb0f21ef1e1d4ffd43be8c63fc3d4928dea7ab",
     "branch": "master",
-    "path": "v8/third_party/markupsafe"
+    "path": "third_party/markupsafe"
   },
   {
     "url": "https://chromium.googlesource.com/external/github.com/intel/ittapi",
     "commit": "b4ae0122ba749163096058b4f1bb065bf4a7de94",
     "branch": "master",
-    "path": "v8/third_party/ittapi"
+    "path": "third_party/ittapi"
   }
 ]

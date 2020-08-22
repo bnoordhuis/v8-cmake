@@ -9,12 +9,10 @@
 #include "include/cppgc/allocation.h"
 #include "include/cppgc/persistent.h"
 #include "src/heap/cppgc/globals.h"
-#include "src/heap/cppgc/heap-object-header-inl.h"
 #include "src/heap/cppgc/heap-object-header.h"
-#include "src/heap/cppgc/heap-page-inl.h"
+#include "src/heap/cppgc/heap-page.h"
 #include "src/heap/cppgc/heap-visitor.h"
 #include "src/heap/cppgc/heap.h"
-#include "src/heap/cppgc/page-memory-inl.h"
 #include "src/heap/cppgc/page-memory.h"
 #include "src/heap/cppgc/stats-collector.h"
 #include "test/unittests/heap/cppgc/tests.h"
@@ -201,8 +199,8 @@ TEST_F(SweeperTest, CoalesceFreeListEntries) {
   const BasePage* page = BasePage::FromPayload(object2);
   const FreeList& freelist = NormalPageSpace::From(page->space())->free_list();
 
-  const FreeList::Block coalesced_block = {object2_start,
-                                           object3_end - object2_start};
+  const FreeList::Block coalesced_block = {
+      object2_start, static_cast<size_t>(object3_end - object2_start)};
 
   EXPECT_EQ(0u, g_destructor_callcount);
   EXPECT_FALSE(freelist.Contains(coalesced_block));

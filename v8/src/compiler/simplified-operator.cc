@@ -6,6 +6,7 @@
 
 #include "include/v8-fast-api-calls.h"
 #include "src/base/lazy-instance.h"
+#include "src/compiler/linkage.h"
 #include "src/compiler/opcodes.h"
 #include "src/compiler/operator.h"
 #include "src/compiler/types.h"
@@ -284,6 +285,29 @@ std::ostream& operator<<(std::ostream& os, CheckMapsParameters const& p) {
 CheckMapsParameters const& CheckMapsParametersOf(Operator const* op) {
   DCHECK_EQ(IrOpcode::kCheckMaps, op->opcode());
   return OpParameter<CheckMapsParameters>(op);
+}
+
+bool operator==(DynamicCheckMapsParameters const& lhs,
+                DynamicCheckMapsParameters const& rhs) {
+  return lhs.handler().address() == rhs.handler().address() &&
+         lhs.feedback() == rhs.feedback() && lhs.state() == rhs.state();
+}
+
+size_t hash_value(DynamicCheckMapsParameters const& p) {
+  FeedbackSource::Hash feedback_hash;
+  return base::hash_combine(p.handler().address(), feedback_hash(p.feedback()),
+                            p.state());
+}
+
+std::ostream& operator<<(std::ostream& os,
+                         DynamicCheckMapsParameters const& p) {
+  return os << p.handler() << ", " << p.feedback() << "," << p.state();
+}
+
+DynamicCheckMapsParameters const& DynamicCheckMapsParametersOf(
+    Operator const* op) {
+  DCHECK_EQ(IrOpcode::kDynamicCheckMaps, op->opcode());
+  return OpParameter<DynamicCheckMapsParameters>(op);
 }
 
 ZoneHandleSet<Map> const& CompareMapsParametersOf(Operator const* op) {
@@ -1189,7 +1213,7 @@ struct SimplifiedOperatorGlobalCache final {
 namespace {
 DEFINE_LAZY_LEAKY_OBJECT_GETTER(SimplifiedOperatorGlobalCache,
                                 GetSimplifiedOperatorGlobalCache)
-}
+}  // namespace
 
 SimplifiedOperatorBuilder::SimplifiedOperatorBuilder(Zone* zone)
     : cache_(*GetSimplifiedOperatorGlobalCache()), zone_(zone) {}
@@ -1212,7 +1236,7 @@ GET_FROM_CACHE(LoadFieldByIndex)
     if (!feedback.IsValid()) {                                              \
       return &cache_.k##Name;                                               \
     }                                                                       \
-    return new (zone()) Operator1<CheckParameters>(                         \
+    return zone()->New<Operator1<CheckParameters>>(                         \
         IrOpcode::k##Name, Operator::kFoldable | Operator::kNoThrow, #Name, \
         value_input_count, 1, 1, value_output_count, 1, 0,                  \
         CheckParameters(feedback));                                         \
@@ -1220,19 +1244,19 @@ GET_FROM_CACHE(LoadFieldByIndex)
 CHECKED_WITH_FEEDBACK_OP_LIST(GET_FROM_CACHE_WITH_FEEDBACK)
 #undef GET_FROM_CACHE_WITH_FEEDBACK
 
-#define GET_FROM_CACHE_WITH_FEEDBACK(Name)                              \
-  const Operator* SimplifiedOperatorBuilder::Name(                      \
-      const FeedbackSource& feedback, CheckBoundsFlags flags) {         \
-    DCHECK(!(flags & CheckBoundsFlag::kConvertStringAndMinusZero));     \
-    if (!feedback.IsValid()) {                                          \
-      if (flags & CheckBoundsFlag::kAbortOnOutOfBounds) {               \
-        return &cache_.k##Name##Aborting;                               \
-      } else {                                                          \
-        return &cache_.k##Name;                                         \
-      }                                                                 \
-    }                                                                   \
-    return new (zone())                                                 \
-        SimplifiedOperatorGlobalCache::Name##Operator(feedback, flags); \
+#define GET_FROM_CACHE_WITH_FEEDBACK(Name)                             \
+  const Operator* SimplifiedOperatorBuilder::Name(                     \
+      const FeedbackSource& feedback, CheckBoundsFlags flags) {        \
+    DCHECK(!(flags & CheckBoundsFlag::kConvertStringAndMinusZero));    \
+    if (!feedback.IsValid()) {                                         \
+      if (flags & CheckBoundsFlag::kAbortOnOutOfBounds) {              \
+        return &cache_.k##Name##Aborting;                              \
+      } else {                                                         \
+        return &cache_.k##Name;                                        \
+      }                                                                \
+    }                                                                  \
+    return zone()->New<SimplifiedOperatorGlobalCache::Name##Operator>( \
+        feedback, flags);                                              \
   }
 CHECKED_BOUNDS_OP_LIST(GET_FROM_CACHE_WITH_FEEDBACK)
 #undef GET_FROM_CACHE_WITH_FEEDBACK
@@ -1255,8 +1279,8 @@ const Operator* SimplifiedOperatorBuilder::CheckBounds(
       }
     }
   }
-  return new (zone())
-      SimplifiedOperatorGlobalCache::CheckBoundsOperator(feedback, flags);
+  return zone()->New<SimplifiedOperatorGlobalCache::CheckBoundsOperator>(
+      feedback, flags);
 }
 
 bool IsCheckedWithFeedback(const Operator* op) {
@@ -1270,7 +1294,7 @@ bool IsCheckedWithFeedback(const Operator* op) {
 }
 
 const Operator* SimplifiedOperatorBuilder::RuntimeAbort(AbortReason reason) {
-  return new (zone()) Operator1<int>(           // --
+  return zone()->New<Operator1<int>>(           // --
       IrOpcode::kRuntimeAbort,                  // opcode
       Operator::kNoThrow | Operator::kNoDeopt,  // flags
       "RuntimeAbort",                           // name
@@ -1281,25 +1305,21 @@ const Operator* SimplifiedOperatorBuilder::RuntimeAbort(AbortReason reason) {
 const Operator* SimplifiedOperatorBuilder::BigIntAsUintN(int bits) {
   CHECK(0 <= bits && bits <= 64);
 
-  return new (zone()) Operator1<int>(IrOpcode::kBigIntAsUintN, Operator::kPure,
+  return zone()->New<Operator1<int>>(IrOpcode::kBigIntAsUintN, Operator::kPure,
                                      "BigIntAsUintN", 1, 0, 0, 1, 0, 0, bits);
+}
+
+const Operator* SimplifiedOperatorBuilder::UpdateInterruptBudget(int delta) {
+  return zone()->New<Operator1<int>>(
+      IrOpcode::kUpdateInterruptBudget, Operator::kNoThrow | Operator::kNoDeopt,
+      "UpdateInterruptBudget", 1, 1, 1, 0, 1, 0, delta);
 }
 
 const Operator* SimplifiedOperatorBuilder::AssertType(Type type) {
   DCHECK(type.IsRange());
-  return new (zone()) Operator1<Type>(IrOpcode::kAssertType,
+  return zone()->New<Operator1<Type>>(IrOpcode::kAssertType,
                                       Operator::kNoThrow | Operator::kNoDeopt,
                                       "AssertType", 1, 0, 0, 1, 0, 0, type);
-}
-
-const Operator* SimplifiedOperatorBuilder::FastApiCall(
-    const CFunctionInfo* signature, FeedbackSource const& feedback) {
-  // function, c args
-  int value_input_count = signature->ArgumentCount() + 1;
-  return new (zone()) Operator1<FastApiCallParameters>(
-      IrOpcode::kFastApiCall, Operator::kNoThrow, "FastApiCall",
-      value_input_count, 1, 1, 1, 1, 0,
-      FastApiCallParameters(signature, feedback));
 }
 
 const Operator* SimplifiedOperatorBuilder::CheckIf(
@@ -1313,7 +1333,7 @@ const Operator* SimplifiedOperatorBuilder::CheckIf(
 #undef CHECK_IF
     }
   }
-  return new (zone()) Operator1<CheckIfParameters>(
+  return zone()->New<Operator1<CheckIfParameters>>(
       IrOpcode::kCheckIf, Operator::kFoldable | Operator::kNoThrow, "CheckIf",
       1, 1, 1, 0, 1, 0, CheckIfParameters(reason, feedback));
 }
@@ -1350,7 +1370,7 @@ const Operator* SimplifiedOperatorBuilder::CheckedFloat64ToInt32(
         return &cache_.kCheckedFloat64ToInt32DontCheckForMinusZeroOperator;
     }
   }
-  return new (zone()) Operator1<CheckMinusZeroParameters>(
+  return zone()->New<Operator1<CheckMinusZeroParameters>>(
       IrOpcode::kCheckedFloat64ToInt32,
       Operator::kFoldable | Operator::kNoThrow, "CheckedFloat64ToInt32", 1, 1,
       1, 1, 1, 0, CheckMinusZeroParameters(mode, feedback));
@@ -1366,7 +1386,7 @@ const Operator* SimplifiedOperatorBuilder::CheckedFloat64ToInt64(
         return &cache_.kCheckedFloat64ToInt64DontCheckForMinusZeroOperator;
     }
   }
-  return new (zone()) Operator1<CheckMinusZeroParameters>(
+  return zone()->New<Operator1<CheckMinusZeroParameters>>(
       IrOpcode::kCheckedFloat64ToInt64,
       Operator::kFoldable | Operator::kNoThrow, "CheckedFloat64ToInt64", 1, 1,
       1, 1, 1, 0, CheckMinusZeroParameters(mode, feedback));
@@ -1382,7 +1402,7 @@ const Operator* SimplifiedOperatorBuilder::CheckedTaggedToInt32(
         return &cache_.kCheckedTaggedToInt32DontCheckForMinusZeroOperator;
     }
   }
-  return new (zone()) Operator1<CheckMinusZeroParameters>(
+  return zone()->New<Operator1<CheckMinusZeroParameters>>(
       IrOpcode::kCheckedTaggedToInt32, Operator::kFoldable | Operator::kNoThrow,
       "CheckedTaggedToInt32", 1, 1, 1, 1, 1, 0,
       CheckMinusZeroParameters(mode, feedback));
@@ -1398,7 +1418,7 @@ const Operator* SimplifiedOperatorBuilder::CheckedTaggedToInt64(
         return &cache_.kCheckedTaggedToInt64DontCheckForMinusZeroOperator;
     }
   }
-  return new (zone()) Operator1<CheckMinusZeroParameters>(
+  return zone()->New<Operator1<CheckMinusZeroParameters>>(
       IrOpcode::kCheckedTaggedToInt64, Operator::kFoldable | Operator::kNoThrow,
       "CheckedTaggedToInt64", 1, 1, 1, 1, 1, 0,
       CheckMinusZeroParameters(mode, feedback));
@@ -1416,7 +1436,7 @@ const Operator* SimplifiedOperatorBuilder::CheckedTaggedToFloat64(
         return &cache_.kCheckedTaggedToFloat64NumberOrOddballOperator;
     }
   }
-  return new (zone()) Operator1<CheckTaggedInputParameters>(
+  return zone()->New<Operator1<CheckTaggedInputParameters>>(
       IrOpcode::kCheckedTaggedToFloat64,
       Operator::kFoldable | Operator::kNoThrow, "CheckedTaggedToFloat64", 1, 1,
       1, 1, 1, 0, CheckTaggedInputParameters(mode, feedback));
@@ -1435,7 +1455,7 @@ const Operator* SimplifiedOperatorBuilder::CheckedTruncateTaggedToWord32(
         return &cache_.kCheckedTruncateTaggedToWord32NumberOrOddballOperator;
     }
   }
-  return new (zone()) Operator1<CheckTaggedInputParameters>(
+  return zone()->New<Operator1<CheckTaggedInputParameters>>(
       IrOpcode::kCheckedTruncateTaggedToWord32,
       Operator::kFoldable | Operator::kNoThrow, "CheckedTruncateTaggedToWord32",
       1, 1, 1, 1, 1, 0, CheckTaggedInputParameters(mode, feedback));
@@ -1445,7 +1465,7 @@ const Operator* SimplifiedOperatorBuilder::CheckMaps(
     CheckMapsFlags flags, ZoneHandleSet<Map> maps,
     const FeedbackSource& feedback) {
   CheckMapsParameters const parameters(flags, maps, feedback);
-  return new (zone()) Operator1<CheckMapsParameters>(  // --
+  return zone()->New<Operator1<CheckMapsParameters>>(  // --
       IrOpcode::kCheckMaps,                            // opcode
       Operator::kNoThrow | Operator::kNoWrite,         // flags
       "CheckMaps",                                     // name
@@ -1453,9 +1473,23 @@ const Operator* SimplifiedOperatorBuilder::CheckMaps(
       parameters);                                     // parameter
 }
 
+const Operator* SimplifiedOperatorBuilder::DynamicCheckMaps(
+    CheckMapsFlags flags, Handle<Object> handler,
+    const FeedbackSource& feedback,
+    DynamicCheckMapsParameters::ICState ic_state) {
+  DynamicCheckMapsParameters const parameters(flags, handler, feedback,
+                                              ic_state);
+  return zone()->New<Operator1<DynamicCheckMapsParameters>>(  // --
+      IrOpcode::kDynamicCheckMaps,                            // opcode
+      Operator::kNoThrow | Operator::kNoWrite,                // flags
+      "DynamicCheckMaps",                                     // name
+      1, 1, 1, 0, 1, 0,                                       // counts
+      parameters);                                            // parameter
+}
+
 const Operator* SimplifiedOperatorBuilder::MapGuard(ZoneHandleSet<Map> maps) {
   DCHECK_LT(0, maps.size());
-  return new (zone()) Operator1<ZoneHandleSet<Map>>(  // --
+  return zone()->New<Operator1<ZoneHandleSet<Map>>>(  // --
       IrOpcode::kMapGuard, Operator::kEliminatable,   // opcode
       "MapGuard",                                     // name
       1, 1, 1, 0, 1, 0,                               // counts
@@ -1465,7 +1499,7 @@ const Operator* SimplifiedOperatorBuilder::MapGuard(ZoneHandleSet<Map> maps) {
 const Operator* SimplifiedOperatorBuilder::CompareMaps(
     ZoneHandleSet<Map> maps) {
   DCHECK_LT(0, maps.size());
-  return new (zone()) Operator1<ZoneHandleSet<Map>>(  // --
+  return zone()->New<Operator1<ZoneHandleSet<Map>>>(  // --
       IrOpcode::kCompareMaps,                         // opcode
       Operator::kNoThrow | Operator::kNoWrite,        // flags
       "CompareMaps",                                  // name
@@ -1498,7 +1532,7 @@ const Operator* SimplifiedOperatorBuilder::CheckFloat64Hole(
     }
     UNREACHABLE();
   }
-  return new (zone()) Operator1<CheckFloat64HoleParameters>(
+  return zone()->New<Operator1<CheckFloat64HoleParameters>>(
       IrOpcode::kCheckFloat64Hole, Operator::kFoldable | Operator::kNoThrow,
       "CheckFloat64Hole", 1, 1, 1, 1, 1, 0,
       CheckFloat64HoleParameters(mode, feedback));
@@ -1506,14 +1540,14 @@ const Operator* SimplifiedOperatorBuilder::CheckFloat64Hole(
 
 const Operator* SimplifiedOperatorBuilder::SpeculativeBigIntAdd(
     BigIntOperationHint hint) {
-  return new (zone()) Operator1<BigIntOperationHint>(
+  return zone()->New<Operator1<BigIntOperationHint>>(
       IrOpcode::kSpeculativeBigIntAdd, Operator::kFoldable | Operator::kNoThrow,
       "SpeculativeBigIntAdd", 2, 1, 1, 1, 1, 0, hint);
 }
 
 const Operator* SimplifiedOperatorBuilder::SpeculativeBigIntSubtract(
     BigIntOperationHint hint) {
-  return new (zone()) Operator1<BigIntOperationHint>(
+  return zone()->New<Operator1<BigIntOperationHint>>(
       IrOpcode::kSpeculativeBigIntSubtract,
       Operator::kFoldable | Operator::kNoThrow, "SpeculativeBigIntSubtract", 2,
       1, 1, 1, 1, 0, hint);
@@ -1521,7 +1555,7 @@ const Operator* SimplifiedOperatorBuilder::SpeculativeBigIntSubtract(
 
 const Operator* SimplifiedOperatorBuilder::SpeculativeBigIntNegate(
     BigIntOperationHint hint) {
-  return new (zone()) Operator1<BigIntOperationHint>(
+  return zone()->New<Operator1<BigIntOperationHint>>(
       IrOpcode::kSpeculativeBigIntNegate,
       Operator::kFoldable | Operator::kNoThrow, "SpeculativeBigIntNegate", 1, 1,
       1, 1, 1, 0, hint);
@@ -1529,7 +1563,7 @@ const Operator* SimplifiedOperatorBuilder::SpeculativeBigIntNegate(
 
 const Operator* SimplifiedOperatorBuilder::CheckClosure(
     const Handle<FeedbackCell>& feedback_cell) {
-  return new (zone()) Operator1<Handle<FeedbackCell>>(  // --
+  return zone()->New<Operator1<Handle<FeedbackCell>>>(  // --
       IrOpcode::kCheckClosure,                          // opcode
       Operator::kNoThrow | Operator::kNoWrite,          // flags
       "CheckClosure",                                   // name
@@ -1561,7 +1595,7 @@ const Operator* SimplifiedOperatorBuilder::SpeculativeToNumber(
         return &cache_.kSpeculativeToNumberNumberOrOddballOperator;
     }
   }
-  return new (zone()) Operator1<NumberOperationParameters>(
+  return zone()->New<Operator1<NumberOperationParameters>>(
       IrOpcode::kSpeculativeToNumber, Operator::kFoldable | Operator::kNoThrow,
       "SpeculativeToNumber", 1, 1, 1, 1, 1, 0,
       NumberOperationParameters(hint, feedback));
@@ -1581,7 +1615,7 @@ const Operator* SimplifiedOperatorBuilder::MaybeGrowFastElements(
         return &cache_.kGrowFastElementsOperatorSmiOrObjectElements;
     }
   }
-  return new (zone()) Operator1<GrowFastElementsParameters>(  // --
+  return zone()->New<Operator1<GrowFastElementsParameters>>(  // --
       IrOpcode::kMaybeGrowFastElements,                       // opcode
       Operator::kNoThrow,                                     // flags
       "MaybeGrowFastElements",                                // name
@@ -1591,7 +1625,7 @@ const Operator* SimplifiedOperatorBuilder::MaybeGrowFastElements(
 
 const Operator* SimplifiedOperatorBuilder::TransitionElementsKind(
     ElementsTransition transition) {
-  return new (zone()) Operator1<ElementsTransition>(  // --
+  return zone()->New<Operator1<ElementsTransition>>(  // --
       IrOpcode::kTransitionElementsKind,              // opcode
       Operator::kNoThrow,                             // flags
       "TransitionElementsKind",                       // name
@@ -1599,49 +1633,30 @@ const Operator* SimplifiedOperatorBuilder::TransitionElementsKind(
       transition);                                    // parameter
 }
 
-namespace {
-
-struct ArgumentsLengthParameters {
-  int formal_parameter_count;
-  bool is_rest_length;
-};
-
-bool operator==(ArgumentsLengthParameters first,
-                ArgumentsLengthParameters second) {
-  return first.formal_parameter_count == second.formal_parameter_count &&
-         first.is_rest_length == second.is_rest_length;
-}
-
-size_t hash_value(ArgumentsLengthParameters param) {
-  return base::hash_combine(param.formal_parameter_count, param.is_rest_length);
-}
-
-std::ostream& operator<<(std::ostream& os, ArgumentsLengthParameters param) {
-  return os << param.formal_parameter_count << ", "
-            << (param.is_rest_length ? "rest length" : "not rest length");
-}
-
-}  // namespace
-
 const Operator* SimplifiedOperatorBuilder::ArgumentsLength(
-    int formal_parameter_count, bool is_rest_length) {
-  return new (zone()) Operator1<ArgumentsLengthParameters>(  // --
-      IrOpcode::kArgumentsLength,                            // opcode
-      Operator::kPure,                                       // flags
-      "ArgumentsLength",                                     // name
-      1, 0, 0, 1, 0, 0,                                      // counts
-      ArgumentsLengthParameters{formal_parameter_count,
-                                is_rest_length});  // parameter
+    int formal_parameter_count) {
+  return zone()->New<Operator1<int>>(  // --
+      IrOpcode::kArgumentsLength,      // opcode
+      Operator::kPure,                 // flags
+      "ArgumentsLength",               // name
+      1, 0, 0, 1, 0, 0,                // counts
+      formal_parameter_count);         // parameter
+}
+
+const Operator* SimplifiedOperatorBuilder::RestLength(
+    int formal_parameter_count) {
+  return zone()->New<Operator1<int>>(  // --
+      IrOpcode::kRestLength,           // opcode
+      Operator::kPure,                 // flags
+      "RestLength",                    // name
+      1, 0, 0, 1, 0, 0,                // counts
+      formal_parameter_count);         // parameter
 }
 
 int FormalParameterCountOf(const Operator* op) {
-  DCHECK_EQ(IrOpcode::kArgumentsLength, op->opcode());
-  return OpParameter<ArgumentsLengthParameters>(op).formal_parameter_count;
-}
-
-bool IsRestLengthOf(const Operator* op) {
-  DCHECK_EQ(IrOpcode::kArgumentsLength, op->opcode());
-  return OpParameter<ArgumentsLengthParameters>(op).is_rest_length;
+  DCHECK(op->opcode() == IrOpcode::kArgumentsLength ||
+         op->opcode() == IrOpcode::kRestLength);
+  return OpParameter<int>(op);
 }
 
 bool operator==(CheckParameters const& lhs, CheckParameters const& rhs) {
@@ -1709,9 +1724,30 @@ CheckIfParameters const& CheckIfParametersOf(Operator const* op) {
   return OpParameter<CheckIfParameters>(op);
 }
 
+FastApiCallParameters const& FastApiCallParametersOf(const Operator* op) {
+  DCHECK_EQ(IrOpcode::kFastApiCall, op->opcode());
+  return OpParameter<FastApiCallParameters>(op);
+}
+
+std::ostream& operator<<(std::ostream& os, FastApiCallParameters const& p) {
+  return os << p.signature() << ", " << p.feedback() << ", " << p.descriptor();
+}
+
+size_t hash_value(FastApiCallParameters const& p) {
+  return base::hash_combine(p.signature(), FeedbackSource::Hash()(p.feedback()),
+                            p.descriptor());
+}
+
+bool operator==(FastApiCallParameters const& lhs,
+                FastApiCallParameters const& rhs) {
+  return lhs.signature() == rhs.signature() &&
+         lhs.feedback() == rhs.feedback() &&
+         lhs.descriptor() == rhs.descriptor();
+}
+
 const Operator* SimplifiedOperatorBuilder::NewDoubleElements(
     AllocationType allocation) {
-  return new (zone()) Operator1<AllocationType>(  // --
+  return zone()->New<Operator1<AllocationType>>(  // --
       IrOpcode::kNewDoubleElements,               // opcode
       Operator::kEliminatable,                    // flags
       "NewDoubleElements",                        // name
@@ -1721,7 +1757,7 @@ const Operator* SimplifiedOperatorBuilder::NewDoubleElements(
 
 const Operator* SimplifiedOperatorBuilder::NewSmiOrObjectElements(
     AllocationType allocation) {
-  return new (zone()) Operator1<AllocationType>(  // --
+  return zone()->New<Operator1<AllocationType>>(  // --
       IrOpcode::kNewSmiOrObjectElements,          // opcode
       Operator::kEliminatable,                    // flags
       "NewSmiOrObjectElements",                   // name
@@ -1730,42 +1766,42 @@ const Operator* SimplifiedOperatorBuilder::NewSmiOrObjectElements(
 }
 
 const Operator* SimplifiedOperatorBuilder::NewArgumentsElements(
-    int mapped_count) {
-  return new (zone()) Operator1<int>(   // --
-      IrOpcode::kNewArgumentsElements,  // opcode
-      Operator::kEliminatable,          // flags
-      "NewArgumentsElements",           // name
-      2, 1, 0, 1, 1, 0,                 // counts
-      mapped_count);                    // parameter
+    CreateArgumentsType type, int formal_parameter_count) {
+  return zone()->New<Operator1<NewArgumentsElementsParameters>>(  // --
+      IrOpcode::kNewArgumentsElements,                            // opcode
+      Operator::kEliminatable,                                    // flags
+      "NewArgumentsElements",                                     // name
+      2, 1, 0, 1, 1, 0,                                           // counts
+      NewArgumentsElementsParameters(type,
+                                     formal_parameter_count));  // parameter
 }
 
-int NewArgumentsElementsMappedCountOf(const Operator* op) {
+bool operator==(const NewArgumentsElementsParameters& lhs,
+                const NewArgumentsElementsParameters& rhs) {
+  return lhs.arguments_type() == rhs.arguments_type() &&
+         lhs.formal_parameter_count() == rhs.formal_parameter_count();
+}
+
+inline size_t hash_value(const NewArgumentsElementsParameters& params) {
+  return base::hash_combine(params.arguments_type(),
+                            params.formal_parameter_count());
+}
+
+std::ostream& operator<<(std::ostream& os,
+                         const NewArgumentsElementsParameters& params) {
+  return os << params.arguments_type()
+            << ", parameter_count = " << params.formal_parameter_count();
+}
+
+const NewArgumentsElementsParameters& NewArgumentsElementsParametersOf(
+    const Operator* op) {
   DCHECK_EQ(IrOpcode::kNewArgumentsElements, op->opcode());
-  return OpParameter<int>(op);
-}
-
-FastApiCallParameters const& FastApiCallParametersOf(const Operator* op) {
-  DCHECK_EQ(IrOpcode::kFastApiCall, op->opcode());
-  return OpParameter<FastApiCallParameters>(op);
-}
-
-std::ostream& operator<<(std::ostream& os, FastApiCallParameters const& p) {
-  return os << p.signature() << ", " << p.feedback();
-}
-
-size_t hash_value(FastApiCallParameters const& p) {
-  return base::hash_combine(p.signature(),
-                            FeedbackSource::Hash()(p.feedback()));
-}
-
-bool operator==(FastApiCallParameters const& lhs,
-                FastApiCallParameters const& rhs) {
-  return lhs.signature() == rhs.signature() && lhs.feedback() == rhs.feedback();
+  return OpParameter<NewArgumentsElementsParameters>(op);
 }
 
 const Operator* SimplifiedOperatorBuilder::Allocate(Type type,
                                                     AllocationType allocation) {
-  return new (zone()) Operator1<AllocateParameters>(
+  return zone()->New<Operator1<AllocateParameters>>(
       IrOpcode::kAllocate, Operator::kEliminatable, "Allocate", 1, 1, 1, 1, 1,
       0, AllocateParameters(type, allocation));
 }
@@ -1778,7 +1814,7 @@ const Operator* SimplifiedOperatorBuilder::AllocateRaw(
   DCHECK(!(allow_large_objects == AllowLargeObjects::kTrue &&
            allocation == AllocationType::kYoung &&
            !FLAG_young_generation_large_objects));
-  return new (zone()) Operator1<AllocateParameters>(
+  return zone()->New<Operator1<AllocateParameters>>(
       IrOpcode::kAllocateRaw, Operator::kEliminatable, "AllocateRaw", 1, 1, 1,
       1, 1, 1, AllocateParameters(type, allocation, allow_large_objects));
 }
@@ -1842,25 +1878,25 @@ const Operator* SimplifiedOperatorBuilder::SpeculativeNumberEqual(
 #define ACCESS(Name, Type, properties, value_input_count, control_input_count, \
                output_count)                                                   \
   const Operator* SimplifiedOperatorBuilder::Name(const Type& access) {        \
-    return new (zone())                                                        \
-        Operator1<Type>(IrOpcode::k##Name,                                     \
-                        Operator::kNoDeopt | Operator::kNoThrow | properties,  \
-                        #Name, value_input_count, 1, control_input_count,      \
-                        output_count, 1, 0, access);                           \
+    return zone()->New<Operator1<Type>>(                                       \
+        IrOpcode::k##Name,                                                     \
+        Operator::kNoDeopt | Operator::kNoThrow | properties, #Name,           \
+        value_input_count, 1, control_input_count, output_count, 1, 0,         \
+        access);                                                               \
   }
 ACCESS_OP_LIST(ACCESS)
 #undef ACCESS
 
 const Operator* SimplifiedOperatorBuilder::LoadMessage() {
-  return new (zone()) Operator(IrOpcode::kLoadMessage, Operator::kEliminatable,
+  return zone()->New<Operator>(IrOpcode::kLoadMessage, Operator::kEliminatable,
                                "LoadMessage", 1, 1, 1, 1, 1, 0);
 }
 
 const Operator* SimplifiedOperatorBuilder::StoreMessage() {
-  return new (zone())
-      Operator(IrOpcode::kStoreMessage,
-               Operator::kNoDeopt | Operator::kNoThrow | Operator::kNoRead,
-               "StoreMessage", 2, 1, 1, 0, 1, 0);
+  return zone()->New<Operator>(
+      IrOpcode::kStoreMessage,
+      Operator::kNoDeopt | Operator::kNoThrow | Operator::kNoRead,
+      "StoreMessage", 2, 1, 1, 0, 1, 0);
 }
 
 const Operator* SimplifiedOperatorBuilder::LoadStackArgument() {
@@ -1870,14 +1906,14 @@ const Operator* SimplifiedOperatorBuilder::LoadStackArgument() {
 const Operator* SimplifiedOperatorBuilder::TransitionAndStoreElement(
     Handle<Map> double_map, Handle<Map> fast_map) {
   TransitionAndStoreElementParameters parameters(double_map, fast_map);
-  return new (zone()) Operator1<TransitionAndStoreElementParameters>(
+  return zone()->New<Operator1<TransitionAndStoreElementParameters>>(
       IrOpcode::kTransitionAndStoreElement,
       Operator::kNoDeopt | Operator::kNoThrow, "TransitionAndStoreElement", 3,
       1, 1, 0, 1, 0, parameters);
 }
 
 const Operator* SimplifiedOperatorBuilder::StoreSignedSmallElement() {
-  return new (zone()) Operator(IrOpcode::kStoreSignedSmallElement,
+  return zone()->New<Operator>(IrOpcode::kStoreSignedSmallElement,
                                Operator::kNoDeopt | Operator::kNoThrow,
                                "StoreSignedSmallElement", 3, 1, 1, 0, 1, 0);
 }
@@ -1885,7 +1921,7 @@ const Operator* SimplifiedOperatorBuilder::StoreSignedSmallElement() {
 const Operator* SimplifiedOperatorBuilder::TransitionAndStoreNumberElement(
     Handle<Map> double_map) {
   TransitionAndStoreNumberElementParameters parameters(double_map);
-  return new (zone()) Operator1<TransitionAndStoreNumberElementParameters>(
+  return zone()->New<Operator1<TransitionAndStoreNumberElementParameters>>(
       IrOpcode::kTransitionAndStoreNumberElement,
       Operator::kNoDeopt | Operator::kNoThrow,
       "TransitionAndStoreNumberElement", 3, 1, 1, 0, 1, 0, parameters);
@@ -1894,10 +1930,39 @@ const Operator* SimplifiedOperatorBuilder::TransitionAndStoreNumberElement(
 const Operator* SimplifiedOperatorBuilder::TransitionAndStoreNonNumberElement(
     Handle<Map> fast_map, Type value_type) {
   TransitionAndStoreNonNumberElementParameters parameters(fast_map, value_type);
-  return new (zone()) Operator1<TransitionAndStoreNonNumberElementParameters>(
+  return zone()->New<Operator1<TransitionAndStoreNonNumberElementParameters>>(
       IrOpcode::kTransitionAndStoreNonNumberElement,
       Operator::kNoDeopt | Operator::kNoThrow,
       "TransitionAndStoreNonNumberElement", 3, 1, 1, 0, 1, 0, parameters);
+}
+
+const Operator* SimplifiedOperatorBuilder::FastApiCall(
+    const CFunctionInfo* signature, FeedbackSource const& feedback,
+    CallDescriptor* descriptor) {
+  int value_input_count =
+      (signature->ArgumentCount() +
+       FastApiCallNode::kFastTargetInputCount) +        // fast call
+      static_cast<int>(descriptor->ParameterCount()) +  // slow call
+      FastApiCallNode::kEffectAndControlInputCount;
+  return zone()->New<Operator1<FastApiCallParameters>>(
+      IrOpcode::kFastApiCall, Operator::kNoThrow, "FastApiCall",
+      value_input_count, 1, 1, 1, 1, 0,
+      FastApiCallParameters(signature, feedback, descriptor));
+}
+
+int FastApiCallNode::FastCallArgumentCount() const {
+  FastApiCallParameters p = FastApiCallParametersOf(node()->op());
+  const CFunctionInfo* signature = p.signature();
+  CHECK_NOT_NULL(signature);
+  return signature->ArgumentCount();
+}
+
+int FastApiCallNode::SlowCallArgumentCount() const {
+  FastApiCallParameters p = FastApiCallParametersOf(node()->op());
+  CallDescriptor* descriptor = p.descriptor();
+  CHECK_NOT_NULL(descriptor);
+  return static_cast<int>(descriptor->ParameterCount()) +
+         kContextAndFrameStateInputCount;
 }
 
 #undef PURE_OP_LIST

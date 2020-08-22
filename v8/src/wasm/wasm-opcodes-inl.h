@@ -153,6 +153,8 @@ constexpr const char* WasmOpcodes::OpcodeName(WasmOpcode opcode) {
     CASE_OP(CallIndirect, "call_indirect")
     CASE_OP(ReturnCall, "return_call")
     CASE_OP(ReturnCallIndirect, "return_call_indirect")
+    CASE_OP(CallRef, "call_ref")
+    CASE_OP(ReturnCallRef, "return_call_ref")
     CASE_OP(BrOnNull, "br_on_null")
     CASE_OP(Drop, "drop")
     CASE_OP(Select, "select")
@@ -172,6 +174,7 @@ constexpr const char* WasmOpcodes::OpcodeName(WasmOpcode opcode) {
     CASE_SIGN_OP(INT, LoadMem16, "load16")
     CASE_SIGN_OP(I64, LoadMem32, "load32")
     CASE_S128_OP(LoadMem, "load128")
+    CASE_S128_OP(Const, "const")
     CASE_ALL_OP(StoreMem, "store")
     CASE_INT_OP(StoreMem8, "store8")
     CASE_INT_OP(StoreMem16, "store16")
@@ -301,6 +304,8 @@ constexpr const char* WasmOpcodes::OpcodeName(WasmOpcode opcode) {
     CASE_SIMDF_OP(Qfma, "qfma")
     CASE_SIMDF_OP(Qfms, "qfms")
 
+    CASE_S128_OP(LoadMem32Zero, "load32_zero")
+    CASE_S128_OP(LoadMem64Zero, "load64_zero")
     CASE_S8x16_OP(LoadSplat, "load_splat")
     CASE_S16x8_OP(LoadSplat, "load_splat")
     CASE_S32x4_OP(LoadSplat, "load_splat")
@@ -354,15 +359,13 @@ constexpr const char* WasmOpcodes::OpcodeName(WasmOpcode opcode) {
     CASE_UNSIGNED_ALL_OP(AtomicCompareExchange, "atomic.cmpxchng")
 
     // GC operations.
-    CASE_OP(StructNew, "struct.new")
-    CASE_OP(StructNewSub, "struct.new_sub")
+    CASE_OP(StructNewWithRtt, "struct.new_with_rtt")
     CASE_OP(StructNewDefault, "struct.new_default")
     CASE_OP(StructGet, "struct.get")
     CASE_OP(StructGetS, "struct.get_s")
     CASE_OP(StructGetU, "struct.get_u")
     CASE_OP(StructSet, "struct.set")
-    CASE_OP(ArrayNew, "array.new")
-    CASE_OP(ArrayNewSub, "array.new_sub")
+    CASE_OP(ArrayNewWithRtt, "array.new_with_rtt")
     CASE_OP(ArrayNewDefault, "array.new_default")
     CASE_OP(ArrayGet, "array.get")
     CASE_OP(ArrayGetS, "array.get_s")
@@ -456,6 +459,8 @@ constexpr bool WasmOpcodes::IsUnconditionalJump(WasmOpcode opcode) {
     case kExprBr:
     case kExprBrTable:
     case kExprReturn:
+    case kExprReturnCall:
+    case kExprReturnCallIndirect:
       return true;
     default:
       return false;
@@ -508,6 +513,7 @@ constexpr bool WasmOpcodes::IsSimdPostMvpOpcode(WasmOpcode opcode) {
   switch (opcode) {
 #define CHECK_OPCODE(name, opcode, _) case kExpr##name:
     FOREACH_SIMD_POST_MVP_OPCODE(CHECK_OPCODE)
+    FOREACH_SIMD_POST_MVP_MEM_OPCODE(CHECK_OPCODE)
 #undef CHECK_OPCODE
     return true;
     default:
@@ -553,7 +559,7 @@ constexpr WasmOpcodeSig GetAsmJsOpcodeSigIndex(byte opcode) {
 constexpr WasmOpcodeSig GetSimdOpcodeSigIndex(byte opcode) {
 #define CASE(name, opc, sig) opcode == (opc & 0xFF) ? kSigEnum_##sig:
   return FOREACH_SIMD_0_OPERAND_OPCODE(CASE) FOREACH_SIMD_MEM_OPCODE(CASE)
-      kSigEnum_None;
+      FOREACH_SIMD_POST_MVP_MEM_OPCODE(CASE) kSigEnum_None;
 #undef CASE
 }
 

@@ -5,7 +5,6 @@
 #include "src/heap/sweeper.h"
 
 #include "src/execution/vm-state-inl.h"
-#include "src/heap/array-buffer-tracker-inl.h"
 #include "src/heap/code-object-registry.h"
 #include "src/heap/free-list-inl.h"
 #include "src/heap/gc-tracer.h"
@@ -247,6 +246,18 @@ void Sweeper::EnsureCompleted() {
   sweeping_in_progress_ = false;
 }
 
+void Sweeper::DrainSweepingWorklists() {
+  if (!sweeping_in_progress_) return;
+
+  ForAllSweepingSpaces(
+      [this](AllocationSpace space) { DrainSweepingWorklistForSpace(space); });
+}
+
+void Sweeper::DrainSweepingWorklistForSpace(AllocationSpace space) {
+  if (!sweeping_in_progress_) return;
+  ParallelSweepSpace(space, 0);
+}
+
 void Sweeper::SupportConcurrentSweeping() {
   ForAllSweepingSpaces([this](AllocationSpace space) {
     const int kMaxPagesToSweepPerSpace = 1;
@@ -341,10 +352,6 @@ int Sweeper::RawSweep(
   DCHECK(!p->IsEvacuationCandidate() && !p->SweepingDone());
 
   // Phase 1: Prepare the page for sweeping.
-
-  // Before we sweep objects on the page, we free dead array buffers which
-  // requires valid mark bits.
-  ArrayBufferTracker::FreeDead(p, marking_state_);
 
   // Set the allocated_bytes_ counter to area_size and clear the wasted_memory_
   // counter. The free operations below will decrease allocated_bytes_ to actual

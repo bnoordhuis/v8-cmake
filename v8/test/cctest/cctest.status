@@ -97,9 +97,6 @@
   # BUG(3742).
   'test-mark-compact/MarkCompactCollector': [PASS, ['arch==arm', NO_VARIANTS]],
 
-  # BUG(10637).
-  'test-concurrent-allocation/ConcurrentAllocationInOldSpace': [SKIP],
-
   # Test that serialization with unknown external reference fails.
   'test-serialize/SnapshotCreatorUnknownExternalReferences': [FAIL],
   'test-serialize/SnapshotCreatorUnknownHandles': [FAIL],
@@ -124,6 +121,13 @@
   'test-serialize/CustomSnapshotDataBlobImmortalImmovableRoots': [PASS, ['mode == debug', SKIP]],
   'test-parsing/ObjectRestNegativeTestSlow': [PASS, ['mode == debug', SKIP]],
 }],  # ALWAYS
+
+##############################################################################
+['mode == debug', {
+  # These tests are supposed to fail in a DCHECK.
+  'test-persistent-handles/NewPersistentHandleFailsWhenParked': [FAIL],
+  'test-persistent-handles/NewPersistentHandleFailsWhenParkedExplicit': [FAIL],
+}],
 
 ##############################################################################
 ['(arch != ia32 and arch != x64)', {
@@ -179,6 +183,17 @@
 }],  # variant == nooptimization and (arch == arm or arch == arm64) and simulator_run
 
 ##############################################################################
+['variant == nooptimization', {
+  # Wasm serialization relies on TurboFan to be available, hence does not work
+  # in the 'nooptimization' variant.
+  'test-wasm-serialization/*': [SKIP],
+  'test-streaming-compilation/SingleThreadedTestDeserializationBypassesCompilation': [SKIP],
+  'test-streaming-compilation/SingleThreadedTestDeserializationFails': [SKIP],
+  'test-streaming-compilation/AsyncTestDeserializationFails': [SKIP],
+  'test-streaming-compilation/AsyncTestDeserializationBypassesCompilation': [SKIP],
+}],  # variant == nooptimization
+
+##############################################################################
 ['variant == no_lfa', {
   # https://crbug.com/v8/10219
   'test-compiler/DecideToPretenureDuringCompilation': [SKIP],
@@ -213,6 +228,7 @@
 ['is_full_debug', {
   # Tests too slow in non-optimized debug mode.
   'test-api/InternalFieldsSubclassing': [SKIP],
+  'test-concurrent-allocation/ConcurrentAllocationInLargeSpace': [SKIP],
   'test-heap/TestInternalWeakLists': [SKIP],
 }],  # 'is_full_debug'
 
@@ -395,6 +411,7 @@
   'test-wasm-breakpoints/*' : [SKIP],
   'test-wasm-debug-evaluate/*': [SKIP],
   'test-run-wasm-module/Run_WasmModule_CompilationHintsNoTiering': [SKIP],
+  'test-wasm-serialization/TierDownAfterDeserialization': [SKIP],
 
   # SIMD not fully implemented yet
   'test-run-wasm-simd-liftoff/*': [SKIP],
@@ -639,13 +656,23 @@
 }],
 
 ################################################################################
-['variant == nci', {
+['variant == nci or variant == nci_as_highest_tier', {
   # Optimizes and deopts differently than TurboFan.
+  'test-api/FastApiCalls': [SKIP],
   'test-cpu-profiler/Deopt*': [SKIP],
   'test-cpu-profiler/DetailedSourcePositionAPI_Inlining': [SKIP],
+  'test-cpu-profiler/DetailedSourcePositionAPI': [SKIP],
+  'test-heap/CellsInOptimizedCodeAreWeak': [SKIP],
   'test-heap/EnsureAllocationSiteDependentCodesProcessed': [SKIP],
+  'test-heap/NewSpaceObjectsInOptimizedCode': [SKIP],
+  'test-heap/ObjectsInEagerlyDeoptimizedCodeAreWeak': [SKIP],
+  'test-heap/ObjectsInOptimizedCodeAreWeak': [SKIP],
   'test-heap/OptimizedPretenuring*': [SKIP],
   'test-heap-profiler/SamplingHeapProfilerPretenuredInlineAllocations': [SKIP],
-}],  # variant == nci
+  'test-log/LogAll': [SKIP],
+
+  # NCI code currently does not use the feedback vector's optimized code cache.
+  'test-compiler/OptimizedCodeSharing1': [SKIP],
+}],  # variant == nci or variant == nci_as_highest_tier
 
 ]

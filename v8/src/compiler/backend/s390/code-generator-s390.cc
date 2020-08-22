@@ -1644,14 +1644,14 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
           AddressingModeField::decode(instr->opcode());
       if (addressing_mode == kMode_MRI) {
         int32_t offset = i.InputInt32(1);
-        ool = new (zone()) OutOfLineRecordWrite(
+        ool = zone()->New<OutOfLineRecordWrite>(
             this, object, offset, value, scratch0, scratch1, mode,
             DetermineStubCallMode(), &unwinding_info_writer_);
         __ StoreTaggedField(value, MemOperand(object, offset), r0);
       } else {
         DCHECK_EQ(kMode_MRR, addressing_mode);
         Register offset(i.InputRegister(1));
-        ool = new (zone()) OutOfLineRecordWrite(
+        ool = zone()->New<OutOfLineRecordWrite>(
             this, object, offset, value, scratch0, scratch1, mode,
             DetermineStubCallMode(), &unwinding_info_writer_);
         __ StoreTaggedField(value, MemOperand(object, offset));
@@ -1674,17 +1674,19 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ AndP(i.InputRegister(0), kSpeculationPoisonRegister);
       break;
     case kS390_Peek: {
-      // The incoming value is 0-based, but we need a 1-based value.
-      int reverse_slot = i.InputInt32(0) + 1;
+      int reverse_slot = i.InputInt32(0);
       int offset =
           FrameSlotToFPOffset(frame()->GetTotalFrameSlotCount() - reverse_slot);
       if (instr->OutputAt(0)->IsFPRegister()) {
         LocationOperand* op = LocationOperand::cast(instr->OutputAt(0));
         if (op->representation() == MachineRepresentation::kFloat64) {
           __ LoadDouble(i.OutputDoubleRegister(), MemOperand(fp, offset));
-        } else {
-          DCHECK_EQ(MachineRepresentation::kFloat32, op->representation());
+        } else if (op->representation() == MachineRepresentation::kFloat32) {
           __ LoadFloat32(i.OutputFloatRegister(), MemOperand(fp, offset));
+        } else {
+          DCHECK_EQ(MachineRepresentation::kSimd128, op->representation());
+          __ LoadSimd128(i.OutputSimd128Register(), MemOperand(fp, offset),
+                         kScratchReg);
         }
       } else {
         __ LoadP(i.OutputRegister(), MemOperand(fp, offset));
@@ -2420,8 +2422,13 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       Label done;
       __ ConvertFloat32ToInt32(i.OutputRegister(0), i.InputDoubleRegister(0),
                                kRoundToZero);
-      __ b(Condition(0xE), &done, Label::kNear);  // normal case
-      __ lghi(i.OutputRegister(0), Operand::Zero());
+      bool set_overflow_to_min_i32 = MiscField::decode(instr->opcode());
+      if (set_overflow_to_min_i32) {
+        // Avoid INT32_MAX as an overflow indicator and use INT32_MIN instead,
+        // because INT32_MIN allows easier out-of-bounds detection.
+        __ b(Condition(0xE), &done, Label::kNear);  // normal case
+        __ llilh(i.OutputRegister(0), Operand(0x8000));
+      }
       __ bind(&done);
       break;
     }
@@ -2429,8 +2436,13 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       Label done;
       __ ConvertFloat32ToUnsignedInt32(i.OutputRegister(0),
                                        i.InputDoubleRegister(0));
-      __ b(Condition(0xE), &done, Label::kNear);  // normal case
-      __ lghi(i.OutputRegister(0), Operand::Zero());
+      bool set_overflow_to_min_u32 = MiscField::decode(instr->opcode());
+      if (set_overflow_to_min_u32) {
+        // Avoid UINT32_MAX as an overflow indicator and use 0 instead,
+        // because 0 allows easier out-of-bounds detection.
+        __ b(Condition(0xE), &done, Label::kNear);  // normal case
+        __ lghi(i.OutputRegister(0), Operand::Zero());
+      }
       __ bind(&done);
       break;
     }
@@ -3918,9 +3930,29 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
             Condition(0));
       break;
     }
+    case kS390_S128Const: {
+#ifdef V8_TARGET_BIG_ENDIAN
+      for (int index = 0, j = 0; index < 2; index++, j = +2) {
+        __ lgfi(index < 1 ? ip : r0, Operand(i.InputInt32(j)));
+        __ iihf(index < 1 ? ip : r0, Operand(i.InputInt32(j + 1)));
+      }
+#else
+      for (int index = 0, j = 0; index < 2; index++, j = +2) {
+        __ lgfi(index < 1 ? r0 : ip, Operand(i.InputInt32(j)));
+        __ iihf(index < 1 ? r0 : ip, Operand(i.InputInt32(j + 1)));
+      }
+#endif
+      __ vlvgp(i.OutputSimd128Register(), r0, ip);
+      break;
+    }
     case kS390_S128Zero: {
       Simd128Register dst = i.OutputSimd128Register();
       __ vx(dst, dst, dst, Condition(0), Condition(0), Condition(0));
+      break;
+    }
+    case kS390_S128AllOnes: {
+      Simd128Register dst = i.OutputSimd128Register();
+      __ vceq(dst, dst, dst, Condition(0), Condition(3));
       break;
     }
     case kS390_S128Select: {
@@ -4153,14 +4185,14 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       // create 2 * 8 byte inputs indicating new indices
       for (int i = 0, j = 0; i < 2; i++, j = +2) {
 #ifdef V8_TARGET_BIG_ENDIAN
-        __ lgfi(i < 1 ? ip : r0, Operand(k8x16_indices[j + 1]));
-        __ iihf(i < 1 ? ip : r0, Operand(k8x16_indices[j]));
-#else
         __ lgfi(i < 1 ? ip : r0, Operand(k8x16_indices[j]));
         __ iihf(i < 1 ? ip : r0, Operand(k8x16_indices[j + 1]));
+#else
+        __ lgfi(i < 1 ? r0 : ip, Operand(k8x16_indices[j]));
+        __ iihf(i < 1 ? r0 : ip, Operand(k8x16_indices[j + 1]));
 #endif
       }
-      __ vlvgp(kScratchDoubleReg, ip, r0);
+      __ vlvgp(kScratchDoubleReg, r0, ip);
       __ vperm(dst, src0, src1, kScratchDoubleReg, Condition(0), Condition(0));
       break;
     }
@@ -4298,6 +4330,17 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
              Condition(0), Condition(2));
       break;
     }
+    case kS390_I32x4DotI16x8S: {
+      Simd128Register tempFPReg1 = i.ToSimd128Register(instr->TempAt(0));
+      __ vme(kScratchDoubleReg, i.InputSimd128Register(0),
+             i.InputSimd128Register(1), Condition(0), Condition(0),
+             Condition(1));
+      __ vmo(tempFPReg1, i.InputSimd128Register(0), i.InputSimd128Register(1),
+             Condition(0), Condition(0), Condition(1));
+      __ va(i.OutputSimd128Register(), kScratchDoubleReg, tempFPReg1,
+            Condition(0), Condition(0), Condition(2));
+      break;
+    }
     case kS390_StoreCompressTagged: {
       CHECK(!instr->HasOutput());
       size_t index = 0;
@@ -4410,7 +4453,7 @@ void CodeGenerator::AssembleArchTrap(Instruction* instr,
         // is added to the native module and copied into wasm code space.
         __ Call(static_cast<Address>(trap_id), RelocInfo::WASM_STUB_CALL);
         ReferenceMap* reference_map =
-            new (gen_->zone()) ReferenceMap(gen_->zone());
+            gen_->zone()->New<ReferenceMap>(gen_->zone());
         gen_->RecordSafepoint(reference_map, Safepoint::kNoLazyDeopt);
         if (FLAG_debug_code) {
           __ stop();
@@ -4421,7 +4464,7 @@ void CodeGenerator::AssembleArchTrap(Instruction* instr,
     Instruction* instr_;
     CodeGenerator* gen_;
   };
-  auto ool = new (zone()) OutOfLineTrap(this, instr);
+  auto ool = zone()->New<OutOfLineTrap>(this, instr);
   Label* tlabel = ool->entry();
   Label end;
 
@@ -4612,7 +4655,7 @@ void CodeGenerator::AssembleConstructFrame() {
 
       __ Call(wasm::WasmCode::kWasmStackOverflow, RelocInfo::WASM_STUB_CALL);
       // We come from WebAssembly, there are no references for the GC.
-      ReferenceMap* reference_map = new (zone()) ReferenceMap(zone());
+      ReferenceMap* reference_map = zone()->New<ReferenceMap>(zone());
       RecordSafepoint(reference_map, Safepoint::kNoLazyDeopt);
       if (FLAG_debug_code) {
         __ stop();

@@ -8,6 +8,7 @@
 #include <memory>
 #include <set>
 
+#include "include/cppgc/heap.h"
 #include "include/cppgc/internal/persistent-node.h"
 #include "include/cppgc/macros.h"
 #include "src/base/macros.h"
@@ -33,9 +34,9 @@ namespace internal {
 
 namespace testing {
 class TestWithHeap;
-}
+}  // namespace testing
 
-class Marker;
+class MarkerBase;
 class PageBackend;
 class PreFinalizerHandler;
 class StatsCollector;
@@ -90,7 +91,7 @@ class V8_EXPORT_PRIVATE HeapBase {
     return prefinalizer_handler_.get();
   }
 
-  Marker* marker() const { return marker_.get(); }
+  MarkerBase* marker() const { return marker_.get(); }
 
   ObjectAllocator& object_allocator() { return object_allocator_; }
 
@@ -116,6 +117,8 @@ class V8_EXPORT_PRIVATE HeapBase {
   size_t ObjectPayloadSize() const;
 
  protected:
+  void VerifyMarking(cppgc::Heap::StackState);
+
   bool in_no_gc_scope() const { return no_gc_scope_ > 0; }
 
   RawHeap raw_heap_;
@@ -128,7 +131,7 @@ class V8_EXPORT_PRIVATE HeapBase {
   std::unique_ptr<StatsCollector> stats_collector_;
   std::unique_ptr<heap::base::Stack> stack_;
   std::unique_ptr<PreFinalizerHandler> prefinalizer_handler_;
-  std::unique_ptr<Marker> marker_;
+  std::unique_ptr<MarkerBase> marker_;
 
   ObjectAllocator object_allocator_;
   Sweeper sweeper_;

@@ -70,6 +70,8 @@ enum class LoadTransformation {
   kI32x4Load16x4U,
   kI64x2Load32x2S,
   kI64x2Load32x2U,
+  kS128LoadMem32Zero,
+  kS128LoadMem64Zero,
 };
 
 size_t hash_value(LoadTransformation);
@@ -152,30 +154,30 @@ MachineRepresentation AtomicStoreRepresentationOf(Operator const* op)
 
 MachineType AtomicOpType(Operator const* op) V8_WARN_UNUSED_RESULT;
 
-class S8x16ShuffleParameter {
+class S128ImmediateParameter {
  public:
-  explicit S8x16ShuffleParameter(const uint8_t shuffle[16]) {
-    std::copy(shuffle, shuffle + 16, shuffle_.begin());
+  explicit S128ImmediateParameter(const uint8_t immediate[16]) {
+    std::copy(immediate, immediate + 16, immediate_.begin());
   }
-  const std::array<uint8_t, 16>& shuffle() const { return shuffle_; }
-  const uint8_t* data() const { return shuffle_.data(); }
-  uint8_t operator[](int x) const { return shuffle_[x]; }
+  const std::array<uint8_t, 16>& immediate() const { return immediate_; }
+  const uint8_t* data() const { return immediate_.data(); }
+  uint8_t operator[](int x) const { return immediate_[x]; }
 
  private:
-  std::array<uint8_t, 16> shuffle_;
+  std::array<uint8_t, 16> immediate_;
 };
 
-V8_EXPORT_PRIVATE bool operator==(S8x16ShuffleParameter const& lhs,
-                                  S8x16ShuffleParameter const& rhs);
-bool operator!=(S8x16ShuffleParameter const& lhs,
-                S8x16ShuffleParameter const& rhs);
+V8_EXPORT_PRIVATE bool operator==(S128ImmediateParameter const& lhs,
+                                  S128ImmediateParameter const& rhs);
+bool operator!=(S128ImmediateParameter const& lhs,
+                S128ImmediateParameter const& rhs);
 
-size_t hash_value(S8x16ShuffleParameter const& p);
+size_t hash_value(S128ImmediateParameter const& p);
 
 V8_EXPORT_PRIVATE std::ostream& operator<<(std::ostream&,
-                                           S8x16ShuffleParameter const&);
+                                           S128ImmediateParameter const&);
 
-V8_EXPORT_PRIVATE S8x16ShuffleParameter const& S8x16ShuffleParameterOf(
+V8_EXPORT_PRIVATE S128ImmediateParameter const& S128ImmediateParameterOf(
     Operator const* op) V8_WARN_UNUSED_RESULT;
 
 StackCheckKind StackCheckKindOf(Operator const* op) V8_WARN_UNUSED_RESULT;
@@ -189,6 +191,12 @@ enum class ShiftKind { kNormal, kShiftOutZeros };
 size_t hash_value(ShiftKind);
 V8_EXPORT_PRIVATE std::ostream& operator<<(std::ostream&, ShiftKind);
 ShiftKind ShiftKindOf(Operator const*) V8_WARN_UNUSED_RESULT;
+
+// TruncateKind::kSetOverflowToMin sets the result of a saturating float-to-int
+// conversion to INT_MIN if the conversion returns INT_MAX due to overflow. This
+// makes it easier to detect an overflow. This parameter is ignored on platforms
+// like x64 and ia32 where a range overflow does not result in INT_MAX.
+enum class TruncateKind { kArchitectureDefault, kSetOverflowToMin };
 
 // Interface for building machine-level operators. These operators are
 // machine-level but machine-independent and thus define a language suitable
@@ -222,13 +230,14 @@ class V8_EXPORT_PRIVATE MachineOperatorBuilder final
     kInt64AbsWithOverflow = 1u << 21,
     kWord32Rol = 1u << 22,
     kWord64Rol = 1u << 23,
+    kSatConversionIsSafe = 1u << 24,
     kAllOptionalOps =
         kFloat32RoundDown | kFloat64RoundDown | kFloat32RoundUp |
         kFloat64RoundUp | kFloat32RoundTruncate | kFloat64RoundTruncate |
         kFloat64RoundTiesAway | kFloat32RoundTiesEven | kFloat64RoundTiesEven |
         kWord32Ctz | kWord64Ctz | kWord32Popcnt | kWord64Popcnt |
         kWord32ReverseBits | kWord64ReverseBits | kInt32AbsWithOverflow |
-        kInt64AbsWithOverflow | kWord32Rol | kWord64Rol
+        kInt64AbsWithOverflow | kWord32Rol | kWord64Rol | kSatConversionIsSafe
   };
   using Flags = base::Flags<Flag, unsigned>;
 
@@ -330,6 +339,11 @@ class V8_EXPORT_PRIVATE MachineOperatorBuilder final
   // generate a mask with 0x1f on the amount ahead of generating the shift.
   bool Word32ShiftIsSafe() const { return flags_ & kWord32ShiftIsSafe; }
 
+  // Return true if the target's implementation of float-to-int-conversions is a
+  // saturating conversion rounding towards 0. Otherwise, we have to manually
+  // generate the correct value if a saturating conversion is requested.
+  bool SatConversionIsSafe() const { return flags_ & kSatConversionIsSafe; }
+
   const Operator* Word64And();
   const Operator* Word64Or();
   const Operator* Word64Xor();
@@ -415,6 +429,10 @@ class V8_EXPORT_PRIVATE MachineOperatorBuilder final
   // in the target type and are *not* defined for other inputs.
   // Use narrowing change operators only when there is a static guarantee that
   // the input value is representable in the target value.
+  //
+  // Some operators can have the behaviour on overflow change through specifying
+  // TruncateKind. The exact semantics are documented in the tests in
+  // test/cctest/compiler/test-run-machops.cc .
   const Operator* ChangeFloat32ToFloat64();
   const Operator* ChangeFloat64ToInt32();   // narrowing
   const Operator* ChangeFloat64ToInt64();
@@ -422,8 +440,8 @@ class V8_EXPORT_PRIVATE MachineOperatorBuilder final
   const Operator* ChangeFloat64ToUint64();
   const Operator* TruncateFloat64ToInt64();
   const Operator* TruncateFloat64ToUint32();
-  const Operator* TruncateFloat32ToInt32();
-  const Operator* TruncateFloat32ToUint32();
+  const Operator* TruncateFloat32ToInt32(TruncateKind kind);
+  const Operator* TruncateFloat32ToUint32(TruncateKind kind);
   const Operator* TryTruncateFloat32ToInt64();
   const Operator* TryTruncateFloat64ToInt64();
   const Operator* TryTruncateFloat32ToUint64();
@@ -737,6 +755,7 @@ class V8_EXPORT_PRIVATE MachineOperatorBuilder final
 
   const Operator* S128Load();
   const Operator* S128Store();
+  const Operator* S128Const(const uint8_t value[16]);
 
   const Operator* S128Zero();
   const Operator* S128And();

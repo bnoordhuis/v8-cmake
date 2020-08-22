@@ -25,6 +25,10 @@ namespace v8 {
 
 class D8Console;
 
+namespace internal {
+class CancelableTaskManager;
+}  // namespace internal
+
 // A single counter in a counter collection.
 class Counter {
  public:
@@ -158,14 +162,14 @@ class SerializationDataQueue {
   std::vector<std::unique_ptr<SerializationData>> data_;
 };
 
-class Worker {
+class Worker : public std::enable_shared_from_this<Worker> {
  public:
   explicit Worker(const char* script);
   ~Worker();
 
-  // Post a message to the worker's incoming message queue. The worker will
-  // take ownership of the SerializationData.
-  // This function should only be called by the thread that created the Worker.
+  // Post a message to the worker. The worker will take ownership of the
+  // SerializationData. This function should only be called by the thread that
+  // created the Worker.
   void PostMessage(std::unique_ptr<SerializationData> data);
   // Synchronously retrieve messages from the worker's outgoing message queue.
   // If there is no message in the queue, block until a message is available.
@@ -179,12 +183,18 @@ class Worker {
   void Terminate();
   // Terminate and join the thread.
   // This function can be called by any thread.
-  void WaitForThread();
+  void TerminateAndWaitForThread();
 
   // Start running the given worker in another thread.
   static bool StartWorkerThread(std::shared_ptr<Worker> worker);
 
  private:
+  friend class ProcessMessageTask;
+  friend class TerminateTask;
+
+  void ProcessMessage(std::unique_ptr<SerializationData> data);
+  void ProcessMessages();
+
   class WorkerThread : public base::Thread {
    public:
     explicit WorkerThread(std::shared_ptr<Worker> worker)
@@ -200,13 +210,25 @@ class Worker {
   void ExecuteInThread();
   static void PostMessageOut(const v8::FunctionCallbackInfo<v8::Value>& args);
 
-  base::Semaphore in_semaphore_;
-  base::Semaphore out_semaphore_;
-  SerializationDataQueue in_queue_;
+  base::Semaphore out_semaphore_{0};
   SerializationDataQueue out_queue_;
-  base::Thread* thread_;
+  base::Thread* thread_ = nullptr;
   char* script_;
-  base::Atomic32 running_;
+  std::atomic<bool> running_;
+  // For signalling that the worker has started.
+  base::Semaphore started_semaphore_{0};
+
+  // For posting tasks to the worker
+  std::shared_ptr<TaskRunner> task_runner_;
+  i::CancelableTaskManager* task_manager_;
+
+  // Protects reading / writing task_runner_. (The TaskRunner itself doesn't
+  // need locking, but accessing the Worker's data member does.)
+  base::Mutex worker_mutex_;
+
+  // Only accessed by the worker thread.
+  Isolate* isolate_ = nullptr;
+  v8::Persistent<v8::Context> context_;
 };
 
 class PerIsolateData {
@@ -270,10 +292,12 @@ class ShellOptions {
 
   ~ShellOptions() { delete[] isolate_sources; }
 
+  bool fuzzilli_coverage_statistics = false;
+  bool fuzzilli_enable_builtins_coverage = true;
   bool send_idle_notification = false;
   bool invoke_weak_callbacks = false;
   bool omit_quit = false;
-  bool wait_for_wasm = true;
+  bool wait_for_background_tasks = true;
   bool stress_opt = false;
   int stress_runs = 1;
   bool stress_snapshot = false;
@@ -405,6 +429,8 @@ class Shell : public i::AllStatic {
       const v8::FunctionCallbackInfo<v8::Value>& args);
   static void WorkerGetMessage(const v8::FunctionCallbackInfo<v8::Value>& args);
   static void WorkerTerminate(const v8::FunctionCallbackInfo<v8::Value>& args);
+  static void WorkerTerminateAndWait(
+      const v8::FunctionCallbackInfo<v8::Value>& args);
   // The OS object on the global object contains methods for performing
   // operating system calls:
   //

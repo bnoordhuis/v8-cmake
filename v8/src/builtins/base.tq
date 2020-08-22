@@ -11,6 +11,7 @@
 #include 'src/objects/bigint.h'
 #include 'src/objects/elements-kind.h'
 #include 'src/objects/free-space.h'
+#include 'src/objects/js-function.h'
 #include 'src/objects/js-generator.h'
 #include 'src/objects/js-promise.h'
 #include 'src/objects/js-regexp-string-iterator.h'
@@ -143,7 +144,6 @@ extern class OrderedNameDictionary extends HashTable;
 extern class NameDictionary extends HashTable;
 extern class GlobalDictionary extends HashTable;
 extern class SimpleNumberDictionary extends HashTable;
-extern class StringTable extends HashTable;
 extern class EphemeronHashTable extends HashTable;
 type ObjectHashTable extends HashTable
     generates 'TNode<ObjectHashTable>';
@@ -234,7 +234,8 @@ extern enum ElementsKind extends int32 {
   ...
 }
 
-extern enum AllocationFlag constexpr 'CodeStubAssembler::AllocationFlag' {
+extern enum AllocationFlag extends int32
+constexpr 'CodeStubAssembler::AllocationFlag' {
   kNone,
   kDoubleAlignment,
   kPretenured,
@@ -329,6 +330,10 @@ extern enum MessageTemplate {
   kWasmTrapNullDereference,
   kWasmTrapIllegalCast,
   kWasmTrapArrayOutOfBounds,
+  kWeakRefsRegisterTargetAndHoldingsMustNotBeSame,
+  kWeakRefsRegisterTargetMustBeObject,
+  kWeakRefsUnregisterTokenMustBeObject,
+  kWeakRefsWeakRefConstructorTargetMustBeObject,
   ...
 }
 
@@ -417,6 +422,7 @@ extern macro ToStringStringConstant(): String;
 extern macro TrueConstant(): True;
 extern macro UndefinedConstant(): Undefined;
 extern macro ValueOfStringConstant(): String;
+extern macro WasmWrappedObjectSymbolConstant(): Symbol;
 
 const TheHole: TheHole = TheHoleConstant();
 const Null: Null = NullConstant();
@@ -444,8 +450,6 @@ const UNSAFE_SKIP_WRITE_BARRIER:
 
 extern transitioning macro AllocateJSIteratorResult(implicit context: Context)(
     JSAny, Boolean): JSObject;
-extern macro AllocateSyntheticFunctionContext(
-    NativeContext, constexpr int32): Context;
 
 extern class Filler extends HeapObject generates 'TNode<HeapObject>';
 
@@ -470,7 +474,6 @@ extern macro SelectBooleanConstant(bool): Boolean;
 extern macro Print(constexpr string);
 extern macro Print(constexpr string, Object);
 extern macro Comment(constexpr string);
-extern macro StaticAssert(bool);
 extern macro Print(Object);
 extern macro DebugBreak();
 
@@ -519,6 +522,12 @@ transitioning macro ToInteger_Inline(implicit context: Context)(input: JSAny):
     }
   }
 }
+
+extern enum BigIntHandling extends int32
+constexpr 'CodeStubAssembler::BigIntHandling' { kConvertToNumber, kThrow }
+
+extern transitioning macro ToNumber(implicit context: Context)(
+    JSAny, constexpr BigIntHandling): Number;
 
 extern transitioning macro ToLength_Inline(implicit context: Context)(JSAny):
     Number;
@@ -601,6 +610,7 @@ extern builtin ToObject(Context, JSAny): JSReceiver;
 extern macro ToObject_Inline(Context, JSAny): JSReceiver;
 extern macro IsNullOrUndefined(Object): bool;
 extern macro IsString(HeapObject): bool;
+extern macro IsSeqOneByteString(HeapObject): bool;
 extern transitioning builtin NonPrimitiveToPrimitive_String(
     Context, JSAny): JSPrimitive;
 extern transitioning builtin NonPrimitiveToPrimitive_Default(
@@ -831,6 +841,7 @@ extern operator '==' macro Word32Equal(uint32, uint32): bool;
 extern operator '!=' macro Word32NotEqual(int32, int32): bool;
 extern operator '!=' macro Word32NotEqual(uint32, uint32): bool;
 extern operator '>>>' macro Word32Shr(uint32, uint32): uint32;
+extern operator '>>' macro Word32Sar(int32, int32): int32;
 extern operator '<<' macro Word32Shl(int32, int32): int32;
 extern operator '<<' macro Word32Shl(uint32, uint32): uint32;
 extern operator '|' macro Word32Or(int32, int32): int32;
@@ -839,6 +850,8 @@ extern operator '&' macro Word32And(bool, bool): bool;
 extern operator '|' macro Word32Or(bool, bool): bool;
 extern operator '==' macro Word32Equal(bool, bool): bool;
 extern operator '!=' macro Word32NotEqual(bool, bool): bool;
+extern operator '|' macro ConstexprWord32Or(
+    constexpr int32, constexpr int32): constexpr int32;
 
 extern operator '+' macro Float64Add(float64, float64): float64;
 extern operator '-' macro Float64Sub(float64, float64): float64;
@@ -1093,60 +1106,50 @@ macro AllowNonNumberElements(kind: ElementsKind): ElementsKind {
 }
 
 macro GetObjectFunction(implicit context: Context)(): JSFunction {
-  return UnsafeCast<JSFunction>(
-      LoadNativeContext(context)[NativeContextSlot::OBJECT_FUNCTION_INDEX]);
+  return *NativeContextSlot(ContextSlot::OBJECT_FUNCTION_INDEX);
 }
 macro GetArrayFunction(implicit context: Context)(): JSFunction {
-  return UnsafeCast<JSFunction>(
-      LoadNativeContext(context)[NativeContextSlot::ARRAY_FUNCTION_INDEX]);
+  return *NativeContextSlot(ContextSlot::ARRAY_FUNCTION_INDEX);
 }
 macro GetArrayBufferFunction(implicit context: Context)(): Constructor {
-  return UnsafeCast<Constructor>(
-      LoadNativeContext(context)[NativeContextSlot::ARRAY_BUFFER_FUN_INDEX]);
+  return *NativeContextSlot(ContextSlot::ARRAY_BUFFER_FUN_INDEX);
 }
 macro GetArrayBufferNoInitFunction(implicit context: Context)(): JSFunction {
-  return UnsafeCast<JSFunction>(LoadNativeContext(
-      context)[NativeContextSlot::ARRAY_BUFFER_NOINIT_FUN_INDEX]);
+  return *NativeContextSlot(ContextSlot::ARRAY_BUFFER_NOINIT_FUN_INDEX);
 }
 macro GetFastPackedElementsJSArrayMap(implicit context: Context)(): Map {
-  return UnsafeCast<Map>(LoadNativeContext(
-      context)[NativeContextSlot::JS_ARRAY_PACKED_ELEMENTS_MAP_INDEX]);
+  return *NativeContextSlot(ContextSlot::JS_ARRAY_PACKED_ELEMENTS_MAP_INDEX);
 }
 macro GetFastPackedSmiElementsJSArrayMap(implicit context: Context)(): Map {
-  return UnsafeCast<Map>(LoadNativeContext(
-      context)[NativeContextSlot::JS_ARRAY_PACKED_SMI_ELEMENTS_MAP_INDEX]);
+  return *NativeContextSlot(
+      ContextSlot::JS_ARRAY_PACKED_SMI_ELEMENTS_MAP_INDEX);
 }
 macro GetProxyRevocableResultMap(implicit context: Context)(): Map {
-  return UnsafeCast<Map>(LoadNativeContext(
-      context)[NativeContextSlot::PROXY_REVOCABLE_RESULT_MAP_INDEX]);
+  return *NativeContextSlot(ContextSlot::PROXY_REVOCABLE_RESULT_MAP_INDEX);
 }
 macro GetIteratorResultMap(implicit context: Context)(): Map {
-  return UnsafeCast<Map>(
-      LoadNativeContext(context)[NativeContextSlot::ITERATOR_RESULT_MAP_INDEX]);
+  return *NativeContextSlot(ContextSlot::ITERATOR_RESULT_MAP_INDEX);
 }
 macro GetInitialStringIteratorMap(implicit context: Context)(): Map {
-  return UnsafeCast<Map>(LoadNativeContext(
-      context)[NativeContextSlot::INITIAL_STRING_ITERATOR_MAP_INDEX]);
+  return *NativeContextSlot(ContextSlot::INITIAL_STRING_ITERATOR_MAP_INDEX);
 }
 macro GetReflectApply(implicit context: Context)(): Callable {
-  return UnsafeCast<Callable>(
-      LoadNativeContext(context)[NativeContextSlot::REFLECT_APPLY_INDEX]);
+  return *NativeContextSlot(ContextSlot::REFLECT_APPLY_INDEX);
 }
 macro GetRegExpLastMatchInfo(implicit context: Context)(): RegExpMatchInfo {
-  return %RawDownCast<RegExpMatchInfo>(LoadNativeContext(
-      context)[NativeContextSlot::REGEXP_LAST_MATCH_INFO_INDEX]);
+  return *NativeContextSlot(ContextSlot::REGEXP_LAST_MATCH_INFO_INDEX);
 }
 macro GetStrictArgumentsMap(implicit context: Context)(): Map {
-  return UnsafeCast<Map>(LoadNativeContext(
-      context)[NativeContextSlot::STRICT_ARGUMENTS_MAP_INDEX]);
+  return *NativeContextSlot(ContextSlot::STRICT_ARGUMENTS_MAP_INDEX);
 }
 macro GetSloppyArgumentsMap(implicit context: Context)(): Map {
-  return UnsafeCast<Map>(LoadNativeContext(
-      context)[NativeContextSlot::SLOPPY_ARGUMENTS_MAP_INDEX]);
+  return *NativeContextSlot(ContextSlot::SLOPPY_ARGUMENTS_MAP_INDEX);
 }
 macro GetFastAliasedArgumentsMap(implicit context: Context)(): Map {
-  return UnsafeCast<Map>(LoadNativeContext(
-      context)[NativeContextSlot::FAST_ALIASED_ARGUMENTS_MAP_INDEX]);
+  return *NativeContextSlot(ContextSlot::FAST_ALIASED_ARGUMENTS_MAP_INDEX);
+}
+macro GetWeakCellMap(implicit context: Context)(): Map {
+  return %GetClassMapConstant<WeakCell>();
 }
 
 // Call(Context, Target, Receiver, ...Args)
@@ -1599,7 +1602,7 @@ transitioning builtin FastCreateDataProperty(implicit context: Context)(
 }
 
 macro VerifiedUnreachable(): never {
-  StaticAssert(false);
+  static_assert(false);
   unreachable;
 }
 

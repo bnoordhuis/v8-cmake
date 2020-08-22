@@ -36,6 +36,7 @@ OBJECT_CONSTRUCTORS_IMPL(WasmMemoryObject, JSObject)
 OBJECT_CONSTRUCTORS_IMPL(WasmModuleObject, JSObject)
 OBJECT_CONSTRUCTORS_IMPL(WasmTableObject, JSObject)
 OBJECT_CONSTRUCTORS_IMPL(AsmWasmData, Struct)
+TQ_OBJECT_CONSTRUCTORS_IMPL(WasmTypeInfo)
 TQ_OBJECT_CONSTRUCTORS_IMPL(WasmStruct)
 TQ_OBJECT_CONSTRUCTORS_IMPL(WasmArray)
 
@@ -47,6 +48,7 @@ CAST_ACCESSOR(WasmMemoryObject)
 CAST_ACCESSOR(WasmModuleObject)
 CAST_ACCESSOR(WasmTableObject)
 CAST_ACCESSOR(AsmWasmData)
+CAST_ACCESSOR(WasmTypeInfo)
 CAST_ACCESSOR(WasmStruct)
 CAST_ACCESSOR(WasmArray)
 
@@ -182,8 +184,8 @@ void WasmGlobalObject::SetF64(double value) {
 
 void WasmGlobalObject::SetExternRef(Handle<Object> value) {
   // We use this getter externref and exnref.
-  DCHECK(type().is_reference_to(wasm::kHeapExtern) ||
-         type().is_reference_to(wasm::kHeapExn));
+  DCHECK(type().is_reference_to(wasm::HeapType::kExtern) ||
+         type().is_reference_to(wasm::HeapType::kExn));
   tagged_buffer().set(offset(), *value);
 }
 
@@ -230,6 +232,8 @@ PRIMITIVE_ACCESSORS(WasmInstanceObject, dropped_elem_segments, byte*,
                     kDroppedElemSegmentsOffset)
 PRIMITIVE_ACCESSORS(WasmInstanceObject, hook_on_function_call_address, Address,
                     kHookOnFunctionCallAddressOffset)
+PRIMITIVE_ACCESSORS(WasmInstanceObject, num_liftoff_function_calls_array,
+                    uint32_t*, kNumLiftoffFunctionCallsArrayOffset)
 
 ACCESSORS(WasmInstanceObject, module_object, WasmModuleObject,
           kModuleObjectOffset)
@@ -326,6 +330,7 @@ ACCESSORS(WasmExportedFunctionData, c_wrapper_code, Object, kCWrapperCodeOffset)
 ACCESSORS(WasmExportedFunctionData, wasm_call_target, Object,
           kWasmCallTargetOffset)
 SMI_ACCESSORS(WasmExportedFunctionData, packed_args_size, kPackedArgsSizeOffset)
+SMI_ACCESSORS(WasmExportedFunctionData, signature_type, kSignatureTypeOffset)
 
 // WasmJSFunction
 WasmJSFunction::WasmJSFunction(Address ptr) : JSFunction(ptr) {
@@ -385,9 +390,8 @@ ACCESSORS(WasmIndirectFunctionTable, refs, FixedArray, kRefsOffset)
 #undef PRIMITIVE_ACCESSORS
 
 wasm::ValueType WasmTableObject::type() {
-  // TODO(7748): Support non-nullable tables?
-  return wasm::ValueType::Ref(static_cast<wasm::HeapType>(raw_type()),
-                              wasm::kNullable);
+  // TODO(7748): Support other table types? Wait for spec to clear up.
+  return wasm::ValueType::Ref(raw_type(), wasm::kNullable);
 }
 
 bool WasmMemoryObject::has_maximum_pages() { return maximum_pages() >= 0; }
@@ -399,8 +403,8 @@ ACCESSORS(AsmWasmData, export_wrappers, FixedArray, kExportWrappersOffset)
 ACCESSORS(AsmWasmData, uses_bitset, HeapNumber, kUsesBitsetOffset)
 
 wasm::StructType* WasmStruct::type(Map map) {
-  Foreign foreign = map.wasm_type_info();
-  return reinterpret_cast<wasm::StructType*>(foreign.foreign_address());
+  WasmTypeInfo type_info = map.wasm_type_info();
+  return reinterpret_cast<wasm::StructType*>(type_info.foreign_address());
 }
 
 wasm::StructType* WasmStruct::GcSafeType(Map map) {
@@ -422,8 +426,8 @@ ObjectSlot WasmStruct::RawField(int raw_offset) {
 
 wasm::ArrayType* WasmArray::type(Map map) {
   DCHECK_EQ(WASM_ARRAY_TYPE, map.instance_type());
-  Foreign foreign = map.wasm_type_info();
-  return reinterpret_cast<wasm::ArrayType*>(foreign.foreign_address());
+  WasmTypeInfo type_info = map.wasm_type_info();
+  return reinterpret_cast<wasm::ArrayType*>(type_info.foreign_address());
 }
 
 wasm::ArrayType* WasmArray::GcSafeType(Map map) {
@@ -441,6 +445,10 @@ wasm::ArrayType* WasmArray::type() const { return type(map()); }
 int WasmArray::SizeFor(Map map, int length) {
   int element_size = type(map)->element_type().element_size_bytes();
   return kHeaderSize + RoundUp(element_size * length, kTaggedSize);
+}
+
+void WasmTypeInfo::clear_foreign_address(Isolate* isolate) {
+  set_foreign_address(isolate, 0);
 }
 
 #include "src/objects/object-macros-undef.h"

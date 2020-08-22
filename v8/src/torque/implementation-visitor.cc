@@ -10,6 +10,7 @@
 
 #include "src/base/optional.h"
 #include "src/common/globals.h"
+#include "src/torque/constants.h"
 #include "src/torque/csa-generator.h"
 #include "src/torque/declaration-visitor.h"
 #include "src/torque/global-context.h"
@@ -80,12 +81,7 @@ void ImplementationVisitor::BeginCSAFiles() {
         UnderlinifyPath(SourceFileMap::PathFromV8Root(file)) + "_H_";
     header << "#ifndef " << headerDefine << "\n";
     header << "#define " << headerDefine << "\n\n";
-    header << "#include \"src/builtins/builtins-promise.h\"\n";
-    header << "#include \"src/compiler/code-assembler.h\"\n";
-    header << "#include \"src/codegen/code-stub-assembler.h\"\n";
-    header << "#include \"src/utils/utils.h\"\n";
-    header << "#include \"torque-generated/field-offsets-tq.h\"\n";
-    header << "#include \"torque-generated/csa-types-tq.h\"\n";
+    header << "#include \"src/builtins/torque-csa-header-includes.h\"\n";
     header << "\n";
 
     header << "namespace v8 {\n"
@@ -284,6 +280,8 @@ void ImplementationVisitor::VisitMacroCommon(Macro* macro) {
   GenerateMacroFunctionDeclaration(source_out(), "", macro);
   source_out() << " {\n";
   source_out() << "  compiler::CodeAssembler ca_(state_);\n";
+  source_out()
+      << "  compiler::CodeAssembler::SourcePositionScope pos_scope(&ca_);\n";
 
   Stack<std::string> lowered_parameters;
   Stack<const Type*> lowered_parameter_types;
@@ -1045,7 +1043,19 @@ std::string FormatAssertSource(const std::string& str) {
 }  // namespace
 
 const Type* ImplementationVisitor::Visit(AssertStatement* stmt) {
-  bool do_check = !stmt->debug_only || GlobalContext::force_assert_statements();
+  if (stmt->kind == AssertStatement::AssertKind::kStaticAssert) {
+    std::string message =
+        "static_assert(" + stmt->source + ") at " + ToString(stmt->pos);
+    GenerateCall(QualifiedName({"", TORQUE_INTERNAL_NAMESPACE_STRING},
+                               STATIC_ASSERT_MACRO_STRING),
+                 Arguments{{Visit(stmt->expression),
+                            VisitResult(TypeOracle::GetConstexprStringType(),
+                                        StringLiteralQuote(message))},
+                           {}});
+    return TypeOracle::GetVoidType();
+  }
+  bool do_check = stmt->kind != AssertStatement::AssertKind::kAssert ||
+                  GlobalContext::force_assert_statements();
 #if defined(DEBUG)
   do_check = true;
 #endif
@@ -1371,12 +1381,18 @@ VisitResult ImplementationVisitor::GenerateArrayLength(VisitResult object,
   StackScope stack_scope(this);
   const ClassType* class_type = *object.type()->ClassSupertype();
   std::map<std::string, LocalValue> bindings;
+  bool before_current = true;
   for (Field f : class_type->ComputeAllFields()) {
-    if (f.index) break;
+    if (field.name_and_type.name == f.name_and_type.name) {
+      before_current = false;
+    }
     bindings.insert(
         {f.name_and_type.name,
          f.const_qualified
-             ? LocalValue{GenerateFieldReference(object, f, class_type)}
+             ? (before_current
+                    ? LocalValue{GenerateFieldReference(object, f, class_type)}
+                    : LocalValue("Array lengths may only refer to fields "
+                                 "defined earlier"))
              : LocalValue(
                    "Non-const fields cannot be used for array lengths.")});
   }
@@ -1516,8 +1532,10 @@ VisitResult ImplementationVisitor::Visit(NewExpression* expr) {
   Arguments allocate_arguments;
   allocate_arguments.parameters.push_back(layout.size);
   allocate_arguments.parameters.push_back(object_map);
+  allocate_arguments.parameters.push_back(
+      GenerateBoolConstant(expr->pretenured));
   VisitResult allocate_result = GenerateCall(
-      QualifiedName({TORQUE_INTERNAL_NAMESPACE_STRING}, "Allocate"),
+      QualifiedName({TORQUE_INTERNAL_NAMESPACE_STRING}, "AllocateFromNew"),
       allocate_arguments, {class_type}, false);
   DCHECK(allocate_result.IsOnStack());
 
@@ -1769,6 +1787,25 @@ bool ImplementationVisitor::TestLookupCallable(
                         {}, {}, true) != nullptr;
 }
 
+TypeArgumentInference ImplementationVisitor::InferSpecializationTypes(
+    GenericCallable* generic, const TypeVector& explicit_specialization_types,
+    const TypeVector& explicit_arguments) {
+  std::vector<base::Optional<const Type*>> all_arguments;
+  const ParameterList& parameters = generic->declaration()->parameters;
+  for (size_t i = 0; i < parameters.implicit_count; ++i) {
+    base::Optional<Binding<LocalValue>*> val =
+        TryLookupLocalValue(parameters.names[i]->value);
+    all_arguments.push_back(
+        val ? (*val)->GetLocationReference(*val).ReferencedType()
+            : base::nullopt);
+  }
+  for (const Type* explicit_argument : explicit_arguments) {
+    all_arguments.push_back(explicit_argument);
+  }
+  return generic->InferSpecializationTypes(explicit_specialization_types,
+                                           all_arguments);
+}
+
 template <class Container>
 Callable* ImplementationVisitor::LookupCallable(
     const QualifiedName& name, const Container& declaration_container,
@@ -1782,8 +1819,8 @@ Callable* ImplementationVisitor::LookupCallable(
   std::vector<std::pair<GenericCallable*, std::string>> inapplicable_generics;
   for (auto* declarable : declaration_container) {
     if (GenericCallable* generic = GenericCallable::DynamicCast(declarable)) {
-      TypeArgumentInference inference = generic->InferSpecializationTypes(
-          specialization_types, parameter_types);
+      TypeArgumentInference inference = InferSpecializationTypes(
+          generic, specialization_types, parameter_types);
       if (inference.HasFailed()) {
         inapplicable_generics.push_back(
             std::make_pair(generic, inference.GetFailureReason()));
@@ -1844,8 +1881,8 @@ Callable* ImplementationVisitor::LookupCallable(
 
   if (GenericCallable* generic =
           GenericCallable::DynamicCast(overloads[best])) {
-    TypeArgumentInference inference = generic->InferSpecializationTypes(
-        specialization_types, parameter_types);
+    TypeArgumentInference inference = InferSpecializationTypes(
+        generic, specialization_types, parameter_types);
     result = GetOrCreateSpecialization(
         SpecializationKey<GenericCallable>{generic, inference.GetResult()});
   } else {
@@ -2391,10 +2428,16 @@ VisitResult ImplementationVisitor::GeneratePointerCall(
 void ImplementationVisitor::AddCallParameter(
     Callable* callable, VisitResult parameter, const Type* parameter_type,
     std::vector<VisitResult>* converted_arguments, StackRange* argument_range,
-    std::vector<std::string>* constexpr_arguments) {
-  VisitResult converted = GenerateImplicitConvert(parameter_type, parameter);
+    std::vector<std::string>* constexpr_arguments, bool inline_macro) {
+  VisitResult converted;
+  if ((converted_arguments->size() < callable->signature().implicit_count) &&
+      parameter.type()->IsTopType()) {
+    converted = GenerateCopy(parameter);
+  } else {
+    converted = GenerateImplicitConvert(parameter_type, parameter);
+  }
   converted_arguments->push_back(converted);
-  if (!callable->ShouldBeInlined()) {
+  if (!inline_macro) {
     if (converted.IsOnStack()) {
       argument_range->Extend(converted.stack_range());
     } else {
@@ -2444,18 +2487,33 @@ VisitResult ImplementationVisitor::GenerateCall(
     }
   }
 
+  bool inline_macro = callable->ShouldBeInlined();
   std::vector<VisitResult> implicit_arguments;
   for (size_t i = 0; i < callable->signature().implicit_count; ++i) {
     std::string implicit_name = callable->signature().parameter_names[i]->value;
     base::Optional<Binding<LocalValue>*> val =
         TryLookupLocalValue(implicit_name);
-    if (!val) {
-      ReportError("implicit parameter '", implicit_name,
-                  "' required for call to '", callable->ReadableName(),
-                  "' is not defined");
+    if (val) {
+      implicit_arguments.push_back(
+          GenerateFetchFromLocation((*val)->GetLocationReference(*val)));
+    } else {
+      VisitResult unititialized = VisitResult::TopTypeResult(
+          "implicit parameter '" + implicit_name +
+              "' is not defined when invoking " + callable->ReadableName() +
+              " at " + PositionAsString(CurrentSourcePosition::Get()),
+          callable->signature().parameter_types.types[i]);
+      implicit_arguments.push_back(unititialized);
     }
-    implicit_arguments.push_back(
-        GenerateFetchFromLocation((*val)->GetLocationReference(*val)));
+    const Type* type = implicit_arguments.back().type();
+    if (const TopType* top_type = TopType::DynamicCast(type)) {
+      if (!callable->IsMacro() || callable->IsExternal()) {
+        ReportError(
+            "unititialized implicit parameters can only be passed to "
+            "Torque-defined macros: the ",
+            top_type->reason());
+      }
+      inline_macro = true;
+    }
   }
 
   std::vector<VisitResult> converted_arguments;
@@ -2467,7 +2525,7 @@ VisitResult ImplementationVisitor::GenerateCall(
     AddCallParameter(callable, implicit_arguments[current],
                      callable->signature().parameter_types.types[current],
                      &converted_arguments, &argument_range,
-                     &constexpr_arguments);
+                     &constexpr_arguments, inline_macro);
   }
 
   if (this_reference) {
@@ -2476,7 +2534,7 @@ VisitResult ImplementationVisitor::GenerateCall(
     // By now, the this reference should either be a variable, a temporary or
     // a Slice. In either case the fetch of the VisitResult should succeed.
     VisitResult this_value = this_reference->GetVisitResult();
-    if (method->ShouldBeInlined()) {
+    if (inline_macro) {
       if (!this_value.type()->IsSubtypeOf(method->aggregate_type())) {
         ReportError("this parameter must be a subtype of ",
                     *method->aggregate_type(), " but it is of type ",
@@ -2485,7 +2543,7 @@ VisitResult ImplementationVisitor::GenerateCall(
     } else {
       AddCallParameter(callable, this_value, method->aggregate_type(),
                        &converted_arguments, &argument_range,
-                       &constexpr_arguments);
+                       &constexpr_arguments, inline_macro);
     }
     ++current;
   }
@@ -2495,7 +2553,7 @@ VisitResult ImplementationVisitor::GenerateCall(
                               ? TypeOracle::GetObjectType()
                               : callable->signature().types()[current++];
     AddCallParameter(callable, arg, to_type, &converted_arguments,
-                     &argument_range, &constexpr_arguments);
+                     &argument_range, &constexpr_arguments, inline_macro);
   }
 
   size_t label_count = callable->signature().labels.size();
@@ -2559,7 +2617,7 @@ VisitResult ImplementationVisitor::GenerateCall(
       }
       result << "))";
       return VisitResult(return_type, result.str());
-    } else if (macro->ShouldBeInlined()) {
+    } else if (inline_macro) {
       std::vector<Block*> label_blocks;
       for (Binding<LocalLabel>* label : arguments.labels) {
         label_blocks.push_back(label->block);
@@ -2874,8 +2932,13 @@ VisitResult ImplementationVisitor::GenerateImplicitConvert(
     return scope.Yield(GenerateCopy(source));
   } else {
     std::stringstream s;
-    s << "cannot use expression of type " << *source.type()
-      << " as a value of type " << *destination_type;
+    if (const TopType* top_type = TopType::DynamicCast(source.type())) {
+      s << "undefined expression of type " << *destination_type << ": the "
+        << top_type->reason();
+    } else {
+      s << "cannot use expression of type " << *source.type()
+        << " as a value of type " << *destination_type;
+    }
     ReportError(s.str());
   }
 }
@@ -3978,6 +4041,8 @@ void EmitClassDefinitionHeadersIncludes(const std::string& basename,
   header << "#include <type_traits>\n\n";
 
   inline_header << "#include \"torque-generated/class-definitions-tq.h\"\n";
+  inline_header << "#include \"src/objects/js-function.h\"\n";
+  inline_header << "#include \"src/objects/js-objects.h\"\n";
   inline_header << "#include \"src/objects/js-promise.h\"\n";
   inline_header << "#include \"src/objects/js-weak-refs.h\"\n";
   inline_header << "#include \"src/objects/module.h\"\n";
@@ -4743,6 +4808,7 @@ void ImplementationVisitor::GenerateExportedMacrosAssembler(
       cc_contents << "#include \"src/objects/js-relative-time-format.h\"\n";
       cc_contents << "#include \"src/objects/js-segment-iterator.h\"\n";
       cc_contents << "#include \"src/objects/js-segmenter.h\"\n";
+      cc_contents << "#include \"src/objects/js-segments.h\"\n";
     }
     cc_contents << "#include \"torque-generated/" << file_name << ".h\"\n";
 

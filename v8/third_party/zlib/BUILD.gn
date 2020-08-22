@@ -23,6 +23,10 @@ config("zlib_internal_config") {
     # Build code using -O3, see: crbug.com/1084371.
     configs = [ "//build/config/compiler:optimize_speed" ]
   }
+  if (is_debug || use_libfuzzer) {
+    # Enable zlib's asserts in debug and fuzzer builds.
+    defines += [ "ZLIB_DEBUG" ]
+  }
 }
 
 use_arm_neon_optimizations = false
@@ -90,6 +94,8 @@ if (use_arm_neon_optimizations) {
         defines += [ "ARMV8_OS_ANDROID" ]
       } else if (is_linux || is_chromeos) {
         defines += [ "ARMV8_OS_LINUX" ]
+      } else if (is_mac) {
+        defines += [ "ARMV8_OS_MACOS" ]
       } else if (is_fuchsia) {
         defines += [ "ARMV8_OS_FUCHSIA" ]
       } else if (is_win) {
@@ -356,7 +362,7 @@ static_library("minizip") {
     ]
   }
 
-  if (is_mac || is_ios || is_android || is_nacl) {
+  if (is_apple || is_android || is_nacl) {
     # Mac, Android and the BSDs don't have fopen64, ftello64, or fseeko64. We
     # use fopen, ftell, and fseek instead on these systems.
     defines = [ "USE_FILE32API" ]

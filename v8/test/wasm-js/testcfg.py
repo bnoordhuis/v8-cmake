@@ -27,12 +27,11 @@ proposal_flags = [{
                   {
                     'name': 'js-types',
                     'flags': ['--experimental-wasm-type-reflection',
-                              '--no-experimental-wasm-bulk-memory',
                               '--wasm-staging']
                   },
                   {
-                    'name': 'JS-BigInt-integration',
-                    'flags': ['--experimental-wasm-bigint',
+                    'name': 'tail-call',
+                    'flags': ['--experimental-wasm-tail-call',
                               '--wasm-staging']
                   },
                   ]

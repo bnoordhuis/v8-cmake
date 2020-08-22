@@ -345,7 +345,7 @@ struct WasmEngine::IsolateInfo {
 #endif
 
   // All native modules that are being used by this Isolate.
-  std::unordered_map<NativeModule*, std::weak_ptr<NativeModule>> native_modules;
+  std::unordered_set<NativeModule*> native_modules;
 
   // Scripts created for each native module in this isolate.
   std::unordered_map<NativeModule*, WeakScriptHandle> scripts;
@@ -369,6 +369,12 @@ struct WasmEngine::IsolateInfo {
 };
 
 struct WasmEngine::NativeModuleInfo {
+  explicit NativeModuleInfo(std::weak_ptr<NativeModule> native_module)
+      : weak_ptr(std::move(native_module)) {}
+
+  // Weak pointer, to gain back a shared_ptr if needed.
+  std::weak_ptr<NativeModule> weak_ptr;
+
   // Set of isolates using this NativeModule.
   std::unordered_set<Isolate*> isolates;
 
@@ -395,8 +401,33 @@ WasmEngine::~WasmEngine() {
   gdb_server_.reset();
 #endif  // V8_ENABLE_WASM_GDB_REMOTE_DEBUGGING
 
-  // Synchronize on all background compile tasks.
-  background_compile_task_manager_.CancelAndWait();
+  // Collect the live modules into a vector first, then cancel them while
+  // releasing our lock. This will allow the background tasks to finish.
+  std::vector<std::shared_ptr<NativeModule>> live_modules;
+  {
+    base::MutexGuard guard(&mutex_);
+    for (auto& entry : native_modules_) {
+      if (auto shared_ptr = entry.second->weak_ptr.lock()) {
+        live_modules.emplace_back(std::move(shared_ptr));
+      }
+    }
+  }
+
+  for (auto& native_module : live_modules) {
+    native_module->compilation_state()->CancelCompilation();
+  }
+  live_modules.clear();
+
+  // Now wait for all background compile tasks to actually finish.
+  std::vector<std::shared_ptr<JobHandle>> compile_job_handles;
+  {
+    base::MutexGuard guard(&mutex_);
+    compile_job_handles = compile_job_handles_;
+  }
+  for (auto& job_handle : compile_job_handles) {
+    if (job_handle->IsRunning()) job_handle->Cancel();
+  }
+
   // All AsyncCompileJobs have been canceled.
   DCHECK(async_compile_jobs_.empty());
   // All Isolates have been deregistered.
@@ -412,9 +443,11 @@ bool WasmEngine::SyncValidate(Isolate* isolate, const WasmFeatures& enabled,
   TRACE_EVENT0("v8.wasm", "wasm.SyncValidate");
   // TODO(titzer): remove dependency on the isolate.
   if (bytes.start() == nullptr || bytes.length() == 0) return false;
-  ModuleResult result =
-      DecodeWasmModule(enabled, bytes.start(), bytes.end(), true, kWasmOrigin,
-                       isolate->counters(), allocator());
+  ModuleResult result = DecodeWasmModule(
+      enabled, bytes.start(), bytes.end(), true, kWasmOrigin,
+      isolate->counters(), isolate->metrics_recorder(),
+      isolate->GetOrRegisterRecorderContextId(isolate->native_context()),
+      DecodingMethod::kSync, allocator());
   return result.ok();
 }
 
@@ -426,9 +459,11 @@ MaybeHandle<AsmWasmData> WasmEngine::SyncCompileTranslatedAsmJs(
   ModuleOrigin origin = language_mode == LanguageMode::kSloppy
                             ? kAsmJsSloppyOrigin
                             : kAsmJsStrictOrigin;
-  ModuleResult result =
-      DecodeWasmModule(WasmFeatures::ForAsmjs(), bytes.start(), bytes.end(),
-                       false, origin, isolate->counters(), allocator());
+  ModuleResult result = DecodeWasmModule(
+      WasmFeatures::ForAsmjs(), bytes.start(), bytes.end(), false, origin,
+      isolate->counters(), isolate->metrics_recorder(),
+      isolate->GetOrRegisterRecorderContextId(isolate->native_context()),
+      DecodingMethod::kSync, allocator());
   if (result.failed()) {
     // This happens once in a while when we have missed some limit check
     // in the asm parser. Output an error message to help diagnose, but crash.
@@ -467,9 +502,11 @@ MaybeHandle<WasmModuleObject> WasmEngine::SyncCompile(
     Isolate* isolate, const WasmFeatures& enabled, ErrorThrower* thrower,
     const ModuleWireBytes& bytes) {
   TRACE_EVENT0("v8.wasm", "wasm.SyncCompile");
-  ModuleResult result =
-      DecodeWasmModule(enabled, bytes.start(), bytes.end(), false, kWasmOrigin,
-                       isolate->counters(), allocator());
+  ModuleResult result = DecodeWasmModule(
+      enabled, bytes.start(), bytes.end(), false, kWasmOrigin,
+      isolate->counters(), isolate->metrics_recorder(),
+      isolate->GetOrRegisterRecorderContextId(isolate->native_context()),
+      DecodingMethod::kSync, allocator());
   if (result.failed()) {
     thrower->CompileFailed(result.error());
     return {};
@@ -632,9 +669,10 @@ void WasmEngine::TierDownAllModulesPerIsolate(Isolate* isolate) {
     base::MutexGuard lock(&mutex_);
     if (isolates_[isolate]->keep_tiered_down) return;
     isolates_[isolate]->keep_tiered_down = true;
-    for (auto& entry : isolates_[isolate]->native_modules) {
-      entry.first->SetTieringState(kTieredDown);
-      if (auto shared_ptr = entry.second.lock()) {
+    for (auto* native_module : isolates_[isolate]->native_modules) {
+      native_module->SetTieringState(kTieredDown);
+      DCHECK_EQ(1, native_modules_.count(native_module));
+      if (auto shared_ptr = native_modules_[native_module]->weak_ptr.lock()) {
         native_modules.emplace_back(std::move(shared_ptr));
       }
     }
@@ -646,33 +684,40 @@ void WasmEngine::TierDownAllModulesPerIsolate(Isolate* isolate) {
 
 void WasmEngine::TierUpAllModulesPerIsolate(Isolate* isolate) {
   // Only trigger recompilation after releasing the mutex, otherwise we risk
-  // deadlocks because of lock inversion.
-  std::vector<std::shared_ptr<NativeModule>> native_modules_to_recompile;
+  // deadlocks because of lock inversion. The bool tells whether the module
+  // needs recompilation for tier up.
+  std::vector<std::pair<std::shared_ptr<NativeModule>, bool>> native_modules;
   {
     base::MutexGuard lock(&mutex_);
     isolates_[isolate]->keep_tiered_down = false;
-    auto test_keep_tiered_down = [this](NativeModule* native_module) {
+    auto test_can_tier_up = [this](NativeModule* native_module) {
       DCHECK_EQ(1, native_modules_.count(native_module));
       for (auto* isolate : native_modules_[native_module]->isolates) {
         DCHECK_EQ(1, isolates_.count(isolate));
-        if (isolates_[isolate]->keep_tiered_down) return true;
+        if (isolates_[isolate]->keep_tiered_down) return false;
       }
-      return false;
+      return true;
     };
-    for (auto& entry : isolates_[isolate]->native_modules) {
-      auto* native_module = entry.first;
+    for (auto* native_module : isolates_[isolate]->native_modules) {
+      DCHECK_EQ(1, native_modules_.count(native_module));
+      auto shared_ptr = native_modules_[native_module]->weak_ptr.lock();
+      if (!shared_ptr) continue;  // The module is not used any more.
       if (!native_module->IsTieredDown()) continue;
-      // Only start tier-up if no other isolate needs this modules in tiered
+      // Only start tier-up if no other isolate needs this module in tiered
       // down state.
-      if (test_keep_tiered_down(native_module)) continue;
-      native_module->SetTieringState(kTieredUp);
-      if (auto shared_ptr = entry.second.lock()) {
-        native_modules_to_recompile.emplace_back(std::move(shared_ptr));
-      }
+      bool tier_up = test_can_tier_up(native_module);
+      if (tier_up) native_module->SetTieringState(kTieredUp);
+      native_modules.emplace_back(std::move(shared_ptr), tier_up);
     }
   }
-  for (auto& native_module : native_modules_to_recompile) {
-    native_module->RecompileForTiering();
+  for (auto& entry : native_modules) {
+    auto& native_module = entry.first;
+    bool tier_up = entry.second;
+    // Remove all breakpoints set by this isolate.
+    if (native_module->HasDebugInfo()) {
+      native_module->GetDebugInfo()->RemoveIsolate(isolate);
+    }
+    if (tier_up) native_module->RecompileForTiering();
   }
 }
 
@@ -778,12 +823,11 @@ Handle<WasmModuleObject> WasmEngine::ImportNativeModule(
   Handle<FixedArray> export_wrappers;
   CompileJsToWasmWrappers(isolate, native_module->module(), &export_wrappers);
   Handle<WasmModuleObject> module_object = WasmModuleObject::New(
-      isolate, shared_native_module, script, export_wrappers);
+      isolate, std::move(shared_native_module), script, export_wrappers);
   {
     base::MutexGuard lock(&mutex_);
     DCHECK_EQ(1, isolates_.count(isolate));
-    isolates_[isolate]->native_modules.emplace(native_module,
-                                               std::move(shared_native_module));
+    isolates_[isolate]->native_modules.insert(native_module);
     DCHECK_EQ(1, native_modules_.count(native_module));
     native_modules_[native_module]->isolates.insert(isolate);
   }
@@ -902,8 +946,8 @@ void WasmEngine::AddIsolate(Isolate* isolate) {
     WasmEngine* engine = isolate->wasm_engine();
     base::MutexGuard lock(&engine->mutex_);
     DCHECK_EQ(1, engine->isolates_.count(isolate));
-    for (auto& entry : engine->isolates_[isolate]->native_modules) {
-      entry.first->SampleCodeSize(counters, NativeModule::kSampling);
+    for (auto* native_module : engine->isolates_[isolate]->native_modules) {
+      native_module->SampleCodeSize(counters, NativeModule::kSampling);
     }
   };
   isolate->heap()->AddGCEpilogueCallback(callback, v8::kGCTypeMarkSweepCompact,
@@ -927,8 +971,7 @@ void WasmEngine::RemoveIsolate(Isolate* isolate) {
   DCHECK_NE(isolates_.end(), it);
   std::unique_ptr<IsolateInfo> info = std::move(it->second);
   isolates_.erase(it);
-  for (auto& entry : info->native_modules) {
-    auto* native_module = entry.first;
+  for (auto* native_module : info->native_modules) {
     DCHECK_EQ(1, native_modules_.count(native_module));
     DCHECK_EQ(1, native_modules_[native_module]->isolates.count(isolate));
     auto* info = native_modules_[native_module].get();
@@ -1019,11 +1062,11 @@ std::shared_ptr<NativeModule> WasmEngine::NewNativeModule(
       this, isolate, enabled, code_size_estimate, std::move(module));
   base::MutexGuard lock(&mutex_);
   auto pair = native_modules_.insert(std::make_pair(
-      native_module.get(), std::make_unique<NativeModuleInfo>()));
+      native_module.get(), std::make_unique<NativeModuleInfo>(native_module)));
   DCHECK(pair.second);  // inserted new entry.
   pair.first->second.get()->isolates.insert(isolate);
   auto& modules_per_isolate = isolates_[isolate]->native_modules;
-  modules_per_isolate.emplace(native_module.get(), native_module);
+  modules_per_isolate.insert(native_module.get());
   if (isolates_[isolate]->keep_tiered_down) {
     native_module->SetTieringState(kTieredDown);
   }
@@ -1043,11 +1086,10 @@ std::shared_ptr<NativeModule> WasmEngine::MaybeGetNativeModule(
     base::MutexGuard guard(&mutex_);
     auto& native_module_info = native_modules_[native_module.get()];
     if (!native_module_info) {
-      native_module_info = std::make_unique<NativeModuleInfo>();
+      native_module_info = std::make_unique<NativeModuleInfo>(native_module);
     }
     native_module_info->isolates.insert(isolate);
-    isolates_[isolate]->native_modules.emplace(native_module.get(),
-                                               native_module);
+    isolates_[isolate]->native_modules.insert(native_module.get());
     if (isolates_[isolate]->keep_tiered_down) {
       native_module->SetTieringState(kTieredDown);
       recompile_module = true;
@@ -1076,8 +1118,7 @@ bool WasmEngine::UpdateNativeModuleCache(
     DCHECK_EQ(1, native_modules_.count(native_module->get()));
     native_modules_[native_module->get()]->isolates.insert(isolate);
     DCHECK_EQ(1, isolates_.count(isolate));
-    isolates_[isolate]->native_modules.emplace(native_module->get(),
-                                               *native_module);
+    isolates_[isolate]->native_modules.insert(native_module->get());
     if (isolates_[isolate]->keep_tiered_down) {
       native_module->get()->SetTieringState(kTieredDown);
       recompile_module = true;
@@ -1296,6 +1337,14 @@ Handle<Script> WasmEngine::GetOrCreateScript(
   }
 }
 
+void WasmEngine::ShepherdCompileJobHandle(
+    std::shared_ptr<JobHandle> job_handle) {
+  DCHECK_NOT_NULL(job_handle);
+  base::MutexGuard guard(&mutex_);
+  // TODO(clemensb): Add occasional cleanup of finished handles.
+  compile_job_handles_.emplace_back(std::move(job_handle));
+}
+
 void WasmEngine::TriggerGC(int8_t gc_sequence_index) {
   DCHECK(!mutex_.TryLock());
   DCHECK_NULL(current_gc_info_);
@@ -1415,6 +1464,13 @@ uint32_t max_maximum_mem_pages() {
 uint32_t max_table_init_entries() {
   return std::min(uint32_t{kV8MaxWasmTableInitEntries},
                   FLAG_wasm_max_table_size);
+}
+
+// {max_module_size} is declared in wasm-limits.h.
+size_t max_module_size() {
+  return FLAG_experimental_wasm_allow_huge_modules
+             ? RoundDown<kSystemPointerSize>(size_t{kMaxInt})
+             : kV8MaxWasmModuleSize;
 }
 
 #undef TRACE_CODE_GC

@@ -423,7 +423,7 @@ class WasmOutOfLineTrap : public OutOfLineCode {
       // is added to the native module and copied into wasm code space.
       __ near_call(static_cast<Address>(trap_id), RelocInfo::WASM_STUB_CALL);
       ReferenceMap* reference_map =
-          new (gen_->zone()) ReferenceMap(gen_->zone());
+          gen_->zone()->New<ReferenceMap>(gen_->zone());
       gen_->RecordSafepoint(reference_map, Safepoint::kNoLazyDeopt);
       __ AssertUnreachable(AbortReason::kUnexpectedReturnFromWasmTrap);
     }
@@ -452,7 +452,7 @@ void EmitOOLTrapIfNeeded(Zone* zone, CodeGenerator* codegen,
   const MemoryAccessMode access_mode =
       static_cast<MemoryAccessMode>(MiscField::decode(opcode));
   if (access_mode == kMemoryAccessProtected) {
-    new (zone) WasmProtectedInstructionTrap(codegen, pc, instr);
+    zone->New<WasmProtectedInstructionTrap>(codegen, pc, instr);
   }
 }
 
@@ -757,13 +757,10 @@ void AdjustStackPointerForTailCall(TurboAssembler* assembler,
   }
 }
 
-void SetupShuffleMaskInTempRegister(TurboAssembler* assembler, uint32_t* mask,
-                                    XMMRegister tmp) {
-  uint64_t shuffle_mask = (mask[0]) | (uint64_t{mask[1]} << 32);
-  assembler->Move(tmp, shuffle_mask);
-  shuffle_mask = (mask[2]) | (uint64_t{mask[3]} << 32);
-  assembler->movq(kScratchRegister, shuffle_mask);
-  assembler->Pinsrq(tmp, kScratchRegister, int8_t{1});
+void SetupSimdImmediateInRegister(TurboAssembler* assembler, uint32_t* imms,
+                                  XMMRegister reg) {
+  assembler->Move(reg, make_uint64(imms[3], imms[2]),
+                  make_uint64(imms[1], imms[0]));
 }
 
 }  // namespace
@@ -1148,7 +1145,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kArchTruncateDoubleToI: {
       auto result = i.OutputRegister();
       auto input = i.InputDoubleRegister(0);
-      auto ool = new (zone()) OutOfLineTruncateDoubleToI(
+      auto ool = zone()->New<OutOfLineTruncateDoubleToI>(
           this, result, input, DetermineStubCallMode(),
           &unwinding_info_writer_);
       // We use Cvttsd2siq instead of Cvttsd2si due to performance reasons. The
@@ -1169,9 +1166,9 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       Register value = i.InputRegister(index);
       Register scratch0 = i.TempRegister(0);
       Register scratch1 = i.TempRegister(1);
-      auto ool = new (zone())
-          OutOfLineRecordWrite(this, object, operand, value, scratch0, scratch1,
-                               mode, DetermineStubCallMode());
+      auto ool = zone()->New<OutOfLineRecordWrite>(this, object, operand, value,
+                                                   scratch0, scratch1, mode,
+                                                   DetermineStubCallMode());
       __ StoreTaggedField(operand, value);
       __ CheckPageFlag(object, scratch0,
                        MemoryChunk::kPointersFromHereAreInterestingMask,
@@ -1567,7 +1564,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         __ Ucomiss(i.InputDoubleRegister(0), i.InputOperand(1));
       }
       auto ool =
-          new (zone()) OutOfLineLoadFloat32NaN(this, i.OutputDoubleRegister());
+          zone()->New<OutOfLineLoadFloat32NaN>(this, i.OutputDoubleRegister());
       __ j(parity_even, ool->entry());
       __ j(above, &done_compare, Label::kNear);
       __ j(below, &compare_swap, Label::kNear);
@@ -1592,7 +1589,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         __ Ucomiss(i.InputDoubleRegister(0), i.InputOperand(1));
       }
       auto ool =
-          new (zone()) OutOfLineLoadFloat32NaN(this, i.OutputDoubleRegister());
+          zone()->New<OutOfLineLoadFloat32NaN>(this, i.OutputDoubleRegister());
       __ j(parity_even, ool->entry());
       __ j(below, &done_compare, Label::kNear);
       __ j(above, &compare_swap, Label::kNear);
@@ -1622,7 +1619,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         __ Ucomisd(i.InputDoubleRegister(0), i.InputOperand(1));
       }
       auto ool =
-          new (zone()) OutOfLineLoadFloat64NaN(this, i.OutputDoubleRegister());
+          zone()->New<OutOfLineLoadFloat64NaN>(this, i.OutputDoubleRegister());
       __ j(parity_even, ool->entry());
       __ j(above, &done_compare, Label::kNear);
       __ j(below, &compare_swap, Label::kNear);
@@ -1647,7 +1644,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         __ Ucomisd(i.InputDoubleRegister(0), i.InputOperand(1));
       }
       auto ool =
-          new (zone()) OutOfLineLoadFloat64NaN(this, i.OutputDoubleRegister());
+          zone()->New<OutOfLineLoadFloat64NaN>(this, i.OutputDoubleRegister());
       __ j(parity_even, ool->entry());
       __ j(below, &done_compare, Label::kNear);
       __ j(above, &compare_swap, Label::kNear);
@@ -2360,9 +2357,11 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         LocationOperand* op = LocationOperand::cast(instr->OutputAt(0));
         if (op->representation() == MachineRepresentation::kFloat64) {
           __ Movsd(i.OutputDoubleRegister(), Operand(rbp, offset));
-        } else {
-          DCHECK_EQ(MachineRepresentation::kFloat32, op->representation());
+        } else if (op->representation() == MachineRepresentation::kFloat32) {
           __ Movss(i.OutputFloatRegister(), Operand(rbp, offset));
+        } else {
+          DCHECK_EQ(MachineRepresentation::kSimd128, op->representation());
+          __ Movdqu(i.OutputSimd128Register(), Operand(rbp, offset));
         }
       } else {
         __ movq(i.OutputRegister(), Operand(rbp, offset));
@@ -2425,7 +2424,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       // Most likely there is no difference and we're done.
       __ Xorpd(kScratchDoubleReg, dst);
       __ Ptest(kScratchDoubleReg, kScratchDoubleReg);
-      auto ool = new (zone()) OutOfLineF64x2Min(this, dst, kScratchDoubleReg);
+      auto ool = zone()->New<OutOfLineF64x2Min>(this, dst, kScratchDoubleReg);
       __ j(not_zero, ool->entry());
       __ bind(ool->exit());
       break;
@@ -2443,7 +2442,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       // Most likely there is no difference and we're done.
       __ Xorpd(kScratchDoubleReg, dst);
       __ Ptest(kScratchDoubleReg, kScratchDoubleReg);
-      auto ool = new (zone()) OutOfLineF64x2Max(this, dst, kScratchDoubleReg);
+      auto ool = zone()->New<OutOfLineF64x2Max>(this, dst, kScratchDoubleReg);
       __ j(not_zero, ool->entry());
       __ bind(ool->exit());
       break;
@@ -2618,7 +2617,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       // Most likely there is no difference and we're done.
       __ Xorps(kScratchDoubleReg, dst);
       __ Ptest(kScratchDoubleReg, kScratchDoubleReg);
-      auto ool = new (zone()) OutOfLineF32x4Min(this, dst, kScratchDoubleReg);
+      auto ool = zone()->New<OutOfLineF32x4Min>(this, dst, kScratchDoubleReg);
       __ j(not_zero, ool->entry());
       __ bind(ool->exit());
       break;
@@ -2636,7 +2635,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       // Most likely there is no difference and we're done.
       __ Xorps(kScratchDoubleReg, dst);
       __ Ptest(kScratchDoubleReg, kScratchDoubleReg);
-      auto ool = new (zone()) OutOfLineF32x4Max(this, dst, kScratchDoubleReg);
+      auto ool = zone()->New<OutOfLineF32x4Max>(this, dst, kScratchDoubleReg);
       __ j(not_zero, ool->entry());
       __ bind(ool->exit());
       break;
@@ -3191,9 +3190,25 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ Pmaddwd(i.OutputSimd128Register(), i.InputSimd128Register(1));
       break;
     }
+    case kX64S128Const: {
+      // Emit code for generic constants as all zeros, or ones cases will be
+      // handled separately by the selector.
+      XMMRegister dst = i.OutputSimd128Register();
+      uint32_t imm[4] = {};
+      for (int j = 0; j < 4; j++) {
+        imm[j] = i.InputUint32(j);
+      }
+      SetupSimdImmediateInRegister(tasm(), imm, dst);
+      break;
+    }
     case kX64S128Zero: {
       XMMRegister dst = i.OutputSimd128Register();
       __ Xorps(dst, dst);
+      break;
+    }
+    case kX64S128AllOnes: {
+      XMMRegister dst = i.OutputSimd128Register();
+      __ Pcmpeqd(dst, dst);
       break;
     }
     case kX64I16x8Splat: {
@@ -3728,7 +3743,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
           mask[j - 1] = i.InputUint32(j);
         }
 
-        SetupShuffleMaskInTempRegister(tasm(), mask, tmp_simd);
+        SetupSimdImmediateInRegister(tasm(), mask, tmp_simd);
         __ Pshufb(dst, tmp_simd);
       } else {  // two input operands
         DCHECK_EQ(6, instr->InputCount());
@@ -3741,7 +3756,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
             mask1[j - 2] |= (lane < kSimd128Size ? lane : 0x80) << k;
           }
         }
-        SetupShuffleMaskInTempRegister(tasm(), mask1, tmp_simd);
+        SetupSimdImmediateInRegister(tasm(), mask1, tmp_simd);
         __ Pshufb(kScratchDoubleReg, tmp_simd);
         uint32_t mask2[4] = {};
         if (instr->InputAt(1)->IsSimd128Register()) {
@@ -3757,7 +3772,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
             mask2[j - 2] |= (lane >= kSimd128Size ? (lane & 0x0F) : 0x80) << k;
           }
         }
-        SetupShuffleMaskInTempRegister(tasm(), mask2, tmp_simd);
+        SetupSimdImmediateInRegister(tasm(), mask2, tmp_simd);
         __ Pshufb(dst, tmp_simd);
         __ Por(dst, kScratchDoubleReg);
       }
@@ -3823,6 +3838,16 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kX64I64x2Load32x2U: {
       EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
       __ Pmovzxdq(i.OutputSimd128Register(), i.MemoryOperand());
+      break;
+    }
+    case kX64S128LoadMem32Zero: {
+      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+      __ Movd(i.OutputSimd128Register(), i.MemoryOperand());
+      break;
+    }
+    case kX64S128LoadMem64Zero: {
+      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+      __ Movq(i.OutputSimd128Register(), i.MemoryOperand());
       break;
     }
     case kX64S32x4Swizzle: {
@@ -4354,7 +4379,7 @@ void CodeGenerator::AssembleArchJump(RpoNumber target) {
 
 void CodeGenerator::AssembleArchTrap(Instruction* instr,
                                      FlagsCondition condition) {
-  auto ool = new (zone()) WasmOutOfLineTrap(this, instr);
+  auto ool = zone()->New<WasmOutOfLineTrap>(this, instr);
   Label* tlabel = ool->entry();
   Label end;
   if (condition == kUnorderedEqual) {
@@ -4537,7 +4562,7 @@ void CodeGenerator::AssembleConstructFrame() {
 
       __ near_call(wasm::WasmCode::kWasmStackOverflow,
                    RelocInfo::WASM_STUB_CALL);
-      ReferenceMap* reference_map = new (zone()) ReferenceMap(zone());
+      ReferenceMap* reference_map = zone()->New<ReferenceMap>(zone());
       RecordSafepoint(reference_map, Safepoint::kNoLazyDeopt);
       __ AssertUnreachable(AbortReason::kUnexpectedReturnFromWasmTrap);
       __ bind(&done);
@@ -4654,6 +4679,24 @@ void CodeGenerator::FinishCode() { tasm()->PatchConstPool(); }
 
 void CodeGenerator::PrepareForDeoptimizationExits(int deopt_count) {}
 
+void CodeGenerator::IncrementStackAccessCounter(
+    InstructionOperand* source, InstructionOperand* destination) {
+  DCHECK(FLAG_trace_turbo_stack_accesses);
+  if (!info()->IsOptimizing() && !info()->IsWasm()) return;
+  DCHECK_NOT_NULL(debug_name_);
+  auto IncrementCounter = [&](ExternalReference counter) {
+    __ incl(__ ExternalReferenceAsOperand(counter));
+  };
+  if (source->IsAnyStackSlot()) {
+    IncrementCounter(
+        ExternalReference::address_of_load_from_stack_count(debug_name_));
+  }
+  if (destination->IsAnyStackSlot()) {
+    IncrementCounter(
+        ExternalReference::address_of_store_to_stack_count(debug_name_));
+  }
+}
+
 void CodeGenerator::AssembleMove(InstructionOperand* source,
                                  InstructionOperand* destination) {
   X64OperandConverter g(this, nullptr);
@@ -4736,6 +4779,11 @@ void CodeGenerator::AssembleMove(InstructionOperand* source,
     MoveConstantToRegister(kScratchRegister, src);
     __ movq(dst, kScratchRegister);
   };
+
+  if (FLAG_trace_turbo_stack_accesses) {
+    IncrementStackAccessCounter(source, destination);
+  }
+
   // Dispatch on the source and destination operand kinds.
   switch (MoveType::InferMove(source, destination)) {
     case MoveType::kRegisterToRegister:
@@ -4842,6 +4890,11 @@ void CodeGenerator::AssembleMove(InstructionOperand* source,
 
 void CodeGenerator::AssembleSwap(InstructionOperand* source,
                                  InstructionOperand* destination) {
+  if (FLAG_trace_turbo_stack_accesses) {
+    IncrementStackAccessCounter(source, destination);
+    IncrementStackAccessCounter(destination, source);
+  }
+
   X64OperandConverter g(this, nullptr);
   // Dispatch on the source and destination operand kinds.  Not all
   // combinations are possible.

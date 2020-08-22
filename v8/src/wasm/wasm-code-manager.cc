@@ -365,8 +365,7 @@ void WasmCode::Disassemble(const char* name, std::ostream& os,
   os << "\n";
 
   if (handler_table_size() > 0) {
-    HandlerTable table(handler_table(), handler_table_size(),
-                       HandlerTable::kReturnAddressBasedEncoding);
+    HandlerTable table(this);
     os << "Exception Handler Table (size = " << table.NumberOfReturnEntries()
        << "):\n";
     table.HandlerTableReturnPrint(os);
@@ -394,8 +393,7 @@ void WasmCode::Disassemble(const char* name, std::ostream& os,
   }
 
   if (safepoint_table_offset_ > 0) {
-    SafepointTable table(instruction_start(), safepoint_table_offset_,
-                         stack_slots_);
+    SafepointTable table(this);
     os << "Safepoints (size = " << table.size() << ")\n";
     for (uint32_t i = 0; i < table.length(); i++) {
       uintptr_t pc_offset = table.GetPcOffset(i);
@@ -607,9 +605,8 @@ size_t ReservationSize(size_t code_size_estimate, int num_declared_functions,
 
 Vector<byte> WasmCodeAllocator::AllocateForCode(NativeModule* native_module,
                                                 size_t size) {
-  return AllocateForCodeInRegion(
-      native_module, size, {kNullAddress, std::numeric_limits<size_t>::max()},
-      WasmCodeAllocator::OptionalLock{});
+  return AllocateForCodeInRegion(native_module, size, kUnrestrictedRegion,
+                                 WasmCodeAllocator::OptionalLock{});
 }
 
 Vector<byte> WasmCodeAllocator::AllocateForCodeInRegion(
@@ -626,11 +623,11 @@ Vector<byte> WasmCodeAllocator::AllocateForCodeInRegion(
   size = RoundUp<kCodeAlignment>(size);
   base::AddressRegion code_space =
       free_code_space_.AllocateInRegion(size, region);
-  if (code_space.is_empty()) {
-    if (region.size() < std::numeric_limits<size_t>::max()) {
-      V8::FatalProcessOutOfMemory(nullptr, "wasm code reservation in region");
-      UNREACHABLE();
-    }
+  if (V8_UNLIKELY(code_space.is_empty())) {
+    // Only allocations without a specific region are allowed to fail. Otherwise
+    // the region must have been allocated big enough to hold all initial
+    // allocations (jump tables etc).
+    CHECK_EQ(kUnrestrictedRegion, region);
 
     Address hint = owned_code_space_.empty() ? kNullAddress
                                              : owned_code_space_.back().end();
@@ -674,10 +671,7 @@ Vector<byte> WasmCodeAllocator::AllocateForCodeInRegion(
     DCHECK_LE(committed_code_space_.load(), kMaxWasmCodeMemory);
     for (base::AddressRegion split_range : SplitRangeByReservationsIfNeeded(
              {commit_start, commit_end - commit_start}, owned_code_space_)) {
-      if (!code_manager_->Commit(split_range)) {
-        V8::FatalProcessOutOfMemory(nullptr, "wasm code commit");
-        UNREACHABLE();
-      }
+      code_manager_->Commit(split_range);
     }
   }
   DCHECK(IsAligned(code_space.begin(), kCodeAlignment));
@@ -776,6 +770,9 @@ size_t WasmCodeAllocator::GetNumCodeSpaces() const {
   return owned_code_space_.size();
 }
 
+// static
+constexpr base::AddressRegion WasmCodeAllocator::kUnrestrictedRegion;
+
 NativeModule::NativeModule(WasmEngine* engine, const WasmFeatures& enabled,
                            VirtualMemory code_space,
                            std::shared_ptr<const WasmModule> module,
@@ -801,6 +798,8 @@ NativeModule::NativeModule(WasmEngine* engine, const WasmFeatures& enabled,
   if (module_->num_declared_functions > 0) {
     code_table_ =
         std::make_unique<WasmCode*[]>(module_->num_declared_functions);
+    num_liftoff_function_calls_ =
+        std::make_unique<uint32_t[]>(module_->num_declared_functions);
   }
   code_allocator_.Init(this);
 }
@@ -1087,8 +1086,7 @@ WasmCode* NativeModule::PublishCodeLocked(std::unique_ptr<WasmCode> code) {
 
     // Assume an order of execution tiers that represents the quality of their
     // generated code.
-    static_assert(ExecutionTier::kNone < ExecutionTier::kInterpreter &&
-                      ExecutionTier::kInterpreter < ExecutionTier::kLiftoff &&
+    static_assert(ExecutionTier::kNone < ExecutionTier::kLiftoff &&
                       ExecutionTier::kLiftoff < ExecutionTier::kTurbofan,
                   "Assume an order on execution tiers");
 
@@ -1098,10 +1096,18 @@ WasmCode* NativeModule::PublishCodeLocked(std::unique_ptr<WasmCode> code) {
     // code, which is only used for a single frame and never installed in the
     // code table of jump table). Otherwise, install code if it was compiled
     // with a higher tier.
+    static_assert(
+        kForDebugging > kNoDebugging && kWithBreakpoints > kForDebugging,
+        "for_debugging is ordered");
     const bool update_code_table =
-        tiering_state_ == kTieredDown
-            ? !prior_code || code->for_debugging() == kForDebugging
-            : !prior_code || prior_code->tier() < code->tier();
+        // Never install stepping code.
+        code->for_debugging() != kForStepping &&
+        (!prior_code ||
+         (tiering_state_ == kTieredDown
+              // Tiered down: Install breakpoints over normal debug code.
+              ? prior_code->for_debugging() <= code->for_debugging()
+              // Tiered up: Install if the tier is higher than before.
+              : prior_code->tier() < code->tier()));
     if (update_code_table) {
       code_table_[slot_idx] = code.get();
       if (prior_code) {
@@ -1112,6 +1118,10 @@ WasmCode* NativeModule::PublishCodeLocked(std::unique_ptr<WasmCode> code) {
       }
 
       PatchJumpTablesLocked(slot_idx, code->instruction_start());
+    }
+    if (!code->for_debugging() && tiering_state_ == kTieredDown &&
+        code->tier() == ExecutionTier::kTurbofan) {
+      liftoff_bailout_count_.fetch_add(1);
     }
   }
   WasmCodeRefScope::AddRef(code.get());
@@ -1497,7 +1507,7 @@ NativeModule::~NativeModule() {
   TRACE_HEAP("Deleting native module: %p\n", this);
   // Cancel all background compilation before resetting any field of the
   // NativeModule or freeing anything.
-  compilation_state_->AbortCompilation();
+  compilation_state_->CancelCompilation();
   engine_->FreeNativeModule(this);
   // Free the import wrapper cache before releasing the {WasmCode} objects in
   // {owned_code_}. The destructor of {WasmImportWrapperCache} still needs to
@@ -1518,9 +1528,9 @@ bool WasmCodeManager::CanRegisterUnwindInfoForNonABICompliantCodeRange() const {
 }
 #endif  // V8_OS_WIN64
 
-bool WasmCodeManager::Commit(base::AddressRegion region) {
+void WasmCodeManager::Commit(base::AddressRegion region) {
   // TODO(v8:8462): Remove eager commit once perf supports remapping.
-  if (FLAG_perf_prof) return true;
+  if (V8_UNLIKELY(FLAG_perf_prof)) return;
   DCHECK(IsAligned(region.begin(), CommitPageSize()));
   DCHECK(IsAligned(region.size(), CommitPageSize()));
   // Reserve the size. Use CAS loop to avoid overflow on
@@ -1528,7 +1538,12 @@ bool WasmCodeManager::Commit(base::AddressRegion region) {
   size_t old_value = total_committed_code_space_.load();
   while (true) {
     DCHECK_GE(max_committed_code_space_, old_value);
-    if (region.size() > max_committed_code_space_ - old_value) return false;
+    if (region.size() > max_committed_code_space_ - old_value) {
+      V8::FatalProcessOutOfMemory(
+          nullptr,
+          "WasmCodeManager::Commit: Exceeding maximum wasm code space");
+      UNREACHABLE();
+    }
     if (total_committed_code_space_.compare_exchange_weak(
             old_value, old_value + region.size())) {
       break;
@@ -1538,22 +1553,22 @@ bool WasmCodeManager::Commit(base::AddressRegion region) {
                                              ? PageAllocator::kReadWrite
                                              : PageAllocator::kReadWriteExecute;
 
-  bool ret = SetPermissions(GetPlatformPageAllocator(), region.begin(),
-                            region.size(), permission);
   TRACE_HEAP("Setting rw permissions for 0x%" PRIxPTR ":0x%" PRIxPTR "\n",
              region.begin(), region.end());
 
-  if (!ret) {
+  if (!SetPermissions(GetPlatformPageAllocator(), region.begin(), region.size(),
+                      permission)) {
     // Highly unlikely.
-    total_committed_code_space_.fetch_sub(region.size());
-    return false;
+    V8::FatalProcessOutOfMemory(
+        nullptr,
+        "WasmCodeManager::Commit: Cannot make pre-reserved region writable");
+    UNREACHABLE();
   }
-  return true;
 }
 
 void WasmCodeManager::Decommit(base::AddressRegion region) {
   // TODO(v8:8462): Remove this once perf supports remapping.
-  if (FLAG_perf_prof) return;
+  if (V8_UNLIKELY(FLAG_perf_prof)) return;
   PageAllocator* allocator = GetPlatformPageAllocator();
   DCHECK(IsAligned(region.begin(), allocator->CommitPageSize()));
   DCHECK(IsAligned(region.size(), allocator->CommitPageSize()));

@@ -6,13 +6,13 @@
 #define V8_OBJECTS_SHARED_FUNCTION_INFO_INL_H_
 
 #include "src/base/macros.h"
-#include "src/objects/shared-function-info.h"
-
 #include "src/handles/handles-inl.h"
 #include "src/heap/heap-write-barrier-inl.h"
+#include "src/heap/local-heap-inl.h"
 #include "src/objects/debug-objects-inl.h"
 #include "src/objects/feedback-vector-inl.h"
 #include "src/objects/scope-info.h"
+#include "src/objects/shared-function-info.h"
 #include "src/objects/templates.h"
 #include "src/wasm/wasm-objects-inl.h"
 
@@ -185,6 +185,9 @@ BIT_FIELD_ACCESSORS(SharedFunctionInfo, flags2, class_scope_has_private_brand,
 BIT_FIELD_ACCESSORS(SharedFunctionInfo, flags2,
                     has_static_private_methods_or_accessors,
                     SharedFunctionInfo::HasStaticPrivateMethodsOrAccessorsBit)
+
+BIT_FIELD_ACCESSORS(SharedFunctionInfo, flags2, may_have_cached_code,
+                    SharedFunctionInfo::MayHaveCachedCodeBit)
 
 BIT_FIELD_ACCESSORS(SharedFunctionInfo, flags, syntax_kind,
                     SharedFunctionInfo::FunctionSyntaxKindBits)
@@ -414,8 +417,10 @@ bool SharedFunctionInfo::is_compiled() const {
          !data.IsUncompiledData();
 }
 
-IsCompiledScope SharedFunctionInfo::is_compiled_scope() const {
-  return IsCompiledScope(*this, GetIsolate());
+template <typename LocalIsolate>
+IsCompiledScope SharedFunctionInfo::is_compiled_scope(
+    LocalIsolate* isolate) const {
+  return IsCompiledScope(*this, isolate);
 }
 
 IsCompiledScope::IsCompiledScope(const SharedFunctionInfo shared,
@@ -423,6 +428,16 @@ IsCompiledScope::IsCompiledScope(const SharedFunctionInfo shared,
     : retain_bytecode_(shared.HasBytecodeArray()
                            ? handle(shared.GetBytecodeArray(), isolate)
                            : MaybeHandle<BytecodeArray>()),
+      is_compiled_(shared.is_compiled()) {
+  DCHECK_IMPLIES(!retain_bytecode_.is_null(), is_compiled());
+}
+
+IsCompiledScope::IsCompiledScope(const SharedFunctionInfo shared,
+                                 LocalIsolate* isolate)
+    : retain_bytecode_(
+          shared.HasBytecodeArray()
+              ? isolate->heap()->NewPersistentHandle(shared.GetBytecodeArray())
+              : MaybeHandle<BytecodeArray>()),
       is_compiled_(shared.is_compiled()) {
   DCHECK_IMPLIES(!retain_bytecode_.is_null(), is_compiled());
 }

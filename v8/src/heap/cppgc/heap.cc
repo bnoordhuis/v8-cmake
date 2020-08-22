@@ -7,7 +7,7 @@
 #include "src/heap/base/stack.h"
 #include "src/heap/cppgc/garbage-collector.h"
 #include "src/heap/cppgc/gc-invoker.h"
-#include "src/heap/cppgc/heap-object-header-inl.h"
+#include "src/heap/cppgc/heap-object-header.h"
 #include "src/heap/cppgc/heap-visitor.h"
 #include "src/heap/cppgc/marker.h"
 #include "src/heap/cppgc/prefinalizer-handler.h"
@@ -74,11 +74,6 @@ void CheckConfig(Heap::Config config) {
 
 }  // namespace
 
-// static
-cppgc::LivenessBroker LivenessBrokerFactory::Create() {
-  return cppgc::LivenessBroker();
-}
-
 Heap::Heap(std::shared_ptr<cppgc::Platform> platform,
            cppgc::Heap::HeapOptions options)
     : HeapBase(platform, options.custom_spaces.size()),
@@ -112,12 +107,16 @@ void Heap::CollectGarbage(Config config) {
   marker_->FinishMarking(marking_config);
   // "Sweeping and finalization".
   {
-    // Pre finalizers are forbidden from allocating objects
+    // Pre finalizers are forbidden from allocating objects.
     ObjectAllocator::NoAllocationScope no_allocation_scope_(object_allocator_);
     marker_->ProcessWeakness();
     prefinalizer_handler_->InvokePreFinalizers();
   }
   marker_.reset();
+  // TODO(chromium:1056170): replace build flag with dedicated flag.
+#if DEBUG
+  VerifyMarking(config.stack_state);
+#endif
   {
     NoGCScope no_gc(*this);
     sweeper_.Start(config.sweeping_type);

@@ -117,6 +117,15 @@ struct CheckLEB1 : std::integral_constant<size_t, num> {
 
 #define EXCEPTION_ENTRY(sig_index) U32V_1(kExceptionAttribute), sig_index
 
+#define FIELD_COUNT(count) U32V_1(count)
+#define STRUCT_FIELD(type, mutability) type, (mutability ? 1 : 0)
+#define WASM_REF(index) kLocalRef, index
+#define WASM_OPT_REF(index) kLocalOptRef, index
+#define WASM_STRUCT_DEF(...) kWasmStructTypeCode, __VA_ARGS__
+#define WASM_ARRAY_DEF(type, mutability) \
+  kWasmArrayTypeCode, type, (mutability ? 1 : 0)
+#define WASM_FUNCTION_DEF(...) kWasmFunctionTypeCode, __VA_ARGS__
+
 #define EXPECT_VERIFIES(data)                                      \
   do {                                                             \
     ModuleResult result = DecodeModule(data, data + sizeof(data)); \
@@ -197,15 +206,19 @@ class WasmModuleVerifyTest : public TestWithIsolateAndZone {
     }
     ModuleResult result = DecodeWasmModule(
         enabled_features_, temp, temp + total, false, kWasmOrigin,
-        isolate()->counters(), isolate()->wasm_engine()->allocator());
+        isolate()->counters(), isolate()->metrics_recorder(),
+        v8::metrics::Recorder::ContextId::Empty(), DecodingMethod::kSync,
+        isolate()->wasm_engine()->allocator());
     delete[] temp;
     return result;
   }
   ModuleResult DecodeModuleNoHeader(const byte* module_start,
                                     const byte* module_end) {
-    return DecodeWasmModule(enabled_features_, module_start, module_end, false,
-                            kWasmOrigin, isolate()->counters(),
-                            isolate()->wasm_engine()->allocator());
+    return DecodeWasmModule(
+        enabled_features_, module_start, module_end, false, kWasmOrigin,
+        isolate()->counters(), isolate()->metrics_recorder(),
+        v8::metrics::Recorder::ContextId::Empty(), DecodingMethod::kSync,
+        isolate()->wasm_engine()->allocator());
   }
 };
 
@@ -252,11 +265,30 @@ TEST_F(WasmModuleVerifyTest, OneGlobal) {
     EXPECT_EQ(kWasmI32, global->type);
     EXPECT_EQ(0u, global->offset);
     EXPECT_FALSE(global->mutability);
-    EXPECT_EQ(WasmInitExpr::kI32Const, global->init.kind);
-    EXPECT_EQ(13, global->init.val.i32_const);
+    EXPECT_EQ(WasmInitExpr::kI32Const, global->init.kind());
+    EXPECT_EQ(13, global->init.immediate().i32_const);
   }
 
   EXPECT_OFF_END_FAILURE(data, 1);
+}
+
+TEST_F(WasmModuleVerifyTest, S128Global) {
+  WASM_FEATURE_SCOPE(simd);
+  std::array<uint8_t, kSimd128Size> v = {1, 2,  3,  4,  5,  6,  7, 8,
+                                         9, 10, 11, 12, 13, 14, 15};
+  static const byte data[] = {SECTION(Global,          // --
+                                      ENTRY_COUNT(1),  // --
+                                      kLocalS128,      // memory type
+                                      0,               // immutable
+                                      WASM_SIMD_CONSTANT(v.data()), kExprEnd)};
+  ModuleResult result = DecodeModule(data, data + sizeof(data));
+  EXPECT_OK(result);
+  const WasmGlobal* global = &result.value()->globals.back();
+  EXPECT_EQ(kWasmS128, global->type);
+  EXPECT_EQ(0u, global->offset);
+  EXPECT_FALSE(global->mutability);
+  EXPECT_EQ(WasmInitExpr::kS128Const, global->init.kind());
+  EXPECT_EQ(global->init.immediate().s128_const, v);
 }
 
 TEST_F(WasmModuleVerifyTest, ExternRefGlobal) {
@@ -298,13 +330,13 @@ TEST_F(WasmModuleVerifyTest, ExternRefGlobal) {
     const WasmGlobal* global = &result.value()->globals[0];
     EXPECT_EQ(kWasmExternRef, global->type);
     EXPECT_FALSE(global->mutability);
-    EXPECT_EQ(WasmInitExpr::kRefNullConst, global->init.kind);
+    EXPECT_EQ(WasmInitExpr::kRefNullConst, global->init.kind());
 
     global = &result.value()->globals[1];
     EXPECT_EQ(kWasmFuncRef, global->type);
     EXPECT_FALSE(global->mutability);
-    EXPECT_EQ(WasmInitExpr::kRefFuncConst, global->init.kind);
-    EXPECT_EQ(uint32_t{1}, global->init.val.function_index);
+    EXPECT_EQ(WasmInitExpr::kRefFuncConst, global->init.kind());
+    EXPECT_EQ(uint32_t{1}, global->init.immediate().index);
   }
 }
 
@@ -346,13 +378,13 @@ TEST_F(WasmModuleVerifyTest, FuncRefGlobal) {
     const WasmGlobal* global = &result.value()->globals[0];
     EXPECT_EQ(kWasmFuncRef, global->type);
     EXPECT_FALSE(global->mutability);
-    EXPECT_EQ(WasmInitExpr::kRefNullConst, global->init.kind);
+    EXPECT_EQ(WasmInitExpr::kRefNullConst, global->init.kind());
 
     global = &result.value()->globals[1];
     EXPECT_EQ(kWasmFuncRef, global->type);
     EXPECT_FALSE(global->mutability);
-    EXPECT_EQ(WasmInitExpr::kRefFuncConst, global->init.kind);
-    EXPECT_EQ(uint32_t{1}, global->init.val.function_index);
+    EXPECT_EQ(WasmInitExpr::kRefFuncConst, global->init.kind());
+    EXPECT_EQ(uint32_t{1}, global->init.immediate().index);
   }
 }
 
@@ -401,7 +433,7 @@ TEST_F(WasmModuleVerifyTest, ExternRefGlobalWithGlobalInit) {
 
     EXPECT_EQ(kWasmExternRef, global->type);
     EXPECT_FALSE(global->mutability);
-    EXPECT_EQ(WasmInitExpr::kGlobalIndex, global->init.kind);
+    EXPECT_EQ(WasmInitExpr::kGlobalGet, global->init.kind());
   }
 }
 
@@ -435,7 +467,7 @@ TEST_F(WasmModuleVerifyTest, NullGlobalWithGlobalInit) {
 
     EXPECT_EQ(kWasmExternRef, global->type);
     EXPECT_FALSE(global->mutability);
-    EXPECT_EQ(WasmInitExpr::kGlobalIndex, global->init.kind);
+    EXPECT_EQ(WasmInitExpr::kGlobalGet, global->init.kind());
   }
 }
 
@@ -461,6 +493,61 @@ TEST_F(WasmModuleVerifyTest, Global_invalid_type2) {
   };
 
   EXPECT_FAILURE(data);
+}
+
+TEST_F(WasmModuleVerifyTest, Global_invalid_init) {
+  static const byte no_initializer_no_end[] = {
+      SECTION(Global,          //--
+              ENTRY_COUNT(1),  //--
+              kLocalI32,       // type
+              1)               // mutable
+  };
+  EXPECT_FAILURE_WITH_MSG(no_initializer_no_end,
+                          "Global initializer is missing 'end'");
+
+  static const byte no_initializer[] = {
+      SECTION(Global,          //--
+              ENTRY_COUNT(1),  //--
+              kLocalI32,       // type
+              1,               // mutable
+              kExprEnd)        // --
+  };
+  EXPECT_FAILURE_WITH_MSG(no_initializer,
+                          "Found 'end' in global initalizer, but no "
+                          "expressions were found on the stack");
+
+  static const byte too_many_initializers_no_end[] = {
+      SECTION(Global,           // --
+              ENTRY_COUNT(1),   // --
+              kLocalI32,        // type
+              1,                // mutable
+              WASM_I32V_1(42),  // one value is good
+              WASM_I32V_1(43))  // another value is too much
+  };
+  EXPECT_FAILURE_WITH_MSG(too_many_initializers_no_end,
+                          "Global initializer is missing 'end'");
+
+  static const byte too_many_initializers[] = {
+      SECTION(Global,           // --
+              ENTRY_COUNT(1),   // --
+              kLocalI32,        // type
+              1,                // mutable
+              WASM_I32V_1(42),  // one value is good
+              WASM_I32V_1(43),  // another value is too much
+              kExprEnd)};
+  EXPECT_FAILURE_WITH_MSG(too_many_initializers,
+                          "Found 'end' in global initalizer, but more than one "
+                          "expressions were found on the stack");
+
+  static const byte missing_end_opcode[] = {
+      SECTION(Global,           // --
+              ENTRY_COUNT(1),   // --
+              kLocalI32,        // type
+              1,                // mutable
+              WASM_I32V_1(42))  // init value
+  };
+  EXPECT_FAILURE_WITH_MSG(missing_end_opcode,
+                          "Global initializer is missing 'end'");
 }
 
 TEST_F(WasmModuleVerifyTest, ZeroGlobals) {
@@ -573,17 +660,176 @@ TEST_F(WasmModuleVerifyTest, TwoGlobals) {
     EXPECT_EQ(kWasmF32, g0->type);
     EXPECT_EQ(0u, g0->offset);
     EXPECT_FALSE(g0->mutability);
-    EXPECT_EQ(WasmInitExpr::kF32Const, g0->init.kind);
+    EXPECT_EQ(WasmInitExpr::kF32Const, g0->init.kind());
 
     const WasmGlobal* g1 = &result.value()->globals[1];
 
     EXPECT_EQ(kWasmF64, g1->type);
     EXPECT_EQ(8u, g1->offset);
     EXPECT_TRUE(g1->mutability);
-    EXPECT_EQ(WasmInitExpr::kF64Const, g1->init.kind);
+    EXPECT_EQ(WasmInitExpr::kF64Const, g1->init.kind());
   }
 
   EXPECT_OFF_END_FAILURE(data, 1);
+}
+
+TEST_F(WasmModuleVerifyTest, RefNullGlobal) {
+  WASM_FEATURE_SCOPE(reftypes);
+  static const byte data[] = {SECTION(Global, ENTRY_COUNT(1), kLocalFuncRef, 1,
+                                      WASM_REF_NULL(kLocalFuncRef), kExprEnd)};
+  ModuleResult result = DecodeModule(data, data + sizeof(data));
+  EXPECT_OK(result);
+}
+
+TEST_F(WasmModuleVerifyTest, RefNullGlobalInvalid1) {
+  WASM_FEATURE_SCOPE(reftypes);
+  WASM_FEATURE_SCOPE(typed_funcref);
+  static const byte data[] = {SECTION(Global, ENTRY_COUNT(1), kLocalOptRef, 0,
+                                      1, WASM_REF_NULL(0), kExprEnd)};
+  ModuleResult result = DecodeModule(data, data + sizeof(data));
+  EXPECT_NOT_OK(result, "Type index 0 is out of bounds");
+}
+
+TEST_F(WasmModuleVerifyTest, RefNullGlobalInvalid2) {
+  WASM_FEATURE_SCOPE(reftypes);
+  WASM_FEATURE_SCOPE(typed_funcref);
+  static const byte data[] = {SECTION(Global, ENTRY_COUNT(1), kLocalFuncRef, 1,
+                                      kExprRefNull, U32V_5(1000001), kExprEnd)};
+  ModuleResult result = DecodeModule(data, data + sizeof(data));
+  EXPECT_NOT_OK(result,
+                "Type index 1000001 is greater than the maximum number 1000000 "
+                "of type definitions supported by V8");
+}
+
+TEST_F(WasmModuleVerifyTest, RttCanonGlobalGeneric) {
+  WASM_FEATURE_SCOPE(reftypes);
+  WASM_FEATURE_SCOPE(typed_funcref);
+  WASM_FEATURE_SCOPE(gc);
+  static const byte data[] = {SECTION(Global, ENTRY_COUNT(1),
+                                      WASM_RTT(1, kLocalFuncRef), 1,
+                                      WASM_RTT_CANON(kLocalFuncRef), kExprEnd)};
+  ModuleResult result = DecodeModule(data, data + sizeof(data));
+  EXPECT_OK(result);
+}
+
+TEST_F(WasmModuleVerifyTest, RttCanonGlobalStruct) {
+  WASM_FEATURE_SCOPE(reftypes);
+  WASM_FEATURE_SCOPE(typed_funcref);
+  WASM_FEATURE_SCOPE(gc);
+  static const byte data[] = {
+      SECTION(Type, ENTRY_COUNT(1),
+              WASM_STRUCT_DEF(FIELD_COUNT(1), STRUCT_FIELD(kLocalI32, true))),
+      SECTION(Global, ENTRY_COUNT(1), WASM_RTT(1, 0), 0, WASM_RTT_CANON(0),
+              kExprEnd)};
+  ModuleResult result = DecodeModule(data, data + sizeof(data));
+  EXPECT_OK(result);
+}
+
+TEST_F(WasmModuleVerifyTest, RttCanonGlobalTypeError) {
+  WASM_FEATURE_SCOPE(reftypes);
+  WASM_FEATURE_SCOPE(typed_funcref);
+  WASM_FEATURE_SCOPE(gc);
+  static const byte data[] = {SECTION(Global, ENTRY_COUNT(1),
+                                      WASM_RTT(1, kLocalExternRef), 1,
+                                      WASM_RTT_CANON(kLocalFuncRef), kExprEnd)};
+  ModuleResult result = DecodeModule(data, data + sizeof(data));
+  EXPECT_NOT_OK(result,
+                "type error in init expression, expected (rtt 1 extern), got "
+                "(rtt 1 func)");
+}
+
+TEST_F(WasmModuleVerifyTest, GlobalRttSubOfCanon) {
+  WASM_FEATURE_SCOPE(reftypes);
+  WASM_FEATURE_SCOPE(typed_funcref);
+  WASM_FEATURE_SCOPE(gc);
+  static const byte data[] = {SECTION(
+      Global, ENTRY_COUNT(1), WASM_RTT(2, kLocalI31Ref), 1,
+      WASM_RTT_SUB(kLocalI31Ref, WASM_RTT_CANON(kLocalEqRef)), kExprEnd)};
+  ModuleResult result = DecodeModule(data, data + sizeof(data));
+  WasmInitExpr expected = WasmInitExpr::RttSub(
+      HeapType::kI31, WasmInitExpr::RttCanon(HeapType::kEq));
+  EXPECT_OK(result);
+  EXPECT_EQ(result.value()->globals.front().init, expected);
+}
+
+TEST_F(WasmModuleVerifyTest, GlobalRttSubOfSubOfCanon) {
+  WASM_FEATURE_SCOPE(reftypes);
+  WASM_FEATURE_SCOPE(typed_funcref);
+  WASM_FEATURE_SCOPE(gc);
+  static const byte data[] = {SECTION(
+      Global, ENTRY_COUNT(1), WASM_RTT(3, kLocalEqRef), 1,
+      WASM_RTT_SUB(kLocalEqRef,
+                   WASM_RTT_SUB(kLocalEqRef, WASM_RTT_CANON(kLocalEqRef))),
+      kExprEnd)};
+  ModuleResult result = DecodeModule(data, data + sizeof(data));
+  WasmInitExpr expected = WasmInitExpr::RttSub(
+      HeapType::kEq, WasmInitExpr::RttSub(
+                         HeapType::kEq, WasmInitExpr::RttCanon(HeapType::kEq)));
+  EXPECT_OK(result);
+  EXPECT_EQ(result.value()->globals.front().init, expected);
+}
+
+TEST_F(WasmModuleVerifyTest, GlobalRttSubOfGlobal) {
+  WASM_FEATURE_SCOPE(reftypes);
+  WASM_FEATURE_SCOPE(typed_funcref);
+  WASM_FEATURE_SCOPE(gc);
+  static const byte data[] = {
+      SECTION(Import,                    // section header
+              ENTRY_COUNT(1),            // number of imports
+              ADD_COUNT('m'),            // module name
+              ADD_COUNT('f'),            // global name
+              kExternalGlobal,           // import kind
+              WASM_RTT(1, kLocalEqRef),  // type
+              0),                        // mutability
+      SECTION(Global, ENTRY_COUNT(1), WASM_RTT(2, kLocalI31Ref), 1,
+              WASM_RTT_SUB(kLocalI31Ref, WASM_GET_GLOBAL(0)), kExprEnd)};
+  ModuleResult result = DecodeModule(data, data + sizeof(data));
+  WasmInitExpr expected =
+      WasmInitExpr::RttSub(HeapType::kI31, WasmInitExpr::GlobalGet(0));
+  EXPECT_OK(result);
+  EXPECT_EQ(result.value()->globals[1].init, expected);
+}
+
+TEST_F(WasmModuleVerifyTest, GlobalRttSubOfGlobalTypeError) {
+  WASM_FEATURE_SCOPE(reftypes);
+  WASM_FEATURE_SCOPE(typed_funcref);
+  WASM_FEATURE_SCOPE(gc);
+  static const byte data[] = {
+      SECTION(Import,           // section header
+              ENTRY_COUNT(1),   // number of imports
+              ADD_COUNT('m'),   // module name
+              ADD_COUNT('f'),   // global name
+              kExternalGlobal,  // import kind
+              kLocalI32,        // type
+              0),               // mutability
+      SECTION(Global, ENTRY_COUNT(1), WASM_RTT(2, kLocalExternRef), 1,
+              WASM_RTT_SUB(kLocalExternRef, WASM_GET_GLOBAL(0)), kExprEnd)};
+  ModuleResult result = DecodeModule(data, data + sizeof(data));
+  EXPECT_NOT_OK(result, "rtt.sub requires a supertype rtt on stack");
+}
+
+TEST_F(WasmModuleVerifyTest, GlobalRttSubIllegalParent) {
+  WASM_FEATURE_SCOPE(reftypes);
+  WASM_FEATURE_SCOPE(typed_funcref);
+  WASM_FEATURE_SCOPE(gc);
+  static const byte data[] = {SECTION(
+      Global, ENTRY_COUNT(1), WASM_RTT(2, kLocalEqRef), 1,
+      WASM_RTT_SUB(kLocalEqRef, WASM_RTT_CANON(kLocalExternRef)), kExprEnd)};
+  ModuleResult result = DecodeModule(data, data + sizeof(data));
+  EXPECT_NOT_OK(result, "rtt.sub requires a supertype rtt on stack");
+}
+
+TEST_F(WasmModuleVerifyTest, RttSubGlobalTypeError) {
+  WASM_FEATURE_SCOPE(reftypes);
+  WASM_FEATURE_SCOPE(typed_funcref);
+  WASM_FEATURE_SCOPE(gc);
+  static const byte data[] = {SECTION(
+      Global, ENTRY_COUNT(1), WASM_RTT(1 /* Should be 2 */, kLocalI31Ref), 1,
+      WASM_RTT_SUB(kLocalI31Ref, WASM_RTT_CANON(kLocalEqRef)), kExprEnd)};
+  ModuleResult result = DecodeModule(data, data + sizeof(data));
+  EXPECT_NOT_OK(result,
+                "type error in init expression, expected (rtt 1 i31), got "
+                "(rtt 2 i31)");
 }
 
 TEST_F(WasmModuleVerifyTest, ZeroExceptions) {
@@ -817,9 +1063,9 @@ TEST_F(WasmModuleVerifyTest, DataSegmentWithImmutableImportedGlobal) {
   };
   ModuleResult result = DecodeModule(data, data + sizeof(data));
   EXPECT_OK(result);
-  WasmInitExpr expr = result.value()->data_segments.back().dest_addr;
-  EXPECT_EQ(WasmInitExpr::kGlobalIndex, expr.kind);
-  EXPECT_EQ(1u, expr.val.global_index);
+  WasmInitExpr expr = std::move(result.value()->data_segments.back()).dest_addr;
+  EXPECT_EQ(WasmInitExpr::kGlobalGet, expr.kind());
+  EXPECT_EQ(1u, expr.immediate().index);
 }
 
 TEST_F(WasmModuleVerifyTest, DataSegmentWithMutableImportedGlobal) {
@@ -876,8 +1122,8 @@ TEST_F(WasmModuleVerifyTest, OneDataSegment) {
 
     const WasmDataSegment* segment = &result.value()->data_segments.back();
 
-    EXPECT_EQ(WasmInitExpr::kI32Const, segment->dest_addr.kind);
-    EXPECT_EQ(0x9BBAA, segment->dest_addr.val.i32_const);
+    EXPECT_EQ(WasmInitExpr::kI32Const, segment->dest_addr.kind());
+    EXPECT_EQ(0x9BBAA, segment->dest_addr.immediate().i32_const);
     EXPECT_EQ(kDataSegmentSourceOffset, segment->source.offset());
     EXPECT_EQ(3u, segment->source.length());
   }
@@ -913,13 +1159,13 @@ TEST_F(WasmModuleVerifyTest, TwoDataSegments) {
     const WasmDataSegment* s0 = &result.value()->data_segments[0];
     const WasmDataSegment* s1 = &result.value()->data_segments[1];
 
-    EXPECT_EQ(WasmInitExpr::kI32Const, s0->dest_addr.kind);
-    EXPECT_EQ(0x7FFEE, s0->dest_addr.val.i32_const);
+    EXPECT_EQ(WasmInitExpr::kI32Const, s0->dest_addr.kind());
+    EXPECT_EQ(0x7FFEE, s0->dest_addr.immediate().i32_const);
     EXPECT_EQ(kDataSegment0SourceOffset, s0->source.offset());
     EXPECT_EQ(4u, s0->source.length());
 
-    EXPECT_EQ(WasmInitExpr::kI32Const, s1->dest_addr.kind);
-    EXPECT_EQ(0x6DDCC, s1->dest_addr.val.i32_const);
+    EXPECT_EQ(WasmInitExpr::kI32Const, s1->dest_addr.kind());
+    EXPECT_EQ(0x6DDCC, s1->dest_addr.immediate().i32_const);
     EXPECT_EQ(kDataSegment1SourceOffset, s1->source.offset());
     EXPECT_EQ(10u, s1->source.length());
   }
@@ -2250,15 +2496,15 @@ class WasmInitExprDecodeTest : public TestWithZone {
   {                                                                \
     static const byte data[] = {__VA_ARGS__, kExprEnd};            \
     WasmInitExpr expr = DecodeInitExpr(data, data + sizeof(data)); \
-    EXPECT_EQ(WasmInitExpr::k##Type##Const, expr.kind);            \
-    EXPECT_EQ(value, expr.val.type##_const);                       \
+    EXPECT_EQ(WasmInitExpr::k##Type##Const, expr.kind());          \
+    EXPECT_EQ(value, expr.immediate().type##_const);               \
   }
 
 #define EXPECT_INIT_EXPR_FAIL(...)                                 \
   {                                                                \
     static const byte data[] = {__VA_ARGS__, kExprEnd};            \
     WasmInitExpr expr = DecodeInitExpr(data, data + sizeof(data)); \
-    EXPECT_EQ(WasmInitExpr::kNone, expr.kind);                     \
+    EXPECT_EQ(WasmInitExpr::kNone, expr.kind());                   \
   }
 
 TEST_F(WasmInitExprDecodeTest, InitExpr_i32) {
@@ -2293,7 +2539,7 @@ TEST_F(WasmInitExprDecodeTest, InitExpr_ExternRef) {
   WASM_FEATURE_SCOPE(reftypes);
   static const byte data[] = {kExprRefNull, kLocalExternRef, kExprEnd};
   WasmInitExpr expr = DecodeInitExpr(data, data + sizeof(data));
-  EXPECT_EQ(WasmInitExpr::kRefNullConst, expr.kind);
+  EXPECT_EQ(WasmInitExpr::kRefNullConst, expr.kind());
 }
 
 TEST_F(WasmInitExprDecodeTest, InitExpr_illegal) {
@@ -2659,6 +2905,56 @@ TEST_F(WasmModuleVerifyTest, DataCountSegmentCount_omitted) {
   EXPECT_NOT_OK(result, "data segments count 0 mismatch (1 expected)");
 }
 
+TEST_F(WasmModuleVerifyTest, GcStructIdsPass) {
+  WASM_FEATURE_SCOPE(gc);
+  WASM_FEATURE_SCOPE(typed_funcref);
+  WASM_FEATURE_SCOPE(reftypes);
+
+  static const byte data[] = {SECTION(
+      Type, ENTRY_COUNT(3),
+      WASM_STRUCT_DEF(FIELD_COUNT(3), STRUCT_FIELD(kLocalI32, true),
+                      STRUCT_FIELD(WASM_OPT_REF(0), true),
+                      STRUCT_FIELD(WASM_OPT_REF(1), true)),
+      WASM_STRUCT_DEF(FIELD_COUNT(2), STRUCT_FIELD(WASM_OPT_REF(0), true),
+                      STRUCT_FIELD(WASM_OPT_REF(2), true)),
+      WASM_ARRAY_DEF(WASM_OPT_REF(0), true))};
+  ModuleResult result = DecodeModule(data, data + sizeof(data));
+  EXPECT_OK(result);
+}
+
+TEST_F(WasmModuleVerifyTest, OutOfBoundsTypeInGlobal) {
+  WASM_FEATURE_SCOPE(reftypes);
+  WASM_FEATURE_SCOPE(typed_funcref);
+  static const byte data[] = {SECTION(Global, ENTRY_COUNT(1), kLocalRef, 0,
+                                      WASM_REF_NULL(0), kExprEnd)};
+  ModuleResult result = DecodeModule(data, data + sizeof(data));
+  EXPECT_NOT_OK(result, "Type index 0 is out of bounds");
+}
+
+TEST_F(WasmModuleVerifyTest, OutOfBoundsTypeInType) {
+  WASM_FEATURE_SCOPE(reftypes);
+  WASM_FEATURE_SCOPE(typed_funcref);
+  WASM_FEATURE_SCOPE(gc);
+  static const byte data[] = {
+      SECTION(Type, ENTRY_COUNT(1),
+              WASM_STRUCT_DEF(FIELD_COUNT(1), STRUCT_FIELD(kLocalRef, true)))};
+  ModuleResult result = DecodeModule(data, data + sizeof(data));
+  EXPECT_NOT_OK(result, "Type index 1 is out of bounds");
+}
+
+TEST_F(WasmModuleVerifyTest, IllegalPackedFields) {
+  WASM_FEATURE_SCOPE(gc);
+  WASM_FEATURE_SCOPE(typed_funcref);
+  WASM_FEATURE_SCOPE(reftypes);
+
+  static const byte data[] = {
+      SECTION(Global, ENTRY_COUNT(1), kLocalI16, 0, WASM_INIT_EXPR_I32V_1(13))};
+
+  ModuleResult result = DecodeModule(data, data + sizeof(data));
+
+  EXPECT_NOT_OK(result, "invalid value type");
+}
+
 #undef EXPECT_INIT_EXPR
 #undef EXPECT_INIT_EXPR_FAIL
 #undef WASM_INIT_EXPR_I32V_1
@@ -2709,6 +3005,14 @@ TEST_F(WasmModuleVerifyTest, DataCountSegmentCount_omitted) {
 #undef FOUR_EMPTY_BODIES
 #undef SIGNATURES_SECTION_VOID_VOID
 #undef LINEAR_MEMORY_INDEX_0
+
+#undef FIELD_COUNT
+#undef STRUCT_FIELD
+#undef WASM_REF
+#undef WASM_OPT_REF
+#undef WASM_STRUCT_DEF
+#undef WASM_ARRAY_DEF
+#undef WASM_FUNCTION_DEF
 #undef EXCEPTION_ENTRY
 #undef EXPECT_VERIFIES
 #undef EXPECT_FAILURE_LEN

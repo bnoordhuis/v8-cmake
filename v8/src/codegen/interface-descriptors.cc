@@ -177,12 +177,6 @@ void InterpreterCEntry2Descriptor::InitializePlatformSpecific(
   InterpreterCEntryDescriptor_InitializePlatformSpecific(data);
 }
 
-void FastNewFunctionContextDescriptor::InitializePlatformSpecific(
-    CallInterfaceDescriptorData* data) {
-  Register registers[] = {ScopeInfoRegister(), SlotsRegister()};
-  data->InitializePlatformSpecific(arraysize(registers), registers);
-}
-
 void FastNewObjectDescriptor::InitializePlatformSpecific(
     CallInterfaceDescriptorData* data) {
   Register registers[] = {TargetRegister(), NewTargetRegister()};
@@ -346,11 +340,6 @@ void GrowArrayElementsDescriptor::InitializePlatformSpecific(
     CallInterfaceDescriptorData* data) {
   Register registers[] = {ObjectRegister(), KeyRegister()};
   data->InitializePlatformSpecific(arraysize(registers), registers);
-}
-
-void NewArgumentsElementsDescriptor::InitializePlatformSpecific(
-    CallInterfaceDescriptorData* data) {
-  DefaultInitializePlatformSpecific(data, kParameterCount);
 }
 
 void ArrayNoArgumentConstructorDescriptor::InitializePlatformSpecific(

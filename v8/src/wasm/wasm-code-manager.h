@@ -49,6 +49,7 @@ struct WasmModule;
 #define WASM_RUNTIME_STUB_LIST(V, VTRAP) \
   FOREACH_WASM_TRAPREASON(VTRAP)         \
   V(WasmCompileLazy)                     \
+  V(WasmTriggerTierUp)                   \
   V(WasmDebugBreak)                      \
   V(WasmInt32ToHeapNumber)               \
   V(WasmTaggedNonSmiToInt32)             \
@@ -421,6 +422,11 @@ class WasmCodeAllocator {
   size_t GetNumCodeSpaces() const;
 
  private:
+  // Sentinel value to be used for {AllocateForCodeInRegion} for specifying no
+  // restriction on the region to allocate in.
+  static constexpr base::AddressRegion kUnrestrictedRegion{
+      kNullAddress, std::numeric_limits<size_t>::max()};
+
   // The engine-wide wasm code manager.
   WasmCodeManager* const code_manager_;
 
@@ -575,6 +581,10 @@ class V8_EXPORT_PRIVATE NativeModule final {
   size_t committed_code_space() const {
     return code_allocator_.committed_code_space();
   }
+  size_t generated_code_size() const {
+    return code_allocator_.generated_code_size();
+  }
+  size_t liftoff_bailout_count() const { return liftoff_bailout_count_.load(); }
   WasmEngine* engine() const { return engine_; }
 
   bool HasWireBytes() const {
@@ -640,6 +650,10 @@ class V8_EXPORT_PRIVATE NativeModule final {
 
   // Get or create the debug info for this NativeModule.
   DebugInfo* GetDebugInfo();
+
+  uint32_t* num_liftoff_function_calls_array() {
+    return num_liftoff_function_calls_.get();
+  }
 
  private:
   friend class WasmCode;
@@ -725,6 +739,9 @@ class V8_EXPORT_PRIVATE NativeModule final {
   // A cache of the import wrappers, keyed on the kind and signature.
   std::unique_ptr<WasmImportWrapperCache> import_wrapper_cache_;
 
+  // Array to handle number of function calls.
+  std::unique_ptr<uint32_t[]> num_liftoff_function_calls_;
+
   // This mutex protects concurrent calls to {AddCode} and friends.
   mutable base::Mutex allocation_mutex_;
 
@@ -759,6 +776,7 @@ class V8_EXPORT_PRIVATE NativeModule final {
   int modification_scope_depth_ = 0;
   UseTrapHandler use_trap_handler_ = kNoTrapHandler;
   bool lazy_compile_frozen_ = false;
+  std::atomic<size_t> liftoff_bailout_count_{0};
 
   DISALLOW_COPY_AND_ASSIGN(NativeModule);
 };
@@ -811,7 +829,7 @@ class V8_EXPORT_PRIVATE WasmCodeManager final {
 
   V8_WARN_UNUSED_RESULT VirtualMemory TryAllocate(size_t size,
                                                   void* hint = nullptr);
-  bool Commit(base::AddressRegion);
+  void Commit(base::AddressRegion);
   void Decommit(base::AddressRegion);
 
   void FreeNativeModule(Vector<VirtualMemory> owned_code,

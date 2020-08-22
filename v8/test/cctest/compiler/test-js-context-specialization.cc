@@ -24,8 +24,9 @@ namespace compiler {
 class ContextSpecializationTester : public HandleAndZoneScope {
  public:
   explicit ContextSpecializationTester(Maybe<OuterContext> context)
-      : canonical_(main_isolate()),
-        graph_(new (main_zone()) Graph(main_zone())),
+      : HandleAndZoneScope(kCompressGraphZone),
+        canonical_(main_isolate()),
+        graph_(main_zone()->New<Graph>(main_zone())),
         common_(main_zone()),
         javascript_(main_zone()),
         machine_(main_zone()),

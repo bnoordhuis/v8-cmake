@@ -53,7 +53,7 @@ extern shape JSStrictArgumentsObject extends JSArgumentsObject {
 // entry has been deleted fron the arguments object, and value is looked up in
 // the unmapped arguments array, as described above. Otherwise, t is a Smi
 // index into the context array specified at elements.context, and the return
-// value is elements.context[t].
+// value is elements.context.
 //
 // A graphic representation of a SloppyArgumentsElements object and a
 // corresponding unmapped arguments FixedArray:
@@ -149,8 +149,8 @@ struct ParameterMapIterator {
 macro NewParameterMapIterator(
     context: Context, formalParameterCount: intptr,
     mappedCount: intptr): ParameterMapIterator {
-  const flags = context.scope_info.flags;
-  let contextHeaderSize: intptr = MIN_CONTEXT_SLOTS;
+  const flags = context.GetScopeInfo().flags;
+  let contextHeaderSize: intptr = ContextSlot::MIN_CONTEXT_SLOTS;
   if (flags.has_context_extension_slot) ++contextHeaderSize;
   // Copy the parameter slots and the holes in the arguments.
   // We need to fill in mapped_count slots. They index the context,
@@ -200,42 +200,64 @@ macro NewAllArguments(implicit context: Context)(
   return NewJSArray(map, elements);
 }
 
+macro NewRestArgumentsElements(
+    frame: FrameWithArguments, formalParameterCount: intptr,
+    argumentCount: intptr): FixedArray {
+  const length = (formalParameterCount >= argumentCount) ?
+      0 :
+      argumentCount - formalParameterCount;
+  const arguments = GetFrameArguments(frame, argumentCount);
+  const it = ArgumentsIterator{arguments, current: formalParameterCount};
+  return NewFixedArray(length, it);
+}
+
 macro NewRestArguments(implicit context: Context)(info: FrameWithArgumentsInfo):
     JSArray {
   const argumentCount = Convert<intptr>(info.argument_count);
   const formalParameterCount = Convert<intptr>(info.formal_parameter_count);
   const map = GetFastPackedElementsJSArrayMap();
-  const length = (formalParameterCount >= argumentCount) ?
-      0 :
-      argumentCount - formalParameterCount;
-  const arguments = GetFrameArguments(info.frame, argumentCount);
-  const it = ArgumentsIterator{arguments, current: formalParameterCount};
-  const elements = NewFixedArray(length, it);
+  const elements =
+      NewRestArgumentsElements(info.frame, formalParameterCount, argumentCount);
   return NewJSArray(map, elements);
+}
+
+macro NewStrictArgumentsElements(
+    frame: FrameWithArguments, argumentCount: intptr): FixedArray {
+  const arguments = GetFrameArguments(frame, argumentCount);
+  const it = ArgumentsIterator{arguments, current: 0};
+  return NewFixedArray(argumentCount, it);
 }
 
 macro NewStrictArguments(implicit context: Context)(
     info: FrameWithArgumentsInfo): JSStrictArgumentsObject {
   const argumentCount = Convert<intptr>(info.argument_count);
-  const arguments = GetFrameArguments(info.frame, argumentCount);
-  const it = ArgumentsIterator{arguments, current: 0};
-  const elements = NewFixedArray(argumentCount, it);
+  const elements = NewStrictArgumentsElements(info.frame, argumentCount);
   return NewJSStrictArgumentsObject(elements);
+}
+
+macro NewSloppyArgumentsElements(
+    frame: FrameWithArguments, formalParameterCount: intptr,
+    argumentCount: intptr): FixedArray {
+  const arguments = GetFrameArguments(frame, argumentCount);
+  if (formalParameterCount == 0) {
+    const it = ArgumentsIterator{arguments, current: 0};
+    return NewFixedArray(argumentCount, it);
+  }
+  const mappedCount = IntPtrMin(formalParameterCount, argumentCount);
+  const it = NewParameterValueIterator(mappedCount, arguments);
+  return NewFixedArray(argumentCount, it);
 }
 
 macro NewSloppyArguments(implicit context: Context)(
     info: FrameWithArgumentsInfo, callee: JSFunction): JSSloppyArgumentsObject {
   const argumentCount = Convert<intptr>(info.argument_count);
-  const arguments = GetFrameArguments(info.frame, argumentCount);
   const formalParameterCount = Convert<intptr>(info.formal_parameter_count);
+  const parameterValues = arguments::NewSloppyArgumentsElements(
+      info.frame, formalParameterCount, argumentCount);
   if (formalParameterCount == 0) {
-    const it = ArgumentsIterator{arguments, current: 0};
-    const elements = NewFixedArray(argumentCount, it);
-    return NewJSSloppyArgumentsObject(elements, callee);
+    return NewJSSloppyArgumentsObject(parameterValues, callee);
   }
   const mappedCount = IntPtrMin(formalParameterCount, argumentCount);
-  const it = NewParameterValueIterator(mappedCount, arguments);
-  const parameterValues = NewFixedArray(argumentCount, it);
   let paramIter =
       NewParameterMapIterator(context, formalParameterCount, mappedCount);
   const elementsLength = Convert<Smi>(mappedCount);
@@ -272,4 +294,25 @@ macro EmitFastNewSloppyArguments(implicit context: Context)(f: JSFunction):
     JSSloppyArgumentsObject {
   const info = GetFrameWithArgumentsInfo();
   return arguments::NewSloppyArguments(info, f);
+}
+
+builtin NewSloppyArgumentsElements(
+    frame: FrameWithArguments, formalParameterCount: intptr,
+    argumentCount: Smi): FixedArray {
+  return arguments::NewSloppyArgumentsElements(
+      frame, formalParameterCount, Convert<intptr>(argumentCount));
+}
+
+builtin NewStrictArgumentsElements(
+    frame: FrameWithArguments, _formalParameterCount: intptr,
+    argumentCount: Smi): FixedArray {
+  return arguments::NewStrictArgumentsElements(
+      frame, Convert<intptr>(argumentCount));
+}
+
+builtin NewRestArgumentsElements(
+    frame: FrameWithArguments, formalParameterCount: intptr,
+    argumentCount: Smi): FixedArray {
+  return arguments::NewRestArgumentsElements(
+      frame, formalParameterCount, Convert<intptr>(argumentCount));
 }

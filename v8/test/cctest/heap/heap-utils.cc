@@ -161,6 +161,7 @@ void SimulateIncrementalMarking(i::Heap* heap, bool force_completion) {
   i::IncrementalMarking* marking = heap->incremental_marking();
   i::MarkCompactCollector* collector = heap->mark_compact_collector();
   if (collector->sweeping_in_progress()) {
+    SafepointScope scope(heap);
     collector->EnsureSweepingCompleted();
   }
   if (marking->IsSweeping()) {
@@ -186,6 +187,7 @@ void SimulateIncrementalMarking(i::Heap* heap, bool force_completion) {
 }
 
 void SimulateFullSpace(v8::internal::PagedSpace* space) {
+  SafepointScope scope(space->heap());
   CodeSpaceMemoryModificationScope modification_scope(space->heap());
   i::MarkCompactCollector* collector = space->heap()->mark_compact_collector();
   if (collector->sweeping_in_progress()) {
@@ -205,6 +207,7 @@ void AbandonCurrentlyFreeMemory(PagedSpace* space) {
 void GcAndSweep(Heap* heap, AllocationSpace space) {
   heap->CollectGarbage(space, GarbageCollectionReason::kTesting);
   if (heap->mark_compact_collector()->sweeping_in_progress()) {
+    SafepointScope scope(heap);
     heap->mark_compact_collector()->EnsureSweepingCompleted();
   }
 }
@@ -223,6 +226,11 @@ void ForceEvacuationCandidate(Page* page) {
                                         ClearRecordedSlots::kNo);
     space->FreeLinearAllocationArea();
   }
+}
+
+bool InCorrectGeneration(HeapObject object) {
+  return FLAG_single_generation ? !i::Heap::InYoungGeneration(object)
+                                : i::Heap::InYoungGeneration(object);
 }
 
 }  // namespace heap

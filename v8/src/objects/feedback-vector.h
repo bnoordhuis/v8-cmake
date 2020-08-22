@@ -13,6 +13,7 @@
 #include "src/common/globals.h"
 #include "src/objects/elements-kind.h"
 #include "src/objects/map.h"
+#include "src/objects/maybe-object.h"
 #include "src/objects/name.h"
 #include "src/objects/type-hints.h"
 #include "src/zone/zone-containers.h"
@@ -62,6 +63,7 @@ enum class FeedbackSlotKind {
 };
 
 using MapAndHandler = std::pair<Handle<Map>, MaybeObjectHandle>;
+using MapAndFeedback = std::pair<Handle<Map>, MaybeObjectHandle>;
 
 inline bool IsCallICKind(FeedbackSlotKind kind) {
   return kind == FeedbackSlotKind::kCall;
@@ -656,9 +658,18 @@ class V8_EXPORT_PRIVATE FeedbackNexus final {
   Map GetFirstMap() const;
 
   int ExtractMaps(MapHandles* maps) const;
+  // Used to obtain maps and the associated handlers stored in the feedback
+  // vector. This should be called when we expect only a handler to be sotred in
+  // the extra feedback. This is used by ICs when updting the handlers.
   int ExtractMapsAndHandlers(std::vector<MapAndHandler>* maps_and_handlers,
                              bool try_update_deprecated = false) const;
   MaybeObjectHandle FindHandlerForMap(Handle<Map> map) const;
+  // Used to obtain maps and the associated feedback stored in the feedback
+  // vector. The returned feedback need not be always a handler. It could be a
+  // name in the case of StoreDataInPropertyLiteral. This is used by TurboFan to
+  // get all the feedback stored in the vector.
+  int ExtractMapsAndFeedback(
+      std::vector<MapAndFeedback>* maps_and_feedback) const;
 
   bool IsCleared() const {
     InlineCacheState state = ic_state();
@@ -756,8 +767,8 @@ class V8_EXPORT_PRIVATE FeedbackNexus final {
   inline void SetFeedbackExtra(MaybeObject feedback_extra,
                                WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
 
-  Handle<WeakFixedArray> EnsureArrayOfSize(int length);
-  Handle<WeakFixedArray> EnsureExtraArrayOfSize(int length);
+  // Create an array. The caller must install it in a feedback vector slot.
+  Handle<WeakFixedArray> CreateArrayOfSize(int length);
 
  private:
   // The reason for having a vector handle and a raw pointer is that we can and
@@ -768,6 +779,28 @@ class V8_EXPORT_PRIVATE FeedbackNexus final {
   FeedbackVector vector_;
   FeedbackSlot slot_;
   FeedbackSlotKind kind_;
+};
+
+class V8_EXPORT_PRIVATE FeedbackIterator final {
+ public:
+  explicit FeedbackIterator(const FeedbackNexus* nexus);
+  void Advance();
+  bool done() { return done_; }
+  Map map() { return map_; }
+  MaybeObject handler() { return handler_; }
+
+ private:
+  void AdvancePolymorphic();
+  enum State { kMonomorphic, kPolymorphic, kOther };
+  static constexpr int kEntrySize = 2;
+  static constexpr int kHandlerOffset = 1;
+
+  Handle<WeakFixedArray> polymorphic_feedback_;
+  Map map_;
+  MaybeObject handler_;
+  bool done_;
+  int index_;
+  State state_;
 };
 
 inline BinaryOperationHint BinaryOperationHintFromFeedback(int type_feedback);

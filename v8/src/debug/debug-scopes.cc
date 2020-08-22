@@ -14,6 +14,7 @@
 #include "src/execution/isolate-inl.h"
 #include "src/objects/js-generator-inl.h"
 #include "src/objects/source-text-module.h"
+#include "src/objects/string-set-inl.h"
 #include "src/parsing/parse-info.h"
 #include "src/parsing/parsing.h"
 #include "src/parsing/rewriter.h"
@@ -721,8 +722,8 @@ void ScopeIterator::VisitScriptScope(const Visitor& visitor) const {
       global->native_context().script_context_table(), isolate_);
 
   // Skip the first script since that just declares 'this'.
-  for (int context_index = 1; context_index < script_contexts->used();
-       context_index++) {
+  for (int context_index = 1;
+       context_index < script_contexts->synchronized_used(); context_index++) {
     Handle<Context> context = ScriptContextTable::GetContext(
         isolate_, script_contexts, context_index);
     Handle<ScopeInfo> scope_info(context->scope_info(), isolate_);

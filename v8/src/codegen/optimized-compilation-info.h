@@ -14,7 +14,9 @@
 #include "src/diagnostics/basic-block-profiler.h"
 #include "src/execution/frames.h"
 #include "src/handles/handles.h"
+#include "src/handles/persistent-handles.h"
 #include "src/objects/objects.h"
+#include "src/utils/identity-map.h"
 #include "src/utils/utils.h"
 #include "src/utils/vector.h"
 
@@ -22,11 +24,10 @@ namespace v8 {
 
 namespace tracing {
 class TracedValue;
-}
+}  // namespace tracing
 
 namespace internal {
 
-class DeferredHandles;
 class FunctionLiteral;
 class Isolate;
 class JavaScriptFrame;
@@ -35,7 +36,7 @@ class Zone;
 
 namespace wasm {
 struct WasmCompilationResult;
-}
+}  // namespace wasm
 
 // OptimizedCompilationInfo encapsulates the information needed to compile
 // optimized code for a given function, and the results of the optimized
@@ -67,8 +68,7 @@ class V8_EXPORT_PRIVATE OptimizedCompilationInfo final {
   V(WasmRuntimeExceptionSupport, wasm_runtime_exception_support, 18)          \
   V(TurboControlFlowAwareAllocation, turbo_control_flow_aware_allocation, 19) \
   V(TurboPreprocessRanges, turbo_preprocess_ranges, 20)                       \
-  V(ConcurrentInlining, concurrent_inlining, 21)                              \
-  V(NativeContextIndependent, native_context_independent, 22)
+  V(ConcurrentInlining, concurrent_inlining, 21)
 
   enum Flag {
 #define DEF_ENUM(Camel, Lower, Bit) k##Camel = 1 << Bit,
@@ -100,11 +100,10 @@ class V8_EXPORT_PRIVATE OptimizedCompilationInfo final {
   // Construct a compilation info for optimized compilation.
   OptimizedCompilationInfo(Zone* zone, Isolate* isolate,
                            Handle<SharedFunctionInfo> shared,
-                           Handle<JSFunction> closure,
-                           bool native_context_independent);
+                           Handle<JSFunction> closure, CodeKind code_kind);
   // Construct a compilation info for stub compilation, Wasm, and testing.
   OptimizedCompilationInfo(Vector<const char> debug_name, Zone* zone,
-                           Code::Kind code_kind);
+                           CodeKind code_kind);
 
   ~OptimizedCompilationInfo();
 
@@ -116,7 +115,7 @@ class V8_EXPORT_PRIVATE OptimizedCompilationInfo final {
   bool has_bytecode_array() const { return !bytecode_array_.is_null(); }
   Handle<JSFunction> closure() const { return closure_; }
   Handle<Code> code() const { return code_; }
-  Code::Kind code_kind() const { return code_kind_; }
+  CodeKind code_kind() const { return code_kind_; }
   int32_t builtin_index() const { return builtin_index_; }
   void set_builtin_index(int32_t index) { builtin_index_ = index; }
   BailoutId osr_offset() const { return osr_offset_; }
@@ -131,7 +130,7 @@ class V8_EXPORT_PRIVATE OptimizedCompilationInfo final {
 
   // Code getters and setters.
 
-  void SetCode(Handle<Code> code) { code_ = code; }
+  void SetCode(Handle<Code> code);
 
   void SetWasmCompilationResult(std::unique_ptr<wasm::WasmCompilationResult>);
   std::unique_ptr<wasm::WasmCompilationResult> ReleaseWasmCompilationResult();
@@ -146,19 +145,34 @@ class V8_EXPORT_PRIVATE OptimizedCompilationInfo final {
   JSGlobalObject global_object() const;
 
   // Accessors for the different compilation modes.
-  bool IsOptimizing() const { return code_kind() == Code::OPTIMIZED_FUNCTION; }
-  bool IsWasm() const { return code_kind() == Code::WASM_FUNCTION; }
-  bool IsNotOptimizedFunctionOrWasmFunction() const {
-    return code_kind() != Code::OPTIMIZED_FUNCTION &&
-           code_kind() != Code::WASM_FUNCTION;
+  bool IsOptimizing() const {
+    return CodeKindIsOptimizedJSFunction(code_kind());
   }
+  bool IsNativeContextIndependent() const {
+    return code_kind() == CodeKind::NATIVE_CONTEXT_INDEPENDENT;
+  }
+  bool IsStub() const { return code_kind() == CodeKind::STUB; }
+  bool IsWasm() const { return code_kind() == CodeKind::WASM_FUNCTION; }
+
   void SetOptimizingForOsr(BailoutId osr_offset, JavaScriptFrame* osr_frame) {
     DCHECK(IsOptimizing());
     osr_offset_ = osr_offset;
     osr_frame_ = osr_frame;
   }
 
-  void set_deferred_handles(std::unique_ptr<DeferredHandles> deferred_handles);
+  void set_persistent_handles(
+      std::unique_ptr<PersistentHandles> persistent_handles) {
+    DCHECK_NULL(ph_);
+    ph_ = std::move(persistent_handles);
+    DCHECK_NOT_NULL(ph_);
+  }
+
+  void set_canonical_handles(
+      std::unique_ptr<CanonicalHandlesMap> canonical_handles) {
+    DCHECK_NULL(canonical_handles_);
+    canonical_handles_ = std::move(canonical_handles);
+    DCHECK_NOT_NULL(canonical_handles_);
+  }
 
   void ReopenHandlesInNewHandleScope(Isolate* isolate);
 
@@ -220,8 +234,17 @@ class V8_EXPORT_PRIVATE OptimizedCompilationInfo final {
     profiler_data_ = profiler_data;
   }
 
+  std::unique_ptr<PersistentHandles> DetachPersistentHandles() {
+    DCHECK_NOT_NULL(ph_);
+    return std::move(ph_);
+  }
+
+  std::unique_ptr<CanonicalHandlesMap> DetachCanonicalHandles() {
+    DCHECK_NOT_NULL(canonical_handles_);
+    return std::move(canonical_handles_);
+  }
+
  private:
-  OptimizedCompilationInfo(Code::Kind code_kind, Zone* zone);
   void ConfigureFlags();
 
   void SetFlag(Flag flag) { flags_ |= flag; }
@@ -234,15 +257,13 @@ class V8_EXPORT_PRIVATE OptimizedCompilationInfo final {
   PoisoningMitigationLevel poisoning_level_ =
       PoisoningMitigationLevel::kDontPoison;
 
-  Code::Kind code_kind_;
+  const CodeKind code_kind_;
   int32_t builtin_index_ = -1;
 
   // We retain a reference the bytecode array specifically to ensure it doesn't
   // get flushed while we are optimizing the code.
   Handle<BytecodeArray> bytecode_array_;
-
   Handle<SharedFunctionInfo> shared_info_;
-
   Handle<JSFunction> closure_;
 
   // The compiled code.
@@ -259,15 +280,14 @@ class V8_EXPORT_PRIVATE OptimizedCompilationInfo final {
 
   // The zone from which the compilation pipeline working on this
   // OptimizedCompilationInfo allocates.
-  Zone* zone_;
-
-  std::unique_ptr<DeferredHandles> deferred_handles_;
+  Zone* const zone_;
 
   BailoutReason bailout_reason_ = BailoutReason::kNoReason;
 
   InlinedFunctionList inlined_functions_;
 
-  int optimization_id_ = -1;
+  static constexpr int kNoOptimizationId = -1;
+  const int optimization_id_;
   unsigned inlined_bytecode_size_ = 0;
 
   // The current OSR frame for specialization or {nullptr}.
@@ -277,6 +297,26 @@ class V8_EXPORT_PRIVATE OptimizedCompilationInfo final {
   std::unique_ptr<char[]> trace_turbo_filename_;
 
   TickCounter tick_counter_;
+
+  // 1) PersistentHandles created via PersistentHandlesScope inside of
+  //    CompilationHandleScope
+  // 2) Owned by OptimizedCompilationInfo
+  // 3) Owned by JSHeapBroker
+  // 4) Owned by the broker's LocalHeap
+  // 5) Back to the broker for a brief moment (after tearing down the
+  //   LocalHeap as part of exiting LocalHeapScope)
+  // 6) Back to OptimizedCompilationInfo when exiting the LocalHeapScope.
+  //
+  // In normal execution it gets destroyed when PipelineData gets destroyed.
+  // There is a special case in GenerateCodeForTesting where the JSHeapBroker
+  // will not be retired in that same method. In this case, we need to re-attach
+  // the PersistentHandles container to the JSHeapBroker.
+  std::unique_ptr<PersistentHandles> ph_;
+
+  // Canonical handles follow the same path as described by the persistent
+  // handles above. The only difference is that is created in the
+  // CanonicalHandleScope(i.e step 1) is different).
+  std::unique_ptr<CanonicalHandlesMap> canonical_handles_;
 
   DISALLOW_COPY_AND_ASSIGN(OptimizedCompilationInfo);
 };

@@ -217,6 +217,10 @@ class DebugDelegate {
                                     const debug::Location& end) {
     return false;
   }
+  virtual bool ShouldBeSkipped(v8::Local<v8::debug::Script> script, int line,
+                               int column) {
+    return false;
+  }
 };
 
 V8_EXPORT_PRIVATE void SetDebugDelegate(Isolate* isolate,
@@ -516,6 +520,10 @@ bool SetFunctionBreakpoint(v8::Local<v8::Function> function,
                            v8::Local<v8::String> condition, BreakpointId* id);
 
 v8::Platform* GetCurrentPlatform();
+
+void ForceGarbageCollection(
+    v8::Isolate* isolate,
+    v8::EmbedderHeapTracer::EmbedderStackState embedder_stack_state);
 
 class PostponeInterruptsScope {
  public:

@@ -403,15 +403,23 @@ bool Scanner::ScanEscape() {
       if (IsInvalid(c)) return false;
       break;
     }
-    case '0':  // Fall through.
-    case '1':  // fall through
-    case '2':  // fall through
-    case '3':  // fall through
-    case '4':  // fall through
-    case '5':  // fall through
-    case '6':  // fall through
+    case '0':
+    case '1':
+    case '2':
+    case '3':
+    case '4':
+    case '5':
+    case '6':
     case '7':
       c = ScanOctalEscape<capture_raw>(c, 2);
+      break;
+    case '8':
+    case '9':
+      // '\8' and '\9' are disallowed in strict mode.
+      // Re-use the octal error state to propagate the error.
+      octal_pos_ = Location(source_pos() - 2, source_pos() - 1);
+      octal_message_ = capture_raw ? MessageTemplate::kTemplate8Or9Escape
+                                   : MessageTemplate::kStrict8Or9Escape;
       break;
   }
 
@@ -592,7 +600,7 @@ Handle<String> Scanner::SourceUrl(LocalIsolate* isolate) const {
 }
 
 template Handle<String> Scanner::SourceUrl(Isolate* isolate) const;
-template Handle<String> Scanner::SourceUrl(OffThreadIsolate* isolate) const;
+template Handle<String> Scanner::SourceUrl(LocalIsolate* isolate) const;
 
 template <typename LocalIsolate>
 Handle<String> Scanner::SourceMappingUrl(LocalIsolate* isolate) const {
@@ -604,8 +612,7 @@ Handle<String> Scanner::SourceMappingUrl(LocalIsolate* isolate) const {
 }
 
 template Handle<String> Scanner::SourceMappingUrl(Isolate* isolate) const;
-template Handle<String> Scanner::SourceMappingUrl(
-    OffThreadIsolate* isolate) const;
+template Handle<String> Scanner::SourceMappingUrl(LocalIsolate* isolate) const;
 
 bool Scanner::ScanDigitsWithNumericSeparators(bool (*predicate)(uc32 ch),
                                               bool is_check_first_digit) {

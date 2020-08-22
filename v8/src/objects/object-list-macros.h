@@ -209,7 +209,6 @@ class ZoneForwardList;
   V(StoreHandler)                              \
   V(String)                                    \
   V(StringSet)                                 \
-  V(StringTable)                               \
   V(StringWrapper)                             \
   V(Struct)                                    \
   V(Symbol)                                    \
@@ -232,6 +231,7 @@ class ZoneForwardList;
   V(WasmMemoryObject)                          \
   V(WasmModuleObject)                          \
   V(WasmStruct)                                \
+  V(WasmTypeInfo)                              \
   V(WasmTableObject)                           \
   V(WeakFixedArray)                            \
   V(WeakArrayList)                             \
@@ -251,7 +251,8 @@ class ZoneForwardList;
   V(JSPluralRules)                        \
   V(JSRelativeTimeFormat)                 \
   V(JSSegmentIterator)                    \
-  V(JSSegmenter)
+  V(JSSegmenter)                          \
+  V(JSSegments)
 #else
 #define HEAP_OBJECT_ORDINARY_TYPE_LIST(V) HEAP_OBJECT_ORDINARY_TYPE_LIST_BASE(V)
 #endif  // V8_INTL_SUPPORT

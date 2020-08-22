@@ -106,6 +106,8 @@ class Sweeper {
   void StartSweeping();
   V8_EXPORT_PRIVATE void StartSweeperTasks();
   void EnsureCompleted();
+  void DrainSweepingWorklists();
+  void DrainSweepingWorklistForSpace(AllocationSpace space);
   bool AreSweeperTasksRunning();
 
   // Support concurrent sweepers from main thread

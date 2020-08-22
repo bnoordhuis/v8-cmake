@@ -278,6 +278,11 @@ void InstructionSelector::VisitStore(Node* node) {
     rep = store_rep.representation();
   }
 
+  if (FLAG_enable_unconditional_write_barriers &&
+      CanBeTaggedOrCompressedPointer(rep)) {
+    write_barrier_kind = kFullWriteBarrier;
+  }
+
   if (write_barrier_kind != kNoWriteBarrier &&
       V8_LIKELY(!FLAG_disable_write_barriers)) {
     DCHECK(CanBeTaggedOrCompressedPointer(rep));
@@ -1222,11 +1227,27 @@ void InstructionSelector::VisitRoundFloat64ToInt32(Node* node) {
 }
 
 void InstructionSelector::VisitTruncateFloat32ToInt32(Node* node) {
-  VisitRR(this, kPPC_DoubleToInt32, node);
+  PPCOperandGenerator g(this);
+
+  InstructionCode opcode = kPPC_Float32ToInt32;
+  TruncateKind kind = OpParameter<TruncateKind>(node->op());
+  if (kind == TruncateKind::kSetOverflowToMin) {
+    opcode |= MiscField::encode(true);
+  }
+
+  Emit(opcode, g.DefineAsRegister(node), g.UseRegister(node->InputAt(0)));
 }
 
 void InstructionSelector::VisitTruncateFloat32ToUint32(Node* node) {
-  VisitRR(this, kPPC_DoubleToUint32, node);
+  PPCOperandGenerator g(this);
+
+  InstructionCode opcode = kPPC_Float32ToUint32;
+  TruncateKind kind = OpParameter<TruncateKind>(node->op());
+  if (kind == TruncateKind::kSetOverflowToMin) {
+    opcode |= MiscField::encode(true);
+  }
+
+  Emit(opcode, g.DefineAsRegister(node), g.UseRegister(node->InputAt(0)));
 }
 
 #if V8_TARGET_ARCH_PPC64
@@ -2174,6 +2195,13 @@ void InstructionSelector::VisitInt64AbsWithOverflow(Node* node) {
   V(I16x8GeS)              \
   V(I16x8GtU)              \
   V(I16x8GeU)              \
+  V(I16x8SConvertI32x4)    \
+  V(I16x8UConvertI32x4)    \
+  V(I16x8AddSaturateS)     \
+  V(I16x8SubSaturateS)     \
+  V(I16x8AddSaturateU)     \
+  V(I16x8SubSaturateU)     \
+  V(I16x8RoundingAverageU) \
   V(I8x16Add)              \
   V(I8x16Sub)              \
   V(I8x16Mul)              \
@@ -2187,11 +2215,47 @@ void InstructionSelector::VisitInt64AbsWithOverflow(Node* node) {
   V(I8x16GeS)              \
   V(I8x16GtU)              \
   V(I8x16GeU)              \
+  V(I8x16SConvertI16x8)    \
+  V(I8x16UConvertI16x8)    \
+  V(I8x16AddSaturateS)     \
+  V(I8x16SubSaturateS)     \
+  V(I8x16AddSaturateU)     \
+  V(I8x16SubSaturateU)     \
+  V(I8x16RoundingAverageU) \
   V(S128And)               \
   V(S128Or)                \
-  V(S128Xor)
+  V(S128Xor)               \
+  V(S8x16Swizzle)
 
-#define SIMD_UNOP_LIST(V) V(S128Not)
+#define SIMD_UNOP_LIST(V)   \
+  V(F64x2Abs)               \
+  V(F64x2Neg)               \
+  V(F64x2Sqrt)              \
+  V(F32x4Abs)               \
+  V(F32x4Neg)               \
+  V(F32x4RecipApprox)       \
+  V(F32x4RecipSqrtApprox)   \
+  V(F32x4Sqrt)              \
+  V(F32x4SConvertI32x4)     \
+  V(F32x4UConvertI32x4)     \
+  V(I64x2Neg)               \
+  V(I32x4Neg)               \
+  V(I32x4Abs)               \
+  V(I32x4SConvertF32x4)     \
+  V(I32x4UConvertF32x4)     \
+  V(I32x4SConvertI16x8Low)  \
+  V(I32x4SConvertI16x8High) \
+  V(I32x4UConvertI16x8Low)  \
+  V(I32x4UConvertI16x8High) \
+  V(I16x8Neg)               \
+  V(I16x8Abs)               \
+  V(I8x16Neg)               \
+  V(I8x16Abs)               \
+  V(I16x8SConvertI8x16Low)  \
+  V(I16x8SConvertI8x16High) \
+  V(I16x8UConvertI8x16Low)  \
+  V(I16x8UConvertI8x16High) \
+  V(S128Not)
 
 #define SIMD_SHIFT_LIST(V) \
   V(I64x2Shl)              \
@@ -2206,6 +2270,14 @@ void InstructionSelector::VisitInt64AbsWithOverflow(Node* node) {
   V(I8x16Shl)              \
   V(I8x16ShrS)             \
   V(I8x16ShrU)
+
+#define SIMD_BOOL_LIST(V) \
+  V(V32x4AnyTrue)         \
+  V(V16x8AnyTrue)         \
+  V(V8x16AnyTrue)         \
+  V(V32x4AllTrue)         \
+  V(V16x8AllTrue)         \
+  V(V8x16AllTrue)
 
 #define SIMD_VISIT_SPLAT(Type)                               \
   void InstructionSelector::Visit##Type##Splat(Node* node) { \
@@ -2256,11 +2328,12 @@ SIMD_BINOP_LIST(SIMD_VISIT_BINOP)
 #undef SIMD_VISIT_BINOP
 #undef SIMD_BINOP_LIST
 
-#define SIMD_VISIT_UNOP(Opcode)                         \
-  void InstructionSelector::Visit##Opcode(Node* node) { \
-    PPCOperandGenerator g(this);                        \
-    Emit(kPPC_##Opcode, g.DefineAsRegister(node),       \
-         g.UseRegister(node->InputAt(0)));              \
+#define SIMD_VISIT_UNOP(Opcode)                                     \
+  void InstructionSelector::Visit##Opcode(Node* node) {             \
+    PPCOperandGenerator g(this);                                    \
+    InstructionOperand temps[] = {g.TempSimd128Register()};         \
+    Emit(kPPC_##Opcode, g.DefineAsRegister(node),                   \
+         g.UseRegister(node->InputAt(0)), arraysize(temps), temps); \
   }
 SIMD_UNOP_LIST(SIMD_VISIT_UNOP)
 #undef SIMD_VISIT_UNOP
@@ -2276,7 +2349,42 @@ SIMD_UNOP_LIST(SIMD_VISIT_UNOP)
 SIMD_SHIFT_LIST(SIMD_VISIT_SHIFT)
 #undef SIMD_VISIT_SHIFT
 #undef SIMD_SHIFT_LIST
+
+#define SIMD_VISIT_BOOL(Opcode)                         \
+  void InstructionSelector::Visit##Opcode(Node* node) { \
+    PPCOperandGenerator g(this);                        \
+    Emit(kPPC_##Opcode, g.DefineAsRegister(node),       \
+         g.UseUniqueRegister(node->InputAt(0)));        \
+  }
+SIMD_BOOL_LIST(SIMD_VISIT_BOOL)
+#undef SIMD_VISIT_BOOL
+#undef SIMD_BOOL_LIST
 #undef SIMD_TYPES
+
+void InstructionSelector::VisitS8x16Shuffle(Node* node) {
+  uint8_t shuffle[kSimd128Size];
+  bool is_swizzle;
+  CanonicalizeShuffle(node, shuffle, &is_swizzle);
+  PPCOperandGenerator g(this);
+  Node* input0 = node->InputAt(0);
+  Node* input1 = node->InputAt(1);
+  // Remap the shuffle indices to match IBM lane numbering.
+  int max_index = 15;
+  int total_lane_count = 2 * kSimd128Size;
+  uint8_t shuffle_remapped[kSimd128Size];
+  for (int i = 0; i < kSimd128Size; i++) {
+    uint8_t current_index = shuffle[i];
+    shuffle_remapped[i] = (current_index <= max_index
+                               ? max_index - current_index
+                               : total_lane_count - current_index + max_index);
+  }
+  Emit(kPPC_S8x16Shuffle, g.DefineAsRegister(node), g.UseUniqueRegister(input0),
+       g.UseUniqueRegister(input1),
+       g.UseImmediate(wasm::SimdShuffle::Pack4Lanes(shuffle_remapped)),
+       g.UseImmediate(wasm::SimdShuffle::Pack4Lanes(shuffle_remapped + 4)),
+       g.UseImmediate(wasm::SimdShuffle::Pack4Lanes(shuffle_remapped + 8)),
+       g.UseImmediate(wasm::SimdShuffle::Pack4Lanes(shuffle_remapped + 12)));
+}
 
 void InstructionSelector::VisitS128Zero(Node* node) {
   PPCOperandGenerator g(this);
@@ -2290,51 +2398,7 @@ void InstructionSelector::VisitS128Select(Node* node) {
        g.UseRegister(node->InputAt(2)));
 }
 
-void InstructionSelector::VisitI32x4Neg(Node* node) { UNIMPLEMENTED(); }
-
-void InstructionSelector::VisitI16x8AddSaturateS(Node* node) {
-  UNIMPLEMENTED();
-}
-
-void InstructionSelector::VisitI16x8SubSaturateS(Node* node) {
-  UNIMPLEMENTED();
-}
-
-void InstructionSelector::VisitI16x8AddSaturateU(Node* node) {
-  UNIMPLEMENTED();
-}
-
-void InstructionSelector::VisitI16x8SubSaturateU(Node* node) {
-  UNIMPLEMENTED();
-}
-
-void InstructionSelector::VisitI16x8Neg(Node* node) { UNIMPLEMENTED(); }
-
-void InstructionSelector::VisitI16x8RoundingAverageU(Node* node) {
-  UNIMPLEMENTED();
-}
-
-void InstructionSelector::VisitI8x16RoundingAverageU(Node* node) {
-  UNIMPLEMENTED();
-}
-
-void InstructionSelector::VisitI8x16Neg(Node* node) { UNIMPLEMENTED(); }
-
-void InstructionSelector::VisitI8x16AddSaturateS(Node* node) {
-  UNIMPLEMENTED();
-}
-
-void InstructionSelector::VisitI8x16SubSaturateS(Node* node) {
-  UNIMPLEMENTED();
-}
-
-void InstructionSelector::VisitI8x16AddSaturateU(Node* node) {
-  UNIMPLEMENTED();
-}
-
-void InstructionSelector::VisitI8x16SubSaturateU(Node* node) {
-  UNIMPLEMENTED();
-}
+void InstructionSelector::VisitS128Const(Node* node) { UNIMPLEMENTED(); }
 
 void InstructionSelector::VisitS128AndNot(Node* node) { UNIMPLEMENTED(); }
 
@@ -2343,7 +2407,7 @@ void InstructionSelector::EmitPrepareResults(
     Node* node) {
   PPCOperandGenerator g(this);
 
-  int reverse_slot = 0;
+  int reverse_slot = 1;
   for (PushParameter output : *results) {
     if (!output.location.IsCallerFrameSlot()) continue;
     // Skip any alignment holes in nodes.
@@ -2353,6 +2417,8 @@ void InstructionSelector::EmitPrepareResults(
         MarkAsFloat32(output.node);
       } else if (output.location.GetType() == MachineType::Float64()) {
         MarkAsFloat64(output.node);
+      } else if (output.location.GetType() == MachineType::Simd128()) {
+        MarkAsSimd128(output.node);
       }
       Emit(kPPC_Peek, g.DefineAsRegister(output.node),
            g.UseImmediate(reverse_slot));
@@ -2361,124 +2427,19 @@ void InstructionSelector::EmitPrepareResults(
   }
 }
 
-void InstructionSelector::VisitF32x4Sqrt(Node* node) { UNIMPLEMENTED(); }
-
 void InstructionSelector::VisitF32x4Div(Node* node) { UNIMPLEMENTED(); }
 
 void InstructionSelector::VisitF32x4Min(Node* node) { UNIMPLEMENTED(); }
 
 void InstructionSelector::VisitF32x4Max(Node* node) { UNIMPLEMENTED(); }
 
-void InstructionSelector::VisitF32x4Neg(Node* node) { UNIMPLEMENTED(); }
-
-void InstructionSelector::VisitF32x4Abs(Node* node) { UNIMPLEMENTED(); }
-
-void InstructionSelector::VisitF32x4RecipSqrtApprox(Node* node) {
-  UNIMPLEMENTED();
-}
-
-void InstructionSelector::VisitF32x4RecipApprox(Node* node) { UNIMPLEMENTED(); }
-
-void InstructionSelector::VisitF32x4SConvertI32x4(Node* node) {
-  UNIMPLEMENTED();
-}
-
-void InstructionSelector::VisitF32x4UConvertI32x4(Node* node) {
-  UNIMPLEMENTED();
-}
-
-void InstructionSelector::VisitI32x4SConvertF32x4(Node* node) {
-  UNIMPLEMENTED();
-}
-
-void InstructionSelector::VisitI32x4UConvertF32x4(Node* node) {
-  UNIMPLEMENTED();
-}
-
-void InstructionSelector::VisitI32x4SConvertI16x8Low(Node* node) {
-  UNIMPLEMENTED();
-}
-
-void InstructionSelector::VisitI32x4SConvertI16x8High(Node* node) {
-  UNIMPLEMENTED();
-}
-
-void InstructionSelector::VisitI32x4UConvertI16x8Low(Node* node) {
-  UNIMPLEMENTED();
-}
-
-void InstructionSelector::VisitI32x4UConvertI16x8High(Node* node) {
-  UNIMPLEMENTED();
-}
-
-void InstructionSelector::VisitI16x8SConvertI8x16Low(Node* node) {
-  UNIMPLEMENTED();
-}
-
-void InstructionSelector::VisitI16x8SConvertI8x16High(Node* node) {
-  UNIMPLEMENTED();
-}
-
-void InstructionSelector::VisitI16x8UConvertI8x16Low(Node* node) {
-  UNIMPLEMENTED();
-}
-
-void InstructionSelector::VisitI16x8UConvertI8x16High(Node* node) {
-  UNIMPLEMENTED();
-}
-
-void InstructionSelector::VisitI16x8SConvertI32x4(Node* node) {
-  UNIMPLEMENTED();
-}
-void InstructionSelector::VisitI16x8UConvertI32x4(Node* node) {
-  UNIMPLEMENTED();
-}
-
-void InstructionSelector::VisitI8x16SConvertI16x8(Node* node) {
-  UNIMPLEMENTED();
-}
-
-void InstructionSelector::VisitI8x16UConvertI16x8(Node* node) {
-  UNIMPLEMENTED();
-}
-
-void InstructionSelector::VisitV32x4AnyTrue(Node* node) { UNIMPLEMENTED(); }
-
-void InstructionSelector::VisitV32x4AllTrue(Node* node) { UNIMPLEMENTED(); }
-
-void InstructionSelector::VisitV16x8AnyTrue(Node* node) { UNIMPLEMENTED(); }
-
-void InstructionSelector::VisitV16x8AllTrue(Node* node) { UNIMPLEMENTED(); }
-
-void InstructionSelector::VisitV8x16AnyTrue(Node* node) { UNIMPLEMENTED(); }
-
-void InstructionSelector::VisitV8x16AllTrue(Node* node) { UNIMPLEMENTED(); }
-
-void InstructionSelector::VisitS8x16Shuffle(Node* node) { UNIMPLEMENTED(); }
-
-void InstructionSelector::VisitS8x16Swizzle(Node* node) { UNIMPLEMENTED(); }
-
-void InstructionSelector::VisitF64x2Abs(Node* node) { UNIMPLEMENTED(); }
-
-void InstructionSelector::VisitF64x2Neg(Node* node) { UNIMPLEMENTED(); }
-
-void InstructionSelector::VisitF64x2Sqrt(Node* node) { UNIMPLEMENTED(); }
-
 void InstructionSelector::VisitF64x2Div(Node* node) { UNIMPLEMENTED(); }
-
-void InstructionSelector::VisitI64x2Neg(Node* node) { UNIMPLEMENTED(); }
 
 void InstructionSelector::VisitF64x2Min(Node* node) { UNIMPLEMENTED(); }
 
 void InstructionSelector::VisitF64x2Max(Node* node) { UNIMPLEMENTED(); }
 
 void InstructionSelector::VisitLoadTransform(Node* node) { UNIMPLEMENTED(); }
-
-void InstructionSelector::VisitI8x16Abs(Node* node) { UNIMPLEMENTED(); }
-
-void InstructionSelector::VisitI16x8Abs(Node* node) { UNIMPLEMENTED(); }
-
-void InstructionSelector::VisitI32x4Abs(Node* node) { UNIMPLEMENTED(); }
 
 // static
 MachineOperatorBuilder::Flags

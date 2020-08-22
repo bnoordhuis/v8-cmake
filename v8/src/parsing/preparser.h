@@ -649,6 +649,7 @@ class PreParserFactory {
                               bool optional_chain = false) {
     if (possibly_eval == Call::IS_POSSIBLY_EVAL) {
       DCHECK(expression.IsIdentifier() && expression.AsIdentifier().IsEval());
+      DCHECK(!optional_chain);
       return PreParserExpression::CallEval();
     }
     return PreParserExpression::Call();
@@ -1528,6 +1529,11 @@ class PreParser : public ParserBase<PreParser> {
   }
 
   V8_INLINE PreParserExpression ThisExpression() {
+    UseThis();
+    return PreParserExpression::This();
+  }
+
+  V8_INLINE PreParserExpression NewThisExpression(int pos) {
     UseThis();
     return PreParserExpression::This();
   }

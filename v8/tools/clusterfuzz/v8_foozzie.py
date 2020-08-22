@@ -22,7 +22,7 @@ import traceback
 
 from collections import namedtuple
 
-import v8_commands
+from v8_commands import Command, FailException, PassException
 import v8_suppressions
 
 PYTHON3 = sys.version_info >= (3, 0)
@@ -86,6 +86,10 @@ CONFIGS = dict(
     '--no-untrusted-code-mitigations',
   ],
 )
+
+BASELINE_CONFIG = 'ignition'
+DEFAULT_CONFIG = 'ignition_turbo'
+DEFAULT_D8 = 'd8'
 
 # Return codes.
 RETURN_PASS = 0
@@ -159,9 +163,12 @@ ORIGINAL_SOURCE_CRASHTESTS = 'placeholder for CrashTests'
 # failures from CrashTests, as those by default map to the placeholder above.
 KNOWN_FAILURES = {
   # Foo.caller with asm.js: https://crbug.com/1042556
-  'CrashTests/5712410200899584/04483.js': '.caller',
+  'CrashTests/4782147262545920/494.js': '.caller',
+  'CrashTests/5637524389167104/01457.js': '.caller',
   'CrashTests/5703451898085376/02176.js': '.caller',
   'CrashTests/4846282433495040/04342.js': '.caller',
+  'CrashTests/5712410200899584/04483.js': '.caller',
+  'v8/test/mjsunit/regress/regress-105.js': '.caller',
   # Flaky issue that almost never repros.
   'CrashTests/5694376231632896/1033966.js': 'flaky',
 }
@@ -202,13 +209,13 @@ class ExecutionArgumentsConfig(object):
         '--%s-d8',
         'optional path to %s d8 executable, '
         'default: bundled in the directory of this script',
-        default='d8')
+        default=DEFAULT_D8)
 
-  def make_options(self, options):
+  def make_options(self, options, default_config=None):
     def get(name):
       return getattr(options, '%s_%s' % (self.label, name))
 
-    config = get('config')
+    config = default_config or get('config')
     assert config in CONFIGS
 
     d8 = get('d8')
@@ -220,6 +227,21 @@ class ExecutionArgumentsConfig(object):
 
     RunOptions = namedtuple('RunOptions', ['arch', 'config', 'd8', 'flags'])
     return RunOptions(infer_arch(d8), config, d8, flags)
+
+
+class ExecutionConfig(object):
+  def __init__(self, options, label):
+    self.options = options
+    self.label = label
+    self.arch = getattr(options, label).arch
+    self.config = getattr(options, label).config
+    d8 = getattr(options, label).d8
+    flags = getattr(options, label).flags
+    self.command = Command(options, label, d8, flags)
+
+  @property
+  def flags(self):
+    return self.command.flags
 
 
 def parse_args():
@@ -238,8 +260,8 @@ def parse_args():
       help='skip suppressions to reproduce known issues')
 
   # Add arguments for each run configuration.
-  first_config_arguments.add_arguments(parser, 'ignition')
-  second_config_arguments.add_arguments(parser, 'ignition_turbo')
+  first_config_arguments.add_arguments(parser, BASELINE_CONFIG)
+  second_config_arguments.add_arguments(parser, DEFAULT_CONFIG)
 
   parser.add_argument('testcase', help='path to test case')
   options = parser.parse_args()
@@ -251,6 +273,8 @@ def parse_args():
 
   options.first = first_config_arguments.make_options(options)
   options.second = second_config_arguments.make_options(options)
+  options.default = second_config_arguments.make_options(
+      options, DEFAULT_CONFIG)
 
   # Ensure we make a valid comparison.
   if (options.first.d8 == options.second.d8 and
@@ -274,39 +298,25 @@ def content_bailout(content, ignore_fun):
   """Print failure state and return if ignore_fun matches content."""
   bug = (ignore_fun(content) or '').strip()
   if bug:
-    print(FAILURE_HEADER_TEMPLATE % dict(
+    raise FailException(FAILURE_HEADER_TEMPLATE % dict(
         configs='', source_key='', suppression=bug))
-    return True
-  return False
-
-
-def timeout_bailout(output, step_number):
-  """Print info and return if in timeout pass state."""
-  if output.HasTimedOut():
-    # Dashed output, so that no other clusterfuzz tools can match the
-    # words timeout or crash.
-    print('# V8 correctness - T-I-M-E-O-U-T %d' % step_number)
-    return True
-  return False
 
 
 def fail_bailout(output, ignore_by_output_fun):
   """Print failure state and return if ignore_by_output_fun matches output."""
   bug = (ignore_by_output_fun(output.stdout) or '').strip()
   if bug:
-    print(FAILURE_HEADER_TEMPLATE % dict(
+    raise FailException(FAILURE_HEADER_TEMPLATE % dict(
         configs='', source_key='', suppression=bug))
-    return True
-  return False
 
 
-def print_difference(
-    options, source_key, first_command, second_command,
+def format_difference(
+    source_key, first_config, second_config,
     first_config_output, second_config_output, difference, source=None):
   # The first three entries will be parsed by clusterfuzz. Format changes
   # will require changes on the clusterfuzz side.
-  first_config_label = '%s,%s' % (options.first.arch, options.first.config)
-  second_config_label = '%s,%s' % (options.second.arch, options.second.config)
+  first_config_label = '%s,%s' % (first_config.arch, first_config.config)
+  second_config_label = '%s,%s' % (second_config.arch, second_config.config)
   source_file_text = SOURCE_FILE_TEMPLATE % source if source else ''
 
   if PYTHON3:
@@ -324,17 +334,17 @@ def print_difference(
       suppression='', # We can't tie bugs to differences.
       first_config_label=first_config_label,
       second_config_label=second_config_label,
-      first_config_flags=' '.join(first_command.flags),
-      second_config_flags=' '.join(second_command.flags),
+      first_config_flags=' '.join(first_config.flags),
+      second_config_flags=' '.join(second_config.flags),
       first_config_output=first_stdout,
       second_config_output=second_stdout,
       source=source,
       difference=difference,
   ))
   if PYTHON3:
-    print(text)
+    return text
   else:
-    print(text.encode('utf-8', 'replace'))
+    return text.encode('utf-8', 'replace')
 
 
 def cluster_failures(source, known_failures=None):
@@ -362,15 +372,64 @@ def cluster_failures(source, known_failures=None):
   return long_key[:ORIGINAL_SOURCE_HASH_LENGTH]
 
 
+def run_comparisons(suppress, execution_configs, test_case, timeout,
+                    verbose=True, ignore_crashes=True, source_key=None):
+  """Runs different configurations and bails out on output difference.
+
+  Args:
+    suppress: The helper object for textual suppressions.
+    execution_configs: Two or more configurations to run. The first one will be
+        used as baseline to compare all others to.
+    test_case: The test case to run.
+    timeout: Timeout in seconds for one run.
+    verbose: Prints the executed commands.
+    ignore_crashes: Typically we ignore crashes during fuzzing as they are
+        frequent. However, when running sanity checks we should not crash
+        and immediately flag crashes as a failure.
+    source_key: A fixed source key. If not given, it will be inferred from the
+        output.
+  """
+  run_test_case = lambda config: config.command.run(
+      test_case, timeout=timeout, verbose=verbose)
+
+  # Run the baseline configuration.
+  baseline_config = execution_configs[0]
+  baseline_output = run_test_case(baseline_config)
+  has_crashed = baseline_output.HasCrashed()
+
+  # Iterate over the remaining configurations, run and compare.
+  for comparison_config in execution_configs[1:]:
+    comparison_output = run_test_case(comparison_config)
+    has_crashed = has_crashed or comparison_output.HasCrashed()
+    difference, source = suppress.diff(baseline_output, comparison_output)
+
+    if difference:
+      # Only bail out due to suppressed output if there was a difference. If a
+      # suppression doesn't show up anymore in the statistics, we might want to
+      # remove it.
+      fail_bailout(baseline_output, suppress.ignore_by_output)
+      fail_bailout(comparison_output, suppress.ignore_by_output)
+
+      source_key = source_key or cluster_failures(source)
+      raise FailException(format_difference(
+          source_key, baseline_config, comparison_config,
+          baseline_output, comparison_output, difference, source))
+
+  if has_crashed:
+    if ignore_crashes:
+      # Show if a crash has happened in one of the runs and no difference was
+      # detected. This is only for the statistics during experiments.
+      raise PassException('# V8 correctness - C-R-A-S-H')
+    else:
+      # Subsume unexpected crashes (e.g. during sanity checks) with one failure
+      # state.
+      raise FailException(FAILURE_HEADER_TEMPLATE % dict(
+          configs='', source_key='', suppression='unexpected crash'))
+
+
 def main():
   options = parse_args()
-
-  # Suppressions are architecture and configuration specific.
-  suppress = v8_suppressions.get_suppression(
-      options.first.arch, options.first.config,
-      options.second.arch, options.second.config,
-      options.skip_suppressions,
-  )
+  suppress = v8_suppressions.get_suppression(options.skip_suppressions)
 
   # Static bailout based on test case content or metadata.
   kwargs = {}
@@ -378,92 +437,57 @@ def main():
     kwargs['encoding'] = 'utf-8'
   with open(options.testcase, 'r', **kwargs) as f:
     content = f.read()
-  if content_bailout(get_meta_data(content), suppress.ignore_by_metadata):
-    return RETURN_FAIL
-  if content_bailout(content, suppress.ignore_by_content):
-    return RETURN_FAIL
+  content_bailout(get_meta_data(content), suppress.ignore_by_metadata)
+  content_bailout(content, suppress.ignore_by_content)
 
-  first_cmd = v8_commands.Command(
-      options,'first', options.first.d8, options.first.flags)
-  second_cmd = v8_commands.Command(
-      options, 'second', options.second.d8, options.second.flags)
+  # Prepare the baseline, default and a secondary configuration to compare to.
+  # The baseline (turbofan) takes precedence as many of the secondary configs
+  # are based on the turbofan config with additional parameters.
+  execution_configs = [
+    ExecutionConfig(options, 'first'),
+    ExecutionConfig(options, 'default'),
+    ExecutionConfig(options, 'second'),
+  ]
 
-  # Sanity checks. Run both configurations with the sanity-checks file only and
-  # bail out early if different.
+  # First, run some fixed smoke tests in all configs to ensure nothing
+  # is fundamentally wrong, in order to prevent bug flooding.
   if not options.skip_sanity_checks:
-    first_config_output = first_cmd.run(
-        SANITY_CHECKS, timeout=SANITY_CHECK_TIMEOUT_SEC)
+    run_comparisons(
+        suppress, execution_configs,
+        test_case=SANITY_CHECKS,
+        timeout=SANITY_CHECK_TIMEOUT_SEC,
+        verbose=False,
+        # Don't accept crashes during sanity checks. A crash would hint at
+        # a flag that might be incompatible or a broken test file.
+        ignore_crashes=False,
+        # Special source key for sanity checks so that clusterfuzz dedupes all
+        # cases on this in case it's hit.
+        source_key = 'sanity check failed',
+    )
 
-    # Early bailout if first run was a timeout.
-    if timeout_bailout(first_config_output, 1):
-      return RETURN_PASS
+  # Second, run all configs against the fuzz test case.
+  run_comparisons(
+      suppress, execution_configs,
+      test_case=options.testcase,
+      timeout=TEST_TIMEOUT_SEC,
+  )
 
-    second_config_output = second_cmd.run(
-        SANITY_CHECKS, timeout=SANITY_CHECK_TIMEOUT_SEC)
-
-    # Bailout if second run was a timeout.
-    if timeout_bailout(second_config_output, 2):
-      return RETURN_PASS
-
-    difference, _ = suppress.diff(first_config_output, second_config_output)
-    if difference:
-      # Special source key for sanity checks so that clusterfuzz dedupes all
-      # cases on this in case it's hit.
-      source_key = 'sanity check failed'
-      print_difference(
-          options, source_key, first_cmd, second_cmd,
-          first_config_output, second_config_output, difference)
-      return RETURN_FAIL
-
-  first_config_output = first_cmd.run(
-      options.testcase, timeout=TEST_TIMEOUT_SEC, verbose=True)
-
-  # Early bailout if first run was a timeout.
-  if timeout_bailout(first_config_output, 1):
-    return RETURN_PASS
-
-  second_config_output = second_cmd.run(
-      options.testcase, timeout=TEST_TIMEOUT_SEC, verbose=True)
-
-  # Bailout if second run was a timeout.
-  if timeout_bailout(second_config_output, 2):
-    return RETURN_PASS
-
-  difference, source = suppress.diff(first_config_output, second_config_output)
-
-  if difference:
-    # Only bail out due to suppressed output if there was a difference. If a
-    # suppression doesn't show up anymore in the statistics, we might want to
-    # remove it.
-    if fail_bailout(first_config_output, suppress.ignore_by_output1):
-      return RETURN_FAIL
-    if fail_bailout(second_config_output, suppress.ignore_by_output2):
-      return RETURN_FAIL
-
-    source_key = cluster_failures(source)
-    print_difference(
-        options, source_key, first_cmd, second_cmd,
-        first_config_output, second_config_output, difference, source)
-    return RETURN_FAIL
-
-  # Show if a crash has happened in one of the runs and no difference was
-  # detected.
-  if first_config_output.HasCrashed():
-    print('# V8 correctness - C-R-A-S-H 1')
-  elif second_config_output.HasCrashed():
-    print('# V8 correctness - C-R-A-S-H 2')
-  else:
-    # TODO(machenbach): Figure out if we could also return a bug in case
-    # there's no difference, but one of the line suppressions has matched -
-    # and without the match there would be a difference.
-    print('# V8 correctness - pass')
-
+  # TODO(machenbach): Figure out if we could also return a bug in case
+  # there's no difference, but one of the line suppressions has matched -
+  # and without the match there would be a difference.
+  print('# V8 correctness - pass')
   return RETURN_PASS
 
 
 if __name__ == "__main__":
   try:
     result = main()
+  except FailException as e:
+    print(e.message)
+    result = RETURN_FAIL
+  except PassException as e:
+    print(e.message)
+    result = RETURN_PASS
   except SystemExit:
     # Make sure clusterfuzz reports internal errors and wrong usage.
     # Use one label for all internal and usage errors.
