@@ -374,8 +374,6 @@ include(${test_cmake_dir}/test_unittests.cmake)
 include(${test_cmake_dir}/testing_gtest.cmake)
 include(${test_cmake_dir}/testing_gmock.cmake)
 include(${test_cmake_dir}/test_cctest.cmake)
-include(${test_cmake_dir}/third_party_zlib.cmake)
-include(${test_cmake_dir}/third_party_zlib_google.cmake)
 include(${test_cmake_dir}/tools_debug_helper.cmake)
 include(${test_cmake_dir}/test_mkgrokdump.cmake)
 

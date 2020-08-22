@@ -63,6 +63,8 @@ string(CONCAT is-x64 $<OR:
 >)
 set(is-s390x 0)
 
+set(COMPILE_TESTS "off" CACHE BOOL "Enable test compilation")
+
 option(V8_ENABLE_CONCURRENT_MARKING "Enable concurrent marking" ON)
 option(V8_ENABLE_I18N "Enable Internationalization support")
 option(V8_ENABLE_POINTER_COMPRESSION "Enable pointer compression" ON)
@@ -977,6 +979,183 @@ target_include_directories(v8-adler32
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/v8/third_party/zlib>
 )
 
-# include() really likes absolute paths
-set(test_cmake_dir ${PROJECT_SOURCE_DIR}/CMakeTests)
-include(${test_cmake_dir}/tests.cmake)
+#
+# From ${D}/third_party/zlib/google/BUILD.gn
+#
+
+set(D ${PROJECT_SOURCE_DIR}/v8/third_party/zlib/google)
+add_library(compression_utils_portable OBJECT
+  ${D}/compression_utils_portable.cc
+  ${D}/compression_utils_portable.h
+  )
+target_link_libraries(compression_utils_portable
+  PUBLIC
+  zlib)
+
+#
+# From third_party/zlib/BUILD.gn
+#
+
+set(D ${PROJECT_SOURCE_DIR}/v8/third_party/zlib)
+
+set(zlib_config_INCLUDES ${D})
+set(zlib_internal_config_DEFINES ZLIB_IMPLEMENTATION)
+
+set(use_x86_x64_optimizations $<AND:$<OR:${is-ia32},${is-x64}>,$<NOT:${is-ios}>>)
+
+set(zlib_adler32_simd_config_DEFINES
+  $<${use_x86_x64_optimizations}:ADLER32_SIMD_SSSE3>
+  $<$<AND:${use_x86_x64_optimizations},${is-win}>:X86_WINDOWS>
+  $<$<AND:${use_x86_x64_optimizations},$<NOT:${is-win}>>:X86_NOT_WINDOWS>
+  )
+
+add_library(zlib_adler32_simd OBJECT
+  $<${use_x86_x64_optimizations}:
+  ${D}/adler32_simd.c
+  ${D}/adler32_simd.h
+  >
+  )
+target_compile_options(zlib_adler32_simd
+  PRIVATE
+    $<$<AND:${use_x86_x64_optimizations},$<OR:$<NOT:${is-win}>,${is-clang}>>:-mssse3>
+  )
+target_compile_definitions(zlib_adler32_simd
+  PRIVATE ${zlib_internal_config_DEFINES}
+  PUBLIC ${zlib_adler32_simd_config_DEFINES}
+  )
+
+set(zlib_inflate_chunk_simd_config_DEFINES
+  $<${use_x86_x64_optimizations}:INFLATE_CHUNK_SIMD_SSE2>
+  $<$<AND:${use_x86_x64_optimizations},${is-x64}>:INFLATE_CHUNK_READ_64LE>
+  )
+
+add_library(zlib_inflate_chunk_simd OBJECT
+  $<${use_x86_x64_optimizations}:
+  ${D}/contrib/optimizations/chunkcopy.h
+  ${D}/contrib/optimizations/inffast_chunk.c
+  ${D}/contrib/optimizations/inffast_chunk.h
+  ${D}/contrib/optimizations/inflate.c
+  >
+  )
+target_compile_definitions(zlib_inflate_chunk_simd
+  PRIVATE ${zlib_internal_config_DEFINES}
+  PUBLIC ${zlib_inflate_chunk_simd_config_DEFINES}
+  )
+target_include_directories(zlib_inflate_chunk_simd
+  PRIVATE
+    $<${use_x86_x64_optimizations}:${D}>
+  )
+
+
+set(zlib_crc32_simd_config_DEFINES
+  $<${use_x86_x64_optimizations}:CRC32_SIMD_SSE42_PCLMUL>
+  )
+
+add_library(zlib_crc32_simd OBJECT
+  $<${use_x86_x64_optimizations}:
+  ${D}/crc32_simd.c
+  ${D}/crc32_simd.h
+  >
+  )
+target_compile_definitions(zlib_crc32_simd
+  PRIVATE ${zlib_internal_config_DEFINES}
+  PUBLIC ${zlib_crc32_simd_config_DEFINES}
+  )
+target_compile_options(zlib_crc32_simd
+  PRIVATE
+    $<$<OR:$<NOT:${is-win}>,${is-clang}>:
+      -msse4.2
+      -mpclmul
+    >
+  )
+
+set(zlib_x86_simd_config_DEFINES
+  $<${use_x86_x64_optimizations}:
+    CRC32_SIMD_SSE42_PCLMUL
+    DEFLATE_FILL_WINDOW_SSE2
+  >
+  )
+
+add_library(zlib_x86_simd OBJECT
+  $<${use_x86_x64_optimizations}:
+  ${D}/crc_folding.c
+  ${D}/fill_window_sse.c
+  >
+  )
+target_compile_definitions(zlib_x86_simd
+  PRIVATE ${zlib_internal_config_DEFINES}
+  PUBLIC ${zlib_x86_simd_config_DEFINES}
+  )
+target_compile_options(zlib_x86_simd
+  PRIVATE
+  $<$<AND:${use_x86_x64_optimizations},$<OR:$<NOT:${is-win}>,${is-clang}>>:
+    -msse4.2
+    -mpclmul
+  >
+  )
+
+set(zlib_warnings_CFLAGS
+  $<$<AND:${is-clang},${use_x86_x64_optimizations}>:-Wno-incompatible-pointer-types>
+  )
+
+add_library(zlib STATIC
+  ${D}/adler32.c
+  ${D}/chromeconf.h
+  ${D}/compress.c
+  ${D}/contrib/optimizations/insert_string.h
+  ${D}/cpu_features.c
+  ${D}/cpu_features.h
+  ${D}/crc32.c
+  ${D}/crc32.h
+  ${D}/deflate.c
+  ${D}/deflate.h
+  ${D}/gzclose.c
+  ${D}/gzguts.h
+  ${D}/gzlib.c
+  ${D}/gzread.c
+  ${D}/gzwrite.c
+  ${D}/infback.c
+  ${D}/inffast.c
+  ${D}/inffast.h
+  ${D}/inffixed.h
+  ${D}/inflate.h
+  ${D}/inftrees.c
+  ${D}/inftrees.h
+  ${D}/trees.c
+  ${D}/trees.h
+  ${D}/uncompr.c
+  ${D}/zconf.h
+  ${D}/zlib.h
+  ${D}/zutil.c
+  ${D}/zutil.h
+  $<$<NOT:${use_x86_x64_optimizations}>:
+    ${D}/inflate.c
+  >
+  $<${use_x86_x64_optimizations}:
+    $<TARGET_OBJECTS:zlib_adler32_simd>
+    $<TARGET_OBJECTS:zlib_inflate_chunk_simd>
+  >
+  $<${use_x86_x64_optimizations}:
+    $<TARGET_OBJECTS:zlib_crc32_simd>
+  >
+  )
+target_compile_definitions(zlib
+  PRIVATE
+    ${zlib_internal_config_DEFINES}
+    $<$<NOT:${use_x86_x64_optimizations}>:CPU_NO_SIMD>
+  )
+target_include_directories(zlib
+  PUBLIC
+    ${zlib_config_INCLUDES}
+  )
+target_compile_options(zlib
+  PRIVATE
+    ${zlib_warnings_CFLAGS}
+  )
+
+if(${COMPILE_TESTS})
+  # include() really likes absolute paths
+  message("compiling for testing")
+  set(test_cmake_dir ${PROJECT_SOURCE_DIR}/CMakeTests)
+  include(${test_cmake_dir}/tests.cmake)
+endif()
