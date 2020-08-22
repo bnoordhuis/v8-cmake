@@ -1011,8 +1011,8 @@ set(zlib_adler32_simd_config_DEFINES
 
 add_library(zlib_adler32_simd OBJECT
   $<${use_x86_x64_optimizations}:
-  ${D}/adler32_simd.c
-  ${D}/adler32_simd.h
+    ${D}/adler32_simd.c
+    ${D}/adler32_simd.h
   >
   )
 target_compile_options(zlib_adler32_simd
@@ -1053,8 +1053,8 @@ set(zlib_crc32_simd_config_DEFINES
 
 add_library(zlib_crc32_simd OBJECT
   $<${use_x86_x64_optimizations}:
-  ${D}/crc32_simd.c
-  ${D}/crc32_simd.h
+    ${D}/crc32_simd.c
+    ${D}/crc32_simd.h
   >
   )
 target_compile_definitions(zlib_crc32_simd
@@ -1142,6 +1142,7 @@ add_library(zlib STATIC
 target_compile_definitions(zlib
   PRIVATE
     ${zlib_internal_config_DEFINES}
+    $<${use_x86_x64_optimizations}:${zlib_adler32_simd_config_DEFINES}>
     $<$<NOT:${use_x86_x64_optimizations}>:CPU_NO_SIMD>
   )
 target_include_directories(zlib
