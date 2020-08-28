@@ -341,7 +341,6 @@ target_link_libraries(unittests PRIVATE
   #v8_for_testing
   torque_ls_base
   v8_initializers
-  v8_base_without_compiler
   v8_compiler
   v8_libbase
   v8_libplatform

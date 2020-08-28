@@ -318,7 +318,8 @@ add_library(v8_base_without_compiler STATIC
   ${wasm-sources}
   ${zone-sources}
   $<TARGET_OBJECTS:v8-adler32>
-)
+  $<TARGET_OBJECTS:v8_inspector>
+  )
 
 if (WIN32)
   if (CMAKE_SYSTEM_VERSION VERSION_GREATER 10) # Windows 10
@@ -364,7 +365,6 @@ target_link_libraries(v8_base_without_compiler
     v8_libbase
     v8_libsampler
     v8_torque_generated
-    v8_inspector
     zlib
     compression_utils_portable
   PUBLIC
@@ -516,8 +516,6 @@ add_custom_command(
 #
 
 # Note: this is the inspector, broken out for ease of maintenance.
-# The GN files are conceptually structured the same but they don't
-# build it as a separate library. We do because it's easier that way.
 set(inspector_files
   ${PROJECT_BINARY_DIR}/inspector/include/inspector/Debugger.h
   ${PROJECT_BINARY_DIR}/inspector/include/inspector/Runtime.h
@@ -558,7 +556,7 @@ file(GLOB inspector-protocol-sources
 list(FILTER inspector-protocol-sources EXCLUDE REGEX "_test[.]cc$")
 list(FILTER inspector-protocol-sources EXCLUDE REGEX "crdtp/test_.*[.]cc$")
 
-add_library(v8_inspector STATIC
+add_library(v8_inspector OBJECT
   ${inspector-protocol-sources}
   ${inspector-sources}
   ${inspector_files}
