@@ -71,9 +71,9 @@
 #include "src/regexp/regexp.h"
 #include "src/utils/ostreams.h"
 #include "src/wasm/wasm-objects-inl.h"
-#include "torque-generated/class-verifiers-tq.h"
-#include "torque-generated/exported-class-definitions-tq-inl.h"
-#include "torque-generated/internal-class-definitions-tq-inl.h"
+#include "torque-generated/class-verifiers.h"
+#include "torque-generated/exported-class-definitions-inl.h"
+#include "torque-generated/internal-class-definitions-inl.h"
 
 namespace v8 {
 namespace internal {
@@ -288,16 +288,18 @@ void BytecodeArray::BytecodeArrayVerify(Isolate* isolate) {
   // - Jumps must go to new instructions starts.
   // - No Illegal bytecodes.
   // - No consecutive sequences of prefix Wide / ExtraWide.
-  CHECK(IsBytecodeArray());
-  CHECK(constant_pool().IsFixedArray());
-  VerifyHeapPointer(isolate, constant_pool());
-  CHECK(source_position_table().IsUndefined() ||
-        source_position_table().IsException() ||
-        source_position_table().IsByteArray());
-  CHECK(handler_table().IsByteArray());
+  CHECK(IsBytecodeArray(isolate));
+  CHECK(constant_pool(isolate).IsFixedArray(isolate));
+  VerifyHeapPointer(isolate, constant_pool(isolate));
+  CHECK(synchronized_source_position_table(isolate).IsUndefined(isolate) ||
+        synchronized_source_position_table(isolate).IsException(isolate) ||
+        synchronized_source_position_table(isolate).IsByteArray(isolate));
+  CHECK(handler_table(isolate).IsByteArray(isolate));
+  for (int i = 0; i < constant_pool(isolate).length(); ++i) {
+    // No ThinStrings in the constant pool.
+    CHECK(!constant_pool(isolate).get(isolate, i).IsThinString(isolate));
+  }
 }
-
-USE_TORQUE_VERIFIER(FeedbackVector)
 
 USE_TORQUE_VERIFIER(JSReceiver)
 
@@ -703,12 +705,10 @@ void JSArgumentsObject::JSArgumentsObjectVerify(Isolate* isolate) {
 
 void JSAsyncFunctionObject::JSAsyncFunctionObjectVerify(Isolate* isolate) {
   TorqueGeneratedClassVerifiers::JSAsyncFunctionObjectVerify(*this, isolate);
-  promise().HeapObjectVerify(isolate);
 }
 
 void JSAsyncGeneratorObject::JSAsyncGeneratorObjectVerify(Isolate* isolate) {
   TorqueGeneratedClassVerifiers::JSAsyncGeneratorObjectVerify(*this, isolate);
-  queue().HeapObjectVerify(isolate);
 }
 
 void JSDate::JSDateVerify(Isolate* isolate) {
@@ -1225,31 +1225,29 @@ void JSRegExp::JSRegExpVerify(Isolate* isolate) {
 
       Object latin1_code = arr.get(JSRegExp::kIrregexpLatin1CodeIndex);
       Object uc16_code = arr.get(JSRegExp::kIrregexpUC16CodeIndex);
-      Object experimental_pattern =
-          arr.get(JSRegExp::kExperimentalPatternIndex);
-      if (latin1_code.IsCode()) {
-        // `this` should be a compiled regexp.
-        CHECK(latin1_code.IsCode());
+      Object latin1_bytecode = arr.get(JSRegExp::kIrregexpLatin1BytecodeIndex);
+      Object uc16_bytecode = arr.get(JSRegExp::kIrregexpUC16BytecodeIndex);
+
+      bool is_compiled = latin1_code.IsCode();
+      if (is_compiled) {
         CHECK_EQ(Code::cast(latin1_code).builtin_index(),
                  Builtins::kRegExpExperimentalTrampoline);
+        CHECK_EQ(uc16_code, latin1_code);
 
-        CHECK(uc16_code.IsCode());
-        CHECK_EQ(Code::cast(uc16_code).builtin_index(),
-                 Builtins::kRegExpExperimentalTrampoline);
-
-        CHECK(experimental_pattern.IsString());
+        CHECK(latin1_bytecode.IsByteArray());
+        CHECK_EQ(uc16_bytecode, latin1_bytecode);
       } else {
         CHECK_EQ(latin1_code, uninitialized);
         CHECK_EQ(uc16_code, uninitialized);
-        CHECK_EQ(experimental_pattern, uninitialized);
+
+        CHECK_EQ(latin1_bytecode, uninitialized);
+        CHECK_EQ(uc16_bytecode, uninitialized);
       }
 
       CHECK_EQ(arr.get(JSRegExp::kIrregexpMaxRegisterCountIndex),
                uninitialized);
-      // TODO(mbid,v8:10765): Once the EXPERIMENTAL regexps support captures,
-      // the capture count should be allowed to be a Smi >= 0.
-      CHECK_EQ(arr.get(JSRegExp::kIrregexpCaptureCountIndex), Smi::FromInt(0));
-      CHECK_EQ(arr.get(JSRegExp::kIrregexpCaptureNameMapIndex), uninitialized);
+      CHECK(arr.get(JSRegExp::kIrregexpCaptureCountIndex).IsSmi());
+      CHECK_GE(Smi::ToInt(arr.get(JSRegExp::kIrregexpCaptureCountIndex)), 0);
       CHECK_EQ(arr.get(JSRegExp::kIrregexpTicksUntilTierUpIndex),
                uninitialized);
       CHECK_EQ(arr.get(JSRegExp::kIrregexpBacktrackLimit), uninitialized);
@@ -1286,6 +1284,7 @@ void JSRegExp::JSRegExpVerify(Isolate* isolate) {
       CHECK_IMPLIES(uc16_data.IsSmi(), uc16_bytecode.IsSmi());
 
       CHECK(arr.get(JSRegExp::kIrregexpCaptureCountIndex).IsSmi());
+      CHECK_GE(Smi::ToInt(arr.get(JSRegExp::kIrregexpCaptureCountIndex)), 0);
       CHECK(arr.get(JSRegExp::kIrregexpMaxRegisterCountIndex).IsSmi());
       CHECK(arr.get(JSRegExp::kIrregexpTicksUntilTierUpIndex).IsSmi());
       CHECK(arr.get(JSRegExp::kIrregexpBacktrackLimit).IsSmi());
@@ -1344,7 +1343,6 @@ void AsyncGeneratorRequest::AsyncGeneratorRequestVerify(Isolate* isolate) {
   TorqueGeneratedClassVerifiers::AsyncGeneratorRequestVerify(*this, isolate);
   CHECK_GE(resume_mode(), JSGeneratorObject::kNext);
   CHECK_LE(resume_mode(), JSGeneratorObject::kThrow);
-  next().ObjectVerify(isolate);
 }
 
 void BigIntBase::BigIntBaseVerify(Isolate* isolate) {
@@ -1460,6 +1458,10 @@ void ObjectBoilerplateDescription::ObjectBoilerplateDescriptionVerify(
   CHECK_GE(this->length(),
            ObjectBoilerplateDescription::kDescriptionStartIndex);
   this->FixedArrayVerify(isolate);
+  for (int i = 0; i < length(); ++i) {
+    // No ThinStrings in the boilerplate.
+    CHECK(!get(isolate, i).IsThinString(isolate));
+  }
 }
 
 USE_TORQUE_VERIFIER(AsmWasmData)

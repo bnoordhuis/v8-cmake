@@ -174,7 +174,6 @@ file(GLOB handles-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/sr
 file(GLOB interpreter-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/interpreter/*.cc)
 file(GLOB json-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/json/*.cc)
 file(GLOB logging-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/logging/*.cc)
-file(GLOB heap-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/heap/*.cc v8/src/heap/third-party/*.cc)
 file(GLOB numbers-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/numbers/*.cc)
 file(GLOB object-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/objects/*.cc)
 file(GLOB parsing-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/parsing/*.cc)
@@ -188,12 +187,19 @@ file(GLOB wasm-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/w
 file(GLOB wasm-baseline-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/wasm/baseline/*.cc)
 file(GLOB zone-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/zone/*.cc)
 
+file(GLOB heap-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS
+  v8/src/heap/*.cc
+  v8/src/heap/base/*.cc
+  v8/src/heap/third-party/*.cc
+)
+
 list(REMOVE_ITEM builtin-sources
   v8/src/builtins/builtins-intl-gen.cc
   v8/src/builtins/builtins-intl.cc
 )
 
 list(REMOVE_ITEM diagnostic-sources v8/src/diagnostics/unwinding-info-win64.cc)
+list(REMOVE_ITEM heap-sources v8/src/heap/conservative-stack-visitor.cc)
 list(REMOVE_ITEM object-sources ${i18n-sources})
 list(REMOVE_ITEM regexp-sources v8/src/regexp/gen-regexp-special-case.cc)
 list(REMOVE_ITEM runtime-sources v8/src/runtime/runtime-intl.cc)
@@ -203,8 +209,6 @@ list(REMOVE_ITEM snapshot-sources
   v8/src/snapshot/snapshot-external.cc
 )
 list(REMOVE_ITEM strings-sources v8/src/strings/char-predicates.cc)
-# wasm-memory.h is currently missing??
-list(REMOVE_ITEM wasm-sources v8/src/wasm/wasm-memory.cc)
 
 list(APPEND snapshot-sources v8/src/snapshot/embedded/embedded-data.cc)
 list(APPEND wasm-sources ${wasm-baseline-sources})
@@ -732,14 +736,23 @@ list(TRANSFORM torque_files PREPEND v8/ OUTPUT_VARIABLE torque_files_abs)
 # a source-only dependency.
 set(torque_outputs
   ${PROJECT_BINARY_DIR}/torque-generated/class-debug-readers-tq.cc
+  ${PROJECT_BINARY_DIR}/torque-generated/class-debug-readers.cc
   ${PROJECT_BINARY_DIR}/torque-generated/class-definitions-tq.cc
+  ${PROJECT_BINARY_DIR}/torque-generated/class-definitions.cc
   ${PROJECT_BINARY_DIR}/torque-generated/class-verifiers-tq.cc
+  ${PROJECT_BINARY_DIR}/torque-generated/class-verifiers.cc
   ${PROJECT_BINARY_DIR}/torque-generated/exported-macros-assembler-tq.cc
+  ${PROJECT_BINARY_DIR}/torque-generated/exported-macros-assembler.cc
   ${PROJECT_BINARY_DIR}/torque-generated/factory-tq.cc
   ${PROJECT_BINARY_DIR}/torque-generated/factory-tq.inc
+  ${PROJECT_BINARY_DIR}/torque-generated/factory.cc
+  ${PROJECT_BINARY_DIR}/torque-generated/factory.inc
   ${PROJECT_BINARY_DIR}/torque-generated/interface-descriptors-tq.inc
-  ${PROJECT_BINARY_DIR}/torque-generated/objects-printer-tq.cc
+  ${PROJECT_BINARY_DIR}/torque-generated/interface-descriptors.inc
+  ${PROJECT_BINARY_DIR}/torque-generated/objects-body-descriptors-inl.inc
   ${PROJECT_BINARY_DIR}/torque-generated/objects-body-descriptors-tq-inl.inc
+  ${PROJECT_BINARY_DIR}/torque-generated/objects-printer-tq.cc
+  ${PROJECT_BINARY_DIR}/torque-generated/objects-printer.cc
 )
 
 list(TRANSFORM torque_files

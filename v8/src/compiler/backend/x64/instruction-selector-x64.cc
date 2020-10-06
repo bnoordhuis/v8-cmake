@@ -1297,9 +1297,9 @@ void InstructionSelector::VisitChangeInt32ToInt64(Node* node) {
   }
 }
 
-namespace {
-
-bool ZeroExtendsWord32ToWord64(Node* node) {
+bool InstructionSelector::ZeroExtendsWord32ToWord64NoPhis(Node* node) {
+  X64OperandGenerator g(this);
+  DCHECK_NE(node->opcode(), IrOpcode::kPhi);
   switch (node->opcode()) {
     case IrOpcode::kWord32And:
     case IrOpcode::kWord32Or:
@@ -1353,12 +1353,19 @@ bool ZeroExtendsWord32ToWord64(Node* node) {
           return false;
       }
     }
+    case IrOpcode::kInt32Constant:
+    case IrOpcode::kInt64Constant:
+      // Constants are loaded with movl or movq, or xorl for zero; see
+      // CodeGenerator::AssembleMove. So any non-negative constant that fits
+      // in a 32-bit signed integer is zero-extended to 64 bits.
+      if (g.CanBeImmediate(node)) {
+        return g.GetImmediateIntegerValue(node) >= 0;
+      }
+      return false;
     default:
       return false;
   }
 }
-
-}  // namespace
 
 void InstructionSelector::VisitChangeUint32ToUint64(Node* node) {
   X64OperandGenerator g(this);
@@ -2271,7 +2278,12 @@ void InstructionSelector::VisitSwitch(Node* node, const SwitchInfo& sw) {
              value_operand, g.TempImmediate(-sw.min_value()));
       } else {
         // Zero extend, because we use it as 64-bit index into the jump table.
-        Emit(kX64Movl, index_operand, value_operand);
+        if (ZeroExtendsWord32ToWord64(node->InputAt(0))) {
+          // Input value has already been zero-extended.
+          index_operand = value_operand;
+        } else {
+          Emit(kX64Movl, index_operand, value_operand);
+        }
       }
       // Generate a table lookup.
       return EmitTableSwitch(sw, index_operand);
@@ -3257,7 +3269,7 @@ bool TryMatchArchShuffle(const uint8_t* shuffle, const ShuffleEntry* table,
 
 }  // namespace
 
-void InstructionSelector::VisitS8x16Shuffle(Node* node) {
+void InstructionSelector::VisitI8x16Shuffle(Node* node) {
   uint8_t shuffle[kSimd128Size];
   bool is_swizzle;
   CanonicalizeShuffle(node, shuffle, &is_swizzle);
@@ -3275,7 +3287,7 @@ void InstructionSelector::VisitS8x16Shuffle(Node* node) {
   // We generally need UseRegister for input0, Use for input1.
   bool src0_needs_reg = true;
   bool src1_needs_reg = false;
-  ArchOpcode opcode = kX64S8x16Shuffle;  // general shuffle is the default
+  ArchOpcode opcode = kX64I8x16Shuffle;  // general shuffle is the default
 
   uint8_t offset;
   uint8_t shuffle32x4[4];
@@ -3365,7 +3377,7 @@ void InstructionSelector::VisitS8x16Shuffle(Node* node) {
     src0_needs_reg = true;
     imms[imm_count++] = index;
   }
-  if (opcode == kX64S8x16Shuffle) {
+  if (opcode == kX64I8x16Shuffle) {
     // Use same-as-first for general swizzle, but not shuffle.
     no_same_as_first = !is_swizzle;
     src0_needs_reg = !no_same_as_first;
@@ -3398,10 +3410,10 @@ void InstructionSelector::VisitS8x16Shuffle(Node* node) {
   Emit(opcode, 1, &dst, input_count, inputs, temp_count, temps);
 }
 
-void InstructionSelector::VisitS8x16Swizzle(Node* node) {
+void InstructionSelector::VisitI8x16Swizzle(Node* node) {
   X64OperandGenerator g(this);
   InstructionOperand temps[] = {g.TempSimd128Register()};
-  Emit(kX64S8x16Swizzle, g.DefineSameAsFirst(node),
+  Emit(kX64I8x16Swizzle, g.DefineSameAsFirst(node),
        g.UseRegister(node->InputAt(0)), g.UseUniqueRegister(node->InputAt(1)),
        arraysize(temps), temps);
 }

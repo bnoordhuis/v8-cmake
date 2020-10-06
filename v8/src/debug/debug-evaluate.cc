@@ -261,7 +261,7 @@ bool IntrinsicHasNoSideEffect(Runtime::FunctionId id) {
   V(ToLength)                                 \
   V(ToNumber)                                 \
   V(ToObject)                                 \
-  V(ToStringRT)                               \
+  V(ToString)                                 \
   /* Type checks */                           \
   V(IsArray)                                  \
   V(IsFunction)                               \
@@ -473,6 +473,7 @@ bool BytecodeHasNoSideEffect(interpreter::Bytecode bytecode) {
     case Bytecode::kToNumeric:
     case Bytecode::kToString:
     // Misc.
+    case Bytecode::kIncBlockCounter:  // Coverage counters.
     case Bytecode::kForInEnumerate:
     case Bytecode::kForInPrepare:
     case Bytecode::kForInContinue:

@@ -148,7 +148,7 @@ class VerboseProgressIndicator(SimpleProgressIndicator):
         outcome = 'FAIL'
     else:
       outcome = 'pass'
-    return 'Done running %s %s: %s' % (
+    return '%s %s: %s' % (
       test, test.variant or 'default', outcome)
 
   def _on_result_for(self, test, result):
@@ -268,6 +268,8 @@ class CompactProgressIndicator(ProgressIndicator):
       else:
         if test.is_fail:
           self.printFormatted('failure', "--- UNEXPECTED PASS ---")
+          if test.expected_failure_reason != None:
+            self.printFormatted('failure', test.expected_failure_reason)
         else:
           self.printFormatted('failure', "--- FAILED ---")
 

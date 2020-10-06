@@ -1,9 +1,9 @@
 [
   {
     "url": "https://chromium.googlesource.com/v8/v8.git",
-    "commit": "58073be96a5485b2844246ea4d8d4b57bc6f3179",
+    "commit": "1195d74667bc2c050e0c673086f2c1c7bd4c7399",
     "/* comment */": "Dependency v8 must be first.",
-    "branch": "branch-heads/8.6",
+    "branch": "branch-heads/8.7",
     "path": ""
   },
   {
@@ -14,7 +14,7 @@
   },
   {
     "url": "https://chromium.googlesource.com/chromium/src/third_party/jinja2.git",
-    "commit": "61cfe2ac6c9108534c43b4039a95a0980251f266",
+    "commit": "a82a4944a7f2496639f34a89c9923be5908b80aa",
     "branch": "master",
     "path": "third_party/jinja2"
   },
@@ -26,7 +26,7 @@
   },
   {
     "url": "https://chromium.googlesource.com/chromium/src/third_party/zlib.git",
-    "commit": "d53accfbd0382a98ad7378045631866449b5f92e",
+    "commit": "4668feaaa47973a6f9d9f9caeb14cd03731854f1",
     "branch": "master",
     "path": "third_party/zlib"
   },
