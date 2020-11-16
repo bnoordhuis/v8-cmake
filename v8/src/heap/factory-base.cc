@@ -195,8 +195,8 @@ Handle<BytecodeArray> FactoryBase<Impl>::NewBytecodeArray(
   instance->set_bytecode_age(BytecodeArray::kNoAgeBytecodeAge);
   instance->set_constant_pool(*constant_pool);
   instance->set_handler_table(read_only_roots().empty_byte_array());
-  instance->set_synchronized_source_position_table(
-      read_only_roots().undefined_value());
+  instance->set_source_position_table(read_only_roots().undefined_value(),
+                                      kReleaseStore);
   CopyBytes(reinterpret_cast<byte*>(instance->GetFirstBytecodeAddress()),
             raw_bytecodes, length);
   instance->clear_padding();
@@ -312,9 +312,9 @@ Handle<SharedFunctionInfo> FactoryBase<Impl>::NewSharedFunctionInfo(
   bool has_shared_name = maybe_name.ToHandle(&shared_name);
   if (has_shared_name) {
     DCHECK(shared_name->IsFlat());
-    shared->set_name_or_scope_info(*shared_name);
+    shared->set_name_or_scope_info(*shared_name, kReleaseStore);
   } else {
-    DCHECK_EQ(shared->name_or_scope_info(),
+    DCHECK_EQ(shared->name_or_scope_info(kAcquireLoad),
               SharedFunctionInfo::kNoSharedNameSentinel);
   }
 
@@ -325,11 +325,12 @@ Handle<SharedFunctionInfo> FactoryBase<Impl>::NewSharedFunctionInfo(
     DCHECK(!Builtins::IsBuiltinId(maybe_builtin_index));
     DCHECK_IMPLIES(function_data->IsCode(),
                    !Code::cast(*function_data).is_builtin());
-    shared->set_function_data(*function_data);
+    shared->set_function_data(*function_data, kReleaseStore);
   } else if (Builtins::IsBuiltinId(maybe_builtin_index)) {
     shared->set_builtin_id(maybe_builtin_index);
   } else {
-    shared->set_builtin_id(Builtins::kIllegal);
+    DCHECK(shared->HasBuiltinId());
+    DCHECK_EQ(Builtins::kIllegal, shared->builtin_id());
   }
 
   shared->CalculateConstructAsBuiltin();
@@ -409,14 +410,14 @@ FactoryBase<Impl>::NewTemplateObjectDescription(
 
 template <typename Impl>
 Handle<FeedbackMetadata> FactoryBase<Impl>::NewFeedbackMetadata(
-    int slot_count, int feedback_cell_count, AllocationType allocation) {
+    int slot_count, int create_closure_slot_count, AllocationType allocation) {
   DCHECK_LE(0, slot_count);
   int size = FeedbackMetadata::SizeFor(slot_count);
   HeapObject result = AllocateRawWithImmortalMap(
       size, allocation, read_only_roots().feedback_metadata_map());
   Handle<FeedbackMetadata> data(FeedbackMetadata::cast(result), isolate());
   data->set_slot_count(slot_count);
-  data->set_closure_feedback_cell_count(feedback_cell_count);
+  data->set_create_closure_slot_count(create_closure_slot_count);
 
   // Initialize the data section to 0.
   int data_size = size - FeedbackMetadata::kHeaderSize;
@@ -435,7 +436,7 @@ Handle<CoverageInfo> FactoryBase<Impl>::NewCoverageInfo(
   int size = CoverageInfo::SizeFor(slot_count);
   Map map = read_only_roots().coverage_info_map();
   HeapObject result =
-      AllocateRawWithImmortalMap(size, AllocationType::kYoung, map);
+      AllocateRawWithImmortalMap(size, AllocationType::kOld, map);
   Handle<CoverageInfo> info(CoverageInfo::cast(result), isolate());
 
   info->set_slot_count(slot_count);
@@ -777,7 +778,9 @@ template <typename Impl>
 HeapObject FactoryBase<Impl>::AllocateRawArray(int size,
                                                AllocationType allocation) {
   HeapObject result = AllocateRaw(size, allocation);
-  if (size > kMaxRegularHeapObjectSize && FLAG_use_marking_progress_bar) {
+  if (!V8_ENABLE_THIRD_PARTY_HEAP_BOOL &&
+      (size > Heap::MaxRegularHeapObjectSize(allocation)) &&
+      FLAG_use_marking_progress_bar) {
     BasicMemoryChunk* chunk = BasicMemoryChunk::FromHeapObject(result);
     chunk->SetFlag<AccessMode::ATOMIC>(MemoryChunk::HAS_PROGRESS_BAR);
   }

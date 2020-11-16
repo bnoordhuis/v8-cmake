@@ -727,7 +727,21 @@ list(APPEND torque_files
 )
 
 if(NOT V8_ENABLE_I18N)
-  list(REMOVE_ITEM torque_files src/objects/intl-objects.tq)
+  list(REMOVE_ITEM torque_files
+    src/objects/intl-objects.tq
+    src/objects/js-break-iterator.tq
+    src/objects/js-collator.tq
+    src/objects/js-date-time-format.tq
+    src/objects/js-display-names.tq
+    src/objects/js-list-format.tq
+    src/objects/js-locale.tq
+    src/objects/js-number-format.tq
+    src/objects/js-plural-rules.tq
+    src/objects/js-relative-time-format.tq
+    src/objects/js-segment-iterator.tq
+    src/objects/js-segmenter.tq
+    src/objects/js-segments.tq
+  )
 endif()
 
 list(TRANSFORM torque_files PREPEND v8/ OUTPUT_VARIABLE torque_files_abs)

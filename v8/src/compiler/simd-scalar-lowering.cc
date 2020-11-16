@@ -141,6 +141,7 @@ void SimdScalarLowering::LowerGraph() {
   V(I32x4ShrU)                    \
   V(I32x4MinU)                    \
   V(I32x4MaxU)                    \
+  V(I32x4DotI16x8S)               \
   V(I32x4Eq)                      \
   V(I32x4Ne)                      \
   V(I32x4LtS)                     \
@@ -178,7 +179,13 @@ void SimdScalarLowering::LowerGraph() {
   V(F64x2Mul)                       \
   V(F64x2Div)                       \
   V(F64x2Min)                       \
-  V(F64x2Max)
+  V(F64x2Max)                       \
+  V(F64x2Pmin)                      \
+  V(F64x2Pmax)                      \
+  V(F64x2Ceil)                      \
+  V(F64x2Floor)                     \
+  V(F64x2Trunc)                     \
+  V(F64x2NearestInt)
 
 #define FOREACH_FLOAT32X4_OPCODE(V) \
   V(F32x4Splat)                     \
@@ -197,7 +204,13 @@ void SimdScalarLowering::LowerGraph() {
   V(F32x4Mul)                       \
   V(F32x4Div)                       \
   V(F32x4Min)                       \
-  V(F32x4Max)
+  V(F32x4Max)                       \
+  V(F32x4Pmin)                      \
+  V(F32x4Pmax)                      \
+  V(F32x4Ceil)                      \
+  V(F32x4Floor)                     \
+  V(F32x4Trunc)                     \
+  V(F32x4NearestInt)
 
 #define FOREACH_FLOAT64x2_TO_INT64x2OPCODE(V) \
   V(F64x2Eq)                                  \
@@ -225,10 +238,10 @@ void SimdScalarLowering::LowerGraph() {
   V(I16x8ShrS)                    \
   V(I16x8SConvertI32x4)           \
   V(I16x8Add)                     \
-  V(I16x8AddSaturateS)            \
+  V(I16x8AddSatS)                 \
   V(I16x8AddHoriz)                \
   V(I16x8Sub)                     \
-  V(I16x8SubSaturateS)            \
+  V(I16x8SubSatS)                 \
   V(I16x8Mul)                     \
   V(I16x8MinS)                    \
   V(I16x8MaxS)                    \
@@ -236,8 +249,8 @@ void SimdScalarLowering::LowerGraph() {
   V(I16x8UConvertI8x16High)       \
   V(I16x8ShrU)                    \
   V(I16x8UConvertI32x4)           \
-  V(I16x8AddSaturateU)            \
-  V(I16x8SubSaturateU)            \
+  V(I16x8AddSatU)                 \
+  V(I16x8SubSatU)                 \
   V(I16x8MinU)                    \
   V(I16x8MaxU)                    \
   V(I16x8Eq)                      \
@@ -264,16 +277,16 @@ void SimdScalarLowering::LowerGraph() {
   V(I8x16Shl)                     \
   V(I8x16ShrS)                    \
   V(I8x16Add)                     \
-  V(I8x16AddSaturateS)            \
+  V(I8x16AddSatS)                 \
   V(I8x16Sub)                     \
-  V(I8x16SubSaturateS)            \
+  V(I8x16SubSatS)                 \
   V(I8x16Mul)                     \
   V(I8x16MinS)                    \
   V(I8x16MaxS)                    \
   V(I8x16ShrU)                    \
   V(I8x16UConvertI16x8)           \
-  V(I8x16AddSaturateU)            \
-  V(I8x16SubSaturateU)            \
+  V(I8x16AddSatU)                 \
+  V(I8x16SubSatU)                 \
   V(I8x16MinU)                    \
   V(I8x16MaxU)                    \
   V(I8x16Eq)                      \
@@ -351,28 +364,24 @@ void SimdScalarLowering::SetLoweredType(Node* node, Node* output) {
     case IrOpcode::kLoadTransform: {
       LoadTransformParameters params = LoadTransformParametersOf(node->op());
       switch (params.transformation) {
-        case LoadTransformation::kS8x16LoadSplat:
+        case LoadTransformation::kS128Load8Splat:
           replacements_[node->id()].type = SimdType::kInt8x16;
           break;
-        case LoadTransformation::kS16x8LoadSplat:
+        case LoadTransformation::kS128Load16Splat:
+        case LoadTransformation::kS128Load8x8S:
+        case LoadTransformation::kS128Load8x8U:
           replacements_[node->id()].type = SimdType::kInt16x8;
           break;
-        case LoadTransformation::kS32x4LoadSplat:
+        case LoadTransformation::kS128Load32Splat:
+        case LoadTransformation::kS128Load16x4S:
+        case LoadTransformation::kS128Load16x4U:
+        case LoadTransformation::kS128Load32Zero:
           replacements_[node->id()].type = SimdType::kInt32x4;
           break;
-        case LoadTransformation::kS64x2LoadSplat:
-          replacements_[node->id()].type = SimdType::kInt64x2;
-          break;
-        case LoadTransformation::kI16x8Load8x8S:
-        case LoadTransformation::kI16x8Load8x8U:
-          replacements_[node->id()].type = SimdType::kInt16x8;
-          break;
-        case LoadTransformation::kI32x4Load16x4S:
-        case LoadTransformation::kI32x4Load16x4U:
-          replacements_[node->id()].type = SimdType::kInt32x4;
-          break;
-        case LoadTransformation::kI64x2Load32x2S:
-        case LoadTransformation::kI64x2Load32x2U:
+        case LoadTransformation::kS128Load64Splat:
+        case LoadTransformation::kS128Load32x2S:
+        case LoadTransformation::kS128Load32x2U:
+        case LoadTransformation::kS128Load64Zero:
           replacements_[node->id()].type = SimdType::kInt64x2;
           break;
         default:
@@ -563,53 +572,53 @@ void SimdScalarLowering::LowerLoadTransformOp(Node* node, SimdType type) {
 
   // Load extends have a different machine type for loading.
   switch (params.transformation) {
-    case LoadTransformation::kI16x8Load8x8S:
+    case LoadTransformation::kS128Load8x8S:
       load_rep = MachineType::Int8();
       load_type = SimdType::kInt8x16;
       break;
-    case LoadTransformation::kI16x8Load8x8U:
+    case LoadTransformation::kS128Load8x8U:
       load_rep = MachineType::Uint8();
       load_type = SimdType::kInt8x16;
       break;
-    case LoadTransformation::kI32x4Load16x4S:
+    case LoadTransformation::kS128Load16x4S:
       load_rep = MachineType::Int16();
       load_type = SimdType::kInt16x8;
       break;
-    case LoadTransformation::kI32x4Load16x4U:
+    case LoadTransformation::kS128Load16x4U:
       load_rep = MachineType::Uint16();
       load_type = SimdType::kInt16x8;
       break;
-    case LoadTransformation::kI64x2Load32x2S:
+    case LoadTransformation::kS128Load32x2S:
       load_rep = MachineType::Int32();
       load_type = SimdType::kInt32x4;
       break;
-    case LoadTransformation::kI64x2Load32x2U:
+    case LoadTransformation::kS128Load32x2U:
       load_rep = MachineType::Uint32();
       load_type = SimdType::kInt32x4;
       break;
-    case LoadTransformation::kS8x16LoadSplat:
-    case LoadTransformation::kS16x8LoadSplat:
-    case LoadTransformation::kS32x4LoadSplat:
-    case LoadTransformation::kS64x2LoadSplat:
+    case LoadTransformation::kS128Load8Splat:
+    case LoadTransformation::kS128Load16Splat:
+    case LoadTransformation::kS128Load32Splat:
+    case LoadTransformation::kS128Load64Splat:
+    case LoadTransformation::kS128Load32Zero:
+    case LoadTransformation::kS128Load64Zero:
       load_rep = MachineTypeFrom(type);
       break;
     default:
-      // Lowering for s64x2 is not implemented since lowering for 64x2
-      // operations doesn't work properly yet.
-      UNIMPLEMENTED();
+      UNREACHABLE();
   }
 
   DCHECK_NE(load_rep, MachineType::None());
 
   const Operator* load_op;
   switch (params.kind) {
-    case LoadKind::kNormal:
+    case MemoryAccessKind::kNormal:
       load_op = machine()->Load(load_rep);
       break;
-    case LoadKind::kUnaligned:
+    case MemoryAccessKind::kUnaligned:
       load_op = machine()->UnalignedLoad(load_rep);
       break;
-    case LoadKind::kProtected:
+    case MemoryAccessKind::kProtected:
       load_op = machine()->ProtectedLoad(load_rep);
       break;
   }
@@ -617,9 +626,14 @@ void SimdScalarLowering::LowerLoadTransformOp(Node* node, SimdType type) {
   Node* base = node->InputAt(0);
   Node* index = node->InputAt(1);
   int num_lanes = NumLanes(type);
-  Node** rep_nodes = zone()->NewArray<Node*>(num_lanes);
+  Node** reps = zone()->NewArray<Node*>(num_lanes);
   Node* effect_input = node->InputAt(2);
   Node* control_input = node->InputAt(3);
+
+  // This node is also used as effect input into other nodes, so we need to
+  // change this node in place.
+  reps[0] = node;
+  NodeProperties::ChangeOp(reps[0], load_op);
 
   if (type != load_type) {
     // We load a smaller lane size, then extend to a larger lane size. So use
@@ -627,29 +641,52 @@ void SimdScalarLowering::LowerLoadTransformOp(Node* node, SimdType type) {
     // actually load half of those lanes.
     Node** indices = zone()->NewArray<Node*>(num_lanes * 2);
     GetIndexNodes(index, indices, load_type);
-    for (int i = num_lanes - 1; i >= 0; --i) {
-      rep_nodes[i] = graph()->NewNode(load_op, base, indices[i], effect_input,
-                                      control_input);
-      effect_input = rep_nodes[i];
 
-      // Load operations are Word32 nodes, change them to Word64.
-      if (params.transformation == LoadTransformation::kI64x2Load32x2S) {
-        rep_nodes[i] =
-            graph()->NewNode(machine()->ChangeInt32ToInt64(), rep_nodes[i]);
-      } else if (params.transformation == LoadTransformation::kI64x2Load32x2U) {
-        rep_nodes[i] =
-            graph()->NewNode(machine()->ChangeUint32ToUint64(), rep_nodes[i]);
-      }
+    reps[0]->ReplaceInput(1, indices[0]);
+
+    for (int i = num_lanes - 1; i > 0; --i) {
+      reps[i] = graph()->NewNode(load_op, base, indices[i], effect_input,
+                                 control_input);
+      effect_input = reps[i];
     }
   } else {
-    // Load splat, load from the same index for every lane.
-    for (int i = num_lanes - 1; i >= 0; --i) {
-      rep_nodes[i] =
-          graph()->NewNode(load_op, base, index, effect_input, control_input);
-      effect_input = rep_nodes[i];
+    if (params.transformation == LoadTransformation::kS128Load32Zero) {
+      for (int i = num_lanes - 1; i > 0; --i) {
+        reps[i] = mcgraph_->Int32Constant(0);
+      }
+    } else if (params.transformation == LoadTransformation::kS128Load64Zero) {
+      for (int i = num_lanes - 1; i > 0; --i) {
+        reps[i] = mcgraph_->Int64Constant(0);
+      }
+    } else {
+      // Load splat, load from the same index for every lane.
+      for (int i = num_lanes - 1; i > 0; --i) {
+        reps[i] =
+            graph()->NewNode(load_op, base, index, effect_input, control_input);
+        effect_input = reps[i];
+      }
     }
   }
-  ReplaceNode(node, rep_nodes, num_lanes);
+
+  // Update the effect input, completing the effect chain, but only if there is
+  // an effect output (LoadZero does not have an effect output, it is zero).
+  if (reps[1]->op()->EffectOutputCount() > 0) {
+    reps[0]->ReplaceInput(2, reps[1]);
+  }
+
+  // Special case, the load nodes need to be sign extended, and we do it here so
+  // the loop above can connect all the effect edges correctly.
+  if (params.transformation == LoadTransformation::kS128Load32x2S) {
+    for (int i = 0; i < num_lanes; ++i) {
+      reps[i] = graph()->NewNode(machine()->ChangeInt32ToInt64(), reps[i]);
+    }
+  } else if (params.transformation == LoadTransformation::kS128Load32x2U) {
+    for (int i = 0; i < num_lanes; ++i) {
+      reps[i] = graph()->NewNode(machine()->ChangeUint32ToUint64(), reps[i]);
+    }
+  }
+
+  ReplaceNode(node, reps, num_lanes);
 }
 
 void SimdScalarLowering::LowerStoreOp(Node* node) {
@@ -947,8 +984,9 @@ void SimdScalarLowering::LowerConvertFromFloat(Node* node, bool is_signed) {
   for (int i = 0; i < kNumLanes32; ++i) {
     Node* double_rep =
         graph()->NewNode(machine()->ChangeFloat32ToFloat64(), rep[i]);
-    Diamond nan_d(graph(), common(), graph()->NewNode(machine()->Float64Equal(),
-                                                      double_rep, double_rep));
+    Diamond nan_d(
+        graph(), common(),
+        graph()->NewNode(machine()->Float64Equal(), double_rep, double_rep));
     Node* temp =
         nan_d.Phi(MachineRepresentation::kFloat64, double_rep, double_zero);
     Diamond min_d(graph(), common(),
@@ -1003,25 +1041,28 @@ void SimdScalarLowering::LowerPack(Node* node, SimdType input_rep_type,
   const Operator* less_op = machine()->Int32LessThan();
   Node* min = nullptr;
   Node* max = nullptr;
+  const Operator* sign_extend;
   MachineRepresentation phi_rep;
   if (output_rep_type == SimdType::kInt16x8) {
+    sign_extend = machine()->SignExtendWord16ToInt32();
     DCHECK(input_rep_type == SimdType::kInt32x4);
     if (is_signed) {
       min = mcgraph_->Int32Constant(std::numeric_limits<int16_t>::min());
       max = mcgraph_->Int32Constant(std::numeric_limits<int16_t>::max());
     } else {
-      min = mcgraph_->Int32Constant(std::numeric_limits<uint16_t>::min());
+      min = mcgraph_->Uint32Constant(std::numeric_limits<uint16_t>::min());
       max = mcgraph_->Uint32Constant(std::numeric_limits<uint16_t>::max());
     }
     phi_rep = MachineRepresentation::kWord16;
   } else {
+    sign_extend = machine()->SignExtendWord8ToInt32();
     DCHECK(output_rep_type == SimdType::kInt8x16 &&
            input_rep_type == SimdType::kInt16x8);
     if (is_signed) {
       min = mcgraph_->Int32Constant(std::numeric_limits<int8_t>::min());
       max = mcgraph_->Int32Constant(std::numeric_limits<int8_t>::max());
     } else {
-      min = mcgraph_->Int32Constant(std::numeric_limits<uint8_t>::min());
+      min = mcgraph_->Uint32Constant(std::numeric_limits<uint8_t>::min());
       max = mcgraph_->Uint32Constant(std::numeric_limits<uint8_t>::max());
     }
     phi_rep = MachineRepresentation::kWord8;
@@ -1037,7 +1078,10 @@ void SimdScalarLowering::LowerPack(Node* node, SimdType input_rep_type,
     Diamond d_min(graph(), common(), graph()->NewNode(less_op, input, min));
     input = d_min.Phi(phi_rep, min, input);
     Diamond d_max(graph(), common(), graph()->NewNode(less_op, max, input));
-    rep_node[i] = d_max.Phi(phi_rep, max, input);
+    // We keep nodes in sign-extended form. E.g. for uint8_t, we need to
+    // compare with 0x000000ff (saturated narrowing), but the result of
+    // conversion should be 0xffffffff to work well with the rest of lowering.
+    rep_node[i] = graph()->NewNode(sign_extend, d_max.Phi(phi_rep, max, input));
   }
   ReplaceNode(node, rep_node, num_lanes);
 }
@@ -1197,6 +1241,23 @@ void SimdScalarLowering::LowerAllTrueOp(Node* node, SimdType rep_type) {
   ReplaceNode(node, rep_node, num_lanes);
 }
 
+void SimdScalarLowering::LowerFloatPseudoMinMax(Node* node, const Operator* op,
+                                                bool is_max, SimdType type) {
+  DCHECK_EQ(2, node->InputCount());
+  Node** rep_left = GetReplacementsWithType(node->InputAt(0), type);
+  Node** rep_right = GetReplacementsWithType(node->InputAt(1), type);
+  int num_lanes = NumLanes(type);
+  Node** rep_node = zone()->NewArray<Node*>(num_lanes);
+  MachineRepresentation rep = MachineTypeFrom(type).representation();
+  for (int i = 0; i < num_lanes; ++i) {
+    Node* cmp = is_max ? graph()->NewNode(op, rep_left[i], rep_right[i])
+                       : graph()->NewNode(op, rep_right[i], rep_left[i]);
+    Diamond d(graph(), common(), cmp);
+    rep_node[i] = d.Phi(rep, rep_right[i], rep_left[i]);
+  }
+  ReplaceNode(node, rep_node, num_lanes);
+}
+
 void SimdScalarLowering::LowerNode(Node* node) {
   SimdType rep_type = ReplacementType(node);
   int num_lanes = NumLanes(rep_type);
@@ -1215,9 +1276,8 @@ void SimdScalarLowering::LowerNode(Node* node) {
         case SimdType::kInt8x16: {
           for (int i = 0; i < num_lanes; ++i) {
             Address data_address = reinterpret_cast<Address>(params.data() + i);
-            rep_node[i] = mcgraph_->Int32Constant(
-                static_cast<int32_t>(static_cast<int8_t>(
-                    base::ReadLittleEndianValue<int8_t>(data_address))));
+            rep_node[i] = mcgraph_->Int32Constant(static_cast<int32_t>(
+                base::ReadLittleEndianValue<int8_t>(data_address)));
           }
           break;
         }
@@ -1527,23 +1587,23 @@ void SimdScalarLowering::LowerNode(Node* node) {
       LowerBinaryOpForSmallInt(node, rep_type, machine()->Int32Mul());
       break;
     }
-    case IrOpcode::kI16x8AddSaturateS:
-    case IrOpcode::kI8x16AddSaturateS: {
+    case IrOpcode::kI16x8AddSatS:
+    case IrOpcode::kI8x16AddSatS: {
       LowerSaturateBinaryOp(node, rep_type, machine()->Int32Add(), true);
       break;
     }
-    case IrOpcode::kI16x8SubSaturateS:
-    case IrOpcode::kI8x16SubSaturateS: {
+    case IrOpcode::kI16x8SubSatS:
+    case IrOpcode::kI8x16SubSatS: {
       LowerSaturateBinaryOp(node, rep_type, machine()->Int32Sub(), true);
       break;
     }
-    case IrOpcode::kI16x8AddSaturateU:
-    case IrOpcode::kI8x16AddSaturateU: {
+    case IrOpcode::kI16x8AddSatU:
+    case IrOpcode::kI8x16AddSatU: {
       LowerSaturateBinaryOp(node, rep_type, machine()->Int32Add(), false);
       break;
     }
-    case IrOpcode::kI16x8SubSaturateU:
-    case IrOpcode::kI8x16SubSaturateU: {
+    case IrOpcode::kI16x8SubSatU:
+    case IrOpcode::kI8x16SubSatU: {
       LowerSaturateBinaryOp(node, rep_type, machine()->Int32Sub(), false);
       break;
     }
@@ -1569,6 +1629,25 @@ void SimdScalarLowering::LowerNode(Node* node) {
     case IrOpcode::kI16x8MinU:
     case IrOpcode::kI8x16MinU: {
       LowerIntMinMax(node, machine()->Uint32LessThan(), false, rep_type);
+      break;
+    }
+    case IrOpcode::kI32x4DotI16x8S: {
+      // i32x4.dot_i16x8_s wants the inputs to be i16x8, but outputs to i32x4.
+      DCHECK_EQ(2, node->InputCount());
+      Node** rep_left =
+          GetReplacementsWithType(node->InputAt(0), SimdType::kInt16x8);
+      Node** rep_right =
+          GetReplacementsWithType(node->InputAt(1), SimdType::kInt16x8);
+      int num_lanes = NumLanes(rep_type);
+      Node** rep_node = zone()->NewArray<Node*>(num_lanes);
+      for (int i = 0; i < num_lanes; ++i) {
+        Node* lo = graph()->NewNode(machine()->Int32Mul(), rep_left[i * 2],
+                                    rep_right[i * 2]);
+        Node* hi = graph()->NewNode(machine()->Int32Mul(), rep_left[i * 2 + 1],
+                                    rep_right[i * 2 + 1]);
+        rep_node[i] = graph()->NewNode(machine()->Int32Add(), lo, hi);
+      }
+      ReplaceNode(node, rep_node, num_lanes);
       break;
     }
     case IrOpcode::kI64x2Neg: {
@@ -1756,6 +1835,16 @@ void SimdScalarLowering::LowerNode(Node* node) {
       F32X4_BINOP_CASE(Div)
       F32X4_BINOP_CASE(Min)
       F32X4_BINOP_CASE(Max)
+    case IrOpcode::kF32x4Pmin: {
+      LowerFloatPseudoMinMax(node, machine()->Float32LessThan(), false,
+                             rep_type);
+      break;
+    }
+    case IrOpcode::kF32x4Pmax: {
+      LowerFloatPseudoMinMax(node, machine()->Float32LessThan(), true,
+                             rep_type);
+      break;
+    }
 #undef F32X4_BINOP_CASE
 #define F32X4_UNOP_CASE(name)                                 \
   case IrOpcode::kF32x4##name: {                              \
@@ -1766,6 +1855,22 @@ void SimdScalarLowering::LowerNode(Node* node) {
       F32X4_UNOP_CASE(Neg)
       F32X4_UNOP_CASE(Sqrt)
 #undef F32X4_UNOP_CASE
+    case IrOpcode::kF32x4Ceil: {
+      LowerUnaryOp(node, rep_type, machine()->Float32RoundUp().op());
+      break;
+    }
+    case IrOpcode::kF32x4Floor: {
+      LowerUnaryOp(node, rep_type, machine()->Float32RoundDown().op());
+      break;
+    }
+    case IrOpcode::kF32x4Trunc: {
+      LowerUnaryOp(node, rep_type, machine()->Float32RoundTruncate().op());
+      break;
+    }
+    case IrOpcode::kF32x4NearestInt: {
+      LowerUnaryOp(node, rep_type, machine()->Float32RoundTiesEven().op());
+      break;
+    }
     case IrOpcode::kF32x4RecipApprox:
     case IrOpcode::kF32x4RecipSqrtApprox: {
       DCHECK_EQ(1, node->InputCount());
@@ -1826,6 +1931,32 @@ void SimdScalarLowering::LowerNode(Node* node) {
       LowerBinaryOp(node, rep_type, machine()->Float64Max());
       break;
     }
+    case IrOpcode::kF64x2Pmin: {
+      LowerFloatPseudoMinMax(node, machine()->Float64LessThan(), false,
+                             rep_type);
+      break;
+    }
+    case IrOpcode::kF64x2Pmax: {
+      LowerFloatPseudoMinMax(node, machine()->Float64LessThan(), true,
+                             rep_type);
+      break;
+    }
+    case IrOpcode::kF64x2Ceil: {
+      LowerUnaryOp(node, rep_type, machine()->Float64RoundUp().op());
+      break;
+    }
+    case IrOpcode::kF64x2Floor: {
+      LowerUnaryOp(node, rep_type, machine()->Float64RoundDown().op());
+      break;
+    }
+    case IrOpcode::kF64x2Trunc: {
+      LowerUnaryOp(node, rep_type, machine()->Float64RoundTruncate().op());
+      break;
+    }
+    case IrOpcode::kF64x2NearestInt: {
+      LowerUnaryOp(node, rep_type, machine()->Float64RoundTiesEven().op());
+      break;
+    }
     case IrOpcode::kF64x2Splat:
     case IrOpcode::kF32x4Splat:
     case IrOpcode::kI64x2Splat:
@@ -1864,6 +1995,14 @@ void SimdScalarLowering::LowerNode(Node* node) {
       int32_t lane = OpParameter<int32_t>(node->op());
       Node** rep_node = zone()->NewArray<Node*>(num_lanes);
       rep_node[0] = GetReplacementsWithType(node->InputAt(0), rep_type)[lane];
+
+      // If unsigned, mask the top bits.
+      if (node->opcode() == IrOpcode::kI16x8ExtractLaneU) {
+        rep_node[0] = Mask(rep_node[0], kMask16);
+      } else if (node->opcode() == IrOpcode::kI8x16ExtractLaneU) {
+        rep_node[0] = Mask(rep_node[0], kMask8);
+      }
+
       for (int i = 1; i < num_lanes; ++i) {
         rep_node[i] = nullptr;
       }
@@ -1890,6 +2029,17 @@ void SimdScalarLowering::LowerNode(Node* node) {
       } else {
         rep_node[lane] = repNode;
       }
+
+      // The replacement nodes for these opcodes are in Word32, and we always
+      // store nodes in sign extended form (and mask to account for overflows.)
+      if (node->opcode() == IrOpcode::kI16x8ReplaceLane) {
+        rep_node[lane] = graph()->NewNode(machine()->SignExtendWord16ToInt32(),
+                                          Mask(rep_node[lane], kMask16));
+      } else if (node->opcode() == IrOpcode::kI8x16ReplaceLane) {
+        rep_node[lane] = graph()->NewNode(machine()->SignExtendWord8ToInt32(),
+                                          Mask(rep_node[lane], kMask8));
+      }
+
       ReplaceNode(node, rep_node, num_lanes);
       break;
     }
@@ -2103,7 +2253,9 @@ void SimdScalarLowering::LowerNode(Node* node) {
       ReplaceNode(node, rep_node, num_lanes);
       break;
     }
-    default: { DefaultLowering(node); }
+    default: {
+      DefaultLowering(node);
+    }
   }
 }
 
@@ -2237,7 +2389,7 @@ void SimdScalarLowering::Int32ToSmallerInt(Node** replacements, Node** result) {
       for (int j = 0; j < num_ints; j++) {
         result[num_ints * i + j] = graph()->NewNode(
             sign_extend,
-            graph()->NewNode(machine()->Word32Sar(), replacements[i],
+            graph()->NewNode(machine()->Word32Shr(), replacements[i],
                              mcgraph_->Int32Constant(j * bit_size)));
       }
     } else {
@@ -2285,88 +2437,233 @@ void SimdScalarLowering::Int32ToInt64(Node** replacements, Node** result) {
 
 Node** SimdScalarLowering::GetReplacementsWithType(Node* node, SimdType type) {
   Node** replacements = GetReplacements(node);
-  if (ReplacementType(node) == type) {
-    return GetReplacements(node);
+  if (type == ReplacementType(node)) {
+    return replacements;
   }
+
   int num_lanes = NumLanes(type);
   Node** result = zone()->NewArray<Node*>(num_lanes);
-  if (type == SimdType::kInt64x2) {
-    if (ReplacementType(node) == SimdType::kInt32x4) {
-      Int32ToInt64(replacements, result);
-    } else if (ReplacementType(node) == SimdType::kFloat64x2) {
-      Float64ToInt64(replacements, result);
-    } else {
-      UNIMPLEMENTED();
+
+  switch (type) {
+    case SimdType::kInt64x2: {
+      switch (ReplacementType(node)) {
+        case SimdType::kInt64x2: {
+          UNREACHABLE();
+        }
+        case SimdType::kInt32x4: {
+          Int32ToInt64(replacements, result);
+          break;
+        }
+        case SimdType::kInt16x8: {
+          Node** to_int32 = zone()->NewArray<Node*>(kNumLanes32);
+          SmallerIntToInt32<int16_t>(replacements, to_int32);
+          Int32ToInt64(to_int32, result);
+          break;
+        }
+        case SimdType::kInt8x16: {
+          Node** to_int32 = zone()->NewArray<Node*>(kNumLanes32);
+          SmallerIntToInt32<int8_t>(replacements, to_int32);
+          Int32ToInt64(to_int32, result);
+          break;
+        }
+        case SimdType::kFloat64x2: {
+          Float64ToInt64(replacements, result);
+          break;
+        }
+        case SimdType::kFloat32x4: {
+          Node** to_int32 = zone()->NewArray<Node*>(kNumLanes32);
+          Float32ToInt32(replacements, to_int32);
+          Int32ToInt64(to_int32, result);
+          break;
+        }
+      }
+      break;
     }
-  } else if (type == SimdType::kInt32x4) {
-    if (ReplacementType(node) == SimdType::kInt64x2) {
-      Int64ToInt32(replacements, result);
-    } else if (ReplacementType(node) == SimdType::kFloat64x2) {
-      Node** float64_to_int64 = zone()->NewArray<Node*>(kNumLanes64);
-      Float64ToInt64(replacements, float64_to_int64);
-      Int64ToInt32(float64_to_int64, result);
-    } else if (ReplacementType(node) == SimdType::kFloat32x4) {
-      Float32ToInt32(replacements, result);
-    } else if (ReplacementType(node) == SimdType::kInt16x8) {
-      SmallerIntToInt32<int16_t>(replacements, result);
-    } else if (ReplacementType(node) == SimdType::kInt8x16) {
-      SmallerIntToInt32<int8_t>(replacements, result);
-    } else {
-      UNREACHABLE();
+    case SimdType::kInt32x4: {
+      switch (ReplacementType(node)) {
+        case SimdType::kInt64x2: {
+          Int64ToInt32(replacements, result);
+          break;
+        }
+        case SimdType::kInt32x4: {
+          UNREACHABLE();
+        }
+        case SimdType::kInt16x8: {
+          SmallerIntToInt32<int16_t>(replacements, result);
+          break;
+        }
+        case SimdType::kInt8x16: {
+          SmallerIntToInt32<int8_t>(replacements, result);
+          break;
+        }
+        case SimdType::kFloat64x2: {
+          Node** float64_to_int64 = zone()->NewArray<Node*>(kNumLanes64);
+          Float64ToInt64(replacements, float64_to_int64);
+          Int64ToInt32(float64_to_int64, result);
+          break;
+        }
+        case SimdType::kFloat32x4: {
+          Float32ToInt32(replacements, result);
+          break;
+        }
+      }
+      break;
     }
-  } else if (type == SimdType::kFloat64x2) {
-    if (ReplacementType(node) == SimdType::kInt64x2) {
-      Int64ToFloat64(replacements, result);
-    } else if (ReplacementType(node) == SimdType::kInt32x4) {
-      Node** int32_to_int64 = zone()->NewArray<Node*>(kNumLanes64);
-      Int32ToInt64(replacements, int32_to_int64);
-      Int64ToFloat64(int32_to_int64, result);
-    } else {
-      UNIMPLEMENTED();
+    case SimdType::kInt16x8: {
+      switch (ReplacementType(node)) {
+        case SimdType::kInt64x2: {
+          Node** to_int32 = zone()->NewArray<Node*>(kNumLanes32);
+          Int64ToInt32(replacements, to_int32);
+          Int32ToSmallerInt<int16_t>(to_int32, result);
+          break;
+        }
+        case SimdType::kInt32x4: {
+          Int32ToSmallerInt<int16_t>(replacements, result);
+          break;
+        }
+        case SimdType::kInt16x8: {
+          UNREACHABLE();
+        }
+        case SimdType::kInt8x16: {
+          Node** to_int32 = zone()->NewArray<Node*>(kNumLanes32);
+          SmallerIntToInt32<int8_t>(replacements, to_int32);
+          Int32ToSmallerInt<int16_t>(to_int32, result);
+          break;
+        }
+        case SimdType::kFloat64x2: {
+          Node** to_int64 = zone()->NewArray<Node*>(kNumLanes64);
+          Node** to_int32 = zone()->NewArray<Node*>(kNumLanes32);
+          Float64ToInt64(replacements, to_int64);
+          Int64ToInt32(to_int64, to_int32);
+          Int32ToSmallerInt<int16_t>(to_int32, result);
+          break;
+        }
+        case SimdType::kFloat32x4: {
+          Node** float32_to_int32 = zone()->NewArray<Node*>(kNumLanes32);
+          Float32ToInt32(replacements, float32_to_int32);
+          Int32ToSmallerInt<int16_t>(float32_to_int32, result);
+          break;
+        }
+      }
+      break;
     }
-  } else if (type == SimdType::kFloat32x4) {
-    if (ReplacementType(node) == SimdType::kFloat64x2) {
-      Node** float64_to_int64 = zone()->NewArray<Node*>(kNumLanes64);
-      Node** int64_to_int32 = zone()->NewArray<Node*>(kNumLanes32);
-      Float64ToInt64(replacements, float64_to_int64);
-      Int64ToInt32(float64_to_int64, int64_to_int32);
-      Int32ToFloat32(int64_to_int32, result);
-    } else if (ReplacementType(node) == SimdType::kInt32x4) {
-      Int32ToFloat32(replacements, result);
-    } else if (ReplacementType(node) == SimdType::kInt16x8) {
-      UNIMPLEMENTED();
-    } else if (ReplacementType(node) == SimdType::kInt8x16) {
-      SmallerIntToInt32<int8_t>(replacements, result);
-      Int32ToFloat32(result, result);
-    } else {
-      UNREACHABLE();
+    case SimdType::kInt8x16: {
+      switch (ReplacementType(node)) {
+        case SimdType::kInt64x2: {
+          Node** int64_to_int32 = zone()->NewArray<Node*>(kNumLanes32);
+          Int64ToInt32(replacements, int64_to_int32);
+          Int32ToSmallerInt<int8_t>(int64_to_int32, result);
+          break;
+        }
+        case SimdType::kInt32x4: {
+          Int32ToSmallerInt<int8_t>(replacements, result);
+          break;
+        }
+        case SimdType::kInt16x8: {
+          Node** int16_to_int32 = zone()->NewArray<Node*>(kNumLanes32);
+          SmallerIntToInt32<int16_t>(replacements, int16_to_int32);
+          Int32ToSmallerInt<int8_t>(int16_to_int32, result);
+          break;
+        }
+        case SimdType::kInt8x16: {
+          UNREACHABLE();
+        }
+        case SimdType::kFloat64x2: {
+          Node** to_int64 = zone()->NewArray<Node*>(kNumLanes64);
+          Node** to_int32 = zone()->NewArray<Node*>(kNumLanes32);
+          Float64ToInt64(replacements, to_int64);
+          Int64ToInt32(to_int64, to_int32);
+          Int32ToSmallerInt<int8_t>(to_int32, result);
+          break;
+        }
+        case SimdType::kFloat32x4: {
+          Node** float32_to_int32 = zone()->NewArray<Node*>(kNumLanes32);
+          Float32ToInt32(replacements, float32_to_int32);
+          Int32ToSmallerInt<int8_t>(float32_to_int32, result);
+          break;
+        }
+      }
+      break;
     }
-  } else if (type == SimdType::kInt16x8) {
-    if (ReplacementType(node) == SimdType::kInt32x4) {
-      Int32ToSmallerInt<int16_t>(replacements, result);
-    } else if (ReplacementType(node) == SimdType::kFloat32x4) {
-      Node** float32_to_int32 = zone()->NewArray<Node*>(kNumLanes32);
-      Float32ToInt32(replacements, float32_to_int32);
-      Int32ToSmallerInt<int16_t>(float32_to_int32, result);
-    } else {
-      UNREACHABLE();
+    case SimdType::kFloat64x2: {
+      switch (ReplacementType(node)) {
+        case SimdType::kInt64x2: {
+          Int64ToFloat64(replacements, result);
+          break;
+        }
+        case SimdType::kInt32x4: {
+          Node** int32_to_int64 = zone()->NewArray<Node*>(kNumLanes64);
+          Int32ToInt64(replacements, int32_to_int64);
+          Int64ToFloat64(int32_to_int64, result);
+          break;
+        }
+        case SimdType::kInt16x8: {
+          Node** to_int32 = zone()->NewArray<Node*>(kNumLanes32);
+          Node** to_int64 = zone()->NewArray<Node*>(kNumLanes64);
+          SmallerIntToInt32<int16_t>(replacements, to_int32);
+          Int32ToInt64(to_int32, to_int64);
+          Int64ToFloat64(to_int64, result);
+          break;
+        }
+        case SimdType::kInt8x16: {
+          Node** to_int32 = zone()->NewArray<Node*>(kNumLanes32);
+          Node** to_int64 = zone()->NewArray<Node*>(kNumLanes64);
+          SmallerIntToInt32<int8_t>(replacements, to_int32);
+          Int32ToInt64(to_int32, to_int64);
+          Int64ToFloat64(to_int64, result);
+          break;
+        }
+        case SimdType::kFloat64x2: {
+          UNREACHABLE();
+        }
+        case SimdType::kFloat32x4: {
+          Node** to_int32 = zone()->NewArray<Node*>(kNumLanes32);
+          Node** to_int64 = zone()->NewArray<Node*>(kNumLanes64);
+          Float32ToInt32(replacements, to_int32);
+          Int32ToInt64(to_int32, to_int64);
+          Int64ToFloat64(to_int64, result);
+          break;
+        }
+      }
+      break;
     }
-  } else if (type == SimdType::kInt8x16) {
-    if (ReplacementType(node) == SimdType::kInt64x2) {
-      Node** int64_to_int32 = zone()->NewArray<Node*>(kNumLanes32);
-      Int64ToInt32(replacements, int64_to_int32);
-      Int32ToSmallerInt<int8_t>(int64_to_int32, result);
-    } else if (ReplacementType(node) == SimdType::kInt32x4) {
-      Int32ToSmallerInt<int8_t>(replacements, result);
-    } else if (ReplacementType(node) == SimdType::kInt16x8) {
-      Node** int16_to_int32 = zone()->NewArray<Node*>(kNumLanes32);
-      SmallerIntToInt32<int16_t>(replacements, int16_to_int32);
-      Int32ToSmallerInt<int8_t>(int16_to_int32, result);
-    } else {
-      UNIMPLEMENTED();
+    case SimdType::kFloat32x4: {
+      switch (ReplacementType(node)) {
+        case SimdType::kInt64x2: {
+          Node** to_int32 = zone()->NewArray<Node*>(kNumLanes32);
+          Int64ToInt32(replacements, to_int32);
+          Int32ToFloat32(to_int32, result);
+          break;
+        }
+        case SimdType::kInt32x4: {
+          Int32ToFloat32(replacements, result);
+          break;
+        }
+        case SimdType::kInt16x8: {
+          Node** to_int32 = zone()->NewArray<Node*>(kNumLanes32);
+          SmallerIntToInt32<int16_t>(replacements, to_int32);
+          Int32ToFloat32(to_int32, result);
+          break;
+        }
+        case SimdType::kInt8x16: {
+          SmallerIntToInt32<int8_t>(replacements, result);
+          Int32ToFloat32(result, result);
+          break;
+        }
+        case SimdType::kFloat64x2: {
+          Node** float64_to_int64 = zone()->NewArray<Node*>(kNumLanes64);
+          Node** int64_to_int32 = zone()->NewArray<Node*>(kNumLanes32);
+          Float64ToInt64(replacements, float64_to_int64);
+          Int64ToInt32(float64_to_int64, int64_to_int32);
+          Int32ToFloat32(int64_to_int32, result);
+          break;
+        }
+        case SimdType::kFloat32x4: {
+          UNREACHABLE();
+        }
+      }
+      break;
     }
-  } else {
-    UNREACHABLE();
   }
   return result;
 }

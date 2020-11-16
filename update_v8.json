@@ -1,9 +1,9 @@
 [
   {
     "url": "https://chromium.googlesource.com/v8/v8.git",
-    "commit": "8b63be769a45775802c2a8d760144d46f3a0cd22",
+    "commit": "7159dda0aca0285fac6c937ac8d4d9aaece2feb1",
     "/* comment */": "Dependency v8 must be first.",
-    "branch": "branch-heads/8.7",
+    "branch": "branch-heads/8.8",
     "path": ""
   },
   {
@@ -20,19 +20,19 @@
   },
   {
     "url": "https://chromium.googlesource.com/chromium/src/base/trace_event/common.git",
-    "commit": "23ef5333a357fc7314630ef88b44c3a545881dee",
+    "commit": "eb94f1c7aa96207f469008f29989a43feb2718f8",
     "branch": "master",
     "path": "base/trace_event/common"
   },
   {
     "url": "https://chromium.googlesource.com/chromium/src/third_party/zlib.git",
-    "commit": "4668feaaa47973a6f9d9f9caeb14cd03731854f1",
+    "commit": "e84c9a3fd75fdc39055b7ae27d6ec508e50bd39e",
     "branch": "master",
     "path": "third_party/zlib"
   },
   {
     "url": "https://chromium.googlesource.com/chromium/src/third_party/markupsafe.git",
-    "commit": "f2fb0f21ef1e1d4ffd43be8c63fc3d4928dea7ab",
+    "commit": "0944e71f4b2cb9a871bcbe353f95e889b64a611a",
     "branch": "master",
     "path": "third_party/markupsafe"
   },
