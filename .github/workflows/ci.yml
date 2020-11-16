@@ -20,7 +20,12 @@ jobs:
       # Note: `cmake -B ${{runner.workspace}}/build` needs
       # cmake 3.13 but Ubuntu 16.04 comes with cmake 3.12.
       - name: configure
+        if: matrix.os != 'windows-latest'
         run: cmake ${{runner.workspace}}/v8-cmake
+        working-directory: ${{runner.workspace}}/build
+      - name: configure-windows
+        if: matrix.os == 'windows-latest'
+        run: cmake -DCMAKE_BUILD_TYPE=Release -T ClangCL ${{runner.workspace}}/v8-cmake
         working-directory: ${{runner.workspace}}/build
       - name: build
         run: cmake --build ${{runner.workspace}}/build -j 2
