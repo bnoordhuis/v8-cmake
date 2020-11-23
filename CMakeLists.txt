@@ -78,6 +78,7 @@ set(
   $<${is-win}:V8_HAVE_TARGET_OS>
   $<${is-win}:V8_TARGET_OS_WIN>
   $<${is-x64}:V8_TARGET_ARCH_X64>
+  $<${is-ia32}:V8_TARGET_ARCH_IA32>
   $<${is-ia32}:DISABLE_UNTRUSTED_CODE_MITIGATIONS> # lest we get FATAL("Poisoning is not supported on ia32.");
   $<${is-win}:NOMINMAX>
   # $<$<AND:${is-win},${is-x64}>:V8_OS_WIN_X64> # This is set by v8 sources - should not be needed here.
@@ -86,8 +87,18 @@ set(
 )
 
 set(msvc-x86-no-safeseh)
-if (${is-ia32} AND MSVC) 
-set(msvc-x86-no-safeseh /SAFESEH:NO)
+if (${is-ia32}) 
+  if (MSVC) 
+    set(msvc-x86-no-safeseh /SAFESEH:NO)
+  endif()
+  if (${is-win})
+      # From Build.GN: Ensure no surprising artifacts from 80bit double math with x86.
+      if (MSVC) 
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /arch:SSE2")
+      else()
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -msse2")
+      endif()
+  endif()
 endif()
 
 set(disable-exceptions
