@@ -564,7 +564,6 @@ namespace internal {
   T(WasmTrapJSTypeError, "type incompatibility when transforming from/to JS")  \
   T(WasmTrapDataSegmentDropped, "data segment has been dropped")               \
   T(WasmTrapElemSegmentDropped, "element segment has been dropped")            \
-  T(WasmTrapBrOnExnNull, "br_on_exn on null value")                            \
   T(WasmTrapRethrowNull, "rethrowing null value")                              \
   T(WasmTrapNullDereference, "dereferencing a null pointer")                   \
   T(WasmTrapIllegalCast, "illegal cast")                                       \
@@ -580,6 +579,8 @@ namespace internal {
   T(DataCloneErrorOutOfMemory, "Data cannot be cloned, out of memory.")        \
   T(DataCloneErrorDetachedArrayBuffer,                                         \
     "An ArrayBuffer is detached and could not be cloned.")                     \
+  T(DataCloneErrorNonDetachableArrayBuffer,                                    \
+    "ArrayBuffer is not detachable and could not be cloned.")                  \
   T(DataCloneErrorSharedArrayBufferTransferred,                                \
     "A SharedArrayBuffer could not be cloned. SharedArrayBuffer must not be "  \
     "transferred.")                                                            \
