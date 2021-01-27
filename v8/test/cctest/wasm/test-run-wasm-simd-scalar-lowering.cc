@@ -288,6 +288,44 @@ WASM_SIMD_TEST(I8x16WidenS_I16x8NarrowU) {
   }
 }
 
+WASM_SIMD_TEST(S128SelectWithF32x4) {
+  WasmRunner<float, int32_t, float, int32_t> r(execution_tier, lower_simd);
+  BUILD(r, WASM_GET_LOCAL(0), WASM_SIMD_OP(kExprI32x4Splat), WASM_GET_LOCAL(1),
+        WASM_SIMD_OP(kExprF32x4Splat), WASM_GET_LOCAL(2),
+        WASM_SIMD_OP(kExprI32x4Splat), WASM_SIMD_OP(kExprS128Select),
+        WASM_SIMD_OP(kExprF32x4ExtractLane), 0);
+  // Selection mask is all 0, so always select 2.0.
+  CHECK_EQ(2.0, r.Call(1, 2.0, 0));
+}
+
+WASM_SIMD_TEST(S128AndNotWithF32x4) {
+  WasmRunner<float, int32_t, float> r(execution_tier, lower_simd);
+  BUILD(r, WASM_GET_LOCAL(0), WASM_SIMD_OP(kExprI32x4Splat), WASM_GET_LOCAL(1),
+        WASM_SIMD_OP(kExprF32x4Splat), WASM_SIMD_OP(kExprS128AndNot),
+        WASM_SIMD_OP(kExprF32x4ExtractLane), 0);
+  // 0x00700000 & !0x40800000 = 0x00700000
+  CHECK_EQ(bit_cast<float>(0x700000),
+           r.Call(0x00700000, bit_cast<float>(0x40800000)));
+}
+
+WASM_SIMD_TEST(FunctionCallWithExtractLaneOutputAsArgument) {
+  // This uses the result of an extract lane as an argument to a function call
+  // to exercise lowering for kCall and make sure the the extract lane is
+  // correctly replaced with a scalar.
+  TestSignatures sigs;
+  WasmRunner<int32_t, int32_t> r(execution_tier, lower_simd);
+  WasmFunctionCompiler& fn = r.NewFunction(sigs.f_f());
+
+  BUILD(fn, WASM_GET_LOCAL(0), WASM_GET_LOCAL(0), kExprF32Add);
+
+  BUILD(r, WASM_GET_LOCAL(0), WASM_SIMD_OP(kExprI32x4Splat),
+        WASM_SIMD_OP(kExprF32x4ExtractLane), 0, kExprCallFunction,
+        fn.function_index(), WASM_SIMD_OP(kExprF32x4Splat), WASM_GET_LOCAL(0),
+        WASM_SIMD_OP(kExprI32x4Splat), WASM_SIMD_OP(kExprI32x4Add),
+        WASM_SIMD_OP(kExprI32x4ExtractLane), 0);
+  CHECK_EQ(15, r.Call(5));
+}
+
 }  // namespace test_run_wasm_simd
 }  // namespace wasm
 }  // namespace internal
