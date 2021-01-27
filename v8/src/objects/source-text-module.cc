@@ -7,6 +7,7 @@
 #include "src/api/api-inl.h"
 #include "src/ast/modules.h"
 #include "src/builtins/accessors.h"
+#include "src/common/assert-scope.h"
 #include "src/objects/js-generator-inl.h"
 #include "src/objects/module-inl.h"
 #include "src/objects/objects-inl.h"
@@ -18,7 +19,7 @@ namespace internal {
 
 struct StringHandleHash {
   V8_INLINE size_t operator()(Handle<String> string) const {
-    return string->Hash();
+    return string->EnsureHash();
   }
 };
 
@@ -77,25 +78,26 @@ class Module::ResolveSet
 };
 
 SharedFunctionInfo SourceTextModule::GetSharedFunctionInfo() const {
-  DisallowHeapAllocation no_alloc;
+  DisallowGarbageCollection no_gc;
   switch (status()) {
     case kUninstantiated:
     case kPreInstantiating:
-      DCHECK(code().IsSharedFunctionInfo());
       return SharedFunctionInfo::cast(code());
     case kInstantiating:
-      DCHECK(code().IsJSFunction());
       return JSFunction::cast(code()).shared();
     case kInstantiated:
     case kEvaluating:
     case kEvaluated:
-      DCHECK(code().IsJSGeneratorObject());
       return JSGeneratorObject::cast(code()).function().shared();
     case kErrored:
-      UNREACHABLE();
+      return SharedFunctionInfo::cast(code());
   }
-
   UNREACHABLE();
+}
+
+Script SourceTextModule::GetScript() const {
+  DisallowGarbageCollection no_gc;
+  return Script::cast(GetSharedFunctionInfo().script());
 }
 
 int SourceTextModule::ExportIndex(int cell_index) {
@@ -137,7 +139,7 @@ void SourceTextModule::CreateExport(Isolate* isolate,
 }
 
 Cell SourceTextModule::GetCell(int cell_index) {
-  DisallowHeapAllocation no_gc;
+  DisallowGarbageCollection no_gc;
   Object cell;
   switch (SourceTextModuleDescriptor::GetCellIndexKind(cell_index)) {
     case SourceTextModuleDescriptor::kImport:
@@ -161,7 +163,7 @@ Handle<Object> SourceTextModule::LoadVariable(Isolate* isolate,
 
 void SourceTextModule::StoreVariable(Handle<SourceTextModule> module,
                                      int cell_index, Handle<Object> value) {
-  DisallowHeapAllocation no_gc;
+  DisallowGarbageCollection no_gc;
   DCHECK_EQ(SourceTextModuleDescriptor::GetCellIndexKind(cell_index),
             SourceTextModuleDescriptor::kExport);
   module->GetCell(cell_index).set_value(*value);
@@ -205,7 +207,7 @@ MaybeHandle<Cell> SourceTextModule::ResolveExport(
     Handle<SourceTextModuleInfoEntry> entry =
         Handle<SourceTextModuleInfoEntry>::cast(object);
     Handle<String> import_name(String::cast(entry->import_name()), isolate);
-    Handle<Script> script(module->script(), isolate);
+    Handle<Script> script(module->GetScript(), isolate);
     MessageLocation new_loc(script, entry->beg_pos(), entry->end_pos());
 
     Handle<Cell> cell;
@@ -269,7 +271,7 @@ MaybeHandle<Cell> SourceTextModule::ResolveExportUsingStarExports(
         continue;  // Indirect export.
       }
 
-      Handle<Script> script(module->script(), isolate);
+      Handle<Script> script(module->GetScript(), isolate);
       MessageLocation new_loc(script, entry->beg_pos(), entry->end_pos());
 
       Handle<Cell> cell;
@@ -310,7 +312,9 @@ MaybeHandle<Cell> SourceTextModule::ResolveExportUsingStarExports(
 
 bool SourceTextModule::PrepareInstantiate(
     Isolate* isolate, Handle<SourceTextModule> module,
-    v8::Local<v8::Context> context, v8::Module::ResolveCallback callback) {
+    v8::Local<v8::Context> context, v8::Module::ResolveModuleCallback callback,
+    Module::DeprecatedResolveCallback callback_without_import_assertions) {
+  DCHECK_EQ(callback != nullptr, callback_without_import_assertions == nullptr);
   // Obtain requested modules.
   Handle<SourceTextModuleInfo> module_info(module->info(), isolate);
   Handle<FixedArray> module_requests(module_info->module_requests(), isolate);
@@ -319,13 +323,25 @@ bool SourceTextModule::PrepareInstantiate(
     Handle<ModuleRequest> module_request(
         ModuleRequest::cast(module_requests->get(i)), isolate);
     Handle<String> specifier(module_request->specifier(), isolate);
-    // TODO(v8:10958) Pass import assertions to the callback
     v8::Local<v8::Module> api_requested_module;
-    if (!callback(context, v8::Utils::ToLocal(specifier),
-                  v8::Utils::ToLocal(Handle<Module>::cast(module)))
-             .ToLocal(&api_requested_module)) {
-      isolate->PromoteScheduledException();
-      return false;
+    if (callback) {
+      Handle<FixedArray> import_assertions(module_request->import_assertions(),
+                                           isolate);
+      if (!callback(context, v8::Utils::ToLocal(specifier),
+                    v8::Utils::FixedArrayToLocal(import_assertions),
+                    v8::Utils::ToLocal(Handle<Module>::cast(module)))
+               .ToLocal(&api_requested_module)) {
+        isolate->PromoteScheduledException();
+        return false;
+      }
+    } else {
+      if (!callback_without_import_assertions(
+               context, v8::Utils::ToLocal(specifier),
+               v8::Utils::ToLocal(Handle<Module>::cast(module)))
+               .ToLocal(&api_requested_module)) {
+        isolate->PromoteScheduledException();
+        return false;
+      }
     }
     Handle<Module> requested_module = Utils::OpenHandle(*api_requested_module);
     requested_modules->set(i, *requested_module);
@@ -336,7 +352,8 @@ bool SourceTextModule::PrepareInstantiate(
     Handle<Module> requested_module(Module::cast(requested_modules->get(i)),
                                     isolate);
     if (!Module::PrepareInstantiate(isolate, requested_module, context,
-                                    callback)) {
+                                    callback,
+                                    callback_without_import_assertions)) {
       return false;
     }
   }
@@ -429,8 +446,8 @@ bool SourceTextModule::FinishInstantiate(
   Handle<SharedFunctionInfo> shared(SharedFunctionInfo::cast(module->code()),
                                     isolate);
   Handle<JSFunction> function =
-      isolate->factory()->NewFunctionFromSharedFunctionInfo(
-          shared, isolate->native_context());
+      Factory::JSFunctionBuilder{isolate, shared, isolate->native_context()}
+          .Build();
   module->set_code(*function);
   module->SetStatus(kInstantiating);
   module->set_dfs_index(*dfs_index);
@@ -466,7 +483,7 @@ bool SourceTextModule::FinishInstantiate(
     }
   }
 
-  Handle<Script> script(module->script(), isolate);
+  Handle<Script> script(module->GetScript(), isolate);
   Handle<SourceTextModuleInfo> module_info(module->info(), isolate);
 
   // Resolve imports.

@@ -98,6 +98,10 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kMips64I64x2Shl:
     case kMips64I64x2ShrS:
     case kMips64I64x2ShrU:
+    case kMips64I64x2BitMask:
+    case kMips64I64x2Eq:
+    case kMips64ExtMulLow:
+    case kMips64ExtMulHigh:
     case kMips64F32x4Abs:
     case kMips64F32x4Add:
     case kMips64F32x4AddHoriz:
@@ -361,6 +365,7 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kMips64S128Load32x2U:
     case kMips64S128Load32Zero:
     case kMips64S128Load64Zero:
+    case kMips64S128LoadLane:
     case kMips64Word64AtomicLoadUint8:
     case kMips64Word64AtomicLoadUint16:
     case kMips64Word64AtomicLoadUint32:
@@ -369,7 +374,6 @@ int InstructionScheduler::GetTargetInstructionFlags(
       return kIsLoadOperation;
 
     case kMips64ModD:
-    case kMips64ModS:
     case kMips64MsaSt:
     case kMips64Push:
     case kMips64Sb:
@@ -386,6 +390,7 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kMips64Usw:
     case kMips64Uswc1:
     case kMips64Sync:
+    case kMips64S128StoreLane:
     case kMips64Word64AtomicStoreWord8:
     case kMips64Word64AtomicStoreWord16:
     case kMips64Word64AtomicStoreWord32:
@@ -1520,9 +1525,6 @@ int InstructionScheduler::GetInstructionLatency(const Instruction* instr) {
       return Latency::MUL_S;
     case kMips64DivS:
       return Latency::DIV_S;
-    case kMips64ModS:
-      return PrepareCallCFunctionLatency() + MovToFloatParametersLatency() +
-             CallCFunctionLatency() + MovFromFloatResultLatency();
     case kMips64AbsS:
       return Latency::ABS_S;
     case kMips64NegS:
