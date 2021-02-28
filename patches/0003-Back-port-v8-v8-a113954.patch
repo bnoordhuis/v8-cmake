@@ -1,0 +1,29 @@
+From a7aa63aedec96919ffa1124c3846259ac4b606ea Mon Sep 17 00:00:00 2001
+From: Ben Noordhuis <info@bnoordhuis.nl>
+Date: Sun, 28 Feb 2021 15:02:57 +0100
+Subject: [PATCH] Back-port v8/v8@a113954
+
+Original commit message:
+
+    Fixes compilation with msvc 2019 toolchain.
+---
+ v8/include/v8-cppgc.h | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/v8/include/v8-cppgc.h b/v8/include/v8-cppgc.h
+index 8a0d9cb9..5a3712dd 100644
+--- a/v8/include/v8-cppgc.h
++++ b/v8/include/v8-cppgc.h
+@@ -26,6 +26,9 @@ class CppHeap;
+ }  // namespace internal
+ 
+ struct V8_EXPORT CppHeapCreateParams {
++  CppHeapCreateParams(const CppHeapCreateParams&) = delete;
++  CppHeapCreateParams& operator=(const CppHeapCreateParams&) = delete;
++
+   std::vector<std::unique_ptr<cppgc::CustomSpaceBase>> custom_spaces;
+ };
+ 
+-- 
+2.25.1
+
