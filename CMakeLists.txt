@@ -5,7 +5,13 @@ project(V8 LANGUAGES CXX C ASM)
 
 if(MSVC)
   enable_language(ASM_MASM)
-  set_property(SOURCE ${PROJECT_BINARY_DIR}/embedded.S PROPERTY LANGUAGE ASM_MASM)
+  set_property(
+    SOURCE ${PROJECT_BINARY_DIR}/embedded.S
+           v8/src/heap/base/asm/arm64/push_registers_masm.S
+           v8/src/heap/base/asm/ia32/push_registers_masm.S
+           v8/src/heap/base/asm/x64/push_registers_masm.S
+    PROPERTY LANGUAGE ASM_MASM)
+
 endif()
 
 list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
@@ -190,8 +196,36 @@ file(GLOB zone-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/z
 file(GLOB heap-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS
   v8/src/heap/*.cc
   v8/src/heap/base/*.cc
+  v8/src/heap/cppgc-js/*.cc
+  v8/src/heap/cppgc/*.cc
   v8/src/heap/third-party/*.cc
 )
+
+# Caged heap feature is x64/arm64-only at the moment.
+list(REMOVE_ITEM heap-sources
+  v8/src/heap/conservative-stack-visitor.cc
+  v8/src/heap/cppgc/caged-heap-local-data.cc
+  v8/src/heap/cppgc/caged-heap.cc
+)
+
+if(WIN32)
+  list(APPEND heap-sources
+    $<${is-arm64}:v8/src/heap/base/asm/arm64/push_registers_masm.S>
+    $<${is-ia32}:v8/src/heap/base/asm/ia32/push_registers_masm.S>
+    $<${is-x64}:v8/src/heap/base/asm/x64/push_registers_masm.S>
+  )
+else()
+  list(APPEND heap-sources
+    $<${is-arm64}:v8/src/heap/base/asm/arm64/push_registers_asm.cc>
+    $<${is-arm}:v8/src/heap/base/asm/arm/push_registers_asm.cc>
+    $<${is-ia32}:v8/src/heap/base/asm/ia32/push_registers_asm.cc>
+    $<${is-mips64}:v8/src/heap/base/asm/mips64/push_registers_asm.cc>
+    $<${is-mips}:v8/src/heap/base/asm/mips/push_registers_asm.cc>
+    $<${is-ppc}:v8/src/heap/base/asm/ppc/push_registers_asm.cc>
+    $<${is-s390}:v8/src/heap/base/asm/s390/push_registers_asm.cc>
+    $<${is-x64}:v8/src/heap/base/asm/x64/push_registers_asm.cc>
+  )
+endif()
 
 list(REMOVE_ITEM builtin-sources
   v8/src/builtins/builtins-intl-gen.cc
@@ -199,7 +233,6 @@ list(REMOVE_ITEM builtin-sources
 )
 
 list(REMOVE_ITEM diagnostic-sources v8/src/diagnostics/unwinding-info-win64.cc)
-list(REMOVE_ITEM heap-sources v8/src/heap/conservative-stack-visitor.cc)
 list(REMOVE_ITEM object-sources ${i18n-sources})
 list(REMOVE_ITEM regexp-sources v8/src/regexp/gen-regexp-special-case.cc)
 list(REMOVE_ITEM runtime-sources v8/src/runtime/runtime-intl.cc)
@@ -278,6 +311,7 @@ add_library(v8_base_without_compiler STATIC
   ${snapshot-sources}
   ${strings-sources}
   v8/src/tasks/cancelable-task.cc
+  v8/src/tasks/operations-barrier.cc
   v8/src/tasks/task-utils.cc
   v8/src/third_party/siphash/halfsiphash.cc
   v8/src/tracing/trace-event.cc
@@ -583,6 +617,8 @@ add_custom_command(
 add_library(v8_libplatform STATIC)
 target_sources(v8_libplatform
   PRIVATE
+    $<$<NOT:${is-win}>:v8/src/libplatform/tracing/recorder-default.cc>
+    $<${is-win}:v8/src/libplatform/tracing/recorder-win.cc>
     v8/src/libplatform/default-foreground-task-runner.cc
     v8/src/libplatform/default-job.cc
     v8/src/libplatform/default-platform.cc
