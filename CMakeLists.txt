@@ -5,7 +5,13 @@ project(V8 LANGUAGES CXX C ASM)
 
 if(MSVC)
   enable_language(ASM_MASM)
-  set_property(SOURCE ${PROJECT_BINARY_DIR}/embedded.S PROPERTY LANGUAGE ASM_MASM)
+  set_property(
+    SOURCE ${PROJECT_BINARY_DIR}/embedded.S
+           v8/src/heap/base/asm/arm64/push_registers_masm.S
+           v8/src/heap/base/asm/ia32/push_registers_masm.S
+           v8/src/heap/base/asm/x64/push_registers_masm.S
+    PROPERTY LANGUAGE ASM_MASM)
+
 endif()
 
 list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
