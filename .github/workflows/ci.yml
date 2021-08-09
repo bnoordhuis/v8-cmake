@@ -1,6 +1,7 @@
 name: v8-cmake
 
 on:
+  push:
   pull_request:
     paths:
       - 'CMakeLists.txt'
