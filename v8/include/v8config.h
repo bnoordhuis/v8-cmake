@@ -5,6 +5,14 @@
 #ifndef V8CONFIG_H_
 #define V8CONFIG_H_
 
+#ifdef V8_GN_HEADER
+#if __cplusplus >= 201703L && !__has_include("v8-gn.h")
+#error Missing v8-gn.h. The configuration for v8 is missing from the include \
+path. Add it with -I<path> to the command line
+#endif
+#include "v8-gn.h"  // NOLINT(build/include_directory)
+#endif
+
 // clang-format off
 
 // Platform headers for feature detection below.
@@ -302,10 +310,6 @@
 // GCC doc: https://gcc.gnu.org/onlinedocs/gcc/Labels-as-Values.html
 # define V8_HAS_COMPUTED_GOTO 1
 
-// Whether constexpr has full C++14 semantics, in particular that non-constexpr
-// code is allowed as long as it's not executed for any constexpr instantiation.
-# define V8_HAS_CXX14_CONSTEXPR 1
-
 #elif defined(__GNUC__)
 
 # define V8_CC_GNU 1
@@ -328,7 +332,10 @@
 # define V8_HAS_ATTRIBUTE_UNUSED 1
 # define V8_HAS_ATTRIBUTE_VISIBILITY 1
 # define V8_HAS_ATTRIBUTE_WARN_UNUSED_RESULT (!V8_CC_INTEL)
-# define V8_HAS_CPP_ATTRIBUTE_NODISCARD (V8_HAS_CPP_ATTRIBUTE(nodiscard))
+
+// [[nodiscard]] does not work together with with
+// __attribute__((visibility(""))) on GCC 7.4 which is why there is no define
+// for V8_HAS_CPP_ATTRIBUTE_NODISCARD. See https://crbug.com/v8/11707.
 
 # define V8_HAS_BUILTIN_ASSUME_ALIGNED 1
 # define V8_HAS_BUILTIN_CLZ 1
@@ -339,11 +346,6 @@
 
 // GCC doc: https://gcc.gnu.org/onlinedocs/gcc/Labels-as-Values.html
 #define V8_HAS_COMPUTED_GOTO 1
-
-// Whether constexpr has full C++14 semantics, in particular that non-constexpr
-// code is allowed as long as it's not executed for any constexpr instantiation.
-// GCC only supports this since version 6.
-# define V8_HAS_CXX14_CONSTEXPR (V8_GNUC_PREREQ(6, 0, 0))
 
 #endif
 

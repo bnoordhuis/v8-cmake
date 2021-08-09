@@ -33,16 +33,11 @@ enum StringRepresentationTag {
 };
 const uint32_t kIsIndirectStringMask = 1 << 0;
 const uint32_t kIsIndirectStringTag = 1 << 0;
-// NOLINTNEXTLINE(runtime/references) (false positive)
 STATIC_ASSERT((kSeqStringTag & kIsIndirectStringMask) == 0);
-// NOLINTNEXTLINE(runtime/references) (false positive)
 STATIC_ASSERT((kExternalStringTag & kIsIndirectStringMask) == 0);
-// NOLINTNEXTLINE(runtime/references) (false positive)
 STATIC_ASSERT((kConsStringTag & kIsIndirectStringMask) == kIsIndirectStringTag);
-// NOLINTNEXTLINE(runtime/references) (false positive)
 STATIC_ASSERT((kSlicedStringTag & kIsIndirectStringMask) ==
               kIsIndirectStringTag);
-// NOLINTNEXTLINE(runtime/references) (false positive)
 STATIC_ASSERT((kThinStringTag & kIsIndirectStringMask) == kIsIndirectStringTag);
 
 // For strings, bit 3 indicates whether the string consists of two-byte
@@ -87,6 +82,12 @@ enum InstanceType : uint16_t {
       kTwoByteStringTag | kExternalStringTag | kInternalizedTag,
   EXTERNAL_ONE_BYTE_INTERNALIZED_STRING_TYPE =
       kOneByteStringTag | kExternalStringTag | kInternalizedTag,
+  UNCACHED_EXTERNAL_INTERNALIZED_STRING_TYPE =
+      EXTERNAL_INTERNALIZED_STRING_TYPE | kUncachedExternalStringTag |
+      kInternalizedTag,
+  UNCACHED_EXTERNAL_ONE_BYTE_INTERNALIZED_STRING_TYPE =
+      EXTERNAL_ONE_BYTE_INTERNALIZED_STRING_TYPE | kUncachedExternalStringTag |
+      kInternalizedTag,
   STRING_TYPE = INTERNALIZED_STRING_TYPE | kNotInternalizedTag,
   ONE_BYTE_STRING_TYPE =
       ONE_BYTE_INTERNALIZED_STRING_TYPE | kNotInternalizedTag,
@@ -101,12 +102,10 @@ enum InstanceType : uint16_t {
       EXTERNAL_INTERNALIZED_STRING_TYPE | kNotInternalizedTag,
   EXTERNAL_ONE_BYTE_STRING_TYPE =
       EXTERNAL_ONE_BYTE_INTERNALIZED_STRING_TYPE | kNotInternalizedTag,
-  UNCACHED_EXTERNAL_STRING_TYPE = kTwoByteStringTag | kExternalStringTag |
-                                  kUncachedExternalStringTag |
-                                  kNotInternalizedTag,
+  UNCACHED_EXTERNAL_STRING_TYPE =
+      UNCACHED_EXTERNAL_INTERNALIZED_STRING_TYPE | kNotInternalizedTag,
   UNCACHED_EXTERNAL_ONE_BYTE_STRING_TYPE =
-      kOneByteStringTag | kExternalStringTag | kUncachedExternalStringTag |
-      kNotInternalizedTag,
+      UNCACHED_EXTERNAL_ONE_BYTE_INTERNALIZED_STRING_TYPE | kNotInternalizedTag,
   THIN_STRING_TYPE = kTwoByteStringTag | kThinStringTag | kNotInternalizedTag,
   THIN_ONE_BYTE_STRING_TYPE =
       kOneByteStringTag | kThinStringTag | kNotInternalizedTag,
@@ -148,7 +147,6 @@ enum InstanceType : uint16_t {
 constexpr InstanceType LAST_STRING_TYPE =
     static_cast<InstanceType>(FIRST_NONSTRING_TYPE - 1);
 
-// NOLINTNEXTLINE(runtime/references) (false positive)
 STATIC_ASSERT((FIRST_NONSTRING_TYPE & kIsNotStringMask) != kStringTag);
 STATIC_ASSERT(JS_OBJECT_TYPE == Internals::kJSObjectType);
 STATIC_ASSERT(JS_API_OBJECT_TYPE == Internals::kJSApiObjectType);
@@ -234,40 +232,42 @@ TYPED_ARRAYS(TYPED_ARRAY_IS_TYPE_FUNCTION_DECL)
 
 // This list must contain only maps that are shared by all objects of their
 // instance type.
-#define UNIQUE_INSTANCE_TYPE_MAP_LIST_GENERATOR(V, _)                       \
-  V(_, AccessorInfoMap, accessor_info_map, AccessorInfo)                    \
-  V(_, AccessorPairMap, accessor_pair_map, AccessorPair)                    \
-  V(_, AllocationMementoMap, allocation_memento_map, AllocationMemento)     \
-  V(_, ArrayBoilerplateDescriptionMap, array_boilerplate_description_map,   \
-    ArrayBoilerplateDescription)                                            \
-  V(_, BreakPointMap, break_point_map, BreakPoint)                          \
-  V(_, BreakPointInfoMap, break_point_info_map, BreakPointInfo)             \
-  V(_, CachedTemplateObjectMap, cached_template_object_map,                 \
-    CachedTemplateObject)                                                   \
-  V(_, CellMap, cell_map, Cell)                                             \
-  V(_, WeakCellMap, weak_cell_map, WeakCell)                                \
-  V(_, CodeMap, code_map, Code)                                             \
-  V(_, CoverageInfoMap, coverage_info_map, CoverageInfo)                    \
-  V(_, DebugInfoMap, debug_info_map, DebugInfo)                             \
-  V(_, FeedbackVectorMap, feedback_vector_map, FeedbackVector)              \
-  V(_, FixedDoubleArrayMap, fixed_double_array_map, FixedDoubleArray)       \
-  V(_, FunctionTemplateInfoMap, function_template_info_map,                 \
-    FunctionTemplateInfo)                                                   \
-  V(_, HeapNumberMap, heap_number_map, HeapNumber)                          \
-  V(_, MetaMap, meta_map, Map)                                              \
-  V(_, PreparseDataMap, preparse_data_map, PreparseData)                    \
-  V(_, PrototypeInfoMap, prototype_info_map, PrototypeInfo)                 \
-  V(_, SharedFunctionInfoMap, shared_function_info_map, SharedFunctionInfo) \
-  V(_, SmallOrderedHashSetMap, small_ordered_hash_set_map,                  \
-    SmallOrderedHashSet)                                                    \
-  V(_, SmallOrderedHashMapMap, small_ordered_hash_map_map,                  \
-    SmallOrderedHashMap)                                                    \
-  V(_, SmallOrderedNameDictionaryMap, small_ordered_name_dictionary_map,    \
-    SmallOrderedNameDictionary)                                             \
-  V(_, SymbolMap, symbol_map, Symbol)                                       \
-  V(_, TransitionArrayMap, transition_array_map, TransitionArray)           \
-  V(_, Tuple2Map, tuple2_map, Tuple2)                                       \
-  V(_, WeakFixedArrayMap, weak_fixed_array_map, WeakFixedArray)             \
+#define UNIQUE_INSTANCE_TYPE_MAP_LIST_GENERATOR(V, _)                          \
+  V(_, AccessorInfoMap, accessor_info_map, AccessorInfo)                       \
+  V(_, AccessorPairMap, accessor_pair_map, AccessorPair)                       \
+  V(_, AllocationMementoMap, allocation_memento_map, AllocationMemento)        \
+  V(_, ArrayBoilerplateDescriptionMap, array_boilerplate_description_map,      \
+    ArrayBoilerplateDescription)                                               \
+  V(_, BreakPointMap, break_point_map, BreakPoint)                             \
+  V(_, BreakPointInfoMap, break_point_info_map, BreakPointInfo)                \
+  V(_, CachedTemplateObjectMap, cached_template_object_map,                    \
+    CachedTemplateObject)                                                      \
+  V(_, CellMap, cell_map, Cell)                                                \
+  V(_, WeakCellMap, weak_cell_map, WeakCell)                                   \
+  V(_, CodeMap, code_map, Code)                                                \
+  V(_, CoverageInfoMap, coverage_info_map, CoverageInfo)                       \
+  V(_, DebugInfoMap, debug_info_map, DebugInfo)                                \
+  V(_, FeedbackVectorMap, feedback_vector_map, FeedbackVector)                 \
+  V(_, FixedDoubleArrayMap, fixed_double_array_map, FixedDoubleArray)          \
+  V(_, FunctionTemplateInfoMap, function_template_info_map,                    \
+    FunctionTemplateInfo)                                                      \
+  V(_, HeapNumberMap, heap_number_map, HeapNumber)                             \
+  V(_, MegaDomHandlerMap, mega_dom_handler_map, MegaDomHandler)                \
+  V(_, MetaMap, meta_map, Map)                                                 \
+  V(_, PreparseDataMap, preparse_data_map, PreparseData)                       \
+  V(_, PrototypeInfoMap, prototype_info_map, PrototypeInfo)                    \
+  V(_, SharedFunctionInfoMap, shared_function_info_map, SharedFunctionInfo)    \
+  V(_, SmallOrderedHashSetMap, small_ordered_hash_set_map,                     \
+    SmallOrderedHashSet)                                                       \
+  V(_, SmallOrderedHashMapMap, small_ordered_hash_map_map,                     \
+    SmallOrderedHashMap)                                                       \
+  V(_, SmallOrderedNameDictionaryMap, small_ordered_name_dictionary_map,       \
+    SmallOrderedNameDictionary)                                                \
+  V(_, SwissNameDictionaryMap, swiss_name_dictionary_map, SwissNameDictionary) \
+  V(_, SymbolMap, symbol_map, Symbol)                                          \
+  V(_, TransitionArrayMap, transition_array_map, TransitionArray)              \
+  V(_, Tuple2Map, tuple2_map, Tuple2)                                          \
+  V(_, WeakFixedArrayMap, weak_fixed_array_map, WeakFixedArray)                \
   TORQUE_DEFINED_MAP_CSA_LIST_GENERATOR(V, _)
 
 }  // namespace internal

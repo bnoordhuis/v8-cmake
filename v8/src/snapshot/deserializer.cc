@@ -282,7 +282,7 @@ void Deserializer::DeserializeDeferredObjects() {
 void Deserializer::LogNewMapEvents() {
   DisallowGarbageCollection no_gc;
   for (Handle<Map> map : new_maps_) {
-    DCHECK(FLAG_trace_maps);
+    DCHECK(FLAG_log_maps);
     LOG(isolate(), MapCreate(*map));
     LOG(isolate(), MapDetails(*map));
   }
@@ -387,7 +387,7 @@ void Deserializer::PostProcessNewObject(Handle<Map> map, Handle<HeapObject> obj,
       new_code_objects_.push_back(Handle<Code>::cast(obj));
     }
   } else if (InstanceTypeChecker::IsMap(instance_type)) {
-    if (FLAG_trace_maps) {
+    if (FLAG_log_maps) {
       // Keep track of all seen Maps to log them later since they might be only
       // partially initialized at this point.
       new_maps_.push_back(Handle<Map>::cast(obj));
@@ -464,6 +464,9 @@ void Deserializer::PostProcessNewObject(Handle<Map> map, Handle<HeapObject> obj,
     DCHECK(InstanceTypeChecker::IsStrongDescriptorArray(instance_type));
     Handle<DescriptorArray> descriptors = Handle<DescriptorArray>::cast(obj);
     new_descriptor_arrays_.push_back(descriptors);
+  } else if (InstanceTypeChecker::IsNativeContext(instance_type)) {
+    Handle<NativeContext> context = Handle<NativeContext>::cast(obj);
+    context->AllocateExternalPointerEntries(isolate());
   }
 
   // Check alignment.
@@ -690,7 +693,7 @@ void Deserializer::RelocInfoVisitor::VisitOffHeapTarget(Code host,
   DCHECK(Builtins::IsBuiltinId(builtin_index));
 
   CHECK_NOT_NULL(isolate()->embedded_blob_code());
-  EmbeddedData d = EmbeddedData::FromBlob();
+  EmbeddedData d = EmbeddedData::FromBlob(isolate());
   Address address = d.InstructionStartOfBuiltin(builtin_index);
   CHECK_NE(kNullAddress, address);
 

@@ -37,8 +37,11 @@
 #include "src/compiler/write-barrier-kind.h"
 #include "src/flags/flags.h"
 #include "src/utils/utils.h"
-#include "src/wasm/simd-shuffle.h"
 #include "src/zone/zone-containers.h"
+
+#if V8_ENABLE_WEBASSEMBLY
+#include "src/wasm/simd-shuffle.h"
+#endif  // V8_ENABLE_WEBASSEMBLY
 
 namespace v8 {
 namespace internal {
@@ -62,7 +65,8 @@ class IA32OperandGenerator final : public OperandGenerator {
 
   bool CanBeMemoryOperand(InstructionCode opcode, Node* node, Node* input,
                           int effect_level) {
-    if (input->opcode() != IrOpcode::kLoad ||
+    if ((input->opcode() != IrOpcode::kLoad &&
+         input->opcode() != IrOpcode::kLoadImmutable) ||
         !selector()->CanCover(node, input)) {
       return false;
     }
@@ -398,7 +402,7 @@ void VisitRROI8x16SimdShift(InstructionSelector* selector, Node* node,
 
 void InstructionSelector::VisitStackSlot(Node* node) {
   StackSlotRepresentation rep = StackSlotRepresentationOf(node->op());
-  int slot = frame_->AllocateSpillSlot(rep.size());
+  int slot = frame_->AllocateSpillSlot(rep.size(), rep.alignment());
   OperandGenerator g(this);
 
   Emit(kArchStackSlot, g.DefineAsRegister(node),
@@ -432,7 +436,8 @@ void InstructionSelector::VisitLoadLane(Node* node) {
   }
 
   IA32OperandGenerator g(this);
-  InstructionOperand outputs[] = {g.DefineAsRegister(node)};
+  InstructionOperand outputs[] = {IsSupported(AVX) ? g.DefineAsRegister(node)
+                                                   : g.DefineSameAsFirst(node)};
   // Input 0 is value node, 1 is lane idx, and GetEffectiveAddressMemoryOperand
   // uses up to 3 inputs. This ordering is consistent with other operations that
   // use the same opcode.
@@ -547,6 +552,7 @@ void InstructionSelector::VisitLoad(Node* node) {
     case MachineRepresentation::kCompressed:         // Fall through.
     case MachineRepresentation::kWord64:             // Fall through.
     case MachineRepresentation::kNone:
+    case MachineRepresentation::kMapWord:
       UNREACHABLE();
   }
 
@@ -560,7 +566,7 @@ void InstructionSelector::VisitLoad(Node* node) {
   InstructionCode code = opcode | AddressingModeField::encode(mode);
   if (node->opcode() == IrOpcode::kPoisonedLoad) {
     CHECK_NE(poisoning_level_, PoisoningMitigationLevel::kDontPoison);
-    code |= MiscField::encode(kMemoryAccessPoisoned);
+    code |= AccessModeField::encode(kMemoryAccessPoisoned);
   }
   Emit(code, 1, outputs, input_count, inputs);
 }
@@ -629,6 +635,7 @@ void InstructionSelector::VisitStore(Node* node) {
       case MachineRepresentation::kCompressedPointer:  // Fall through.
       case MachineRepresentation::kCompressed:         // Fall through.
       case MachineRepresentation::kWord64:             // Fall through.
+      case MachineRepresentation::kMapWord:            // Fall through.
       case MachineRepresentation::kNone:
         UNREACHABLE();
     }
@@ -812,7 +819,8 @@ void InstructionSelector::VisitStackPointerGreaterThan(
 
   Node* const value = node->InputAt(0);
   if (g.CanBeMemoryOperand(kIA32Cmp, node, value, effect_level)) {
-    DCHECK_EQ(IrOpcode::kLoad, value->opcode());
+    DCHECK(value->opcode() == IrOpcode::kLoad ||
+           value->opcode() == IrOpcode::kLoadImmutable);
 
     // GetEffectiveAddressMemoryOperand can create at most 3 inputs.
     static constexpr int kMaxInputCount = 3;
@@ -1363,35 +1371,33 @@ void InstructionSelector::EmitPrepareArguments(
   } else {
     // Push any stack arguments.
     int effect_level = GetEffectLevel(node);
+    int stack_decrement = 0;
     for (PushParameter input : base::Reversed(*arguments)) {
-      // Skip any alignment holes in pushed nodes.
+      stack_decrement += kSystemPointerSize;
+      // Skip holes in the param array. These represent both extra slots for
+      // multi-slot values and padding slots for alignment.
       if (input.node == nullptr) continue;
-      if (g.CanBeMemoryOperand(kIA32Push, node, input.node, effect_level)) {
+      InstructionOperand decrement = g.UseImmediate(stack_decrement);
+      stack_decrement = 0;
+      if (g.CanBeImmediate(input.node)) {
+        Emit(kIA32Push, g.NoOutput(), decrement, g.UseImmediate(input.node));
+      } else if (IsSupported(ATOM) ||
+                 sequence()->IsFP(GetVirtualRegister(input.node))) {
+        // TODO(bbudge): IA32Push cannot handle stack->stack double moves
+        // because there is no way to encode fixed double slots.
+        Emit(kIA32Push, g.NoOutput(), decrement, g.UseRegister(input.node));
+      } else if (g.CanBeMemoryOperand(kIA32Push, node, input.node,
+                                      effect_level)) {
         InstructionOperand outputs[1];
-        InstructionOperand inputs[4];
+        InstructionOperand inputs[5];
         size_t input_count = 0;
-        InstructionCode opcode = kIA32Push;
+        inputs[input_count++] = decrement;
         AddressingMode mode = g.GetEffectiveAddressMemoryOperand(
             input.node, inputs, &input_count);
-        opcode |= AddressingModeField::encode(mode);
+        InstructionCode opcode = kIA32Push | AddressingModeField::encode(mode);
         Emit(opcode, 0, outputs, input_count, inputs);
       } else {
-        InstructionOperand value =
-            g.CanBeImmediate(input.node)
-                ? g.UseImmediate(input.node)
-                : IsSupported(ATOM) ||
-                          sequence()->IsFP(GetVirtualRegister(input.node))
-                      ? g.UseRegister(input.node)
-                      : g.Use(input.node);
-        if (input.location.GetType() == MachineType::Float32()) {
-          Emit(kIA32PushFloat32, g.NoOutput(), value);
-        } else if (input.location.GetType() == MachineType::Float64()) {
-          Emit(kIA32PushFloat64, g.NoOutput(), value);
-        } else if (input.location.GetType() == MachineType::Simd128()) {
-          Emit(kIA32PushSimd128, g.NoOutput(), value);
-        } else {
-          Emit(kIA32Push, g.NoOutput(), value);
-        }
+        Emit(kIA32Push, g.NoOutput(), decrement, g.UseAny(input.node));
       }
     }
   }
@@ -1424,15 +1430,14 @@ void InstructionSelector::EmitPrepareResults(
 
 bool InstructionSelector::IsTailCallAddressImmediate() { return true; }
 
-int InstructionSelector::GetTempsCountForTailCallFromJSFunction() { return 0; }
-
 namespace {
 
 void VisitCompareWithMemoryOperand(InstructionSelector* selector,
                                    InstructionCode opcode, Node* left,
                                    InstructionOperand right,
                                    FlagsContinuation* cont) {
-  DCHECK_EQ(IrOpcode::kLoad, left->opcode());
+  DCHECK(left->opcode() == IrOpcode::kLoad ||
+         left->opcode() == IrOpcode::kLoadImmutable);
   IA32OperandGenerator g(selector);
   size_t input_count = 0;
   InstructionOperand inputs[4];
@@ -1463,7 +1468,8 @@ void VisitCompare(InstructionSelector* selector, InstructionCode opcode,
 }
 
 MachineType MachineTypeForNarrow(Node* node, Node* hint_node) {
-  if (hint_node->opcode() == IrOpcode::kLoad) {
+  if (hint_node->opcode() == IrOpcode::kLoad ||
+      hint_node->opcode() == IrOpcode::kLoadImmutable) {
     MachineType hint = LoadRepresentationOf(hint_node->op());
     if (node->opcode() == IrOpcode::kInt32Constant ||
         node->opcode() == IrOpcode::kInt64Constant) {
@@ -1497,8 +1503,10 @@ MachineType MachineTypeForNarrow(Node* node, Node* hint_node) {
       }
     }
   }
-  return node->opcode() == IrOpcode::kLoad ? LoadRepresentationOf(node->op())
-                                           : MachineType::None();
+  return node->opcode() == IrOpcode::kLoad ||
+                 node->opcode() == IrOpcode::kLoadImmutable
+             ? LoadRepresentationOf(node->op())
+             : MachineType::None();
 }
 
 // Tries to match the size of the given opcode to that of the operands, if
@@ -2190,7 +2198,6 @@ void InstructionSelector::VisitWord32AtomicPairCompareExchange(Node* node) {
   V(F32x4Lt)               \
   V(F32x4Le)               \
   V(I32x4Add)              \
-  V(I32x4AddHoriz)         \
   V(I32x4Sub)              \
   V(I32x4Mul)              \
   V(I32x4MinS)             \
@@ -2206,7 +2213,6 @@ void InstructionSelector::VisitWord32AtomicPairCompareExchange(Node* node) {
   V(I16x8SConvertI32x4)    \
   V(I16x8Add)              \
   V(I16x8AddSatS)          \
-  V(I16x8AddHoriz)         \
   V(I16x8Sub)              \
   V(I16x8SubSatS)          \
   V(I16x8Mul)              \
@@ -2223,20 +2229,8 @@ void InstructionSelector::VisitWord32AtomicPairCompareExchange(Node* node) {
   V(I16x8GtU)              \
   V(I16x8GeU)              \
   V(I8x16SConvertI16x8)    \
-  V(I8x16Add)              \
-  V(I8x16AddSatS)          \
-  V(I8x16Sub)              \
-  V(I8x16SubSatS)          \
-  V(I8x16MinS)             \
-  V(I8x16MaxS)             \
-  V(I8x16Eq)               \
   V(I8x16Ne)               \
-  V(I8x16GtS)              \
   V(I8x16GeS)              \
-  V(I8x16AddSatU)          \
-  V(I8x16SubSatU)          \
-  V(I8x16MinU)             \
-  V(I8x16MaxU)             \
   V(I8x16GtU)              \
   V(I8x16GeU)              \
   V(S128And)               \
@@ -2245,16 +2239,27 @@ void InstructionSelector::VisitWord32AtomicPairCompareExchange(Node* node) {
 
 #define SIMD_BINOP_UNIFIED_SSE_AVX_LIST(V) \
   V(F32x4Add)                              \
-  V(F32x4AddHoriz)                         \
   V(F32x4Sub)                              \
   V(F32x4Mul)                              \
   V(F32x4Div)                              \
   V(I64x2Add)                              \
   V(I64x2Sub)                              \
   V(I64x2Eq)                               \
+  V(I64x2Ne)                               \
   V(I32x4DotI16x8S)                        \
   V(I16x8RoundingAverageU)                 \
-  V(I16x8Q15MulRSatS)                      \
+  V(I8x16Add)                              \
+  V(I8x16AddSatS)                          \
+  V(I8x16Sub)                              \
+  V(I8x16SubSatS)                          \
+  V(I8x16MinS)                             \
+  V(I8x16MaxS)                             \
+  V(I8x16Eq)                               \
+  V(I8x16GtS)                              \
+  V(I8x16AddSatU)                          \
+  V(I8x16SubSatU)                          \
+  V(I8x16MinU)                             \
+  V(I8x16MaxU)                             \
   V(I8x16RoundingAverageU)
 
 // These opcodes require all inputs to be registers because the codegen is
@@ -2271,9 +2276,15 @@ void InstructionSelector::VisitWord32AtomicPairCompareExchange(Node* node) {
   V(I16x8ExtMulLowI8x16S)  \
   V(I16x8ExtMulHighI8x16S) \
   V(I16x8ExtMulLowI8x16U)  \
-  V(I16x8ExtMulHighI8x16U)
+  V(I16x8ExtMulHighI8x16U) \
+  V(I16x8Q15MulRSatS)
 
 #define SIMD_UNOP_LIST(V)   \
+  V(F64x2ConvertLowI32x4S)  \
+  V(F64x2PromoteLowF32x4)   \
+  V(F32x4DemoteF64x2Zero)   \
+  V(F32x4Abs)               \
+  V(F32x4Neg)               \
   V(F32x4Sqrt)              \
   V(F32x4SConvertI32x4)     \
   V(F32x4RecipApprox)       \
@@ -2298,22 +2309,14 @@ void InstructionSelector::VisitWord32AtomicPairCompareExchange(Node* node) {
   V(I16x8Abs)               \
   V(I8x16Neg)               \
   V(I8x16Abs)               \
-  V(I8x16BitMask)
-
-#define SIMD_UNOP_PREFIX_LIST(V) \
-  V(F32x4Abs)                    \
-  V(F32x4Neg)                    \
+  V(I8x16BitMask)           \
   V(S128Not)
 
-#define SIMD_ANYTRUE_LIST(V) \
-  V(V32x4AnyTrue)            \
-  V(V16x8AnyTrue)            \
-  V(V8x16AnyTrue)
-
 #define SIMD_ALLTRUE_LIST(V) \
-  V(V32x4AllTrue)            \
-  V(V16x8AllTrue)            \
-  V(V8x16AllTrue)
+  V(I64x2AllTrue)            \
+  V(I32x4AllTrue)            \
+  V(I16x8AllTrue)            \
+  V(I8x16AllTrue)
 
 #define SIMD_SHIFT_OPCODES_UNIFED_SSE_AVX(V) \
   V(I64x2Shl)                                \
@@ -2351,30 +2354,24 @@ void InstructionSelector::VisitS128Const(Node* node) {
 
 void InstructionSelector::VisitF64x2Min(Node* node) {
   IA32OperandGenerator g(this);
-  InstructionOperand temps[] = {g.TempSimd128Register()};
-  InstructionOperand operand0 = g.UseUniqueRegister(node->InputAt(0));
-  InstructionOperand operand1 = g.UseUnique(node->InputAt(1));
+  InstructionOperand operand0 = g.UseRegister(node->InputAt(0));
+  InstructionOperand operand1 = g.UseRegister(node->InputAt(1));
 
   if (IsSupported(AVX)) {
-    Emit(kIA32F64x2Min, g.DefineAsRegister(node), operand0, operand1,
-         arraysize(temps), temps);
+    Emit(kIA32F64x2Min, g.DefineAsRegister(node), operand0, operand1);
   } else {
-    Emit(kIA32F64x2Min, g.DefineSameAsFirst(node), operand0, operand1,
-         arraysize(temps), temps);
+    Emit(kIA32F64x2Min, g.DefineSameAsFirst(node), operand0, operand1);
   }
 }
 
 void InstructionSelector::VisitF64x2Max(Node* node) {
   IA32OperandGenerator g(this);
-  InstructionOperand temps[] = {g.TempSimd128Register()};
-  InstructionOperand operand0 = g.UseUniqueRegister(node->InputAt(0));
-  InstructionOperand operand1 = g.UseUnique(node->InputAt(1));
+  InstructionOperand operand0 = g.UseRegister(node->InputAt(0));
+  InstructionOperand operand1 = g.UseRegister(node->InputAt(1));
   if (IsSupported(AVX)) {
-    Emit(kIA32F64x2Max, g.DefineAsRegister(node), operand0, operand1,
-         arraysize(temps), temps);
+    Emit(kIA32F64x2Max, g.DefineAsRegister(node), operand0, operand1);
   } else {
-    Emit(kIA32F64x2Max, g.DefineSameAsFirst(node), operand0, operand1,
-         arraysize(temps), temps);
+    Emit(kIA32F64x2Max, g.DefineSameAsFirst(node), operand0, operand1);
   }
 }
 
@@ -2383,7 +2380,7 @@ void InstructionSelector::VisitF64x2Splat(Node* node) {
 }
 
 void InstructionSelector::VisitF64x2ExtractLane(Node* node) {
-  VisitRRISimd(this, node, kAVXF64x2ExtractLane, kSSEF64x2ExtractLane);
+  VisitRRISimd(this, node, kF64x2ExtractLane, kF64x2ExtractLane);
 }
 
 void InstructionSelector::VisitI64x2SplatI32Pair(Node* node) {
@@ -2411,7 +2408,10 @@ void InstructionSelector::VisitI64x2ReplaceLaneI32Pair(Node* node) {
 
 void InstructionSelector::VisitI64x2Neg(Node* node) {
   IA32OperandGenerator g(this);
-  InstructionOperand operand0 = g.UseUnique(node->InputAt(0));
+  // If AVX unsupported, make sure dst != src to avoid a move.
+  InstructionOperand operand0 = IsSupported(AVX)
+                                    ? g.UseRegister(node->InputAt(0))
+                                    : g.UseUnique(node->InputAt(0));
   Emit(kIA32I64x2Neg, g.DefineAsRegister(node), operand0);
 }
 
@@ -2474,20 +2474,6 @@ void InstructionSelector::VisitI32x4UConvertF32x4(Node* node) {
        arraysize(temps), temps);
 }
 
-void InstructionSelector::VisitI8x16Mul(Node* node) {
-  IA32OperandGenerator g(this);
-  InstructionOperand operand0 = g.UseUniqueRegister(node->InputAt(0));
-  InstructionOperand operand1 = g.UseUniqueRegister(node->InputAt(1));
-  InstructionOperand temps[] = {g.TempSimd128Register()};
-  if (IsSupported(AVX)) {
-    Emit(kAVXI8x16Mul, g.DefineAsRegister(node), operand0, operand1,
-         arraysize(temps), temps);
-  } else {
-    Emit(kSSEI8x16Mul, g.DefineSameAsFirst(node), operand0, operand1,
-         arraysize(temps), temps);
-  }
-}
-
 void InstructionSelector::VisitS128Zero(Node* node) {
   IA32OperandGenerator g(this);
   Emit(kIA32S128Zero, g.DefineAsRegister(node));
@@ -2504,8 +2490,10 @@ void InstructionSelector::VisitS128Select(Node* node) {
 void InstructionSelector::VisitS128AndNot(Node* node) {
   IA32OperandGenerator g(this);
   // andnps a b does ~a & b, but we want a & !b, so flip the input.
-  Emit(kIA32S128AndNot, g.DefineSameAsFirst(node),
-       g.UseRegister(node->InputAt(1)), g.UseRegister(node->InputAt(0)));
+  InstructionOperand dst =
+      IsSupported(AVX) ? g.DefineAsRegister(node) : g.DefineSameAsFirst(node);
+  Emit(kIA32S128AndNot, dst, g.UseRegister(node->InputAt(1)),
+       g.UseRegister(node->InputAt(0)));
 }
 
 #define VISIT_SIMD_SPLAT(Type)                               \
@@ -2563,27 +2551,15 @@ SIMD_REPLACE_LANE_TYPE_OP(VISIT_SIMD_REPLACE_LANE)
 #undef VISIT_SIMD_REPLACE_LANE
 #undef SIMD_REPLACE_LANE_TYPE_OP
 
-// The difference between this and VISIT_SIMD_REPLACE_LANE is that this forces
-// operand2 to be UseRegister, because the codegen relies on insertps using
-// registers.
-// TODO(v8:9764) Remove this UseRegister requirement
-#define VISIT_SIMD_REPLACE_LANE_USE_REG(Type)                            \
-  void InstructionSelector::Visit##Type##ReplaceLane(Node* node) {       \
-    IA32OperandGenerator g(this);                                        \
-    InstructionOperand operand0 = g.UseRegister(node->InputAt(0));       \
-    InstructionOperand operand1 =                                        \
-        g.UseImmediate(OpParameter<int32_t>(node->op()));                \
-    InstructionOperand operand2 = g.UseUniqueRegister(node->InputAt(1)); \
-    if (IsSupported(AVX)) {                                              \
-      Emit(kAVX##Type##ReplaceLane, g.DefineAsRegister(node), operand0,  \
-           operand1, operand2);                                          \
-    } else {                                                             \
-      Emit(kSSE##Type##ReplaceLane, g.DefineSameAsFirst(node), operand0, \
-           operand1, operand2);                                          \
-    }                                                                    \
-  }
-VISIT_SIMD_REPLACE_LANE_USE_REG(F64x2)
-#undef VISIT_SIMD_REPLACE_LANE_USE_REG
+void InstructionSelector::VisitF64x2ReplaceLane(Node* node) {
+  IA32OperandGenerator g(this);
+  int32_t lane = OpParameter<int32_t>(node->op());
+  // When no-AVX, define dst == src to save a move.
+  InstructionOperand dst =
+      IsSupported(AVX) ? g.DefineAsRegister(node) : g.DefineSameAsFirst(node);
+  Emit(kF64x2ReplaceLane, dst, g.UseRegister(node->InputAt(0)),
+       g.UseImmediate(lane), g.UseRegister(node->InputAt(1)));
+}
 
 #define VISIT_SIMD_SHIFT_UNIFIED_SSE_AVX(Opcode)        \
   void InstructionSelector::Visit##Opcode(Node* node) { \
@@ -2607,36 +2583,12 @@ SIMD_UNOP_LIST(VISIT_SIMD_UNOP)
 #undef VISIT_SIMD_UNOP
 #undef SIMD_UNOP_LIST
 
-// TODO(v8:9198): SSE instructions that read 16 bytes from memory require the
-// operand to be 16-byte aligned. AVX instructions relax this requirement, but
-// might have reduced performance if the memory crosses cache line. But since we
-// have limited xmm registers, this might be okay to alleviate register
-// pressure.
-#define VISIT_SIMD_UNOP_PREFIX(Opcode)                                       \
-  void InstructionSelector::Visit##Opcode(Node* node) {                      \
-    IA32OperandGenerator g(this);                                            \
-    if (IsSupported(AVX)) {                                                  \
-      Emit(kAVX##Opcode, g.DefineAsRegister(node), g.Use(node->InputAt(0))); \
-    } else {                                                                 \
-      Emit(kSSE##Opcode, g.DefineSameAsFirst(node),                          \
-           g.UseRegister(node->InputAt(0)));                                 \
-    }                                                                        \
-  }
-SIMD_UNOP_PREFIX_LIST(VISIT_SIMD_UNOP_PREFIX)
-#undef VISIT_SIMD_UNOP_PREFIX
-#undef SIMD_UNOP_PREFIX_LIST
-
-// The implementation of AnyTrue is the same for all shapes.
-#define VISIT_SIMD_ANYTRUE(Opcode)                                  \
-  void InstructionSelector::Visit##Opcode(Node* node) {             \
-    IA32OperandGenerator g(this);                                   \
-    InstructionOperand temps[] = {g.TempRegister()};                \
-    Emit(kIA32S128AnyTrue, g.DefineAsRegister(node),                \
-         g.UseRegister(node->InputAt(0)), arraysize(temps), temps); \
-  }
-SIMD_ANYTRUE_LIST(VISIT_SIMD_ANYTRUE)
-#undef VISIT_SIMD_ANYTRUE
-#undef SIMD_ANYTRUE_LIST
+void InstructionSelector::VisitV128AnyTrue(Node* node) {
+  IA32OperandGenerator g(this);
+  InstructionOperand temps[] = {g.TempRegister()};
+  Emit(kIA32S128AnyTrue, g.DefineAsRegister(node),
+       g.UseRegister(node->InputAt(0)), arraysize(temps), temps);
+}
 
 #define VISIT_SIMD_ALLTRUE(Opcode)                                            \
   void InstructionSelector::Visit##Opcode(Node* node) {                       \
@@ -2747,6 +2699,7 @@ void InstructionSelector::VisitInt64AbsWithOverflow(Node* node) {
   UNREACHABLE();
 }
 
+#if V8_ENABLE_WEBASSEMBLY
 namespace {
 
 // Returns true if shuffle can be decomposed into two 16x4 half shuffles
@@ -3036,12 +2989,27 @@ void InstructionSelector::VisitI8x16Shuffle(Node* node) {
   }
   Emit(opcode, 1, &dst, input_count, inputs, temp_count, temps);
 }
+#else
+void InstructionSelector::VisitI8x16Shuffle(Node* node) { UNREACHABLE(); }
+#endif  // V8_ENABLE_WEBASSEMBLY
 
 void InstructionSelector::VisitI8x16Swizzle(Node* node) {
+  InstructionCode op = kIA32I8x16Swizzle;
+
+  auto m = V128ConstMatcher(node->InputAt(1));
+  if (m.HasResolvedValue()) {
+    // If the indices vector is a const, check if they are in range, or if the
+    // top bit is set, then we can avoid the paddusb in the codegen and simply
+    // emit a pshufb.
+    auto imms = m.ResolvedValue().immediate();
+    op |= MiscField::encode(wasm::SimdSwizzle::AllInRangeOrTopBitSet(imms));
+  }
+
   IA32OperandGenerator g(this);
-  InstructionOperand temps[] = {g.TempSimd128Register()};
-  Emit(kIA32I8x16Swizzle, g.DefineSameAsFirst(node),
-       g.UseRegister(node->InputAt(0)), g.UseUniqueRegister(node->InputAt(1)),
+  InstructionOperand temps[] = {g.TempRegister()};
+  Emit(op,
+       IsSupported(AVX) ? g.DefineAsRegister(node) : g.DefineSameAsFirst(node),
+       g.UseRegister(node->InputAt(0)), g.UseRegister(node->InputAt(1)),
        arraysize(temps), temps);
 }
 
@@ -3051,8 +3019,10 @@ void VisitPminOrPmax(InstructionSelector* selector, Node* node,
   // Due to the way minps/minpd work, we want the dst to be same as the second
   // input: b = pmin(a, b) directly maps to minps b a.
   IA32OperandGenerator g(selector);
-  selector->Emit(opcode, g.DefineSameAsFirst(node),
-                 g.UseRegister(node->InputAt(1)),
+  InstructionOperand dst = selector->IsSupported(AVX)
+                               ? g.DefineAsRegister(node)
+                               : g.DefineSameAsFirst(node);
+  selector->Emit(opcode, dst, g.UseRegister(node->InputAt(1)),
                  g.UseRegister(node->InputAt(0)));
 }
 }  // namespace
@@ -3074,59 +3044,118 @@ void InstructionSelector::VisitF64x2Pmax(Node* node) {
 }
 
 namespace {
-void VisitSignSelect(InstructionSelector* selector, Node* node,
-                     ArchOpcode opcode) {
+void VisitExtAddPairwise(InstructionSelector* selector, Node* node,
+                         ArchOpcode opcode, bool need_temp) {
   IA32OperandGenerator g(selector);
-  // signselect(x, y, -1) = x
-  // pblendvb(dst, x, y, -1) = dst <- y, so we need to swap x and y.
-  if (selector->IsSupported(AVX)) {
-    selector->Emit(
-        opcode, g.DefineAsRegister(node), g.UseRegister(node->InputAt(1)),
-        g.UseRegister(node->InputAt(0)), g.UseRegister(node->InputAt(2)));
+  InstructionOperand operand0 = g.UseRegister(node->InputAt(0));
+  InstructionOperand dst = (selector->IsSupported(AVX))
+                               ? g.DefineAsRegister(node)
+                               : g.DefineSameAsFirst(node);
+  if (need_temp) {
+    InstructionOperand temps[] = {g.TempRegister()};
+    selector->Emit(opcode, dst, operand0, arraysize(temps), temps);
   } else {
-    // We would like to fix the mask to be xmm0, since that is what
-    // pblendvb/blendvps/blendvps uses as an implicit operand. However, xmm0 is
-    // also scratch register, so our mask values can be overwritten. Instead, we
-    // manually move the mask to xmm0 inside codegen.
-    selector->Emit(
-        opcode, g.DefineSameAsFirst(node), g.UseRegister(node->InputAt(1)),
-        g.UseRegister(node->InputAt(0)), g.UseRegister(node->InputAt(2)));
+    selector->Emit(opcode, dst, operand0);
   }
 }
 }  // namespace
 
-void InstructionSelector::VisitI8x16SignSelect(Node* node) {
-  VisitSignSelect(this, node, kIA32I8x16SignSelect);
-}
-
-void InstructionSelector::VisitI16x8SignSelect(Node* node) {
-  VisitSignSelect(this, node, kIA32I16x8SignSelect);
-}
-
-void InstructionSelector::VisitI32x4SignSelect(Node* node) {
-  VisitSignSelect(this, node, kIA32I32x4SignSelect);
-}
-
-void InstructionSelector::VisitI64x2SignSelect(Node* node) {
-  VisitSignSelect(this, node, kIA32I64x2SignSelect);
-}
-
 void InstructionSelector::VisitI32x4ExtAddPairwiseI16x8S(Node* node) {
-  VisitRRSimd(this, node, kIA32I32x4ExtAddPairwiseI16x8S);
+  VisitExtAddPairwise(this, node, kIA32I32x4ExtAddPairwiseI16x8S, true);
 }
 
 void InstructionSelector::VisitI32x4ExtAddPairwiseI16x8U(Node* node) {
-  VisitRRSimd(this, node, kIA32I32x4ExtAddPairwiseI16x8U);
+  VisitExtAddPairwise(this, node, kIA32I32x4ExtAddPairwiseI16x8U, false);
 }
 
 void InstructionSelector::VisitI16x8ExtAddPairwiseI8x16S(Node* node) {
-  IA32OperandGenerator g(this);
-  Emit(kIA32I16x8ExtAddPairwiseI8x16S, g.DefineAsRegister(node),
-       g.UseUniqueRegister(node->InputAt(0)));
+  VisitExtAddPairwise(this, node, kIA32I16x8ExtAddPairwiseI8x16S, true);
 }
 
 void InstructionSelector::VisitI16x8ExtAddPairwiseI8x16U(Node* node) {
-  VisitRRSimd(this, node, kIA32I16x8ExtAddPairwiseI8x16U);
+  VisitExtAddPairwise(this, node, kIA32I16x8ExtAddPairwiseI8x16U, true);
+}
+
+void InstructionSelector::VisitI8x16Popcnt(Node* node) {
+  IA32OperandGenerator g(this);
+  InstructionOperand dst = CpuFeatures::IsSupported(AVX)
+                               ? g.DefineAsRegister(node)
+                               : g.DefineAsRegister(node);
+  InstructionOperand temps[] = {g.TempSimd128Register(), g.TempRegister()};
+  Emit(kIA32I8x16Popcnt, dst, g.UseUniqueRegister(node->InputAt(0)),
+       arraysize(temps), temps);
+}
+
+void InstructionSelector::VisitF64x2ConvertLowI32x4U(Node* node) {
+  IA32OperandGenerator g(this);
+  InstructionOperand temps[] = {g.TempRegister()};
+  InstructionOperand dst =
+      IsSupported(AVX) ? g.DefineAsRegister(node) : g.DefineSameAsFirst(node);
+  Emit(kIA32F64x2ConvertLowI32x4U, dst, g.UseRegister(node->InputAt(0)),
+       arraysize(temps), temps);
+}
+
+void InstructionSelector::VisitI32x4TruncSatF64x2SZero(Node* node) {
+  IA32OperandGenerator g(this);
+  InstructionOperand temps[] = {g.TempRegister()};
+  if (IsSupported(AVX)) {
+    // Requires dst != src.
+    Emit(kIA32I32x4TruncSatF64x2SZero, g.DefineAsRegister(node),
+         g.UseUniqueRegister(node->InputAt(0)), arraysize(temps), temps);
+  } else {
+    Emit(kIA32I32x4TruncSatF64x2SZero, g.DefineSameAsFirst(node),
+         g.UseRegister(node->InputAt(0)), arraysize(temps), temps);
+  }
+}
+
+void InstructionSelector::VisitI32x4TruncSatF64x2UZero(Node* node) {
+  IA32OperandGenerator g(this);
+  InstructionOperand temps[] = {g.TempRegister()};
+  InstructionOperand dst =
+      IsSupported(AVX) ? g.DefineAsRegister(node) : g.DefineSameAsFirst(node);
+  Emit(kIA32I32x4TruncSatF64x2UZero, dst, g.UseRegister(node->InputAt(0)),
+       arraysize(temps), temps);
+}
+
+void InstructionSelector::VisitI64x2GtS(Node* node) {
+  IA32OperandGenerator g(this);
+  if (CpuFeatures::IsSupported(AVX)) {
+    Emit(kIA32I64x2GtS, g.DefineAsRegister(node),
+         g.UseRegister(node->InputAt(0)), g.UseRegister(node->InputAt(1)));
+  } else if (CpuFeatures::IsSupported(SSE4_2)) {
+    Emit(kIA32I64x2GtS, g.DefineSameAsFirst(node),
+         g.UseRegister(node->InputAt(0)), g.UseRegister(node->InputAt(1)));
+  } else {
+    Emit(kIA32I64x2GtS, g.DefineAsRegister(node),
+         g.UseUniqueRegister(node->InputAt(0)),
+         g.UseUniqueRegister(node->InputAt(1)));
+  }
+}
+
+void InstructionSelector::VisitI64x2GeS(Node* node) {
+  IA32OperandGenerator g(this);
+  if (CpuFeatures::IsSupported(AVX)) {
+    Emit(kIA32I64x2GeS, g.DefineAsRegister(node),
+         g.UseRegister(node->InputAt(0)), g.UseRegister(node->InputAt(1)));
+  } else if (CpuFeatures::IsSupported(SSE4_2)) {
+    Emit(kIA32I64x2GeS, g.DefineAsRegister(node),
+         g.UseUniqueRegister(node->InputAt(0)),
+         g.UseRegister(node->InputAt(1)));
+  } else {
+    Emit(kIA32I64x2GeS, g.DefineAsRegister(node),
+         g.UseUniqueRegister(node->InputAt(0)),
+         g.UseUniqueRegister(node->InputAt(1)));
+  }
+}
+
+void InstructionSelector::VisitI64x2Abs(Node* node) {
+  VisitRRSimd(this, node, kIA32I64x2Abs, kIA32I64x2Abs);
+}
+
+void InstructionSelector::AddOutputToSelectContinuation(OperandGenerator* g,
+                                                        int first_input_index,
+                                                        Node* node) {
+  UNREACHABLE();
 }
 
 // static

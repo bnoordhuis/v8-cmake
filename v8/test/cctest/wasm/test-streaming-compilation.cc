@@ -393,7 +393,7 @@ ZoneBuffer GetModuleWithInvalidSection(Zone* zone) {
   TestSignatures sigs;
   WasmModuleBuilder builder(zone);
   // Add an invalid global to the module. The decoder will fail there.
-  builder.AddGlobal(kWasmStmt, true, WasmInitExpr::GlobalGet(12));
+  builder.AddGlobal(kWasmVoid, true, WasmInitExpr::GlobalGet(12));
   {
     WasmFunctionBuilder* f = builder.AddFunction(sigs.i_iii());
     uint8_t code[] = {kExprLocalGet, 0, kExprEnd};
@@ -1370,6 +1370,28 @@ STREAM_TEST(TestProfilingMidStreaming) {
       cpu_profiler->StopProfiling(v8::String::Empty(isolate));
   profile->Delete();
   cpu_profiler->Dispose();
+}
+
+STREAM_TEST(TierDownWithError) {
+  // https://crbug.com/1160031
+  StreamTester tester(isolate);
+  Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
+  Zone* zone = tester.zone();
+
+  ZoneBuffer buffer(zone);
+  {
+    TestSignatures sigs;
+    WasmModuleBuilder builder(zone);
+    // Type error at i32.add.
+    builder.AddFunction(sigs.v_v())->Emit(kExprI32Add);
+    builder.WriteTo(&buffer);
+  }
+
+  i_isolate->wasm_engine()->TierDownAllModulesPerIsolate(i_isolate);
+
+  tester.OnBytesReceived(buffer.begin(), buffer.size());
+  tester.FinishStream();
+  tester.RunCompilerTasks();
 }
 
 #undef STREAM_TEST

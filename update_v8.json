@@ -1,45 +1,45 @@
 [
   {
-    "url": "https://chromium.googlesource.com/v8/v8.git", 
-    "commit": "6fbcc11c530bb348e805f6c5cfcd15c337640dc8", 
-    "/* comment */": "Dependency v8 must be first.", 
-    "branch": "branch-heads/8.9", 
+    "url": "https://chromium.googlesource.com/v8/v8.git",
+    "commit": "cfa4152ad7ea6f9d327cbfcf904e778fe755737e",
+    "/* comment */": "Dependency v8 must be first.",
+    "branch": "branch-heads/9.2",
     "path": ""
-  }, 
+  },
   {
-    "url": "https://chromium.googlesource.com/external/github.com/google/googletest.git", 
-    "commit": "1b0cdaae57c046c87fb99cb4f69c312a7e794adb", 
-    "branch": "master", 
+    "url": "https://chromium.googlesource.com/external/github.com/google/googletest.git",
+    "commit": "23ef29555ef4789f555f1ba8c51b4c52975f0907",
+    "branch": "master",
     "path": "third_party/googletest/src"
-  }, 
+  },
   {
-    "url": "https://chromium.googlesource.com/chromium/src/third_party/jinja2.git", 
-    "commit": "11b6b3e5971d760bd2d310f77643f55a818a6d25", 
-    "branch": "master", 
+    "url": "https://chromium.googlesource.com/chromium/src/third_party/jinja2.git",
+    "commit": "11b6b3e5971d760bd2d310f77643f55a818a6d25",
+    "branch": "master",
     "path": "third_party/jinja2"
-  }, 
+  },
   {
-    "url": "https://chromium.googlesource.com/chromium/src/base/trace_event/common.git", 
-    "commit": "eb94f1c7aa96207f469008f29989a43feb2718f8", 
-    "branch": "master", 
+    "url": "https://chromium.googlesource.com/chromium/src/base/trace_event/common.git",
+    "commit": "d5bb24e5d9802c8c917fcaa4375d5239a586c168",
+    "branch": "master",
     "path": "base/trace_event/common"
-  }, 
+  },
   {
-    "url": "https://chromium.googlesource.com/chromium/src/third_party/zlib.git", 
-    "commit": "2c183c9f93a328bfb3121284da13cf89a0f7e64a", 
-    "branch": "master", 
+    "url": "https://chromium.googlesource.com/chromium/src/third_party/zlib.git",
+    "commit": "5b8d433953beb2a75a755ba321a3076b95f7cdb9",
+    "branch": "master",
     "path": "third_party/zlib"
-  }, 
+  },
   {
-    "url": "https://chromium.googlesource.com/chromium/src/third_party/markupsafe.git", 
-    "commit": "0944e71f4b2cb9a871bcbe353f95e889b64a611a", 
-    "branch": "master", 
+    "url": "https://chromium.googlesource.com/chromium/src/third_party/markupsafe.git",
+    "commit": "0944e71f4b2cb9a871bcbe353f95e889b64a611a",
+    "branch": "master",
     "path": "third_party/markupsafe"
-  }, 
+  },
   {
-    "url": "https://chromium.googlesource.com/external/github.com/intel/ittapi", 
-    "commit": "b4ae0122ba749163096058b4f1bb065bf4a7de94", 
-    "branch": "master", 
+    "url": "https://chromium.googlesource.com/external/github.com/intel/ittapi",
+    "commit": "b4ae0122ba749163096058b4f1bb065bf4a7de94",
+    "branch": "master",
     "path": "third_party/ittapi"
   }
 ]

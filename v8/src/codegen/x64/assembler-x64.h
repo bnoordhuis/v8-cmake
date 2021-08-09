@@ -124,6 +124,9 @@ class Immediate {
     DCHECK(SmiValuesAre31Bits());  // Only available for 31-bit SMI.
   }
 
+  int32_t value() const { return value_; }
+  RelocInfo::Mode rmode() const { return rmode_; }
+
  private:
   const int32_t value_;
   const RelocInfo::Mode rmode_ = RelocInfo::NONE;
@@ -832,6 +835,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   // Unconditional jump to L
   void jmp(Label* L, Label::Distance distance = Label::kFar);
   void jmp(Handle<Code> target, RelocInfo::Mode rmode);
+  void jmp(Address entry, RelocInfo::Mode rmode);
 
   // Jump near absolute indirect (r64)
   void jmp(Register adr);
@@ -920,6 +924,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   void ucomiss(XMMRegister dst, XMMRegister src);
   void ucomiss(XMMRegister dst, Operand src);
   void movaps(XMMRegister dst, XMMRegister src);
+  void movaps(XMMRegister dst, Operand src);
 
   // Don't use this unless it's important to keep the
   // top half of the destination register unchanged.
@@ -1205,6 +1210,8 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   void movupd(XMMRegister dst, Operand src);
   void movupd(Operand dst, XMMRegister src);
 
+  void cvtdq2pd(XMMRegister dst, XMMRegister src);
+
   void cvttsd2si(Register dst, Operand src);
   void cvttsd2si(Register dst, XMMRegister src);
   void cvttss2siq(Register dst, XMMRegister src);
@@ -1270,6 +1277,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   SSE_CMP_P(cmpeq, 0x0)
   SSE_CMP_P(cmplt, 0x1)
   SSE_CMP_P(cmple, 0x2)
+  SSE_CMP_P(cmpunord, 0x3)
   SSE_CMP_P(cmpneq, 0x4)
   SSE_CMP_P(cmpnlt, 0x5)
   SSE_CMP_P(cmpnle, 0x6)
@@ -1330,6 +1338,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   }
   void vmovsd(XMMRegister dst, Operand src) { vsd(0x10, dst, xmm0, src); }
   void vmovsd(Operand dst, XMMRegister src) { vsd(0x11, src, xmm0, dst); }
+  void vmovdqa(XMMRegister dst, Operand src);
   void vmovdqa(XMMRegister dst, XMMRegister src);
   void vmovdqu(XMMRegister dst, Operand src);
   void vmovdqu(Operand dst, XMMRegister src);
@@ -1398,6 +1407,9 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   }
   void vmovhlps(XMMRegister dst, XMMRegister src1, XMMRegister src2) {
     vinstr(0x12, dst, src1, src2, kNone, k0F, kWIG);
+  }
+  void vcvtdq2pd(XMMRegister dst, XMMRegister src) {
+    vinstr(0xe6, dst, xmm0, src, kF3, k0F, kWIG);
   }
   void vcvtss2sd(XMMRegister dst, XMMRegister src1, XMMRegister src2) {
     vinstr(0x5a, dst, src1, src2, kF3, k0F, kWIG);
@@ -1513,6 +1525,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   }
 
   void vmovaps(XMMRegister dst, XMMRegister src) { vps(0x28, dst, xmm0, src); }
+  void vmovaps(XMMRegister dst, Operand src) { vps(0x28, dst, xmm0, src); }
   void vmovups(XMMRegister dst, XMMRegister src) { vps(0x10, dst, xmm0, src); }
   void vmovups(XMMRegister dst, Operand src) { vps(0x10, dst, xmm0, src); }
   void vmovups(Operand dst, XMMRegister src) { vps(0x11, src, xmm0, dst); }
@@ -1562,6 +1575,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   AVX_CMP_P(vcmpeq, 0x0)
   AVX_CMP_P(vcmplt, 0x1)
   AVX_CMP_P(vcmple, 0x2)
+  AVX_CMP_P(vcmpunord, 0x3)
   AVX_CMP_P(vcmpneq, 0x4)
   AVX_CMP_P(vcmpnlt, 0x5)
   AVX_CMP_P(vcmpnle, 0x6)
@@ -2365,8 +2379,8 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
 // checks that we did not generate too much.
 class EnsureSpace {
  public:
-  explicit EnsureSpace(Assembler* assembler) : assembler_(assembler) {
-    if (assembler_->buffer_overflow()) assembler_->GrowBuffer();
+  explicit V8_INLINE EnsureSpace(Assembler* assembler) : assembler_(assembler) {
+    if (V8_UNLIKELY(assembler_->buffer_overflow())) assembler_->GrowBuffer();
 #ifdef DEBUG
     space_before_ = assembler_->available_space();
 #endif
@@ -2380,7 +2394,7 @@ class EnsureSpace {
 #endif
 
  private:
-  Assembler* assembler_;
+  Assembler* const assembler_;
 #ifdef DEBUG
   int space_before_;
 #endif

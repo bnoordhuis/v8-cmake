@@ -2,6 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#if !V8_ENABLE_WEBASSEMBLY
+#error This header should only be included if WebAssembly is enabled.
+#endif  // !V8_ENABLE_WEBASSEMBLY
+
 #ifndef V8_WASM_WASM_SUBTYPING_H_
 #define V8_WASM_WASM_SUBTYPING_H_
 
@@ -45,15 +49,21 @@ V8_NOINLINE bool EquivalentTypes(ValueType type1, ValueType type2,
 // - ref(ht1) <: ref/optref(ht2) iff ht1 <: ht2.
 // - rtt1 <: rtt2 iff rtt1 ~ rtt2.
 // For heap types, the following subtyping rules hold:
-// - Each generic heap type is a subtype of itself.
-// - All heap types are subtypes of any.
+// - The abstract heap types form the following type hierarchy:
+//           any
+//         /  |  \
+//       eq func  extern
+//      / \
+//   i31   data
+// - All structs and arrays are subtypes of data.
 // - All functions are subtypes of func.
-// - i31, structs and arrays are subtypes of eq.
 // - Struct subtyping: Subtype must have at least as many fields as supertype,
 //   covariance for immutable fields, equivalence for mutable fields.
 // - Array subtyping (mutable only) is the equivalence relation.
-// - Function subtyping is the equivalence relation (note: this rule might
-//   change in the future to include type variance).
+// - Function subtyping depends on the enabled wasm features: if
+//   --experimental-wasm-gc is enabled, then subtyping is computed
+//   contravariantly for parameter types and covariantly for return types.
+//   Otherwise, the subtyping relation is the equivalence relation.
 V8_INLINE bool IsSubtypeOf(ValueType subtype, ValueType supertype,
                            const WasmModule* sub_module,
                            const WasmModule* super_module) {
@@ -70,18 +80,22 @@ V8_INLINE bool IsSubtypeOf(ValueType subtype, ValueType supertype,
 }
 
 // We have this function call IsSubtypeOf instead of the opposite because type
-// checks are much more common than heap type checks.
-V8_INLINE bool IsHeapSubtypeOf(HeapType subtype, HeapType supertype,
+// checks are much more common than heap type checks.}
+V8_INLINE bool IsHeapSubtypeOf(uint32_t subtype_index,
+                               HeapType::Representation supertype,
                                const WasmModule* module) {
-  return IsSubtypeOf(ValueType::Ref(subtype, kNonNullable),
+  return IsSubtypeOf(ValueType::Ref(subtype_index, kNonNullable),
                      ValueType::Ref(supertype, kNonNullable), module);
 }
+V8_INLINE bool IsHeapSubtypeOf(uint32_t subtype_index, uint32_t supertype_index,
+                               const WasmModule* module) {
+  return IsSubtypeOf(ValueType::Ref(subtype_index, kNonNullable),
+                     ValueType::Ref(supertype_index, kNonNullable), module);
+}
 
-// Returns the weakest type that is a subtype of both a and b
-// (which is currently always one of a, b, or kWasmBottom).
-// TODO(manoskouk): Update this once we have settled on a type system for
-// reference types.
-ValueType CommonSubtype(ValueType a, ValueType b, const WasmModule* module);
+// Call this function in {module}'s destructor to avoid spurious cache hits in
+// case another WasmModule gets allocated in the same address later.
+void DeleteCachedTypeJudgementsForModule(const WasmModule* module);
 
 }  // namespace wasm
 }  // namespace internal

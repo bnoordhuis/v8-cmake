@@ -54,6 +54,7 @@ static bool IsPropertyNameFeedback(MaybeObject feedback) {
   Symbol symbol = Symbol::cast(heap_object);
   ReadOnlyRoots roots = symbol.GetReadOnlyRoots();
   return symbol != roots.uninitialized_symbol() &&
+         symbol != roots.mega_dom_symbol() &&
          symbol != roots.megamorphic_symbol();
 }
 
@@ -75,8 +76,8 @@ void FeedbackMetadata::SetKind(FeedbackSlot slot, FeedbackSlotKind kind) {
 }
 
 // static
-template <typename LocalIsolate>
-Handle<FeedbackMetadata> FeedbackMetadata::New(LocalIsolate* isolate,
+template <typename IsolateT>
+Handle<FeedbackMetadata> FeedbackMetadata::New(IsolateT* isolate,
                                                const FeedbackVectorSpec* spec) {
   auto* factory = isolate->factory();
 
@@ -253,8 +254,6 @@ Handle<FeedbackVector> FeedbackVector::New(
   DCHECK_EQ(vector->optimization_marker(),
             FLAG_log_function_events ? OptimizationMarker::kLogFirstExecution
                                      : OptimizationMarker::kNone);
-  // TODO(mythria): This might change if NCI code is installed on feedback
-  // vector. Update this accordingly.
   DCHECK_EQ(vector->optimization_tier(), OptimizationTier::kNone);
   DCHECK_EQ(vector->invocation_count(), 0);
   DCHECK_EQ(vector->profiler_ticks(), 0);
@@ -381,7 +380,8 @@ void FeedbackVector::SaturatingIncrementProfilerTicks() {
 
 // static
 void FeedbackVector::SetOptimizedCode(Handle<FeedbackVector> vector,
-                                      Handle<Code> code) {
+                                      Handle<Code> code,
+                                      FeedbackCell feedback_cell) {
   DCHECK(CodeKindIsOptimizedJSFunction(code->kind()));
   // We should only set optimized code only when there is no valid optimized
   // code or we are tiering up.
@@ -394,18 +394,46 @@ void FeedbackVector::SetOptimizedCode(Handle<FeedbackVector> vector,
   // re-mark the function for non-concurrent optimization after an OSR. We
   // should avoid these cases and also check that marker isn't
   // kCompileOptimized or kCompileOptimizedConcurrent.
-  vector->set_maybe_optimized_code(HeapObjectReference::Weak(*code));
+  vector->set_maybe_optimized_code(HeapObjectReference::Weak(*code),
+                                   kReleaseStore);
   int32_t state = vector->flags();
   state = OptimizationTierBits::update(state, GetTierForCodeKind(code->kind()));
   state = OptimizationMarkerBits::update(state, OptimizationMarker::kNone);
   vector->set_flags(state);
+  // With FLAG_turboprop, we would have an interrupt budget necessary for
+  // tiering up to Turboprop code. Once we install turboprop code, set it to a
+  // higher value as required for tiering up from Turboprop to TurboFan.
+  if (FLAG_turboprop) {
+    FeedbackVector::SetInterruptBudget(feedback_cell);
+  }
 }
 
-void FeedbackVector::ClearOptimizedCode() {
+// static
+void FeedbackVector::SetInterruptBudget(FeedbackCell feedback_cell) {
+  DCHECK(feedback_cell.value().IsFeedbackVector());
+  FeedbackVector vector = FeedbackVector::cast(feedback_cell.value());
+  // Set the interrupt budget as required for tiering up to next level. Without
+  // Turboprop, this is used only to tier up to TurboFan and hence always set to
+  // FLAG_interrupt_budget. With Turboprop, we use this budget to both tier up
+  // to Turboprop and TurboFan. When there is no optimized code, set it to
+  // FLAG_interrupt_budget required for tiering up to Turboprop. When there is
+  // optimized code, set it to a higher value required for tiering up from
+  // Turboprop to TurboFan.
+  if (FLAG_turboprop && vector.has_optimized_code()) {
+    feedback_cell.set_interrupt_budget(
+        FLAG_interrupt_budget *
+        FLAG_interrupt_budget_scale_factor_for_top_tier);
+  } else {
+    feedback_cell.set_interrupt_budget(FLAG_interrupt_budget);
+  }
+}
+
+void FeedbackVector::ClearOptimizedCode(FeedbackCell feedback_cell) {
   DCHECK(has_optimized_code());
   DCHECK_NE(optimization_tier(), OptimizationTier::kNone);
-  set_maybe_optimized_code(HeapObjectReference::ClearedValue(GetIsolate()));
-  ClearOptimizationTier();
+  set_maybe_optimized_code(HeapObjectReference::ClearedValue(GetIsolate()),
+                           kReleaseStore);
+  ClearOptimizationTier(feedback_cell);
 }
 
 void FeedbackVector::ClearOptimizationMarker() {
@@ -418,10 +446,15 @@ void FeedbackVector::SetOptimizationMarker(OptimizationMarker marker) {
   set_flags(state);
 }
 
-void FeedbackVector::ClearOptimizationTier() {
+void FeedbackVector::ClearOptimizationTier(FeedbackCell feedback_cell) {
   int32_t state = flags();
   state = OptimizationTierBits::update(state, OptimizationTier::kNone);
   set_flags(state);
+  // We are discarding the optimized code, adjust the interrupt budget
+  // so we have the correct budget required for the tier up.
+  if (FLAG_turboprop) {
+    FeedbackVector::SetInterruptBudget(feedback_cell);
+  }
 }
 
 void FeedbackVector::InitializeOptimizationState() {
@@ -434,10 +467,10 @@ void FeedbackVector::InitializeOptimizationState() {
 }
 
 void FeedbackVector::EvictOptimizedCodeMarkedForDeoptimization(
-    SharedFunctionInfo shared, const char* reason) {
-  MaybeObject slot = maybe_optimized_code();
+    FeedbackCell feedback_cell, SharedFunctionInfo shared, const char* reason) {
+  MaybeObject slot = maybe_optimized_code(kAcquireLoad);
   if (slot->IsCleared()) {
-    ClearOptimizationTier();
+    ClearOptimizationTier(feedback_cell);
     return;
   }
 
@@ -447,7 +480,7 @@ void FeedbackVector::EvictOptimizedCodeMarkedForDeoptimization(
     if (!code.deopt_already_counted()) {
       code.set_deopt_already_counted(true);
     }
-    ClearOptimizedCode();
+    ClearOptimizedCode(feedback_cell);
   }
 }
 
@@ -642,6 +675,13 @@ bool FeedbackNexus::ConfigureMegamorphic() {
   return false;
 }
 
+void FeedbackNexus::ConfigureMegaDOM(const MaybeObjectHandle& handler) {
+  DisallowGarbageCollection no_gc;
+  MaybeObject sentinel = MegaDOMSentinel();
+
+  SetFeedback(sentinel, SKIP_WRITE_BARRIER, *handler, UPDATE_WRITE_BARRIER);
+}
+
 bool FeedbackNexus::ConfigureMegamorphic(IcCheckType property_type) {
   DisallowGarbageCollection no_gc;
   MaybeObject sentinel = MegamorphicSentinel();
@@ -702,6 +742,10 @@ InlineCacheState FeedbackNexus::ic_state() const {
       }
       if (feedback == MegamorphicSentinel()) {
         return MEGAMORPHIC;
+      }
+      if (feedback == MegaDOMSentinel()) {
+        DCHECK(IsLoadICKind(kind()));
+        return MEGADOM;
       }
       if (feedback->IsWeakOrCleared()) {
         // Don't check if the map is cleared.
@@ -963,6 +1007,15 @@ SpeculationMode FeedbackNexus::GetSpeculationMode() {
   CHECK(call_count.IsSmi());
   uint32_t value = static_cast<uint32_t>(Smi::ToInt(call_count));
   return SpeculationModeField::decode(value);
+}
+
+CallFeedbackContent FeedbackNexus::GetCallFeedbackContent() {
+  DCHECK(IsCallICKind(kind()));
+
+  Object call_count = GetFeedbackExtra()->cast<Object>();
+  CHECK(call_count.IsSmi());
+  uint32_t value = static_cast<uint32_t>(Smi::ToInt(call_count));
+  return CallFeedbackContentField::decode(value);
 }
 
 float FeedbackNexus::ComputeCallFrequency() {
@@ -1371,52 +1424,6 @@ std::vector<Handle<String>> FeedbackNexus::GetTypesForSourcePositions(
   }
 
   return types_for_position;
-}
-
-namespace {
-
-Handle<JSObject> ConvertToJSObject(Isolate* isolate,
-                                   Handle<SimpleNumberDictionary> feedback) {
-  Handle<JSObject> type_profile =
-      isolate->factory()->NewJSObject(isolate->object_function());
-
-  for (int index = SimpleNumberDictionary::kElementsStartIndex;
-       index < feedback->length();
-       index += SimpleNumberDictionary::kEntrySize) {
-    int key_index = index + SimpleNumberDictionary::kEntryKeyIndex;
-    Object key = feedback->get(key_index);
-    if (key.IsSmi()) {
-      int value_index = index + SimpleNumberDictionary::kEntryValueIndex;
-
-      Handle<ArrayList> position_specific_types(
-          ArrayList::cast(feedback->get(value_index)), isolate);
-
-      int position = Smi::ToInt(key);
-      JSObject::AddDataElement(
-          type_profile, position,
-          isolate->factory()->NewJSArrayWithElements(
-              ArrayList::Elements(isolate, position_specific_types)),
-          PropertyAttributes::NONE);
-    }
-  }
-  return type_profile;
-}
-}  // namespace
-
-JSObject FeedbackNexus::GetTypeProfile() const {
-  DCHECK(IsTypeProfileKind(kind()));
-  Isolate* isolate = GetIsolate();
-
-  MaybeObject const feedback = GetFeedback();
-
-  if (feedback == UninitializedSentinel()) {
-    return *isolate->factory()->NewJSObject(isolate->object_function());
-  }
-
-  return *ConvertToJSObject(isolate,
-                            handle(SimpleNumberDictionary::cast(
-                                       feedback->GetHeapObjectAssumeStrong()),
-                                   isolate));
 }
 
 void FeedbackNexus::ResetTypeProfile() {

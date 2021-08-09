@@ -2,6 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#if !V8_ENABLE_WEBASSEMBLY
+#error This header should only be included if WebAssembly is enabled.
+#endif  // !V8_ENABLE_WEBASSEMBLY
+
 #ifndef V8_WASM_WASM_ENGINE_H_
 #define V8_WASM_WASM_ENGINE_H_
 
@@ -242,6 +246,12 @@ class V8_EXPORT_PRIVATE WasmEngine {
   // for tearing down an isolate, or to clean it up to be reused.
   void DeleteCompileJobsOnIsolate(Isolate* isolate);
 
+  // Get a token for compiling wrappers for an Isolate. The token is used to
+  // synchronize background tasks on isolate shutdown. The caller should only
+  // hold the token while compiling export wrappers. If the isolate is already
+  // shutting down, this method will return an invalid token.
+  OperationsBarrier::Token StartWrapperCompilation(Isolate*);
+
   // Manage the set of Isolates that use this WasmEngine.
   void AddIsolate(Isolate* isolate);
   void RemoveIsolate(Isolate* isolate);
@@ -339,14 +349,16 @@ class V8_EXPORT_PRIVATE WasmEngine {
   // preventing this object from being destroyed.
   std::shared_ptr<OperationsBarrier> GetBarrierForBackgroundCompile();
 
+  void SampleThrowEvent(Isolate*);
+  void SampleRethrowEvent(Isolate*);
+  void SampleCatchEvent(Isolate*);
+
   // Call on process start and exit.
   static void InitializeOncePerProcess();
   static void GlobalTearDown();
 
-  // Returns a reference to the WasmEngine shared by the entire process. Try to
-  // use {Isolate::wasm_engine} instead if it is available, which encapsulates
-  // engine lifetime decisions during Isolate bootstrapping.
-  static std::shared_ptr<WasmEngine> GetWasmEngine();
+  // Returns a reference to the WasmEngine shared by the entire process.
+  static WasmEngine* GetWasmEngine();
 
  private:
   struct CurrentGCInfo;
@@ -357,7 +369,7 @@ class V8_EXPORT_PRIVATE WasmEngine {
       Isolate* isolate, const WasmFeatures& enabled,
       std::unique_ptr<byte[]> bytes_copy, size_t length,
       Handle<Context> context, const char* api_method_name,
-      std::shared_ptr<CompilationResultResolver> resolver);
+      std::shared_ptr<CompilationResultResolver> resolver, int compilation_id);
 
   void TriggerGC(int8_t gc_sequence_index);
 
@@ -377,6 +389,8 @@ class V8_EXPORT_PRIVATE WasmEngine {
   // Implements a GDB-remote stub for WebAssembly debugging.
   std::unique_ptr<gdb_server::GdbServer> gdb_server_;
 #endif  // V8_ENABLE_WASM_GDB_REMOTE_DEBUGGING
+
+  std::atomic<int> next_compilation_id_{0};
 
   // This mutex protects all information which is mutated concurrently or
   // fields that are initialized lazily on the first access.

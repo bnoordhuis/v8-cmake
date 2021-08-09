@@ -18,7 +18,7 @@
 #include "src/objects/smi.h"
 #include "src/objects/struct.h"
 #include "src/roots/roots.h"
-#include "testing/gtest/include/gtest/gtest_prod.h"
+#include "testing/gtest/include/gtest/gtest_prod.h"  // nogncheck
 #include "torque-generated/bit-fields.h"
 #include "torque-generated/field-offsets.h"
 
@@ -34,9 +34,17 @@ class BytecodeArray;
 class CoverageInfo;
 class DebugInfo;
 class IsCompiledScope;
+template <typename>
+class Signature;
 class WasmCapiFunctionData;
 class WasmExportedFunctionData;
 class WasmJSFunctionData;
+
+namespace wasm {
+struct WasmModule;
+class ValueType;
+using FunctionSig = Signature<ValueType>;
+}  // namespace wasm
 
 #include "torque-generated/src/objects/shared-function-info-tq.inc"
 
@@ -147,6 +155,14 @@ class InterpreterData : public Struct {
   OBJECT_CONSTRUCTORS(InterpreterData, Struct);
 };
 
+class BaselineData : public TorqueGeneratedBaselineData<BaselineData, Struct> {
+ public:
+  inline BytecodeArray GetActiveBytecodeArray() const;
+  inline void SetActiveBytecodeArray(BytecodeArray bytecode);
+
+  TQ_OBJECT_CONSTRUCTORS(BaselineData)
+};
+
 // SharedFunctionInfo describes the JSFunction information that can be
 // shared by multiple instances of the function.
 class SharedFunctionInfo
@@ -175,8 +191,8 @@ class SharedFunctionInfo
 
   // Get the abstract code associated with the function, which will either be
   // a Code object or a BytecodeArray.
-  template <typename LocalIsolate>
-  inline AbstractCode abstract_code(LocalIsolate* isolate);
+  template <typename IsolateT>
+  inline AbstractCode abstract_code(IsolateT* isolate);
 
   // Tells whether or not this shared function info has an attached
   // BytecodeArray.
@@ -248,9 +264,8 @@ class SharedFunctionInfo
   // Returns an IsCompiledScope which reports whether the function is compiled,
   // and if compiled, will avoid the function becoming uncompiled while it is
   // held.
-  template <typename LocalIsolate>
-  inline IsCompiledScope is_compiled_scope(LocalIsolate* isolate) const;
-
+  template <typename IsolateT>
+  inline IsCompiledScope is_compiled_scope(IsolateT* isolate) const;
 
   // [internal formal parameter count]: The declared number of parameters.
   // For subclass constructors, also includes new.target.
@@ -285,19 +300,37 @@ class SharedFunctionInfo
   inline FunctionTemplateInfo get_api_func_data() const;
   inline void set_api_func_data(FunctionTemplateInfo data);
   inline bool HasBytecodeArray() const;
-  template <typename LocalIsolate>
-  inline BytecodeArray GetBytecodeArray(LocalIsolate* isolate) const;
+  template <typename IsolateT>
+  inline BytecodeArray GetBytecodeArray(IsolateT* isolate) const;
 
   inline void set_bytecode_array(BytecodeArray bytecode);
   inline Code InterpreterTrampoline() const;
   inline bool HasInterpreterData() const;
   inline InterpreterData interpreter_data() const;
   inline void set_interpreter_data(InterpreterData interpreter_data);
+  inline bool HasBaselineData() const;
+  inline BaselineData baseline_data() const;
+  inline void set_baseline_data(BaselineData Baseline_data);
+  inline void flush_baseline_data();
   inline BytecodeArray GetActiveBytecodeArray() const;
   inline void SetActiveBytecodeArray(BytecodeArray bytecode);
+
+#if V8_ENABLE_WEBASSEMBLY
   inline bool HasAsmWasmData() const;
+  inline bool HasWasmExportedFunctionData() const;
+  inline bool HasWasmJSFunctionData() const;
+  inline bool HasWasmCapiFunctionData() const;
   inline AsmWasmData asm_wasm_data() const;
   inline void set_asm_wasm_data(AsmWasmData data);
+
+  V8_EXPORT_PRIVATE WasmExportedFunctionData
+  wasm_exported_function_data() const;
+  WasmJSFunctionData wasm_js_function_data() const;
+  WasmCapiFunctionData wasm_capi_function_data() const;
+
+  inline const wasm::WasmModule* wasm_module() const;
+  inline const wasm::FunctionSig* wasm_function_signature() const;
+#endif  // V8_ENABLE_WEBASSEMBLY
 
   // builtin_id corresponds to the auto-generated Builtins::Name id.
   inline bool HasBuiltinId() const;
@@ -312,13 +345,6 @@ class SharedFunctionInfo
   inline void set_uncompiled_data_with_preparse_data(
       UncompiledDataWithPreparseData data);
   inline bool HasUncompiledDataWithoutPreparseData() const;
-  inline bool HasWasmExportedFunctionData() const;
-  V8_EXPORT_PRIVATE WasmExportedFunctionData
-  wasm_exported_function_data() const;
-  inline bool HasWasmJSFunctionData() const;
-  WasmJSFunctionData wasm_js_function_data() const;
-  inline bool HasWasmCapiFunctionData() const;
-  WasmCapiFunctionData wasm_capi_function_data() const;
 
   // Clear out pre-parsed scope data from UncompiledDataWithPreparseData,
   // turning it into UncompiledDataWithoutPreparseData.
@@ -390,19 +416,6 @@ class SharedFunctionInfo
   DECL_BOOLEAN_ACCESSORS(class_scope_has_private_brand)
   DECL_BOOLEAN_ACCESSORS(has_static_private_methods_or_accessors)
 
-  // True if this SFI has been (non-OSR) optimized in the past. This is used to
-  // guide native-context-independent codegen.
-  DECL_BOOLEAN_ACCESSORS(has_optimized_at_least_once)
-
-  // True if a Code object associated with this SFI has been inserted into the
-  // compilation cache. Note that the cache entry may be removed by aging,
-  // hence the 'may'.
-  DECL_BOOLEAN_ACCESSORS(may_have_cached_code)
-
-  // Returns the cached Code object for this SFI if it exists, an empty handle
-  // otherwise.
-  MaybeHandle<Code> TryGetCachedCode(Isolate* isolate);
-
   // Is this function a top-level function (scripts, evals).
   DECL_BOOLEAN_ACCESSORS(is_toplevel)
 
@@ -428,8 +441,10 @@ class SharedFunctionInfo
   // global object.
   DECL_BOOLEAN_ACCESSORS(native)
 
+#if V8_ENABLE_WEBASSEMBLY
   // Indicates that asm->wasm conversion failed and should not be re-attempted.
   DECL_BOOLEAN_ACCESSORS(is_asm_wasm_broken)
+#endif  // V8_ENABLE_WEBASSEMBLY
 
   // Indicates that the function was created by the Function function.
   // Though it's anonymous, toString should treat it as if it had the name
@@ -532,8 +547,8 @@ class SharedFunctionInfo
     kExceedsBytecodeLimit,
     kMayContainBreakPoints,
   };
-  template <typename LocalIsolate>
-  Inlineability GetInlineability(LocalIsolate* isolate) const;
+  template <typename IsolateT>
+  Inlineability GetInlineability(IsolateT* isolate) const;
 
   // Source size of this function.
   int SourceSize();
@@ -544,8 +559,8 @@ class SharedFunctionInfo
   inline bool has_simple_parameters();
 
   // Initialize a SharedFunctionInfo from a parsed function literal.
-  template <typename LocalIsolate>
-  static void InitFromFunctionLiteral(LocalIsolate* isolate,
+  template <typename IsolateT>
+  static void InitFromFunctionLiteral(IsolateT* isolate,
                                       Handle<SharedFunctionInfo> shared_info,
                                       FunctionLiteral* lit, bool is_toplevel);
 
@@ -562,8 +577,8 @@ class SharedFunctionInfo
   static void EnsureSourcePositionsAvailable(
       Isolate* isolate, Handle<SharedFunctionInfo> shared_info);
 
-  template <typename LocalIsolate>
-  bool AreSourcePositionsAvailable(LocalIsolate* isolate) const;
+  template <typename IsolateT>
+  bool AreSourcePositionsAvailable(IsolateT* isolate) const;
 
   // Hash based on function literal id and script id.
   V8_EXPORT_PRIVATE uint32_t Hash();
@@ -622,11 +637,6 @@ class SharedFunctionInfo
   STATIC_ASSERT(FunctionSyntaxKind::kLastFunctionSyntaxKind <=
                 FunctionSyntaxKindBits::kMax);
 
-  // Indicates that this function uses a super property (or an eval that may
-  // use a super property).
-  // This is needed to set up the [[HomeObject]] on the function instance.
-  inline bool needs_home_object() const;
-
   // Sets the bytecode in {shared}'s DebugInfo as the bytecode to
   // be returned by following calls to GetActiveBytecodeArray. Stores a
   // reference to the original bytecode in the DebugInfo.
@@ -638,6 +648,8 @@ class SharedFunctionInfo
                                      Isolate* isolate);
 
  private:
+  friend class WebSnapshotDeserializer;
+
 #ifdef VERIFY_HEAP
   void SharedFunctionInfoVerify(ReadOnlyRoots roots);
 #endif
@@ -659,8 +671,6 @@ class SharedFunctionInfo
   DECL_BOOLEAN_ACCESSORS(is_oneshot_iife_or_properties_are_final)
 
   inline void set_kind(FunctionKind kind);
-
-  inline void set_needs_home_object(bool value);
 
   inline uint16_t get_property_estimate_from_literal(FunctionLiteral* literal);
 

@@ -10,7 +10,7 @@
 #include "src/heap/heap.h"
 
 // Helper types to make boolean flag easier to read at call-site.
-enum InvokeFlag { CALL_FUNCTION, JUMP_FUNCTION };
+enum class InvokeType { kCall, kJump };
 
 // Flags used for the AllocateInNewSpace functions.
 enum AllocationFlags {
@@ -27,6 +27,10 @@ enum AllocationFlags {
   // Directly allocate in old space
   PRETENURE = 1 << 3,
 };
+
+enum class RememberedSetAction { kOmit, kEmit };
+
+enum class SmiCheck { kOmit, kInline };
 
 // This is the only place allowed to include the platform-specific headers.
 #define INCLUDED_FROM_MACRO_ASSEMBLER_H
@@ -52,6 +56,9 @@ enum AllocationFlags {
 #elif V8_TARGET_ARCH_S390
 #include "src/codegen/s390/constants-s390.h"
 #include "src/codegen/s390/macro-assembler-s390.h"
+#elif V8_TARGET_ARCH_RISCV64
+#include "src/codegen/riscv64/constants-riscv64.h"
+#include "src/codegen/riscv64/macro-assembler-riscv64.h"
 #else
 #error Unsupported target architecture.
 #endif

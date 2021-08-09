@@ -45,13 +45,28 @@ InspectorTest.runAsyncTestSuite([
     let objectId = await evaluateToObjectId('new Uint8Array([1, 1, 1, 1, 1, 1, 1, 1]).buffer');
     let props = await Protocol.Runtime.getProperties({ objectId, ownProperties: true });
     for (let prop of props.result.result) {
-      if (prop.name === '__proto__')
-        continue;
       InspectorTest.log(prop.name);
       await logGetPropertiesResult(prop.value.objectId);
     }
     for (let prop of props.result.internalProperties) {
       InspectorTest.log(prop.name);
+      if (prop.value.objectId)
+        await logGetPropertiesResult(prop.value.objectId);
+    }
+  },
+
+  async function testArrayBufferFromWebAssemblyMemory() {
+    let objectId = await evaluateToObjectId('new WebAssembly.Memory({initial: 1}).buffer');
+    let props = await Protocol.Runtime.getProperties({ objectId, ownProperties: true });
+    for (let prop of props.result.result) {
+      InspectorTest.log(prop.name);
+      await logGetPropertiesResult(prop.value.objectId);
+    }
+    for (let prop of props.result.internalProperties) {
+      InspectorTest.log(prop.name);
+      // Skip printing the values of the virtual typed arrays.
+      if (/\[\[.*Array\]\]/.test(prop.name))
+        continue;
       if (prop.value.objectId)
         await logGetPropertiesResult(prop.value.objectId);
     }
@@ -65,8 +80,6 @@ InspectorTest.runAsyncTestSuite([
     await Protocol.Runtime.evaluate({ expression: 'b', generatePreview: true })
     let props = await Protocol.Runtime.getProperties({ objectId, ownProperties: true });
     for (let prop of props.result.result) {
-      if (prop.name === '__proto__')
-        continue;
       InspectorTest.log(prop.name);
       await logGetPropertiesResult(prop.value.objectId);
     }
@@ -85,6 +98,10 @@ InspectorTest.runAsyncTestSuite([
       this.Uint8Array = this.uint8array_old;
       delete this.uint8array_old;
     })()`);
+  },
+
+  async function testObjectWithProtoProperty() {
+    await logExpressionProperties('Object.defineProperty({}, "__proto__", {enumerable: true, value: {b:"aaa"}})');
   }
 ]);
 

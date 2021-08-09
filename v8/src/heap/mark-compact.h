@@ -238,8 +238,6 @@ class MarkCompactCollectorBase {
   int NumberOfParallelCompactionTasks();
 
   Heap* heap_;
-  // Number of old to new slots. Should be computed during MarkLiveObjects.
-  base::Optional<size_t> old_to_new_slots_;
 };
 
 class MinorMarkingState final
@@ -508,6 +506,7 @@ class MarkCompactCollector final : public MarkCompactCollectorBase {
   void RecordLiveSlotsOnPage(Page* page);
 
   bool is_compacting() const { return compacting_; }
+  bool is_shared_heap() const { return is_shared_heap_; }
 
   // Ensures that sweeping is finished.
   //
@@ -569,6 +568,8 @@ class MarkCompactCollector final : public MarkCompactCollectorBase {
 
   unsigned epoch() const { return epoch_; }
 
+  BytecodeFlushMode bytecode_flush_mode() const { return bytecode_flush_mode_; }
+
   explicit MarkCompactCollector(Heap* heap);
   ~MarkCompactCollector() override;
 
@@ -605,11 +606,11 @@ class MarkCompactCollector final : public MarkCompactCollectorBase {
 
   void MarkLiveObjects() override;
 
-  // Marks the object black and adds it to the marking work list.
+  // Marks the object grey and adds it to the marking work list.
   // This is for non-incremental marking only.
   V8_INLINE void MarkObject(HeapObject host, HeapObject obj);
 
-  // Marks the object black and adds it to the marking work list.
+  // Marks the object grey and adds it to the marking work list.
   // This is for non-incremental marking only.
   V8_INLINE void MarkRootObject(Root root, HeapObject obj);
 
@@ -743,6 +744,8 @@ class MarkCompactCollector final : public MarkCompactCollectorBase {
   CollectorState state_;
 #endif
 
+  const bool is_shared_heap_;
+
   bool was_marked_incrementally_;
 
   bool evacuation_;
@@ -783,6 +786,12 @@ class MarkCompactCollector final : public MarkCompactCollectorBase {
   //   two bits are used, so it is okay if this counter overflows and wraps
   //   around.
   unsigned epoch_ = 0;
+
+  // Bytecode flushing is disabled when the code coverage mode is changed. Since
+  // that can happen while a GC is happening and we need the
+  // bytecode_flush_mode_ to remain the same through out a GC, we record this at
+  // the start of each GC.
+  BytecodeFlushMode bytecode_flush_mode_;
 
   friend class FullEvacuator;
   friend class RecordMigratedSlotVisitor;

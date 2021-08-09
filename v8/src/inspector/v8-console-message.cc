@@ -152,7 +152,7 @@ class V8ValueStringBuilder {
 
   bool append(v8::Local<v8::Symbol> symbol) {
     m_builder.append("Symbol(");
-    bool result = append(symbol->Description(), IgnoreUndefined);
+    bool result = append(symbol->Description(m_isolate), IgnoreUndefined);
     m_builder.append(')');
     return result;
   }
@@ -208,7 +208,12 @@ void V8ConsoleMessage::setLocation(const String16& url, unsigned lineNumber,
                                    unsigned columnNumber,
                                    std::unique_ptr<V8StackTraceImpl> stackTrace,
                                    int scriptId) {
-  m_url = url;
+  const char* dataURIPrefix = "data:";
+  if (url.substring(0, strlen(dataURIPrefix)) == dataURIPrefix) {
+    m_url = String16();
+  } else {
+    m_url = url;
+  }
   m_lineNumber = lineNumber;
   m_columnNumber = columnNumber;
   m_stackTrace = std::move(stackTrace);
