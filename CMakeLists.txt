@@ -262,13 +262,11 @@ add_library(v8_base_without_compiler STATIC
   $<$<AND:${is-x64},${is-win}>:v8/src/trap-handler/handler-outside-win.cc>
   $<${is-x64}:v8/src/codegen/x64/assembler-x64.cc>
   $<${is-x64}:v8/src/codegen/x64/cpu-x64.cc>
-  $<${is-x64}:v8/src/codegen/x64/interface-descriptors-x64.cc>
   $<${is-x64}:v8/src/codegen/x64/macro-assembler-x64.cc>
   $<${is-x64}:v8/src/compiler/backend/x64/code-generator-x64.cc>
   $<${is-x64}:v8/src/compiler/backend/x64/instruction-scheduler-x64.cc>
   $<${is-x64}:v8/src/compiler/backend/x64/instruction-selector-x64.cc>
   $<${is-x64}:v8/src/compiler/backend/x64/unwinding-info-writer-x64.cc>
-  $<${is-x64}:v8/src/debug/x64/debug-x64.cc>
   $<${is-x64}:v8/src/deoptimizer/x64/deoptimizer-x64.cc>
   $<${is-x64}:v8/src/diagnostics/x64/disasm-x64.cc>
   $<${is-x64}:v8/src/diagnostics/x64/eh-frame-x64.cc>
@@ -334,7 +332,7 @@ add_library(v8_base_without_compiler STATIC
   ${regexp-sources}
   v8/src/roots/roots.cc
   ${runtime-sources}
-  v8/src/sanitizer/lsan-page-allocator.cc
+  v8/src/base/sanitizer/lsan-page-allocator.cc
   ${snapshot-sources}
   ${strings-sources}
   v8/src/tasks/cancelable-task.cc
@@ -454,7 +452,6 @@ add_library(
   v8/src/builtins/builtins-constructor-gen.cc
   v8/src/builtins/builtins-conversion-gen.cc
   v8/src/builtins/builtins-date-gen.cc
-  v8/src/builtins/builtins-debug-gen.cc
   v8/src/builtins/builtins-generator-gen.cc
   v8/src/builtins/builtins-global-gen.cc
   v8/src/builtins/builtins-handler-gen.cc
@@ -644,7 +641,6 @@ add_custom_command(
 add_library(v8_libplatform STATIC)
 target_sources(v8_libplatform
   PRIVATE
-    $<$<NOT:${is-win}>:v8/src/libplatform/tracing/recorder-default.cc>
     $<${is-win}:v8/src/libplatform/tracing/recorder-win.cc>
     v8/src/libplatform/default-foreground-task-runner.cc
     v8/src/libplatform/default-job.cc
