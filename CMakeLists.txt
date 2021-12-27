@@ -53,6 +53,9 @@ set(is-msvc $<CXX_COMPILER_ID:MSVC>)
 # FIXME obviously
 set(is-arm 0)
 set(is-arm64 0)
+if (CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "arm64")
+  set(is-arm64 1)
+endif ()
 set(is-ia32 0)
 set(is-mips 0)
 set(is-mips64 0)
@@ -76,6 +79,7 @@ set(
   $<${is-win}:V8_HAVE_TARGET_OS>
   $<${is-win}:V8_TARGET_OS_WIN>
   $<${is-x64}:V8_TARGET_ARCH_X64>
+  $<${is-arm64}:V8_TARGET_ARCH_ARM64>
   $<${is-win}:NOMINMAX>
   $<$<AND:${is-win},${is-x64}>:V8_OS_WIN_X64>
   $<$<BOOL:${V8_ENABLE_CONCURRENT_MARKING}>:V8_CONCURRENT_MARKING>
@@ -266,6 +270,25 @@ add_library(v8_base_without_compiler STATIC
   $<${is-x64}:v8/src/diagnostics/x64/eh-frame-x64.cc>
   $<${is-x64}:v8/src/execution/x64/frame-constants-x64.cc>
   $<${is-x64}:v8/src/regexp/x64/regexp-macro-assembler-x64.cc>
+  $<${is-arm64}:v8/src/codegen/arm64/assembler-arm64.cc>
+  $<${is-arm64}:v8/src/codegen/arm64/cpu-arm64.cc>
+  $<${is-arm64}:v8/src/codegen/arm64/decoder-arm64.cc>
+  $<${is-arm64}:v8/src/codegen/arm64/interface-descriptors-arm64.cc>
+  $<${is-arm64}:v8/src/codegen/arm64/macro-assembler-arm64.cc>
+  $<${is-arm64}:v8/src/codegen/arm64/instructions-arm64.cc>
+  $<${is-arm64}:v8/src/codegen/arm64/instructions-arm64-constants.cc>
+  $<${is-arm64}:v8/src/codegen/arm64/register-arm64.cc>
+  $<${is-arm64}:v8/src/codegen/arm64/utils-arm64.cc>
+  $<${is-arm64}:v8/src/compiler/backend/arm64/code-generator-arm64.cc>
+  $<${is-arm64}:v8/src/compiler/backend/arm64/instruction-scheduler-arm64.cc>
+  $<${is-arm64}:v8/src/compiler/backend/arm64/instruction-selector-arm64.cc>
+  $<${is-arm64}:v8/src/compiler/backend/arm64/unwinding-info-writer-arm64.cc>
+  $<${is-arm64}:v8/src/debug/arm64/debug-arm64.cc>
+  $<${is-arm64}:v8/src/deoptimizer/arm64/deoptimizer-arm64.cc>
+  $<${is-arm64}:v8/src/diagnostics/arm64/disasm-arm64.cc>
+  $<${is-arm64}:v8/src/diagnostics/arm64/eh-frame-arm64.cc>
+  $<${is-arm64}:v8/src/execution/arm64/frame-constants-arm64.cc>
+  $<${is-arm64}:v8/src/regexp/arm64/regexp-macro-assembler-arm64.cc>
   $<$<BOOL:${V8_ENABLE_I18N}>:$<TARGET_OBJECTS:v8-i18n-support>>
   ${api-sources}
   ${asmjs-sources}
