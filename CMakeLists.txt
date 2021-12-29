@@ -15,6 +15,7 @@ if(MSVC)
     PROPERTY LANGUAGE ASM_MASM)
 
 endif()
+add_definitions("-DV8_ENABLE_WEBASSEMBLY")
 
 list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
 set(THREADS_PREFER_PTHREAD_FLAG ON)
@@ -275,7 +276,6 @@ add_library(v8_base_without_compiler STATIC
   $<${is-arm64}:v8/src/codegen/arm64/assembler-arm64.cc>
   $<${is-arm64}:v8/src/codegen/arm64/cpu-arm64.cc>
   $<${is-arm64}:v8/src/codegen/arm64/decoder-arm64.cc>
-  $<${is-arm64}:v8/src/codegen/arm64/interface-descriptors-arm64.cc>
   $<${is-arm64}:v8/src/codegen/arm64/macro-assembler-arm64.cc>
   $<${is-arm64}:v8/src/codegen/arm64/instructions-arm64.cc>
   $<${is-arm64}:v8/src/codegen/arm64/instructions-arm64-constants.cc>
@@ -285,7 +285,6 @@ add_library(v8_base_without_compiler STATIC
   $<${is-arm64}:v8/src/compiler/backend/arm64/instruction-scheduler-arm64.cc>
   $<${is-arm64}:v8/src/compiler/backend/arm64/instruction-selector-arm64.cc>
   $<${is-arm64}:v8/src/compiler/backend/arm64/unwinding-info-writer-arm64.cc>
-  $<${is-arm64}:v8/src/debug/arm64/debug-arm64.cc>
   $<${is-arm64}:v8/src/deoptimizer/arm64/deoptimizer-arm64.cc>
   $<${is-arm64}:v8/src/diagnostics/arm64/disasm-arm64.cc>
   $<${is-arm64}:v8/src/diagnostics/arm64/eh-frame-arm64.cc>
@@ -774,9 +773,17 @@ file(GLOB_RECURSE torque-objects
   RELATIVE ${PROJECT_SOURCE_DIR}/v8
   CONFIGURE_DEPENDS v8/src/objects/*.tq
 )
+file(GLOB_RECURSE torque-webassembly
+        RELATIVE ${PROJECT_SOURCE_DIR}/v8
+        CONFIGURE_DEPENDS
+        v8/src/debug/debug-wasm-objects.tq,
+        v8/src/builtins/wasm.tq,
+        v8/src/wasm/wasm-objects.tq,
+)
 
 list(APPEND torque_files ${torque-builtins})
 list(APPEND torque_files ${torque-objects})
+list(APPEND torque_files ${torque-webassembly})
 
 list(APPEND torque_files
   src/ic/handler-configuration.tq
