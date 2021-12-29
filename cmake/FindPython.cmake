@@ -1,6 +1,11 @@
 # This is a wrapper around FindPythonInterp so that older CMake versions
 # can safely find_package(Python) when using v8, as this is the desired
 # behavior.
+
+if (NOT V8CMAKE_FIND_PYTHON)
+  return()
+endif()
+
 include(FindPackageHandleStandardArgs)
 
 if (NOT ${CMAKE_FIND_PACKAGE_NAME}_FIND_COMPONENTS)

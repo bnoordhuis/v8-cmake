@@ -3,6 +3,8 @@ set(CMAKE_USER_MAKE_RULES_OVERRIDE "${CMAKE_CURRENT_SOURCE_DIR}/cmake/MSVC.cmake
 set(CMAKE_DISABLE_IN_SOURCE_BUILD ON)
 project(V8 LANGUAGES CXX C ASM)
 
+option(V8CMAKE_FIND_PYTHON "Enable finding python" ON)
+
 if(MSVC)
   enable_language(ASM_MASM)
   set_property(
@@ -17,7 +19,9 @@ endif()
 list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 
-find_package(Python 3 REQUIRED QUIET COMPONENTS Interpreter)
+if (V8CMAKE_FIND_PYTHON)
+  find_package(Python 3 REQUIRED QUIET COMPONENTS Interpreter)
+endif()
 find_package(Threads QUIET)
 
 include(CMakeDependentOption)
