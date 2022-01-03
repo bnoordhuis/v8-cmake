@@ -157,9 +157,9 @@ struct V8_EXPORT_PRIVATE AssemblerOptions {
   // assembler is used on existing code directly (e.g. JumpTableAssembler)
   // without any buffer to hold reloc information.
   bool disable_reloc_info_for_patching = false;
-  // Enables access to exrefs by computing a delta from the root array.
-  // Only valid if code will not survive the process.
-  bool enable_root_array_delta_access = false;
+  // Enables root-relative access to arbitrary untagged addresses (usually
+  // external references). Only valid if code will not survive the process.
+  bool enable_root_relative_access = false;
   // Enables specific assembler sequences only used for the simulator.
   bool enable_simulator_code = false;
   // Enables use of isolate-independent constants, indirected through the
@@ -202,6 +202,11 @@ class AssemblerBuffer {
   // destructed), but not written.
   virtual std::unique_ptr<AssemblerBuffer> Grow(int new_size)
       V8_WARN_UNUSED_RESULT = 0;
+  virtual bool IsOnHeap() const { return false; }
+  virtual MaybeHandle<Code> code() const { return MaybeHandle<Code>(); }
+  // Return the GC count when the buffer was allocated (only if the buffer is on
+  // the GC heap).
+  virtual int OnHeapGCCount() const { return 0; }
 };
 
 // Allocate an AssemblerBuffer which uses an existing buffer. This buffer cannot
@@ -213,6 +218,10 @@ std::unique_ptr<AssemblerBuffer> ExternalAssemblerBuffer(void* buffer,
 // Allocate a new growable AssemblerBuffer with a given initial size.
 V8_EXPORT_PRIVATE
 std::unique_ptr<AssemblerBuffer> NewAssemblerBuffer(int size);
+
+V8_EXPORT_PRIVATE
+std::unique_ptr<AssemblerBuffer> NewOnHeapAssemblerBuffer(Isolate* isolate,
+                                                          int size);
 
 class V8_EXPORT_PRIVATE AssemblerBase : public Malloced {
  public:
@@ -267,17 +276,37 @@ class V8_EXPORT_PRIVATE AssemblerBase : public Malloced {
   int pc_offset() const { return static_cast<int>(pc_ - buffer_start_); }
 
   int pc_offset_for_safepoint() {
-#if defined(V8_TARGET_ARCH_MIPS) || defined(V8_TARGET_ARCH_MIPS64)
-    // Mips needs it's own implementation to avoid trampoline's influence.
+#if defined(V8_TARGET_ARCH_MIPS) || defined(V8_TARGET_ARCH_MIPS64) || \
+    defined(V8_TARGET_ARCH_LOONG64)
+    // MIPS and LOONG need to use their own implementation to avoid trampoline's
+    // influence.
     UNREACHABLE();
 #else
     return pc_offset();
 #endif
   }
 
+  bool IsOnHeap() const { return buffer_->IsOnHeap(); }
+
+  int OnHeapGCCount() const { return buffer_->OnHeapGCCount(); }
+
+  MaybeHandle<Code> code() const {
+    DCHECK(IsOnHeap());
+    return buffer_->code();
+  }
+
   byte* buffer_start() const { return buffer_->start(); }
   int buffer_size() const { return buffer_->size(); }
   int instruction_size() const { return pc_offset(); }
+
+  std::unique_ptr<AssemblerBuffer> ReleaseBuffer() {
+    std::unique_ptr<AssemblerBuffer> buffer = std::move(buffer_);
+    DCHECK_NULL(buffer_);
+    // Reset fields to prevent accidental further modifications of the buffer.
+    buffer_start_ = nullptr;
+    pc_ = nullptr;
+    return buffer;
+  }
 
   // This function is called when code generation is aborted, so that
   // the assembler could clean up internal data structures.
@@ -288,14 +317,47 @@ class V8_EXPORT_PRIVATE AssemblerBase : public Malloced {
 
   // Record an inline code comment that can be used by a disassembler.
   // Use --code-comments to enable.
-  V8_INLINE void RecordComment(const char* msg) {
+  V8_INLINE void RecordComment(const char* comment) {
     // Set explicit dependency on --code-comments for dead-code elimination in
     // release builds.
     if (!FLAG_code_comments) return;
     if (options().emit_code_comments) {
-      code_comments_writer_.Add(pc_offset(), std::string(msg));
+      code_comments_writer_.Add(pc_offset(), std::string(comment));
     }
   }
+
+  V8_INLINE void RecordComment(std::string comment) {
+    // Set explicit dependency on --code-comments for dead-code elimination in
+    // release builds.
+    if (!FLAG_code_comments) return;
+    if (options().emit_code_comments) {
+      code_comments_writer_.Add(pc_offset(), std::move(comment));
+    }
+  }
+
+#ifdef V8_CODE_COMMENTS
+  class CodeComment {
+   public:
+    explicit CodeComment(Assembler* assembler, const std::string& comment)
+        : assembler_(assembler) {
+      if (FLAG_code_comments) Open(comment);
+    }
+    ~CodeComment() {
+      if (FLAG_code_comments) Close();
+    }
+    static const int kIndentWidth = 2;
+
+   private:
+    int depth() const;
+    void Open(const std::string& comment);
+    void Close();
+    Assembler* assembler_;
+  };
+#else  // V8_CODE_COMMENTS
+  class CodeComment {
+    explicit CodeComment(Assembler* assembler, std::string comment) {}
+  };
+#endif
 
   // The minimum buffer size. Should be at least two times the platform-specific
   // {Assembler::kGap}.
@@ -349,10 +411,21 @@ class V8_EXPORT_PRIVATE AssemblerBase : public Malloced {
         !options().record_reloc_info_for_serialization && !FLAG_debug_code) {
       return false;
     }
+#ifndef ENABLE_DISASSEMBLER
+    if (RelocInfo::IsLiteralConstant(rmode)) return false;
+#endif
     return true;
   }
 
   CodeCommentsWriter code_comments_writer_;
+
+  // Relocation information when code allocated directly on heap.
+  // These constants correspond to the 99% percentile of a selected number of JS
+  // frameworks and benchmarks, including jquery, lodash, d3 and speedometer3.
+  const int kSavedHandleForRawObjectsInitialSize = 60;
+  const int kSavedOffsetForRuntimeEntriesInitialSize = 100;
+  std::vector<std::pair<uint32_t, Address>> saved_handles_for_raw_object_ptr_;
+  std::vector<std::pair<uint32_t, uint32_t>> saved_offsets_for_runtime_entries_;
 
  private:
   // Before we copy code into the code space, we sometimes cannot encode
@@ -386,6 +459,10 @@ class V8_EXPORT_PRIVATE AssemblerBase : public Malloced {
 
   JumpOptimizationInfo* jump_optimization_info_;
 
+#ifdef V8_CODE_COMMENTS
+  int comment_depth_ = 0;
+#endif
+
   // Constant pool.
   friend class FrameAndConstantPoolScope;
   friend class ConstantPoolUnavailableScope;
@@ -415,6 +492,15 @@ class V8_EXPORT_PRIVATE V8_NODISCARD CpuFeatureScope {
   }
 #endif
 };
+
+#ifdef V8_CODE_COMMENTS
+#define ASM_CODE_COMMENT(asm) ASM_CODE_COMMENT_STRING(asm, __func__)
+#define ASM_CODE_COMMENT_STRING(asm, comment) \
+  AssemblerBase::CodeComment asm_code_comment(asm, comment)
+#else
+#define ASM_CODE_COMMENT(asm)
+#define ASM_CODE_COMMENT_STRING(asm, ...)
+#endif
 
 }  // namespace internal
 }  // namespace v8

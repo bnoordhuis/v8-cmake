@@ -123,6 +123,7 @@ bool Scavenger::MigrateObject(Map map, HeapObject source, HeapObject target,
   heap()->CopyBlock(target.address() + kTaggedSize,
                     source.address() + kTaggedSize, size - kTaggedSize);
 
+  // This release CAS is paired with the load acquire in ScavengeObject.
   if (!source.release_compare_and_swap_map_word(
           MapWord::FromMap(map), MapWord::FromForwardingAddress(target))) {
     // Other task migrated the object.
@@ -340,10 +341,10 @@ SlotCallbackResult Scavenger::EvacuateShortcutCandidate(Map map,
                           kReleaseStore);
       return Heap::InYoungGeneration(target) ? KEEP_SLOT : REMOVE_SLOT;
     }
-    Map map = first_word.ToMap();
-    SlotCallbackResult result =
-        EvacuateObjectDefault(map, slot, first, first.SizeFromMap(map),
-                              Map::ObjectFieldsFrom(map.visitor_id()));
+    Map first_map = first_word.ToMap();
+    SlotCallbackResult result = EvacuateObjectDefault(
+        first_map, slot, first, first.SizeFromMap(first_map),
+        Map::ObjectFieldsFrom(first_map.visitor_id()));
     object.set_map_word(MapWord::FromForwardingAddress(slot.ToHeapObject()),
                         kReleaseStore);
     return result;
@@ -391,7 +392,9 @@ SlotCallbackResult Scavenger::ScavengeObject(THeapObjectSlot p,
                 "Only FullHeapObjectSlot and HeapObjectSlot are expected here");
   DCHECK(Heap::InFromPage(object));
 
-  // Synchronized load that consumes the publishing CAS of MigrateObject.
+  // Synchronized load that consumes the publishing CAS of MigrateObject. We
+  // need memory ordering in order to read the page header of the forwarded
+  // object (using Heap::InYoungGeneration).
   MapWord first_word = object.map_word(kAcquireLoad);
 
   // If the first word is a forwarding address, the object has already been
@@ -402,6 +405,8 @@ SlotCallbackResult Scavenger::ScavengeObject(THeapObjectSlot p,
     DCHECK_IMPLIES(Heap::InYoungGeneration(dest),
                    Heap::InToPage(dest) || Heap::IsLargeObject(dest));
 
+    // This load forces us to have memory ordering for the map load above. We
+    // need to have the page header properly initialized.
     return Heap::InYoungGeneration(dest) ? KEEP_SLOT : REMOVE_SLOT;
   }
 
@@ -446,6 +451,14 @@ void ScavengeVisitor::VisitPointers(HeapObject host, ObjectSlot start,
 void ScavengeVisitor::VisitPointers(HeapObject host, MaybeObjectSlot start,
                                     MaybeObjectSlot end) {
   return VisitPointersImpl(host, start, end);
+}
+
+void ScavengeVisitor::VisitCodePointer(HeapObject host, CodeObjectSlot slot) {
+  CHECK(V8_EXTERNAL_CODE_SPACE_BOOL);
+  // Code slots never appear in new space because CodeDataContainers, the
+  // only object that can contain code pointers, are always allocated in
+  // the old space.
+  UNREACHABLE();
 }
 
 void ScavengeVisitor::VisitCodeTarget(Code host, RelocInfo* rinfo) {

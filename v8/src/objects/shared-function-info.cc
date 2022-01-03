@@ -8,6 +8,7 @@
 #include "src/ast/scopes.h"
 #include "src/codegen/compilation-cache.h"
 #include "src/codegen/compiler.h"
+#include "src/common/globals.h"
 #include "src/diagnostics/code-tracer.h"
 #include "src/objects/shared-function-info-inl.h"
 #include "src/strings/string-builder-inl.h"
@@ -32,7 +33,7 @@ void SharedFunctionInfo::Init(ReadOnlyRoots ro_roots, int unique_id) {
   // Set the function data to the "illegal" builtin. Ideally we'd use some sort
   // of "uninitialized" marker here, but it's cheaper to use a valid buitin and
   // avoid having to do uninitialized checks elsewhere.
-  set_builtin_id(Builtins::kIllegal);
+  set_builtin_id(Builtin::kIllegal);
 
   // Set the name to the no-name sentinel, this can be updated later.
   set_name_or_scope_info(SharedFunctionInfo::kNoSharedNameSentinel,
@@ -52,13 +53,13 @@ void SharedFunctionInfo::Init(ReadOnlyRoots ro_roots, int unique_id) {
 
   // Set integer fields (smi or int, depending on the architecture).
   set_length(0);
-  set_internal_formal_parameter_count(0);
+  set_internal_formal_parameter_count(JSParameterCount(0));
   set_expected_nof_properties(0);
   set_raw_function_token_offset(0);
 
   // All flags default to false or 0, except ConstructAsBuiltinBit just because
   // we're using the kIllegal builtin.
-  set_flags(ConstructAsBuiltinBit::encode(true));
+  set_flags(ConstructAsBuiltinBit::encode(true), kRelaxedStore);
   set_flags2(0);
 
   UpdateFunctionMapIndex();
@@ -77,23 +78,23 @@ Code SharedFunctionInfo::GetCode() const {
   if (data.IsSmi()) {
     // Holding a Smi means we are a builtin.
     DCHECK(HasBuiltinId());
-    return isolate->builtins()->builtin(builtin_id());
+    return isolate->builtins()->code(builtin_id());
   }
   if (data.IsBytecodeArray()) {
     // Having a bytecode array means we are a compiled, interpreted function.
     DCHECK(HasBytecodeArray());
-    return isolate->builtins()->builtin(Builtins::kInterpreterEntryTrampoline);
+    return isolate->builtins()->code(Builtin::kInterpreterEntryTrampoline);
   }
-  if (data.IsBaselineData()) {
-    // Having BaselineData means we are a compiled, baseline function.
-    DCHECK(HasBaselineData());
-    return baseline_data().baseline_code();
+  if (data.IsCodeT()) {
+    // Having baseline Code means we are a compiled, baseline function.
+    DCHECK(HasBaselineCode());
+    return FromCodeT(CodeT::cast(data));
   }
 #if V8_ENABLE_WEBASSEMBLY
   if (data.IsAsmWasmData()) {
     // Having AsmWasmData means we are an asm.js/wasm function.
     DCHECK(HasAsmWasmData());
-    return isolate->builtins()->builtin(Builtins::kInstantiateAsmJs);
+    return isolate->builtins()->code(Builtin::kInstantiateAsmJs);
   }
   if (data.IsWasmExportedFunctionData()) {
     // Having a WasmExportedFunctionData means the code is in there.
@@ -110,12 +111,12 @@ Code SharedFunctionInfo::GetCode() const {
   if (data.IsUncompiledData()) {
     // Having uncompiled data (with or without scope) means we need to compile.
     DCHECK(HasUncompiledData());
-    return isolate->builtins()->builtin(Builtins::kCompileLazy);
+    return isolate->builtins()->code(Builtin::kCompileLazy);
   }
   if (data.IsFunctionTemplateInfo()) {
     // Having a function template info means we are an API function.
     DCHECK(IsApiFunction());
-    return isolate->builtins()->builtin(Builtins::kHandleApiCall);
+    return isolate->builtins()->code(Builtin::kHandleApiCall);
   }
   if (data.IsInterpreterData()) {
     Code code = InterpreterTrampoline();
@@ -270,7 +271,7 @@ Handle<String> SharedFunctionInfo::DebugName(
   if (shared->HasWasmExportedFunctionData()) {
     return shared->GetIsolate()
         ->factory()
-        ->NewStringFromUtf8(CStrVector(shared->DebugNameCStr().get()))
+        ->NewStringFromUtf8(base::CStrVector(shared->DebugNameCStr().get()))
         .ToHandleChecked();
   }
 #endif  // V8_ENABLE_WEBASSEMBLY
@@ -281,8 +282,9 @@ Handle<String> SharedFunctionInfo::DebugName(
 }
 
 bool SharedFunctionInfo::PassesFilter(const char* raw_filter) {
-  Vector<const char> filter = CStrVector(raw_filter);
-  return v8::internal::PassesFilter(CStrVector(DebugNameCStr().get()), filter);
+  base::Vector<const char> filter = base::CStrVector(raw_filter);
+  return v8::internal::PassesFilter(base::CStrVector(DebugNameCStr().get()),
+                                    filter);
 }
 
 bool SharedFunctionInfo::HasSourceCode() const {
@@ -434,7 +436,8 @@ std::ostream& operator<<(std::ostream& os, const SourceCodeOf& v) {
 void SharedFunctionInfo::DisableOptimization(BailoutReason reason) {
   DCHECK_NE(reason, BailoutReason::kNoReason);
 
-  set_flags(DisabledOptimizationReasonBits::update(flags(), reason));
+  set_flags(DisabledOptimizationReasonBits::update(flags(kRelaxedLoad), reason),
+            kRelaxedStore);
   // Code should be the lazy compilation stub or else interpreted.
   Isolate* isolate = GetIsolate();
   DCHECK(abstract_code(isolate).kind() == CodeKind::INTERPRETED_FUNCTION ||
@@ -458,7 +461,8 @@ void SharedFunctionInfo::InitFromFunctionLiteral(
 
   // When adding fields here, make sure DeclarationScope::AnalyzePartially is
   // updated accordingly.
-  shared_info->set_internal_formal_parameter_count(lit->parameter_count());
+  shared_info->set_internal_formal_parameter_count(
+      JSParameterCount(lit->parameter_count()));
   shared_info->SetFunctionTokenPosition(lit->function_token_position(),
                                         lit->start_position());
   shared_info->set_syntax_kind(lit->syntax_kind());
@@ -605,7 +609,7 @@ int SharedFunctionInfo::StartPosition() const {
     return uncompiled_data().start_position();
   }
   if (IsApiFunction() || HasBuiltinId()) {
-    DCHECK_IMPLIES(HasBuiltinId(), builtin_id() != Builtins::kCompileLazy);
+    DCHECK_IMPLIES(HasBuiltinId(), builtin_id() != Builtin::kCompileLazy);
     return 0;
   }
 #if V8_ENABLE_WEBASSEMBLY
@@ -632,7 +636,7 @@ int SharedFunctionInfo::EndPosition() const {
     return uncompiled_data().end_position();
   }
   if (IsApiFunction() || HasBuiltinId()) {
-    DCHECK_IMPLIES(HasBuiltinId(), builtin_id() != Builtins::kCompileLazy);
+    DCHECK_IMPLIES(HasBuiltinId(), builtin_id() != Builtin::kCompileLazy);
     return 0;
   }
 #if V8_ENABLE_WEBASSEMBLY
@@ -669,8 +673,7 @@ void SharedFunctionInfo::SetPosition(int start_position, int end_position) {
 // static
 void SharedFunctionInfo::EnsureSourcePositionsAvailable(
     Isolate* isolate, Handle<SharedFunctionInfo> shared_info) {
-  if (FLAG_enable_lazy_source_positions && shared_info->HasBytecodeArray() &&
-      !shared_info->GetBytecodeArray(isolate).HasSourcePositionTable()) {
+  if (shared_info->CanCollectSourcePosition(isolate)) {
     Compiler::CollectSourcePositions(isolate, shared_info);
   }
 }
@@ -704,6 +707,7 @@ void SharedFunctionInfo::UninstallDebugBytecode(SharedFunctionInfo shared,
       isolate->shared_function_info_access());
   DebugInfo debug_info = shared.GetDebugInfo();
   BytecodeArray original_bytecode_array = debug_info.OriginalBytecodeArray();
+  DCHECK(!shared.HasBaselineCode());
   shared.SetActiveBytecodeArray(original_bytecode_array);
   debug_info.set_original_bytecode_array(
       ReadOnlyRoots(isolate).undefined_value(), kReleaseStore);

@@ -58,6 +58,11 @@ class V8_EXPORT_PRIVATE MarkerBase {
     IsForcedGC is_forced_gc = IsForcedGC::kNotForced;
   };
 
+  enum class WriteBarrierType {
+    kDijkstra,
+    kSteele,
+  };
+
   virtual ~MarkerBase();
 
   MarkerBase(const MarkerBase&) = delete;
@@ -95,6 +100,8 @@ class V8_EXPORT_PRIVATE MarkerBase {
   void ProcessWeakness();
 
   inline void WriteBarrierForInConstructionObject(HeapObjectHeader&);
+
+  template <WriteBarrierType type>
   inline void WriteBarrierForObject(HeapObjectHeader&);
 
   HeapBase& heap() { return heap_; }
@@ -157,6 +164,8 @@ class V8_EXPORT_PRIVATE MarkerBase {
 
   void VisitRoots(MarkingConfig::StackState);
 
+  bool VisitCrossThreadPersistentsIfNeeded();
+
   void MarkNotFullyConstructedObjects();
 
   void ScheduleIncrementalMarkingTask();
@@ -179,6 +188,7 @@ class V8_EXPORT_PRIVATE MarkerBase {
   std::unique_ptr<ConcurrentMarkerBase> concurrent_marker_{nullptr};
 
   bool main_marking_disabled_for_testing_{false};
+  bool visited_cross_thread_persistents_in_atomic_pause_{false};
 
   friend class MarkerFactory;
 };
@@ -220,8 +230,16 @@ void MarkerBase::WriteBarrierForInConstructionObject(HeapObjectHeader& header) {
       .Push<AccessMode::kAtomic>(&header);
 }
 
+template <MarkerBase::WriteBarrierType type>
 void MarkerBase::WriteBarrierForObject(HeapObjectHeader& header) {
-  mutator_marking_state_.write_barrier_worklist().Push(&header);
+  switch (type) {
+    case MarkerBase::WriteBarrierType::kDijkstra:
+      mutator_marking_state_.write_barrier_worklist().Push(&header);
+      break;
+    case MarkerBase::WriteBarrierType::kSteele:
+      mutator_marking_state_.retrace_marked_objects_worklist().Push(&header);
+      break;
+  }
 }
 
 }  // namespace internal

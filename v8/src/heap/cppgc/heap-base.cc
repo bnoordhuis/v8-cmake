@@ -17,6 +17,7 @@
 #include "src/heap/cppgc/marking-verifier.h"
 #include "src/heap/cppgc/object-view.h"
 #include "src/heap/cppgc/page-memory.h"
+#include "src/heap/cppgc/platform.h"
 #include "src/heap/cppgc/prefinalizer-handler.h"
 #include "src/heap/cppgc/stats-collector.h"
 
@@ -29,18 +30,18 @@ class ObjectSizeCounter : private HeapVisitor<ObjectSizeCounter> {
   friend class HeapVisitor<ObjectSizeCounter>;
 
  public:
-  size_t GetSize(RawHeap* heap) {
+  size_t GetSize(RawHeap& heap) {
     Traverse(heap);
     return accumulated_size_;
   }
 
  private:
-  static size_t ObjectSize(const HeapObjectHeader* header) {
-    return ObjectView(*header).Size();
+  static size_t ObjectSize(const HeapObjectHeader& header) {
+    return ObjectView(header).Size();
   }
 
-  bool VisitHeapObjectHeader(HeapObjectHeader* header) {
-    if (header->IsFree()) return true;
+  bool VisitHeapObjectHeader(HeapObjectHeader& header) {
+    if (header.IsFree()) return true;
     accumulated_size_ += ObjectSize(header);
     return true;
   }
@@ -53,28 +54,29 @@ class ObjectSizeCounter : private HeapVisitor<ObjectSizeCounter> {
 HeapBase::HeapBase(
     std::shared_ptr<cppgc::Platform> platform,
     const std::vector<std::unique_ptr<CustomSpaceBase>>& custom_spaces,
-    StackSupport stack_support,
-    std::unique_ptr<MetricRecorder> histogram_recorder)
+    StackSupport stack_support)
     : raw_heap_(this, custom_spaces),
       platform_(std::move(platform)),
+      oom_handler_(std::make_unique<FatalOutOfMemoryHandler>(this)),
 #if defined(LEAK_SANITIZER)
       lsan_page_allocator_(std::make_unique<v8::base::LsanPageAllocator>(
           platform_->GetPageAllocator())),
 #endif  // LEAK_SANITIZER
 #if defined(CPPGC_CAGED_HEAP)
-      caged_heap_(this, page_allocator()),
-      page_backend_(std::make_unique<PageBackend>(&caged_heap_.allocator())),
+      caged_heap_(*this, *page_allocator()),
+      page_backend_(std::make_unique<PageBackend>(caged_heap_.allocator(),
+                                                  *oom_handler_.get())),
 #else   // !CPPGC_CAGED_HEAP
-      page_backend_(std::make_unique<PageBackend>(page_allocator())),
+      page_backend_(std::make_unique<PageBackend>(*page_allocator(),
+                                                  *oom_handler_.get())),
 #endif  // !CPPGC_CAGED_HEAP
-      stats_collector_(std::make_unique<StatsCollector>(
-          std::move(histogram_recorder), platform_.get())),
+      stats_collector_(std::make_unique<StatsCollector>(platform_.get())),
       stack_(std::make_unique<heap::base::Stack>(
           v8::base::Stack::GetStackStart())),
       prefinalizer_handler_(std::make_unique<PreFinalizerHandler>(*this)),
       compactor_(raw_heap_),
-      object_allocator_(&raw_heap_, page_backend_.get(),
-                        stats_collector_.get()),
+      object_allocator_(raw_heap_, *page_backend_, *stats_collector_,
+                        *prefinalizer_handler_),
       sweeper_(*this),
       stack_support_(stack_support) {
   stats_collector_->RegisterObserver(
@@ -92,16 +94,23 @@ PageAllocator* HeapBase::page_allocator() const {
 }
 
 size_t HeapBase::ObjectPayloadSize() const {
-  return ObjectSizeCounter().GetSize(const_cast<RawHeap*>(&raw_heap()));
+  return ObjectSizeCounter().GetSize(const_cast<RawHeap&>(raw_heap()));
 }
 
 void HeapBase::AdvanceIncrementalGarbageCollectionOnAllocationIfNeeded() {
   if (marker_) marker_->AdvanceMarkingOnAllocation();
 }
-void HeapBase::ExecutePreFinalizers() {
+
+size_t HeapBase::ExecutePreFinalizers() {
+#ifdef CPPGC_ALLOW_ALLOCATIONS_IN_PREFINALIZERS
+  // Allocations in pre finalizers should not trigger another GC.
+  cppgc::subtle::NoGarbageCollectionScope no_gc_scope(*this);
+#else
   // Pre finalizers are forbidden from allocating objects.
   cppgc::subtle::DisallowGarbageCollectionScope no_gc_scope(*this);
+#endif  // CPPGC_ALLOW_ALLOCATIONS_IN_PREFINALIZERS
   prefinalizer_handler_->InvokePreFinalizers();
+  return prefinalizer_handler_->ExtractBytesAllocatedInPrefinalizers();
 }
 
 void HeapBase::Terminate() {
@@ -112,6 +121,7 @@ void HeapBase::Terminate() {
 
   constexpr size_t kMaxTerminationGCs = 20;
   size_t gc_count = 0;
+  bool more_termination_gcs_needed = false;
   do {
     CHECK_LT(gc_count++, kMaxTerminationGCs);
 
@@ -127,14 +137,21 @@ void HeapBase::Terminate() {
     stats_collector()->NotifyMarkingStarted(
         GarbageCollector::Config::CollectionType::kMajor,
         GarbageCollector::Config::IsForcedGC::kForced);
-    stats_collector()->NotifyMarkingCompleted(0);
     object_allocator().ResetLinearAllocationBuffers();
+    stats_collector()->NotifyMarkingCompleted(0);
     ExecutePreFinalizers();
     sweeper().Start(
         {Sweeper::SweepingConfig::SweepingType::kAtomic,
          Sweeper::SweepingConfig::CompactableSpaceHandling::kSweep});
     sweeper().NotifyDoneIfNeeded();
-  } while (strong_persistent_region_.NodesInUse() > 0);
+    more_termination_gcs_needed =
+        strong_persistent_region_.NodesInUse() ||
+        weak_persistent_region_.NodesInUse() || [this]() {
+          PersistentRegionLock guard;
+          return strong_cross_thread_persistent_region_.NodesInUse() ||
+                 weak_cross_thread_persistent_region_.NodesInUse();
+        }();
+  } while (more_termination_gcs_needed);
 
   object_allocator().Terminate();
   disallow_gc_scope_++;
@@ -149,14 +166,16 @@ HeapStatistics HeapBase::CollectStatistics(
     HeapStatistics::DetailLevel detail_level) {
   if (detail_level == HeapStatistics::DetailLevel::kBrief) {
     return {stats_collector_->allocated_memory_size(),
+            stats_collector_->resident_memory_size(),
             stats_collector_->allocated_object_size(),
             HeapStatistics::DetailLevel::kBrief,
+            {},
             {}};
   }
 
   sweeper_.FinishIfRunning();
   object_allocator_.ResetLinearAllocationBuffers();
-  return HeapStatisticsCollector().CollectStatistics(this);
+  return HeapStatisticsCollector().CollectDetailedStatistics(this);
 }
 
 }  // namespace internal

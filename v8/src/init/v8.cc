@@ -20,6 +20,7 @@
 #include "src/execution/runtime-profiler.h"
 #include "src/execution/simulator.h"
 #include "src/init/bootstrapper.h"
+#include "src/init/vm-cage.h"
 #include "src/libsampler/sampler.h"
 #include "src/objects/elements.h"
 #include "src/objects/objects-inl.h"
@@ -65,7 +66,25 @@ void V8::TearDown() {
   FlagList::ResetAllFlags();  // Frees memory held by string arguments.
 }
 
+#define DISABLE_FLAG(flag)                                                    \
+  if (FLAG_##flag) {                                                          \
+    PrintF(stderr,                                                            \
+           "Warning: disabling flag --" #flag " due to conflicting flags\n"); \
+    FLAG_##flag = false;                                                      \
+  }
+
 void V8::InitializeOncePerProcessImpl() {
+  CHECK(platform_);
+
+#ifdef V8_VIRTUAL_MEMORY_CAGE
+  if (!GetProcessWideVirtualMemoryCage()->is_initialized()) {
+    // For now, we still allow the cage to be disabled even if V8 was compiled
+    // with V8_VIRTUAL_MEMORY_CAGE. This will eventually be forbidden.
+    CHECK(kAllowBackingStoresOutsideCage);
+    GetProcessWideVirtualMemoryCage()->Disable();
+  }
+#endif
+
   // Update logging information before enforcing flag implications.
   bool* log_all_flags[] = {&FLAG_turbo_profiling_log_builtins,
                            &FLAG_log_all,
@@ -129,7 +148,7 @@ void V8::InitializeOncePerProcessImpl() {
   // memory.
 #if V8_ENABLE_WEBASSEMBLY
   if (FLAG_jitless && !FLAG_correctness_fuzzer_suppressions) {
-    FLAG_expose_wasm = false;
+    DISABLE_FLAG(expose_wasm);
   }
 #endif
 
@@ -139,24 +158,18 @@ void V8::InitializeOncePerProcessImpl() {
   // TODO(chromium:1205289): Teach relevant fuzzers to not pass TF tracing
   // flags instead, and remove this section.
   if (FLAG_fuzzing && FLAG_concurrent_recompilation) {
-    FLAG_trace_turbo = false;
-    FLAG_trace_turbo_graph = false;
-    FLAG_trace_turbo_scheduled = false;
-    FLAG_trace_turbo_reduction = false;
-    FLAG_trace_turbo_trimming = false;
-    FLAG_trace_turbo_jt = false;
-    FLAG_trace_turbo_ceq = false;
-    FLAG_trace_turbo_loop = false;
-    FLAG_trace_turbo_alloc = false;
-    FLAG_trace_all_uses = false;
-    FLAG_trace_representation = false;
-    FLAG_trace_turbo_stack_accesses = false;
-  }
-
-  if (FLAG_regexp_interpret_all && FLAG_regexp_tier_up) {
-    // Turning off the tier-up strategy, because the --regexp-interpret-all and
-    // --regexp-tier-up flags are incompatible.
-    FLAG_regexp_tier_up = false;
+    DISABLE_FLAG(trace_turbo);
+    DISABLE_FLAG(trace_turbo_graph);
+    DISABLE_FLAG(trace_turbo_scheduled);
+    DISABLE_FLAG(trace_turbo_reduction);
+    DISABLE_FLAG(trace_turbo_trimming);
+    DISABLE_FLAG(trace_turbo_jt);
+    DISABLE_FLAG(trace_turbo_ceq);
+    DISABLE_FLAG(trace_turbo_loop);
+    DISABLE_FLAG(trace_turbo_alloc);
+    DISABLE_FLAG(trace_all_uses);
+    DISABLE_FLAG(trace_representation);
+    DISABLE_FLAG(trace_turbo_stack_accesses);
   }
 
   // The --jitless and --interpreted-frames-native-stack flags are incompatible
@@ -167,6 +180,8 @@ void V8::InitializeOncePerProcessImpl() {
   base::OS::Initialize(FLAG_hard_abort, FLAG_gc_fake_mmap);
 
   if (FLAG_random_seed) SetRandomMmapSeed(FLAG_random_seed);
+
+  if (FLAG_print_flag_values) FlagList::PrintValues();
 
 #if defined(V8_USE_PERFETTO)
   if (perfetto::Tracing::IsInitialized()) TrackEvent::Register();
@@ -206,6 +221,15 @@ void V8::InitializePlatform(v8::Platform* platform) {
 #endif
 }
 
+#ifdef V8_VIRTUAL_MEMORY_CAGE
+bool V8::InitializeVirtualMemoryCage() {
+  // Platform must have been initialized already.
+  CHECK(platform_);
+  v8::PageAllocator* page_allocator = GetPlatformPageAllocator();
+  return GetProcessWideVirtualMemoryCage()->Initialize(page_allocator);
+}
+#endif
+
 void V8::ShutdownPlatform() {
   CHECK(platform_);
 #if defined(V8_OS_WIN) && defined(V8_ENABLE_SYSTEM_INSTRUMENTATION)
@@ -215,6 +239,13 @@ void V8::ShutdownPlatform() {
 #endif
   v8::tracing::TracingCategoryObserver::TearDown();
   v8::base::SetPrintStackTrace(nullptr);
+
+#ifdef V8_VIRTUAL_MEMORY_CAGE
+  // TODO(chromium:1218005) alternatively, this could move to its own
+  // public TearDownVirtualMemoryCage function.
+  GetProcessWideVirtualMemoryCage()->TearDown();
+#endif
+
   platform_ = nullptr;
 }
 

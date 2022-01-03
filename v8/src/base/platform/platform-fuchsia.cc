@@ -127,8 +127,18 @@ bool OS::SetPermissions(void* address, size_t size, MemoryPermission access) {
 
 // static
 bool OS::DiscardSystemPages(void* address, size_t size) {
-  // TODO(hpayer): Does Fuchsia have madvise?
-  return true;
+  uint64_t address_int = reinterpret_cast<uint64_t>(address);
+  zx_status_t status = zx::vmar::root_self()->op_range(
+      ZX_VMO_OP_DECOMMIT, address_int, size, nullptr, 0);
+  return status == ZX_OK;
+}
+
+bool OS::DecommitPages(void* address, size_t size) {
+  // We rely on DiscardSystemPages decommitting the pages immediately (via
+  // ZX_VMO_OP_DECOMMIT) so that they are guaranteed to be zero-initialized
+  // should they be accessed again later on.
+  return SetPermissions(address, size, MemoryPermission::kNoAccess) &&
+         DiscardSystemPages(address, size);
 }
 
 // static

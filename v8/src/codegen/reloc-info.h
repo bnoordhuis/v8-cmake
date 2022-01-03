@@ -88,6 +88,10 @@ class RelocInfo {
     DEOPT_INLINING_ID,  // Deoptimization source position.
     DEOPT_REASON,       // Deoptimization reason index.
     DEOPT_ID,           // Deoptimization inlining id.
+    DEOPT_NODE_ID,      // Id of the node that caused deoptimization. This
+                        // information is only recorded in debug builds.
+
+    LITERAL_CONSTANT,  // An constant embedded in the instruction stream.
 
     // This is not an actual reloc mode, but used to encode a long pc jump that
     // cannot be encoded as part of another record.
@@ -169,6 +173,12 @@ class RelocInfo {
     return mode == DEOPT_REASON;
   }
   static constexpr bool IsDeoptId(Mode mode) { return mode == DEOPT_ID; }
+  static constexpr bool IsLiteralConstant(Mode mode) {
+    return mode == LITERAL_CONSTANT;
+  }
+  static constexpr bool IsDeoptNodeId(Mode mode) {
+    return mode == DEOPT_NODE_ID;
+  }
   static constexpr bool IsExternalReference(Mode mode) {
     return mode == EXTERNAL_REFERENCE;
   }
@@ -245,8 +255,9 @@ class RelocInfo {
   V8_INLINE HeapObject target_object();
 
   // In GC operations, we don't have a host_ pointer. Retrieving a target
-  // for COMPRESSED_EMBEDDED_OBJECT mode requires an isolate.
-  V8_INLINE HeapObject target_object_no_host(Isolate* isolate);
+  // for COMPRESSED_EMBEDDED_OBJECT mode requires a pointer compression cage
+  // base value.
+  V8_INLINE HeapObject target_object_no_host(PtrComprCageBase cage_base);
   V8_INLINE Handle<HeapObject> target_object_handle(Assembler* origin);
 
   V8_INLINE void set_target_object(
@@ -432,9 +443,9 @@ class V8_EXPORT_PRIVATE RelocIterator : public Malloced {
   explicit RelocIterator(const CodeDesc& desc, int mode_mask = -1);
   explicit RelocIterator(const CodeReference code_reference,
                          int mode_mask = -1);
-  explicit RelocIterator(Vector<byte> instructions,
-                         Vector<const byte> reloc_info, Address const_pool,
-                         int mode_mask = -1);
+  explicit RelocIterator(base::Vector<byte> instructions,
+                         base::Vector<const byte> reloc_info,
+                         Address const_pool, int mode_mask = -1);
   RelocIterator(RelocIterator&&) V8_NOEXCEPT = default;
 
   RelocIterator(const RelocIterator&) = delete;

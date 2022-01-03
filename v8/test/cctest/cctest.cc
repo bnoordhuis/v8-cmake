@@ -29,7 +29,13 @@
 
 #include "include/cppgc/platform.h"
 #include "include/libplatform/libplatform.h"
-#include "include/v8.h"
+#include "include/v8-array-buffer.h"
+#include "include/v8-context.h"
+#include "include/v8-function.h"
+#include "include/v8-isolate.h"
+#include "include/v8-local-handle.h"
+#include "include/v8-locker.h"
+#include "src/base/strings.h"
 #include "src/codegen/compiler.h"
 #include "src/codegen/optimized-compilation-info.h"
 #include "src/compiler/pipeline.h"
@@ -116,7 +122,7 @@ void CcTest::Run() {
   DCHECK_EQ(active_isolates, i::Isolate::non_disposed_isolates());
 #endif  // DEBUG
   if (initialize_) {
-    if (v8::Locker::IsActive()) {
+    if (v8::Locker::WasEverUsed()) {
       v8::Locker locker(isolate_);
       EmptyMessageQueues(isolate_);
     } else {
@@ -170,8 +176,8 @@ i::Handle<i::String> CcTest::MakeString(const char* str) {
 }
 
 i::Handle<i::String> CcTest::MakeName(const char* str, int suffix) {
-  i::EmbeddedVector<char, 128> buffer;
-  SNPrintF(buffer, "%s%d", str, suffix);
+  v8::base::EmbeddedVector<char, 128> buffer;
+  v8::base::SNPrintF(buffer, "%s%d", str, suffix);
   return CcTest::MakeString(buffer.begin());
 }
 
@@ -272,6 +278,7 @@ i::Handle<i::JSFunction> Optimize(
   i::OptimizedCompilationInfo info(zone, isolate, shared, function,
                                    i::CodeKind::TURBOFAN);
 
+  if (flags & ~i::OptimizedCompilationInfo::kInlining) UNIMPLEMENTED();
   if (flags & i::OptimizedCompilationInfo::kInlining) {
     info.set_inlining();
   }
@@ -334,6 +341,9 @@ int main(int argc, char* argv[]) {
   v8::V8::InitializeICUDefaultLocation(argv[0]);
   std::unique_ptr<v8::Platform> platform(v8::platform::NewDefaultPlatform());
   v8::V8::InitializePlatform(platform.get());
+#ifdef V8_VIRTUAL_MEMORY_CAGE
+  CHECK(v8::V8::InitializeVirtualMemoryCage());
+#endif
   cppgc::InitializeProcess(platform->GetPageAllocator());
   using HelpOptions = v8::internal::FlagList::HelpOptions;
   v8::internal::FlagList::SetFlagsFromCommandLine(
@@ -341,12 +351,10 @@ int main(int argc, char* argv[]) {
   v8::V8::Initialize();
   v8::V8::InitializeExternalStartupData(argv[0]);
 
-#if V8_ENABLE_WEBASSEMBLY
-  if (V8_TRAP_HANDLER_SUPPORTED && i::FLAG_wasm_trap_handler) {
-    constexpr bool use_default_signal_handler = true;
-    CHECK(v8::V8::EnableWebAssemblyTrapHandler(use_default_signal_handler));
-  }
-#endif  // V8_ENABLE_WEBASSEMBLY
+#if V8_ENABLE_WEBASSEMBLY && V8_TRAP_HANDLER_SUPPORTED
+  constexpr bool kUseDefaultTrapHandler = true;
+  CHECK(v8::V8::EnableWebAssemblyTrapHandler(kUseDefaultTrapHandler));
+#endif  // V8_ENABLE_WEBASSEMBLY && V8_TRAP_HANDLER_SUPPORTED
 
   CcTest::set_array_buffer_allocator(
       v8::ArrayBuffer::Allocator::NewDefaultAllocator());
@@ -414,7 +422,9 @@ int RegisterThreadedTest::count_ = 0;
 bool IsValidUnwrapObject(v8::Object* object) {
   i::Address addr = *reinterpret_cast<i::Address*>(object);
   auto instance_type = i::Internals::GetInstanceType(addr);
-  return (instance_type == i::Internals::kJSObjectType ||
-          instance_type == i::Internals::kJSApiObjectType ||
+  return (v8::base::IsInRange(instance_type,
+                              i::Internals::kFirstJSApiObjectType,
+                              i::Internals::kLastJSApiObjectType) ||
+          instance_type == i::Internals::kJSObjectType ||
           instance_type == i::Internals::kJSSpecialApiObjectType);
 }

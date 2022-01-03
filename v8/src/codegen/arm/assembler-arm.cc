@@ -2677,7 +2677,7 @@ void Assembler::vstm(BlockAddrMode am, Register base, SwVfpRegister first,
        0xA * B8 | count);
 }
 
-static void DoubleAsTwoUInt32(Double d, uint32_t* lo, uint32_t* hi) {
+static void DoubleAsTwoUInt32(base::Double d, uint32_t* lo, uint32_t* hi) {
   uint64_t i = d.AsUint64();
 
   *lo = i & 0xFFFFFFFF;
@@ -2750,7 +2750,7 @@ void Assembler::vmov(const QwNeonRegister dst, uint64_t imm) {
 
 // Only works for little endian floating point formats.
 // We don't support VFP on the mixed endian floating point platform.
-static bool FitsVmovFPImmediate(Double d, uint32_t* encoding) {
+static bool FitsVmovFPImmediate(base::Double d, uint32_t* encoding) {
   // VMOV can accept an immediate of the form:
   //
   //  +/- m * 2^(-n) where 16 <= m <= 31 and 0 <= n <= 7
@@ -2799,7 +2799,7 @@ static bool FitsVmovFPImmediate(Double d, uint32_t* encoding) {
 void Assembler::vmov(const SwVfpRegister dst, Float32 imm) {
   uint32_t enc;
   if (CpuFeatures::IsSupported(VFPv3) &&
-      FitsVmovFPImmediate(Double(imm.get_scalar()), &enc)) {
+      FitsVmovFPImmediate(base::Double(imm.get_scalar()), &enc)) {
     CpuFeatureScope scope(this, VFPv3);
     // The float can be encoded in the instruction.
     //
@@ -2818,7 +2818,7 @@ void Assembler::vmov(const SwVfpRegister dst, Float32 imm) {
   }
 }
 
-void Assembler::vmov(const DwVfpRegister dst, Double imm,
+void Assembler::vmov(const DwVfpRegister dst, base::Double imm,
                      const Register extra_scratch) {
   DCHECK(VfpRegisterIsAvailable(dst));
   uint32_t enc;
@@ -4046,6 +4046,8 @@ enum UnaryOp {
   VTRN,
   VRECPE,
   VRSQRTE,
+  VPADAL_S,
+  VPADAL_U,
   VPADDL_S,
   VPADDL_U,
   VCEQ0,
@@ -4118,6 +4120,12 @@ static Instr EncodeNeonUnaryOp(UnaryOp op, NeonRegType reg_type, NeonSize size,
     case VRSQRTE:
       // Only support floating point.
       op_encoding = 0x3 * B16 | 0xB * B7;
+      break;
+    case VPADAL_S:
+      op_encoding = 0xC * B7;
+      break;
+    case VPADAL_U:
+      op_encoding = 0xD * B7;
       break;
     case VPADDL_S:
       op_encoding = 0x4 * B7;
@@ -4778,7 +4786,7 @@ static Instr EncodeNeonPairwiseOp(NeonPairwiseOp op, NeonDataType dt,
 void Assembler::vpadd(DwVfpRegister dst, DwVfpRegister src1,
                       DwVfpRegister src2) {
   DCHECK(IsEnabled(NEON));
-  // Dd = vpadd(Dn, Dm) SIMD integer pairwise ADD.
+  // Dd = vpadd(Dn, Dm) SIMD floating point pairwise ADD.
   // Instruction details available in ARM DDI 0406C.b, A8-982.
   int vd, d;
   dst.split_code(&vd, &d);
@@ -5016,6 +5024,14 @@ void Assembler::vtrn(NeonSize size, QwNeonRegister src1, QwNeonRegister src2) {
   emit(EncodeNeonUnaryOp(VTRN, NEON_Q, size, src1.code(), src2.code()));
 }
 
+void Assembler::vpadal(NeonDataType dt, QwNeonRegister dst,
+                       QwNeonRegister src) {
+  DCHECK(IsEnabled(NEON));
+  // vpadal.<dt>(Qd, Qm) SIMD Vector Pairwise Add and Accumulate Long
+  emit(EncodeNeonUnaryOp(NeonU(dt) ? VPADAL_U : VPADAL_S, NEON_Q,
+                         NeonDataTypeToSize(dt), dst.code(), src.code()));
+}
+
 void Assembler::vpaddl(NeonDataType dt, QwNeonRegister dst,
                        QwNeonRegister src) {
   DCHECK(IsEnabled(NEON));
@@ -5156,8 +5172,28 @@ void Assembler::RecordConstPool(int size) {
   RecordRelocInfo(RelocInfo::CONST_POOL, static_cast<intptr_t>(size));
 }
 
+void Assembler::FixOnHeapReferences(bool update_embedded_objects) {
+  if (!update_embedded_objects) return;
+  Address base = reinterpret_cast<Address>(buffer_->start());
+  for (auto p : saved_handles_for_raw_object_ptr_) {
+    Handle<HeapObject> object(reinterpret_cast<Address*>(p.second));
+    WriteUnalignedValue(base + p.first, *object);
+  }
+}
+
+void Assembler::FixOnHeapReferencesToHandles() {
+  Address base = reinterpret_cast<Address>(buffer_->start());
+  for (auto p : saved_handles_for_raw_object_ptr_) {
+    WriteUnalignedValue(base + p.first, p.second);
+  }
+  saved_handles_for_raw_object_ptr_.clear();
+}
+
 void Assembler::GrowBuffer() {
   DCHECK_EQ(buffer_start_, buffer_->start());
+
+  bool previously_on_heap = buffer_->IsOnHeap();
+  int previous_on_heap_gc_count = OnHeapGCCount();
 
   // Compute new buffer size.
   int old_size = buffer_->size();
@@ -5191,6 +5227,15 @@ void Assembler::GrowBuffer() {
       reinterpret_cast<Address>(reloc_info_writer.last_pc()) + pc_delta);
   reloc_info_writer.Reposition(new_reloc_start, new_last_pc);
 
+  // Fix on-heap references.
+  if (previously_on_heap) {
+    if (buffer_->IsOnHeap()) {
+      FixOnHeapReferences(previous_on_heap_gc_count != OnHeapGCCount());
+    } else {
+      FixOnHeapReferencesToHandles();
+    }
+  }
+
   // None of our relocation types are pc relative pointing outside the code
   // buffer nor pc absolute pointing inside the code buffer, so there is no need
   // to relocate any emitted relocation entries.
@@ -5211,7 +5256,8 @@ void Assembler::dd(uint32_t data, RelocInfo::Mode rmode) {
   DCHECK(is_const_pool_blocked() || pending_32_bit_constants_.empty());
   CheckBuffer();
   if (!RelocInfo::IsNone(rmode)) {
-    DCHECK(RelocInfo::IsDataEmbeddedObject(rmode));
+    DCHECK(RelocInfo::IsDataEmbeddedObject(rmode) ||
+           RelocInfo::IsLiteralConstant(rmode));
     RecordRelocInfo(rmode);
   }
   base::WriteUnalignedValue(reinterpret_cast<Address>(pc_), data);
@@ -5224,7 +5270,8 @@ void Assembler::dq(uint64_t value, RelocInfo::Mode rmode) {
   DCHECK(is_const_pool_blocked() || pending_32_bit_constants_.empty());
   CheckBuffer();
   if (!RelocInfo::IsNone(rmode)) {
-    DCHECK(RelocInfo::IsDataEmbeddedObject(rmode));
+    DCHECK(RelocInfo::IsDataEmbeddedObject(rmode) ||
+           RelocInfo::IsLiteralConstant(rmode));
     RecordRelocInfo(rmode);
   }
   base::WriteUnalignedValue(reinterpret_cast<Address>(pc_), value);
@@ -5357,9 +5404,9 @@ void Assembler::CheckConstPool(bool force_emit, bool require_jump) {
   while (buffer_space() <= needed_space) GrowBuffer();
 
   {
+    ASM_CODE_COMMENT_STRING(this, "Constant Pool");
     // Block recursive calls to CheckConstPool.
     BlockConstPoolScope block_const_pool(this);
-    RecordComment("[ Constant Pool");
     RecordConstPool(size);
 
     Label size_check;
@@ -5383,6 +5430,13 @@ void Assembler::CheckConstPool(bool force_emit, bool require_jump) {
     // Make sure we're not emitting the constant too late.
     CHECK_LE(pc_offset(),
              first_const_pool_32_use_ + kMaxDistToPcRelativeConstant);
+
+    // Check that the code buffer is large enough before emitting the constant
+    // pool (this includes the gap to the relocation information).
+    int needed_space = pending_32_bit_constants_.size() * kPointerSize + kGap;
+    while (buffer_space() <= needed_space) {
+      GrowBuffer();
+    }
 
     // Emit 32-bit constant pool entries.
     for (size_t i = 0; i < pending_32_bit_constants_.size(); i++) {
@@ -5416,15 +5470,21 @@ void Assembler::CheckConstPool(bool force_emit, bool require_jump) {
       instr_at_put(entry.position(),
                    SetLdrRegisterImmediateOffset(instr, delta));
       if (!entry.is_merged()) {
-        emit(entry.value());
+        if (IsOnHeap() && RelocInfo::IsEmbeddedObjectMode(entry.rmode())) {
+          int offset = pc_offset();
+          saved_handles_for_raw_object_ptr_.emplace_back(offset, entry.value());
+          Handle<HeapObject> object(reinterpret_cast<Address*>(entry.value()));
+          emit(object->ptr());
+          DCHECK(EmbeddedObjectMatches(offset, object));
+        } else {
+          emit(entry.value());
+        }
       }
     }
 
     pending_32_bit_constants_.clear();
 
     first_const_pool_32_use_ = -1;
-
-    RecordComment("]");
 
     DCHECK_EQ(size, SizeOfCodeGeneratedSince(&size_check));
 

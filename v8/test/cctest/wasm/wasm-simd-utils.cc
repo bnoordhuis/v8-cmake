@@ -36,7 +36,7 @@ void RunI8x16UnOpTest(TestExecutionTier execution_tier, WasmOpcode opcode,
     r.Call(x);
     int8_t expected = expected_op(x);
     for (int i = 0; i < 16; i++) {
-      CHECK_EQ(expected, ReadLittleEndianValue<int8_t>(&g[i]));
+      CHECK_EQ(expected, LANE(g, i));
     }
   }
 }
@@ -62,7 +62,7 @@ void RunI8x16BinOpTest(TestExecutionTier execution_tier, WasmOpcode opcode,
       r.Call(x, y);
       T expected = expected_op(x, y);
       for (int i = 0; i < 16; i++) {
-        CHECK_EQ(expected, ReadLittleEndianValue<T>(&g[i]));
+        CHECK_EQ(expected, LANE(g, i));
       }
     }
   }
@@ -100,8 +100,8 @@ void RunI8x16ShiftOpTest(TestExecutionTier execution_tier, WasmOpcode opcode,
       r.Call(x);
       int8_t expected = expected_op(x, shift);
       for (int i = 0; i < 16; i++) {
-        CHECK_EQ(expected, ReadLittleEndianValue<int8_t>(&g_imm[i]));
-        CHECK_EQ(expected, ReadLittleEndianValue<int8_t>(&g_mem[i]));
+        CHECK_EQ(expected, LANE(g_imm, i));
+        CHECK_EQ(expected, LANE(g_mem, i));
       }
     }
   }
@@ -144,7 +144,7 @@ void RunI16x8UnOpTest(TestExecutionTier execution_tier, WasmOpcode opcode,
     r.Call(x);
     int16_t expected = expected_op(x);
     for (int i = 0; i < 8; i++) {
-      CHECK_EQ(expected, ReadLittleEndianValue<int16_t>(&g[i]));
+      CHECK_EQ(expected, LANE(g, i));
     }
   }
 }
@@ -170,7 +170,7 @@ void RunI16x8BinOpTest(TestExecutionTier execution_tier, WasmOpcode opcode,
       r.Call(x, y);
       T expected = expected_op(x, y);
       for (int i = 0; i < 8; i++) {
-        CHECK_EQ(expected, ReadLittleEndianValue<T>(&g[i]));
+        CHECK_EQ(expected, LANE(g, i));
       }
     }
   }
@@ -207,8 +207,8 @@ void RunI16x8ShiftOpTest(TestExecutionTier execution_tier, WasmOpcode opcode,
       r.Call(x);
       int16_t expected = expected_op(x, shift);
       for (int i = 0; i < 8; i++) {
-        CHECK_EQ(expected, ReadLittleEndianValue<int16_t>(&g_imm[i]));
-        CHECK_EQ(expected, ReadLittleEndianValue<int16_t>(&g_mem[i]));
+        CHECK_EQ(expected, LANE(g_imm, i));
+        CHECK_EQ(expected, LANE(g_mem, i));
       }
     }
   }
@@ -251,7 +251,7 @@ void RunI32x4UnOpTest(TestExecutionTier execution_tier, WasmOpcode opcode,
     r.Call(x);
     int32_t expected = expected_op(x);
     for (int i = 0; i < 4; i++) {
-      CHECK_EQ(expected, ReadLittleEndianValue<int32_t>(&g[i]));
+      CHECK_EQ(expected, LANE(g, i));
     }
   }
 }
@@ -276,7 +276,7 @@ void RunI32x4BinOpTest(TestExecutionTier execution_tier, WasmOpcode opcode,
       r.Call(x, y);
       int32_t expected = expected_op(x, y);
       for (int i = 0; i < 4; i++) {
-        CHECK_EQ(expected, ReadLittleEndianValue<int32_t>(&g[i]));
+        CHECK_EQ(expected, LANE(g, i));
       }
     }
   }
@@ -307,8 +307,8 @@ void RunI32x4ShiftOpTest(TestExecutionTier execution_tier, WasmOpcode opcode,
       r.Call(x);
       int32_t expected = expected_op(x, shift);
       for (int i = 0; i < 4; i++) {
-        CHECK_EQ(expected, ReadLittleEndianValue<int32_t>(&g_imm[i]));
-        CHECK_EQ(expected, ReadLittleEndianValue<int32_t>(&g_mem[i]));
+        CHECK_EQ(expected, LANE(g_imm, i));
+        CHECK_EQ(expected, LANE(g_mem, i));
       }
     }
   }
@@ -330,7 +330,7 @@ void RunI64x2UnOpTest(TestExecutionTier execution_tier, WasmOpcode opcode,
     r.Call(x);
     int64_t expected = expected_op(x);
     for (int i = 0; i < 2; i++) {
-      CHECK_EQ(expected, ReadLittleEndianValue<int64_t>(&g[i]));
+      CHECK_EQ(expected, LANE(g, i));
     }
   }
 }
@@ -355,7 +355,7 @@ void RunI64x2BinOpTest(TestExecutionTier execution_tier, WasmOpcode opcode,
       r.Call(x, y);
       int64_t expected = expected_op(x, y);
       for (int i = 0; i < 2; i++) {
-        CHECK_EQ(expected, ReadLittleEndianValue<int64_t>(&g[i]));
+        CHECK_EQ(expected, LANE(g, i));
       }
     }
   }
@@ -386,8 +386,8 @@ void RunI64x2ShiftOpTest(TestExecutionTier execution_tier, WasmOpcode opcode,
       r.Call(x);
       int64_t expected = expected_op(x, shift);
       for (int i = 0; i < 2; i++) {
-        CHECK_EQ(expected, ReadLittleEndianValue<int64_t>(&g_imm[i]));
-        CHECK_EQ(expected, ReadLittleEndianValue<int64_t>(&g_mem[i]));
+        CHECK_EQ(expected, LANE(g_imm, i));
+        CHECK_EQ(expected, LANE(g_mem, i));
       }
     }
   }
@@ -399,15 +399,6 @@ bool IsExtreme(float x) {
   const float kLargeFloatThreshold = 1.0e32f;
   return abs_x != 0.0f &&  // 0 or -0 are fine.
          (abs_x < kSmallFloatThreshold || abs_x > kLargeFloatThreshold);
-}
-
-bool IsSameNan(float expected, float actual) {
-  // Sign is non-deterministic.
-  uint32_t expected_bits = bit_cast<uint32_t>(expected) & ~0x80000000;
-  uint32_t actual_bits = bit_cast<uint32_t>(actual) & ~0x80000000;
-  // Some implementations convert signaling NaNs to quiet NaNs.
-  return (expected_bits == actual_bits) ||
-         ((expected_bits | 0x00400000) == actual_bits);
 }
 
 bool IsCanonical(float actual) {
@@ -470,13 +461,13 @@ void RunF32x4UnOpTest(TestExecutionTier execution_tier, WasmOpcode opcode,
     if (!PlatformCanRepresent(expected)) continue;
     r.Call(x);
     for (int i = 0; i < 4; i++) {
-      float actual = ReadLittleEndianValue<float>(&g[i]);
+      float actual = LANE(g, i);
       CheckFloatResult(x, x, expected, actual, exact);
     }
   }
 
-  FOR_FLOAT32_NAN_INPUTS(i) {
-    float x = bit_cast<float>(nan_test_array[i]);
+  FOR_FLOAT32_NAN_INPUTS(f) {
+    float x = bit_cast<float>(nan_test_array[f]);
     if (!PlatformCanRepresent(x)) continue;
     // Extreme values have larger errors so skip them for approximation tests.
     if (!exact && IsExtreme(x)) continue;
@@ -484,7 +475,7 @@ void RunF32x4UnOpTest(TestExecutionTier execution_tier, WasmOpcode opcode,
     if (!PlatformCanRepresent(expected)) continue;
     r.Call(x);
     for (int i = 0; i < 4; i++) {
-      float actual = ReadLittleEndianValue<float>(&g[i]);
+      float actual = LANE(g, i);
       CheckFloatResult(x, x, expected, actual, exact);
     }
   }
@@ -513,14 +504,14 @@ void RunF32x4BinOpTest(TestExecutionTier execution_tier, WasmOpcode opcode,
       if (!PlatformCanRepresent(expected)) continue;
       r.Call(x, y);
       for (int i = 0; i < 4; i++) {
-        float actual = ReadLittleEndianValue<float>(&g[i]);
+        float actual = g[i];
         CheckFloatResult(x, y, expected, actual, true /* exact */);
       }
     }
   }
 
-  FOR_FLOAT32_NAN_INPUTS(i) {
-    float x = bit_cast<float>(nan_test_array[i]);
+  FOR_FLOAT32_NAN_INPUTS(f) {
+    float x = bit_cast<float>(nan_test_array[f]);
     if (!PlatformCanRepresent(x)) continue;
     FOR_FLOAT32_NAN_INPUTS(j) {
       float y = bit_cast<float>(nan_test_array[j]);
@@ -529,7 +520,7 @@ void RunF32x4BinOpTest(TestExecutionTier execution_tier, WasmOpcode opcode,
       if (!PlatformCanRepresent(expected)) continue;
       r.Call(x, y);
       for (int i = 0; i < 4; i++) {
-        float actual = ReadLittleEndianValue<float>(&g[i]);
+        float actual = LANE(g, i);
         CheckFloatResult(x, y, expected, actual, true /* exact */);
       }
     }
@@ -560,7 +551,7 @@ void RunF32x4CompareOpTest(TestExecutionTier execution_tier, WasmOpcode opcode,
       r.Call(x, y);
       int32_t expected = expected_op(x, y);
       for (int i = 0; i < 4; i++) {
-        CHECK_EQ(expected, ReadLittleEndianValue<int32_t>(&g[i]));
+        CHECK_EQ(expected, LANE(g, i));
       }
     }
   }
@@ -572,15 +563,6 @@ bool IsExtreme(double x) {
   const double kLargeFloatThreshold = 1.0e298;
   return abs_x != 0.0f &&  // 0 or -0 are fine.
          (abs_x < kSmallFloatThreshold || abs_x > kLargeFloatThreshold);
-}
-
-bool IsSameNan(double expected, double actual) {
-  // Sign is non-deterministic.
-  uint64_t expected_bits = bit_cast<uint64_t>(expected) & ~0x8000000000000000;
-  uint64_t actual_bits = bit_cast<uint64_t>(actual) & ~0x8000000000000000;
-  // Some implementations convert signaling NaNs to quiet NaNs.
-  return (expected_bits == actual_bits) ||
-         ((expected_bits | 0x0008000000000000) == actual_bits);
 }
 
 bool IsCanonical(double actual) {
@@ -643,13 +625,13 @@ void RunF64x2UnOpTest(TestExecutionTier execution_tier, WasmOpcode opcode,
     if (!PlatformCanRepresent(expected)) continue;
     r.Call(x);
     for (int i = 0; i < 2; i++) {
-      double actual = ReadLittleEndianValue<double>(&g[i]);
+      double actual = LANE(g, i);
       CheckDoubleResult(x, x, expected, actual, exact);
     }
   }
 
-  FOR_FLOAT64_NAN_INPUTS(i) {
-    double x = bit_cast<double>(double_nan_test_array[i]);
+  FOR_FLOAT64_NAN_INPUTS(d) {
+    double x = bit_cast<double>(double_nan_test_array[d]);
     if (!PlatformCanRepresent(x)) continue;
     // Extreme values have larger errors so skip them for approximation tests.
     if (!exact && IsExtreme(x)) continue;
@@ -657,7 +639,7 @@ void RunF64x2UnOpTest(TestExecutionTier execution_tier, WasmOpcode opcode,
     if (!PlatformCanRepresent(expected)) continue;
     r.Call(x);
     for (int i = 0; i < 2; i++) {
-      double actual = ReadLittleEndianValue<double>(&g[i]);
+      double actual = LANE(g, i);
       CheckDoubleResult(x, x, expected, actual, exact);
     }
   }
@@ -686,14 +668,14 @@ void RunF64x2BinOpTest(TestExecutionTier execution_tier, WasmOpcode opcode,
       if (!PlatformCanRepresent(expected)) continue;
       r.Call(x, y);
       for (int i = 0; i < 2; i++) {
-        double actual = ReadLittleEndianValue<double>(&g[i]);
+        double actual = LANE(g, i);
         CheckDoubleResult(x, y, expected, actual, true /* exact */);
       }
     }
   }
 
-  FOR_FLOAT64_NAN_INPUTS(i) {
-    double x = bit_cast<double>(double_nan_test_array[i]);
+  FOR_FLOAT64_NAN_INPUTS(d) {
+    double x = bit_cast<double>(double_nan_test_array[d]);
     if (!PlatformCanRepresent(x)) continue;
     FOR_FLOAT64_NAN_INPUTS(j) {
       double y = bit_cast<double>(double_nan_test_array[j]);
@@ -701,7 +683,7 @@ void RunF64x2BinOpTest(TestExecutionTier execution_tier, WasmOpcode opcode,
       if (!PlatformCanRepresent(expected)) continue;
       r.Call(x, y);
       for (int i = 0; i < 2; i++) {
-        double actual = ReadLittleEndianValue<double>(&g[i]);
+        double actual = LANE(g, i);
         CheckDoubleResult(x, y, expected, actual, true /* exact */);
       }
     }
@@ -737,8 +719,8 @@ void RunF64x2CompareOpTest(TestExecutionTier execution_tier, WasmOpcode opcode,
       r.Call(x, y);
       int64_t expected0 = expected_op(x, y);
       int64_t expected1 = expected_op(y, y);
-      CHECK_EQ(expected0, ReadLittleEndianValue<int64_t>(&g[0]));
-      CHECK_EQ(expected1, ReadLittleEndianValue<int64_t>(&g[1]));
+      CHECK_EQ(expected0, LANE(g, 0));
+      CHECK_EQ(expected1, LANE(g, 1));
     }
   }
 }

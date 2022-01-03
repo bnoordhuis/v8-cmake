@@ -7,7 +7,15 @@
 #include <algorithm>
 #include <string>
 
-#include "include/v8.h"
+#include "include/v8-context.h"
+#include "include/v8-date.h"
+#include "include/v8-function.h"
+#include "include/v8-json.h"
+#include "include/v8-local-handle.h"
+#include "include/v8-primitive-object.h"
+#include "include/v8-template.h"
+#include "include/v8-value-serializer.h"
+#include "include/v8-wasm.h"
 #include "src/api/api-inl.h"
 #include "src/base/build_config.h"
 #include "src/objects/backing-store.h"
@@ -260,12 +268,9 @@ class ValueSerializerTest : public TestWithIsolate {
   }
 
   Local<Object> NewDummyUint8Array() {
-    static uint8_t data[] = {4, 5, 6};
-    std::unique_ptr<v8::BackingStore> backing_store =
-        ArrayBuffer::NewBackingStore(
-            data, sizeof(data), [](void*, size_t, void*) {}, nullptr);
-    Local<ArrayBuffer> ab =
-        ArrayBuffer::New(isolate(), std::move(backing_store));
+    const uint8_t data[] = {4, 5, 6};
+    Local<ArrayBuffer> ab = ArrayBuffer::New(isolate(), sizeof(data));
+    memcpy(ab->GetBackingStore()->Data(), data, sizeof(data));
     return Uint8Array::New(ab, 0, sizeof(data));
   }
 
@@ -1516,22 +1521,14 @@ TEST_F(ValueSerializerTest, DecodeLinearRegExp) {
 }
 
 TEST_F(ValueSerializerTest, DecodeHasIndicesRegExp) {
-  bool flag_was_enabled = i::FLAG_harmony_regexp_match_indices;
-
   // The last byte encodes the regexp flags.
   std::vector<uint8_t> regexp_encoding = {0xFF, 0x09, 0x3F, 0x00, 0x52, 0x03,
                                           0x66, 0x6F, 0x6F, 0xAD, 0x01};
 
-  i::FLAG_harmony_regexp_match_indices = true;
   Local<Value> value = DecodeTest(regexp_encoding);
   ASSERT_TRUE(value->IsRegExp());
   ExpectScriptTrue("Object.getPrototypeOf(result) === RegExp.prototype");
   ExpectScriptTrue("result.toString() === '/foo/dgmsy'");
-
-  i::FLAG_harmony_regexp_match_indices = false;
-  InvalidDecodeTest(regexp_encoding);
-
-  i::FLAG_harmony_regexp_match_indices = flag_was_enabled;
 }
 
 TEST_F(ValueSerializerTest, RoundTripMap) {
@@ -2066,15 +2063,9 @@ class ValueSerializerTestWithSharedArrayBufferClone
 #endif  // V8_ENABLE_WEBASSEMBLY
 
     CHECK(!is_wasm_memory);
-    std::unique_ptr<v8::BackingStore> backing_store =
-        SharedArrayBuffer::NewBackingStore(
-            data, byte_length,
-            [](void*, size_t, void*) {
-              // Leak the buffer as it has the
-              // lifetime of the test.
-            },
-            nullptr);
-    return SharedArrayBuffer::New(isolate(), std::move(backing_store));
+    auto sab = SharedArrayBuffer::New(isolate(), byte_length);
+    memcpy(sab->GetBackingStore()->Data(), data, byte_length);
+    return sab;
   }
 
   static void SetUpTestCase() {
@@ -2601,9 +2592,9 @@ class ValueSerializerTestWithWasm : public ValueSerializerTest {
     i::wasm::ErrorThrower thrower(i_isolate(), "MakeWasm");
     auto enabled_features = i::wasm::WasmFeatures::FromIsolate(i_isolate());
     i::MaybeHandle<i::JSObject> compiled =
-        i_isolate()->wasm_engine()->SyncCompile(
+        i::wasm::GetWasmEngine()->SyncCompile(
             i_isolate(), enabled_features, &thrower,
-            i::wasm::ModuleWireBytes(i::ArrayVector(kIncrementerWasm)));
+            i::wasm::ModuleWireBytes(base::ArrayVector(kIncrementerWasm)));
     CHECK(!thrower.error());
     return Local<WasmModuleObject>::Cast(
         Utils::ToLocal(compiled.ToHandleChecked()));

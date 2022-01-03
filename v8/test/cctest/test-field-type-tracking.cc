@@ -70,7 +70,9 @@ static void CheckMigrationTarget(Isolate* isolate, Map old_map, Map new_map) {
                    .GetMigrationTarget();
   if (target.is_null()) return;
   CHECK_EQ(new_map, target);
-  CHECK_EQ(Map::TryUpdateSlow(isolate, old_map), target);
+  CHECK_EQ(MapUpdater::TryUpdateNoLock(isolate, old_map,
+                                       ConcurrencyMode::kNotConcurrent),
+           target);
 }
 
 class Expectations {
@@ -106,7 +108,7 @@ class Expectations {
     CHECK(index < MAX_PROPERTIES);
     kinds_[index] = kind;
     locations_[index] = location;
-    if (kind == kData && location == kField &&
+    if (kind == kData && location == PropertyLocation::kField &&
         IsTransitionableFastElementsKind(elements_kind_)) {
       // Maps with transitionable elements kinds must have the most general
       // field type.
@@ -137,7 +139,7 @@ class Expectations {
       os << " (";
       if (constnesses_[i] == PropertyConstness::kConst) os << "const ";
       os << (kinds_[i] == kData ? "data " : "accessor ");
-      if (locations_[i] == kField) {
+      if (locations_[i] == PropertyLocation::kField) {
         os << "field"
            << ": " << representations_[i].Mnemonic();
       } else {
@@ -154,14 +156,15 @@ class Expectations {
 
   Handle<FieldType> GetFieldType(int index) {
     CHECK(index < MAX_PROPERTIES);
-    CHECK_EQ(kField, locations_[index]);
+    CHECK_EQ(PropertyLocation::kField, locations_[index]);
     return Handle<FieldType>::cast(values_[index]);
   }
 
   void SetDataField(int index, PropertyAttributes attrs,
                     PropertyConstness constness, Representation representation,
                     Handle<FieldType> field_type) {
-    Init(index, kData, attrs, constness, kField, representation, field_type);
+    Init(index, kData, attrs, constness, PropertyLocation::kField,
+         representation, field_type);
   }
 
   void SetDataField(int index, PropertyConstness constness,
@@ -172,8 +175,9 @@ class Expectations {
   }
 
   void SetAccessorField(int index, PropertyAttributes attrs) {
-    Init(index, kAccessor, attrs, PropertyConstness::kConst, kDescriptor,
-         Representation::Tagged(), FieldType::Any(isolate_));
+    Init(index, kAccessor, attrs, PropertyConstness::kConst,
+         PropertyLocation::kDescriptor, Representation::Tagged(),
+         FieldType::Any(isolate_));
   }
 
   void SetAccessorField(int index) {
@@ -183,8 +187,8 @@ class Expectations {
   void SetDataConstant(int index, PropertyAttributes attrs,
                        Handle<JSFunction> value) {
     Handle<FieldType> field_type(FieldType::Class(value->map()), isolate_);
-    Init(index, kData, attrs, PropertyConstness::kConst, kField,
-         Representation::HeapObject(), field_type);
+    Init(index, kData, attrs, PropertyConstness::kConst,
+         PropertyLocation::kField, Representation::HeapObject(), field_type);
   }
 
   void SetDataConstant(int index, Handle<JSFunction> value) {
@@ -193,8 +197,8 @@ class Expectations {
 
   void SetAccessorConstant(int index, PropertyAttributes attrs,
                            Handle<Object> getter, Handle<Object> setter) {
-    Init(index, kAccessor, attrs, PropertyConstness::kConst, kDescriptor,
-         Representation::Tagged(), getter);
+    Init(index, kAccessor, attrs, PropertyConstness::kConst,
+         PropertyLocation::kDescriptor, Representation::Tagged(), getter);
     setter_values_[index] = setter;
   }
 
@@ -202,7 +206,7 @@ class Expectations {
                                     AccessorComponent component,
                                     Handle<Object> accessor) {
     CHECK_EQ(kAccessor, kinds_[index]);
-    CHECK_EQ(kDescriptor, locations_[index]);
+    CHECK_EQ(PropertyLocation::kDescriptor, locations_[index]);
     CHECK(index < number_of_properties_);
     if (component == ACCESSOR_GETTER) {
       values_[index] = accessor;
@@ -232,7 +236,7 @@ class Expectations {
   void GeneralizeField(int index) {
     CHECK(index < number_of_properties_);
     representations_[index] = Representation::Tagged();
-    if (locations_[index] == kField) {
+    if (locations_[index] == PropertyLocation::kField) {
       values_[index] = FieldType::Any(isolate_);
     }
   }
@@ -253,7 +257,7 @@ class Expectations {
     if (!details.representation().Equals(expected_representation)) return false;
 
     Object expected_value = *values_[descriptor.as_int()];
-    if (details.location() == kField) {
+    if (details.location() == PropertyLocation::kField) {
       if (details.kind() == kData) {
         FieldType type = descriptors.GetFieldType(descriptor);
         return FieldType::cast(expected_value) == type;
@@ -708,15 +712,12 @@ void TestGeneralizeField(int detach_property_at_index, int property_index,
   Handle<Code> code_field_const = CreateDummyOptimizedCode(isolate);
   Handle<Map> field_owner(
       map->FindFieldOwner(isolate, InternalIndex(property_index)), isolate);
-  DependentCode::InstallDependency(isolate,
-                                   MaybeObjectHandle::Weak(code_field_type),
-                                   field_owner, DependentCode::kFieldTypeGroup);
-  DependentCode::InstallDependency(
-      isolate, MaybeObjectHandle::Weak(code_field_repr), field_owner,
-      DependentCode::kFieldRepresentationGroup);
-  DependentCode::InstallDependency(
-      isolate, MaybeObjectHandle::Weak(code_field_const), field_owner,
-      DependentCode::kFieldConstGroup);
+  DependentCode::InstallDependency(isolate, code_field_type, field_owner,
+                                   DependentCode::kFieldTypeGroup);
+  DependentCode::InstallDependency(isolate, code_field_repr, field_owner,
+                                   DependentCode::kFieldRepresentationGroup);
+  DependentCode::InstallDependency(isolate, code_field_const, field_owner,
+                                   DependentCode::kFieldConstGroup);
   CHECK(!code_field_type->marked_for_deoptimization());
   CHECK(!code_field_repr->marked_for_deoptimization());
   CHECK(!code_field_const->marked_for_deoptimization());
@@ -786,9 +787,9 @@ void TestGeneralizeField(const CRFTData& from, const CRFTData& to,
     // Check the cases when the map being reconfigured is NOT a part of the
     // transition tree. "None -> anything" representation changes make sense
     // only for "attached" maps.
-    int indices[] = {0, kPropCount - 1};
-    for (int i = 0; i < static_cast<int>(arraysize(indices)); i++) {
-      TestGeneralizeField(indices[i], 2, from, to, expected, expected_alert);
+    int indices2[] = {0, kPropCount - 1};
+    for (int i = 0; i < static_cast<int>(arraysize(indices2)); i++) {
+      TestGeneralizeField(indices2[i], 2, from, to, expected, expected_alert);
     }
 
     // Check that reconfiguration to the very same field works correctly.
@@ -1091,22 +1092,18 @@ void TestReconfigureDataFieldAttribute_GeneralizeField(
   {
     Handle<Map> field_owner(
         map->FindFieldOwner(isolate, InternalIndex(kSplitProp)), isolate);
-    DependentCode::InstallDependency(
-        isolate, MaybeObjectHandle::Weak(code_field_type), field_owner,
-        DependentCode::kFieldTypeGroup);
-    DependentCode::InstallDependency(
-        isolate, MaybeObjectHandle::Weak(code_field_repr), field_owner,
-        DependentCode::kFieldRepresentationGroup);
-    DependentCode::InstallDependency(
-        isolate, MaybeObjectHandle::Weak(code_field_const), field_owner,
-        DependentCode::kFieldConstGroup);
+    DependentCode::InstallDependency(isolate, code_field_type, field_owner,
+                                     DependentCode::kFieldTypeGroup);
+    DependentCode::InstallDependency(isolate, code_field_repr, field_owner,
+                                     DependentCode::kFieldRepresentationGroup);
+    DependentCode::InstallDependency(isolate, code_field_const, field_owner,
+                                     DependentCode::kFieldConstGroup);
   }
   {
     Handle<Map> field_owner(
         map2->FindFieldOwner(isolate, InternalIndex(kSplitProp)), isolate);
-    DependentCode::InstallDependency(
-        isolate, MaybeObjectHandle::Weak(code_src_field_const), field_owner,
-        DependentCode::kFieldConstGroup);
+    DependentCode::InstallDependency(isolate, code_src_field_const, field_owner,
+                                     DependentCode::kFieldConstGroup);
   }
   CHECK(!code_field_type->marked_for_deoptimization());
   CHECK(!code_field_repr->marked_for_deoptimization());
@@ -1562,7 +1559,7 @@ TEST(ReconfigureDataFieldAttribute_DataConstantToDataFieldAfterTargetMap) {
       Handle<Map> sloppy_map =
           Map::CopyInitialMap(isolate, isolate->sloppy_function_map());
       Handle<SharedFunctionInfo> info =
-          factory->NewSharedFunctionInfoForBuiltin(name, Builtins::kIllegal);
+          factory->NewSharedFunctionInfoForBuiltin(name, Builtin::kIllegal);
       function_type_ = FieldType::Class(sloppy_map, isolate);
       CHECK(sloppy_map->is_stable());
 
@@ -1793,15 +1790,12 @@ static void TestReconfigureElementsKind_GeneralizeFieldInPlace(
   Handle<Code> code_field_const = CreateDummyOptimizedCode(isolate);
   Handle<Map> field_owner(
       map->FindFieldOwner(isolate, InternalIndex(kDiffProp)), isolate);
-  DependentCode::InstallDependency(isolate,
-                                   MaybeObjectHandle::Weak(code_field_type),
-                                   field_owner, DependentCode::kFieldTypeGroup);
-  DependentCode::InstallDependency(
-      isolate, MaybeObjectHandle::Weak(code_field_repr), field_owner,
-      DependentCode::kFieldRepresentationGroup);
-  DependentCode::InstallDependency(
-      isolate, MaybeObjectHandle::Weak(code_field_const), field_owner,
-      DependentCode::kFieldConstGroup);
+  DependentCode::InstallDependency(isolate, code_field_type, field_owner,
+                                   DependentCode::kFieldTypeGroup);
+  DependentCode::InstallDependency(isolate, code_field_repr, field_owner,
+                                   DependentCode::kFieldRepresentationGroup);
+  DependentCode::InstallDependency(isolate, code_field_const, field_owner,
+                                   DependentCode::kFieldConstGroup);
   CHECK(!code_field_type->marked_for_deoptimization());
   CHECK(!code_field_repr->marked_for_deoptimization());
   CHECK(!code_field_const->marked_for_deoptimization());
@@ -1841,8 +1835,8 @@ static void TestReconfigureElementsKind_GeneralizeFieldInPlace(
   {
     MapHandles map_list;
     map_list.push_back(updated_map);
-    Map transitioned_map =
-        map2->FindElementsKindTransitionedMap(isolate, map_list);
+    Map transitioned_map = map2->FindElementsKindTransitionedMap(
+        isolate, map_list, ConcurrencyMode::kNotConcurrent);
     CHECK_EQ(*updated_map, transitioned_map);
   }
 }
@@ -2204,8 +2198,8 @@ static void TestGeneralizeFieldWithSpecialTransition(
         if (config->is_non_equivalent_transition()) {
           // In case of non-equivalent transition currently we generalize all
           // representations.
-          for (int i = 0; i < kPropCount; i++) {
-            expectations2.GeneralizeField(i);
+          for (int j = 0; j < kPropCount; j++) {
+            expectations2.GeneralizeField(j);
           }
           CHECK(new_map2->GetBackPointer().IsUndefined(isolate));
           CHECK(expectations2.Check(*new_map2));
@@ -2722,7 +2716,7 @@ TEST(TransitionDataConstantToAnotherDataConstant) {
   Handle<Map> sloppy_map =
       Map::CopyInitialMap(isolate, isolate->sloppy_function_map());
   Handle<SharedFunctionInfo> info =
-      factory->NewSharedFunctionInfoForBuiltin(name, Builtins::kIllegal);
+      factory->NewSharedFunctionInfoForBuiltin(name, Builtin::kIllegal);
   CHECK(sloppy_map->is_stable());
 
   Handle<JSFunction> js_func1 =
@@ -2783,13 +2777,13 @@ TEST(HoleyHeapNumber) {
   Isolate* isolate = CcTest::i_isolate();
 
   auto mhn = isolate->factory()->NewHeapNumberWithHoleNaN();
-  CHECK_EQ(kHoleNanInt64, mhn->value_as_bits());
+  CHECK_EQ(kHoleNanInt64, mhn->value_as_bits(kRelaxedLoad));
 
   mhn = isolate->factory()->NewHeapNumber(0.0);
-  CHECK_EQ(uint64_t{0}, mhn->value_as_bits());
+  CHECK_EQ(uint64_t{0}, mhn->value_as_bits(kRelaxedLoad));
 
-  mhn->set_value_as_bits(kHoleNanInt64);
-  CHECK_EQ(kHoleNanInt64, mhn->value_as_bits());
+  mhn->set_value_as_bits(kHoleNanInt64, kRelaxedStore);
+  CHECK_EQ(kHoleNanInt64, mhn->value_as_bits(kRelaxedLoad));
 
   // Ensure that new storage for uninitialized value or mutable heap number
   // with uninitialized sentinel (kHoleNanInt64) is a mutable heap number
@@ -2798,11 +2792,11 @@ TEST(HoleyHeapNumber) {
       Object::NewStorageFor(isolate, isolate->factory()->uninitialized_value(),
                             Representation::Double());
   CHECK(obj->IsHeapNumber());
-  CHECK_EQ(kHoleNanInt64, HeapNumber::cast(*obj).value_as_bits());
+  CHECK_EQ(kHoleNanInt64, HeapNumber::cast(*obj).value_as_bits(kRelaxedLoad));
 
   obj = Object::NewStorageFor(isolate, mhn, Representation::Double());
   CHECK(obj->IsHeapNumber());
-  CHECK_EQ(kHoleNanInt64, HeapNumber::cast(*obj).value_as_bits());
+  CHECK_EQ(kHoleNanInt64, HeapNumber::cast(*obj).value_as_bits(kRelaxedLoad));
 }
 
 namespace {
@@ -3015,10 +3009,11 @@ TEST(NormalizeToMigrationTarget) {
 }
 
 TEST(RepresentationPredicatesAreInSync) {
-  STATIC_ASSERT(Representation::kNumRepresentations == 5);
+  STATIC_ASSERT(Representation::kNumRepresentations == 6);
   static Representation reps[] = {
-      Representation::None(), Representation::Smi(), Representation::Double(),
-      Representation::HeapObject(), Representation::Tagged()};
+      Representation::None(),   Representation::Smi(),
+      Representation::Double(), Representation::HeapObject(),
+      Representation::Tagged(), Representation::WasmValue()};
 
   for (Representation from : reps) {
     Representation most_generic_rep = from.MostGenericInPlaceChange();
@@ -3153,6 +3148,48 @@ TEST(DeletePropertyGeneralizesConstness) {
     }
   }
 }
+
+#define CHECK_SAME(object, rep, expected)           \
+  CHECK_EQ(object->FitsRepresentation(rep, true),   \
+           object->FitsRepresentation(rep, false)); \
+  CHECK_EQ(object->FitsRepresentation(rep, true), expected)
+
+TEST(CheckFitsRepresentationPredicate) {
+  CcTest::InitializeVM();
+  v8::HandleScope scope(CcTest::isolate());
+  i::Factory* factory = CcTest::i_isolate()->factory();
+
+  Handle<Smi> smi_value = factory->last_script_id();
+  Handle<HeapNumber> double_value = factory->nan_value();
+  Handle<OrderedHashMap> heapobject_value = factory->empty_ordered_hash_map();
+
+  Representation rep_smi = Representation::Smi();
+  Representation rep_double = Representation::Double();
+  Representation rep_heapobject = Representation::HeapObject();
+  Representation rep_tagged = Representation::Tagged();
+
+  // Verify the behavior of Object::FitsRepresentation() with and
+  // without coercion. A Smi can be "coerced" into a Double
+  // representation by converting it to a HeapNumber. If coercion is
+  // disallowed, that query should fail.
+  CHECK_SAME(smi_value, rep_smi, true);
+  CHECK_EQ(smi_value->FitsRepresentation(rep_double, true), true);
+  CHECK_EQ(smi_value->FitsRepresentation(rep_double, false), false);
+  CHECK_SAME(smi_value, rep_heapobject, false);
+  CHECK_SAME(smi_value, rep_tagged, true);
+
+  CHECK_SAME(double_value, rep_smi, false);
+  CHECK_SAME(double_value, rep_double, true);
+  CHECK_SAME(double_value, rep_heapobject, true);
+  CHECK_SAME(double_value, rep_tagged, true);
+
+  CHECK_SAME(heapobject_value, rep_smi, false);
+  CHECK_SAME(heapobject_value, rep_double, false);
+  CHECK_SAME(heapobject_value, rep_heapobject, true);
+  CHECK_SAME(heapobject_value, rep_tagged, true);
+}
+
+#undef CHECK_SAME
 
 }  // namespace test_field_type_tracking
 }  // namespace compiler

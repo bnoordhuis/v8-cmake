@@ -5,24 +5,20 @@
 #ifndef INCLUDE_CPPGC_ALLOCATION_H_
 #define INCLUDE_CPPGC_ALLOCATION_H_
 
-#include <stdint.h>
-
 #include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <new>
 #include <type_traits>
+#include <utility>
 
 #include "cppgc/custom-space.h"
-#include "cppgc/garbage-collected.h"
 #include "cppgc/internal/api-constants.h"
 #include "cppgc/internal/gc-info.h"
+#include "cppgc/type-traits.h"
+#include "v8config.h"  // NOLINT(build/include_directory)
 
 namespace cppgc {
-
-template <typename T>
-class MakeGarbageCollectedTraitBase;
-
-namespace internal {
-class ObjectAllocator;
-}  // namespace internal
 
 /**
  * AllocationHandle is used to allocate garbage-collected objects.
@@ -40,8 +36,13 @@ class V8_EXPORT MakeGarbageCollectedTraitInternal {
             const_cast<uint16_t*>(reinterpret_cast<const uint16_t*>(
                 reinterpret_cast<const uint8_t*>(payload) -
                 api_constants::kFullyConstructedBitFieldOffsetFromPayload)));
-    atomic_mutable_bitfield->fetch_or(api_constants::kFullyConstructedBitMask,
-                                      std::memory_order_release);
+    // It's safe to split use load+store here (instead of a read-modify-write
+    // operation), since it's guaranteed that this 16-bit bitfield is only
+    // modified by a single thread. This is cheaper in terms of code bloat (on
+    // ARM) and performance.
+    uint16_t value = atomic_mutable_bitfield->load(std::memory_order_relaxed);
+    value |= api_constants::kFullyConstructedBitMask;
+    atomic_mutable_bitfield->store(value, std::memory_order_release);
   }
 
   template <typename U, typename CustomSpace>
@@ -206,7 +207,7 @@ struct PostConstructionCallbackTrait {
  * \returns an instance of type T.
  */
 template <typename T, typename... Args>
-T* MakeGarbageCollected(AllocationHandle& handle, Args&&... args) {
+V8_INLINE T* MakeGarbageCollected(AllocationHandle& handle, Args&&... args) {
   T* object =
       MakeGarbageCollectedTrait<T>::Call(handle, std::forward<Args>(args)...);
   PostConstructionCallbackTrait<T>::Call(object);
@@ -224,8 +225,9 @@ T* MakeGarbageCollected(AllocationHandle& handle, Args&&... args) {
  * \returns an instance of type T.
  */
 template <typename T, typename... Args>
-T* MakeGarbageCollected(AllocationHandle& handle,
-                        AdditionalBytes additional_bytes, Args&&... args) {
+V8_INLINE T* MakeGarbageCollected(AllocationHandle& handle,
+                                  AdditionalBytes additional_bytes,
+                                  Args&&... args) {
   T* object = MakeGarbageCollectedTrait<T>::Call(handle, additional_bytes,
                                                  std::forward<Args>(args)...);
   PostConstructionCallbackTrait<T>::Call(object);

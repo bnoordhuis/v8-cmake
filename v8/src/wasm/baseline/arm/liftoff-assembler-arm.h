@@ -10,6 +10,7 @@
 #include "src/heap/memory-chunk.h"
 #include "src/wasm/baseline/liftoff-assembler.h"
 #include "src/wasm/baseline/liftoff-register.h"
+#include "src/wasm/wasm-objects.h"
 
 namespace v8 {
 namespace internal {
@@ -478,51 +479,76 @@ void LiftoffAssembler::PrepareTailCall(int num_callee_stack_params,
 
 void LiftoffAssembler::AlignFrameSize() {}
 
-void LiftoffAssembler::PatchPrepareStackFrame(int offset) {
-  // The frame_size includes the frame marker. The frame marker has already been
-  // pushed on the stack though, so we don't need to allocate memory for it
-  // anymore.
-  int frame_size = GetTotalFrameSize() - kSystemPointerSize;
-
-  // When using the simulator, deal with Liftoff which allocates the stack
-  // before checking it.
-  // TODO(arm): Remove this when the stack check mechanism will be updated.
-  // Note: This check is only needed for simulator runs, but we run it
-  // unconditionally to make sure that the simulator executes the same code
-  // that's also executed on native hardware (see https://crbug.com/v8/11041).
-  if (frame_size > KB / 2) {
-    bailout(kOtherReason,
-            "Stack limited to 512 bytes to avoid a bug in StackCheck");
-    return;
-  }
+void LiftoffAssembler::PatchPrepareStackFrame(
+    int offset, SafepointTableBuilder* safepoint_table_builder) {
+  // The frame_size includes the frame marker and the instance slot. Both are
+  // pushed as part of frame construction, so we don't need to allocate memory
+  // for them anymore.
+  int frame_size = GetTotalFrameSize() - 2 * kSystemPointerSize;
 
   PatchingAssembler patching_assembler(AssemblerOptions{},
                                        buffer_start_ + offset,
                                        liftoff::kPatchInstructionsRequired);
-#if V8_OS_WIN
-  if (frame_size > kStackPageSize) {
-    // Generate OOL code (at the end of the function, where the current
-    // assembler is pointing) to do the explicit stack limit check (see
-    // https://docs.microsoft.com/en-us/previous-versions/visualstudio/
-    // visual-studio-6.0/aa227153(v=vs.60)).
-    // At the function start, emit a jump to that OOL code (from {offset} to
-    // {pc_offset()}).
-    int ool_offset = pc_offset() - offset;
-    patching_assembler.b(ool_offset - Instruction::kPcLoadDelta);
+  if (V8_LIKELY(frame_size < 4 * KB)) {
+    // This is the standard case for small frames: just subtract from SP and be
+    // done with it.
+    patching_assembler.sub(sp, sp, Operand(frame_size));
     patching_assembler.PadWithNops();
-
-    // Now generate the OOL code.
-    AllocateStackSpace(frame_size);
-    // Jump back to the start of the function (from {pc_offset()} to {offset +
-    // liftoff::kPatchInstructionsRequired * kInstrSize}).
-    int func_start_offset =
-        offset + liftoff::kPatchInstructionsRequired * kInstrSize - pc_offset();
-    b(func_start_offset - Instruction::kPcLoadDelta);
     return;
   }
-#endif
-  patching_assembler.sub(sp, sp, Operand(frame_size));
+
+  // The frame size is bigger than 4KB, so we might overflow the available stack
+  // space if we first allocate the frame and then do the stack check (we will
+  // need some remaining stack space for throwing the exception). That's why we
+  // check the available stack space before we allocate the frame. To do this we
+  // replace the {__ sub(sp, sp, framesize)} with a jump to OOL code that does
+  // this "extended stack check".
+  //
+  // The OOL code can simply be generated here with the normal assembler,
+  // because all other code generation, including OOL code, has already finished
+  // when {PatchPrepareStackFrame} is called. The function prologue then jumps
+  // to the current {pc_offset()} to execute the OOL code for allocating the
+  // large frame.
+
+  // Emit the unconditional branch in the function prologue (from {offset} to
+  // {pc_offset()}).
+  patching_assembler.b(pc_offset() - offset - Instruction::kPcLoadDelta);
   patching_assembler.PadWithNops();
+
+  // If the frame is bigger than the stack, we throw the stack overflow
+  // exception unconditionally. Thereby we can avoid the integer overflow
+  // check in the condition code.
+  RecordComment("OOL: stack check for large frame");
+  Label continuation;
+  if (frame_size < FLAG_stack_size * 1024) {
+    UseScratchRegisterScope temps(this);
+    Register stack_limit = temps.Acquire();
+    ldr(stack_limit,
+        FieldMemOperand(kWasmInstanceRegister,
+                        WasmInstanceObject::kRealStackLimitAddressOffset));
+    ldr(stack_limit, MemOperand(stack_limit));
+    add(stack_limit, stack_limit, Operand(frame_size));
+    cmp(sp, stack_limit);
+    b(cs /* higher or same */, &continuation);
+  }
+
+  Call(wasm::WasmCode::kWasmStackOverflow, RelocInfo::WASM_STUB_CALL);
+  // The call will not return; just define an empty safepoint.
+  safepoint_table_builder->DefineSafepoint(this);
+  if (FLAG_debug_code) stop();
+
+  bind(&continuation);
+
+  // Now allocate the stack space. Note that this might do more than just
+  // decrementing the SP; consult {TurboAssembler::AllocateStackSpace}.
+  AllocateStackSpace(frame_size);
+
+  // Jump back to the start of the function, from {pc_offset()} to
+  // right after the reserved space for the {__ sub(sp, sp, framesize)} (which
+  // is a branch now).
+  int func_start_offset =
+      offset + liftoff::kPatchInstructionsRequired * kInstrSize;
+  b(func_start_offset - pc_offset() - Instruction::kPcLoadDelta);
 }
 
 void LiftoffAssembler::FinishCode() { CheckConstPool(true, false); }
@@ -566,7 +592,8 @@ void LiftoffAssembler::LoadConstant(LiftoffRegister reg, WasmValue value,
       break;
     case kF64: {
       Register extra_scratch = GetUnusedRegister(kGpReg, {}).gp();
-      vmov(reg.fp(), Double(value.to_f64_boxed().get_bits()), extra_scratch);
+      vmov(reg.fp(), base::Double(value.to_f64_boxed().get_bits()),
+           extra_scratch);
       break;
     }
     default:
@@ -757,18 +784,20 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
   JumpIfSmi(src.gp(), &exit);
   CheckPageFlag(src.gp(), MemoryChunk::kPointersToHereAreInterestingMask, eq,
                 &exit);
-  CallRecordWriteStub(dst_addr,
-                      actual_offset_reg == no_reg ? Operand(offset_imm)
-                                                  : Operand(actual_offset_reg),
-                      RememberedSetAction::kEmit, SaveFPRegsMode::kSave,
-                      wasm::WasmCode::kRecordWrite);
+  CallRecordWriteStubSaveRegisters(
+      dst_addr,
+      actual_offset_reg == no_reg ? Operand(offset_imm)
+                                  : Operand(actual_offset_reg),
+      RememberedSetAction::kEmit, SaveFPRegsMode::kSave,
+      StubCallMode::kCallWasmRuntimeStub);
   bind(&exit);
 }
 
 void LiftoffAssembler::Load(LiftoffRegister dst, Register src_addr,
                             Register offset_reg, uint32_t offset_imm,
                             LoadType type, LiftoffRegList pinned,
-                            uint32_t* protected_load_pc, bool is_load_mem) {
+                            uint32_t* protected_load_pc, bool is_load_mem,
+                            bool i64_offset) {
   // Offsets >=2GB are statically OOB on 32-bit systems.
   DCHECK_LE(offset_imm, std::numeric_limits<int32_t>::max());
   liftoff::LoadInternal(this, dst, src_addr, offset_reg,
@@ -2030,11 +2059,11 @@ bool LiftoffAssembler::emit_type_conversion(WasmOpcode opcode,
       vmov(dst.gp(), scratch_f);
       // Check underflow and NaN.
       DwVfpRegister scratch_d = temps.AcquireD();
-      vmov(scratch_d, Double(static_cast<double>(INT32_MIN - 1.0)));
+      vmov(scratch_d, base::Double(static_cast<double>(INT32_MIN - 1.0)));
       VFPCompareAndSetFlags(src.fp(), scratch_d);
       b(trap, le);
       // Check overflow.
-      vmov(scratch_d, Double(static_cast<double>(INT32_MAX + 1.0)));
+      vmov(scratch_d, base::Double(static_cast<double>(INT32_MAX + 1.0)));
       VFPCompareAndSetFlags(src.fp(), scratch_d);
       b(trap, ge);
       return true;
@@ -2046,11 +2075,11 @@ bool LiftoffAssembler::emit_type_conversion(WasmOpcode opcode,
       vmov(dst.gp(), scratch_f);
       // Check underflow and NaN.
       DwVfpRegister scratch_d = temps.AcquireD();
-      vmov(scratch_d, Double(static_cast<double>(-1.0)));
+      vmov(scratch_d, base::Double(static_cast<double>(-1.0)));
       VFPCompareAndSetFlags(src.fp(), scratch_d);
       b(trap, le);
       // Check overflow.
-      vmov(scratch_d, Double(static_cast<double>(UINT32_MAX + 1.0)));
+      vmov(scratch_d, base::Double(static_cast<double>(UINT32_MAX + 1.0)));
       VFPCompareAndSetFlags(src.fp(), scratch_d);
       b(trap, ge);
       return true;
@@ -3039,8 +3068,8 @@ void LiftoffAssembler::emit_i32x4_bitmask(LiftoffRegister dst,
   vshr(NeonS32, tmp, liftoff::GetSimd128Register(src), 31);
   // Set i-th bit of each lane i. When AND with tmp, the lanes that
   // are signed will have i-th bit set, unsigned will be 0.
-  vmov(mask.low(), Double((uint64_t)0x0000'0002'0000'0001));
-  vmov(mask.high(), Double((uint64_t)0x0000'0008'0000'0004));
+  vmov(mask.low(), base::Double((uint64_t)0x0000'0002'0000'0001));
+  vmov(mask.high(), base::Double((uint64_t)0x0000'0008'0000'0004));
   vand(tmp, mask, tmp);
   vpadd(Neon32, tmp.low(), tmp.low(), tmp.high());
   vpadd(Neon32, tmp.low(), tmp.low(), kDoubleRegZero);
@@ -3224,8 +3253,8 @@ void LiftoffAssembler::emit_i16x8_bitmask(LiftoffRegister dst,
   vshr(NeonS16, tmp, liftoff::GetSimd128Register(src), 15);
   // Set i-th bit of each lane i. When AND with tmp, the lanes that
   // are signed will have i-th bit set, unsigned will be 0.
-  vmov(mask.low(), Double((uint64_t)0x0008'0004'0002'0001));
-  vmov(mask.high(), Double((uint64_t)0x0080'0040'0020'0010));
+  vmov(mask.low(), base::Double((uint64_t)0x0008'0004'0002'0001));
+  vmov(mask.high(), base::Double((uint64_t)0x0080'0040'0020'0010));
   vand(tmp, mask, tmp);
   vpadd(Neon16, tmp.low(), tmp.low(), tmp.high());
   vpadd(Neon16, tmp.low(), tmp.low(), tmp.low());
@@ -3534,8 +3563,8 @@ void LiftoffAssembler::emit_i8x16_bitmask(LiftoffRegister dst,
   vshr(NeonS8, tmp, liftoff::GetSimd128Register(src), 7);
   // Set i-th bit of each lane i. When AND with tmp, the lanes that
   // are signed will have i-th bit set, unsigned will be 0.
-  vmov(mask.low(), Double((uint64_t)0x8040'2010'0804'0201));
-  vmov(mask.high(), Double((uint64_t)0x8040'2010'0804'0201));
+  vmov(mask.low(), base::Double((uint64_t)0x8040'2010'0804'0201));
+  vmov(mask.high(), base::Double((uint64_t)0x8040'2010'0804'0201));
   vand(tmp, mask, tmp);
   vext(mask, tmp, tmp, 8);
   vzip(Neon8, mask, tmp);
@@ -3829,9 +3858,9 @@ void LiftoffAssembler::emit_f64x2_le(LiftoffRegister dst, LiftoffRegister lhs,
 void LiftoffAssembler::emit_s128_const(LiftoffRegister dst,
                                        const uint8_t imms[16]) {
   uint64_t vals[2];
-  base::Memcpy(vals, imms, sizeof(vals));
-  vmov(dst.low_fp(), Double(vals[0]));
-  vmov(dst.high_fp(), Double(vals[1]));
+  memcpy(vals, imms, sizeof(vals));
+  vmov(dst.low_fp(), base::Double(vals[0]));
+  vmov(dst.high_fp(), base::Double(vals[1]));
 }
 
 void LiftoffAssembler::emit_s128_not(LiftoffRegister dst, LiftoffRegister src) {
@@ -4230,6 +4259,38 @@ void LiftoffAssembler::DeallocateStackSlot(uint32_t size) {
 }
 
 void LiftoffAssembler::MaybeOSR() {}
+
+void LiftoffAssembler::emit_set_if_nan(Register dst, DoubleRegister src,
+                                       ValueKind kind) {
+  if (kind == kF32) {
+    FloatRegister src_f = liftoff::GetFloatRegister(src);
+    VFPCompareAndSetFlags(src_f, src_f);
+  } else {
+    DCHECK_EQ(kind, kF64);
+    VFPCompareAndSetFlags(src, src);
+  }
+
+  // Store a non-zero value if src is NaN.
+  str(dst, MemOperand(dst), ne);  // x != x iff isnan(x)
+}
+
+void LiftoffAssembler::emit_s128_set_if_nan(Register dst, LiftoffRegister src,
+                                            Register tmp_gp,
+                                            LiftoffRegister tmp_s128,
+                                            ValueKind lane_kind) {
+  QwNeonRegister src_q = liftoff::GetSimd128Register(src);
+  QwNeonRegister tmp_q = liftoff::GetSimd128Register(tmp_s128);
+  if (lane_kind == kF32) {
+    vpadd(tmp_q.low(), src_q.low(), src_q.high());
+    LowDwVfpRegister tmp_d =
+        LowDwVfpRegister::from_code(tmp_s128.low_fp().code());
+    vadd(tmp_d.low(), tmp_d.low(), tmp_d.high());
+  } else {
+    DCHECK_EQ(lane_kind, kF64);
+    vadd(tmp_q.low(), src_q.low(), src_q.high());
+  }
+  emit_set_if_nan(dst, tmp_q.low(), lane_kind);
+}
 
 void LiftoffStackSlots::Construct(int param_slots) {
   DCHECK_LT(0, slots_.size());

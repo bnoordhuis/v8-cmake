@@ -12,16 +12,16 @@
 #include "src/base/logging.h"
 #include "src/base/page-allocator.h"
 #include "src/base/platform/platform.h"
+#include "src/base/platform/wrappers.h"
 #include "src/base/sanitizer/lsan-page-allocator.h"
+#include "src/base/vector.h"
 #include "src/flags/flags.h"
 #include "src/init/v8.h"
+#include "src/init/vm-cage.h"
 #include "src/utils/memcopy.h"
-#include "src/utils/vector.h"
 
 #if V8_LIBC_BIONIC
 #include <malloc.h>
-
-#include "src/base/platform/wrappers.h"
 #endif
 
 namespace v8 {
@@ -37,6 +37,8 @@ void* AlignedAllocInternal(size_t size, size_t alignment) {
   // posix_memalign is not exposed in some Android versions, so we fall back to
   // memalign. See http://code.google.com/p/android/issues/detail?id=35391.
   ptr = memalign(alignment, size);
+#elif V8_OS_STARBOARD
+  ptr = SbMemoryAllocateAligned(alignment, size);
 #else
   if (posix_memalign(&ptr, alignment, size)) ptr = nullptr;
 #endif
@@ -52,6 +54,7 @@ class PageAllocatorInitializer {
       page_allocator_ = default_page_allocator.get();
     }
 #if defined(LEAK_SANITIZER)
+    static_assert(!V8_VIRTUAL_MEMORY_CAGE_BOOL, "Not currently supported");
     static base::LeakyObject<base::LsanPageAllocator> lsan_allocator(
         page_allocator_);
     page_allocator_ = lsan_allocator.get();
@@ -69,7 +72,7 @@ class PageAllocatorInitializer {
 };
 
 DEFINE_LAZY_LEAKY_OBJECT_GETTER(PageAllocatorInitializer,
-                                GetPageTableInitializer)
+                                GetPageAllocatorInitializer)
 
 // We will attempt allocation this many times. After each failure, we call
 // OnCriticalMemoryPressure to try to free some memory.
@@ -78,14 +81,27 @@ const int kAllocationTries = 2;
 }  // namespace
 
 v8::PageAllocator* GetPlatformPageAllocator() {
-  DCHECK_NOT_NULL(GetPageTableInitializer()->page_allocator());
-  return GetPageTableInitializer()->page_allocator();
+  DCHECK_NOT_NULL(GetPageAllocatorInitializer()->page_allocator());
+  return GetPageAllocatorInitializer()->page_allocator();
 }
+
+#ifdef V8_VIRTUAL_MEMORY_CAGE
+v8::PageAllocator* GetVirtualMemoryCagePageAllocator() {
+  // TODO(chromium:1218005) remove this code once the cage is no longer
+  // optional.
+  if (GetProcessWideVirtualMemoryCage()->is_disabled()) {
+    return GetPlatformPageAllocator();
+  } else {
+    CHECK(GetProcessWideVirtualMemoryCage()->is_initialized());
+    return GetProcessWideVirtualMemoryCage()->page_allocator();
+  }
+}
+#endif
 
 v8::PageAllocator* SetPlatformPageAllocatorForTesting(
     v8::PageAllocator* new_page_allocator) {
   v8::PageAllocator* old_page_allocator = GetPlatformPageAllocator();
-  GetPageTableInitializer()->SetPageAllocatorForTesting(new_page_allocator);
+  GetPageAllocatorInitializer()->SetPageAllocatorForTesting(new_page_allocator);
   return old_page_allocator;
 }
 
@@ -116,10 +132,10 @@ char* StrNDup(const char* str, size_t n) {
   return result;
 }
 
-void* AllocWithRetry(size_t size) {
+void* AllocWithRetry(size_t size, MallocFn malloc_fn) {
   void* result = nullptr;
   for (int i = 0; i < kAllocationTries; ++i) {
-    result = base::Malloc(size);
+    result = malloc_fn(size);
     if (result != nullptr) break;
     if (!OnCriticalMemoryPressure(size)) break;
   }
@@ -147,6 +163,8 @@ void AlignedFree(void* ptr) {
 #elif V8_LIBC_BIONIC
   // Using free is not correct in general, but for V8_LIBC_BIONIC it is.
   base::Free(ptr);
+#elif V8_OS_STARBOARD
+  SbMemoryFreeAligned(ptr);
 #else
   base::Free(ptr);
 #endif
@@ -320,7 +338,8 @@ inline Address VirtualMemoryCageStart(
 }
 }  // namespace
 
-bool VirtualMemoryCage::InitReservation(const ReservationParams& params) {
+bool VirtualMemoryCage::InitReservation(
+    const ReservationParams& params, base::AddressRegion existing_reservation) {
   DCHECK(!reservation_.IsReserved());
 
   const size_t allocate_page_size = params.page_allocator->AllocatePageSize();
@@ -334,7 +353,15 @@ bool VirtualMemoryCage::InitReservation(const ReservationParams& params) {
                            RoundUp(params.base_alignment, allocate_page_size)) -
                  RoundUp(params.base_bias_size, allocate_page_size);
 
-  if (params.base_alignment == ReservationParams::kAnyBaseAlignment) {
+  if (!existing_reservation.is_empty()) {
+    CHECK_EQ(existing_reservation.size(), params.reservation_size);
+    CHECK(params.base_alignment == ReservationParams::kAnyBaseAlignment ||
+          IsAligned(existing_reservation.begin(), params.base_alignment));
+    reservation_ =
+        VirtualMemory(params.page_allocator, existing_reservation.begin(),
+                      existing_reservation.size());
+    base_ = reservation_.address() + params.base_bias_size;
+  } else if (params.base_alignment == ReservationParams::kAnyBaseAlignment) {
     // When the base doesn't need to be aligned, the virtual memory reservation
     // fails only due to OOM.
     VirtualMemory reservation(params.page_allocator, params.reservation_size,
@@ -415,7 +442,8 @@ bool VirtualMemoryCage::InitReservation(const ReservationParams& params) {
                 params.page_size);
   page_allocator_ = std::make_unique<base::BoundedPageAllocator>(
       params.page_allocator, allocatable_base, allocatable_size,
-      params.page_size);
+      params.page_size,
+      base::PageInitializationMode::kAllocatedPagesCanBeUninitialized);
   return true;
 }
 

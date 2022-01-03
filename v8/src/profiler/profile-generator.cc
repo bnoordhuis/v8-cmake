@@ -64,6 +64,11 @@ int SourcePositionTable::GetInliningId(int pc_offset) const {
   return it->inlining_id;
 }
 
+size_t SourcePositionTable::Size() const {
+  return sizeof(*this) + pc_offsets_to_lines_.capacity() *
+                             sizeof(decltype(pc_offsets_to_lines_)::value_type);
+}
+
 void SourcePositionTable::print() const {
   base::OS::Print(" - source position table at %p\n", this);
   for (const SourcePositionTuple& pos_info : pc_offsets_to_lines_) {
@@ -157,12 +162,10 @@ bool CodeEntry::IsSameFunctionAs(const CodeEntry* entry) const {
          line_number_ == entry->line_number_;
 }
 
-
-void CodeEntry::SetBuiltinId(Builtins::Name id) {
+void CodeEntry::SetBuiltinId(Builtin id) {
   bit_field_ = TagField::update(bit_field_, CodeEventListener::BUILTIN_TAG);
-  bit_field_ = BuiltinIdField::update(bit_field_, id);
+  bit_field_ = BuiltinField::update(bit_field_, id);
 }
-
 
 int CodeEntry::GetSourceLine(int pc_offset) const {
   if (line_info_) return line_info_->GetSourceLineNumber(pc_offset);
@@ -170,8 +173,7 @@ int CodeEntry::GetSourceLine(int pc_offset) const {
 }
 
 void CodeEntry::SetInlineStacks(
-    std::unordered_set<std::unique_ptr<CodeEntry>, Hasher, Equals>
-        inline_entries,
+    std::unordered_set<CodeEntry*, Hasher, Equals> inline_entries,
     std::unordered_map<int, std::vector<CodeEntryAndLineNumber>>
         inline_stacks) {
   EnsureRareData()->inline_entries_ = std::move(inline_entries);
@@ -210,6 +212,37 @@ void CodeEntry::FillFunctionInfo(SharedFunctionInfo shared) {
   }
 }
 
+size_t CodeEntry::EstimatedSize() const {
+  size_t estimated_size = 0;
+  if (rare_data_) {
+    estimated_size += sizeof(rare_data_.get());
+
+    for (const auto& inline_entry : rare_data_->inline_entries_) {
+      estimated_size += inline_entry->EstimatedSize();
+    }
+    estimated_size += rare_data_->inline_entries_.size() *
+                      sizeof(decltype(rare_data_->inline_entries_)::value_type);
+
+    for (const auto& inline_stack_pair : rare_data_->inline_stacks_) {
+      estimated_size += inline_stack_pair.second.size() *
+                        sizeof(decltype(inline_stack_pair.second)::value_type);
+    }
+    estimated_size +=
+        rare_data_->inline_stacks_.size() *
+        (sizeof(decltype(rare_data_->inline_stacks_)::key_type) +
+         sizeof(decltype(rare_data_->inline_stacks_)::value_type));
+
+    estimated_size +=
+        rare_data_->deopt_inlined_frames_.capacity() *
+        sizeof(decltype(rare_data_->deopt_inlined_frames_)::value_type);
+  }
+
+  if (line_info_) {
+    estimated_size += line_info_.get()->Size();
+  }
+  return sizeof(*this) + estimated_size;
+}
+
 CpuProfileDeoptInfo CodeEntry::GetDeoptInfo() {
   DCHECK(has_deopt_info());
 
@@ -233,6 +266,8 @@ CodeEntry::RareData* CodeEntry::EnsureRareData() {
 }
 
 void CodeEntry::ReleaseStrings(StringsStorage& strings) {
+  DCHECK_EQ(ref_count_, 0UL);
+
   if (name_) {
     strings.Release(name_);
     name_ = nullptr;
@@ -240,14 +275,6 @@ void CodeEntry::ReleaseStrings(StringsStorage& strings) {
   if (resource_name_) {
     strings.Release(resource_name_);
     resource_name_ = nullptr;
-  }
-
-  if (rare_data_) {
-    // All inline entries are exclusively owned by the CodeEntry. They'll be
-    // deallocated when the CodeEntry is deallocated.
-    for (auto& entry : rare_data_->inline_entries_) {
-      entry->ReleaseStrings(strings);
-    }
   }
 }
 
@@ -296,6 +323,10 @@ void CodeEntry::print() const {
     }
   }
   base::OS::Print("\n");
+}
+
+ProfileNode::~ProfileNode() {
+  if (tree_->code_entries()) tree_->code_entries()->DecRef(entry_);
 }
 
 CpuProfileNode::SourceType ProfileNode::source_type() const {
@@ -428,17 +459,16 @@ class DeleteNodesCallback {
  public:
   void BeforeTraversingChild(ProfileNode*, ProfileNode*) { }
 
-  void AfterAllChildrenTraversed(ProfileNode* node) {
-    delete node;
-  }
+  void AfterAllChildrenTraversed(ProfileNode* node) { delete node; }
 
   void AfterChildTraversed(ProfileNode*, ProfileNode*) { }
 };
 
-ProfileTree::ProfileTree(Isolate* isolate)
+ProfileTree::ProfileTree(Isolate* isolate, CodeEntryStorage* storage)
     : next_node_id_(1),
-      root_(new ProfileNode(this, CodeEntry::root_entry(), nullptr)),
-      isolate_(isolate) {}
+      isolate_(isolate),
+      code_entries_(storage),
+      root_(new ProfileNode(this, CodeEntry::root_entry(), nullptr)) {}
 
 ProfileTree::~ProfileTree() {
   DeleteNodesCallback cb;
@@ -550,7 +580,7 @@ CpuProfile::CpuProfile(CpuProfiler* profiler, const char* title,
       options_(options),
       delegate_(std::move(delegate)),
       start_time_(base::TimeTicks::HighResolutionNow()),
-      top_down_(profiler->isolate()),
+      top_down_(profiler->isolate(), profiler->code_entries()),
       profiler_(profiler),
       streaming_next_sample_(0),
       id_(++last_id_) {
@@ -741,31 +771,37 @@ void CpuProfile::Print() const {
   ProfilerStats::Instance()->Clear();
 }
 
-CodeMap::CodeMap(StringsStorage& function_and_resource_names)
-    : function_and_resource_names_(function_and_resource_names) {}
+void CodeEntryStorage::AddRef(CodeEntry* entry) {
+  if (entry->is_ref_counted()) entry->AddRef();
+}
+
+void CodeEntryStorage::DecRef(CodeEntry* entry) {
+  if (entry->is_ref_counted() && entry->DecRef() == 0) {
+    if (entry->rare_data_) {
+      for (auto* inline_entry : entry->rare_data_->inline_entries_) {
+        DecRef(inline_entry);
+      }
+    }
+    entry->ReleaseStrings(function_and_resource_names_);
+    delete entry;
+  }
+}
+
+CodeMap::CodeMap(CodeEntryStorage& storage) : code_entries_(storage) {}
 
 CodeMap::~CodeMap() { Clear(); }
 
 void CodeMap::Clear() {
   for (auto& slot : code_map_) {
     if (CodeEntry* entry = slot.second.entry) {
-      entry->ReleaseStrings(function_and_resource_names_);
-      delete entry;
+      code_entries_.DecRef(entry);
     } else {
       // We expect all entries in the code mapping to contain a CodeEntry.
       UNREACHABLE();
     }
   }
 
-  // Free all CodeEntry objects that are no longer in the map, but in a profile.
-  // TODO(acomminos): Remove this deque after we refcount CodeEntry objects.
-  for (CodeEntry* entry : used_entries_) {
-    DCHECK(entry->used());
-    DeleteCodeEntry(entry);
-  }
-
   code_map_.clear();
-  used_entries_.clear();
 }
 
 void CodeMap::AddCode(Address addr, CodeEntry* entry, unsigned size) {
@@ -777,11 +813,7 @@ bool CodeMap::RemoveCode(CodeEntry* entry) {
   auto range = code_map_.equal_range(entry->instruction_start());
   for (auto i = range.first; i != range.second; ++i) {
     if (i->second.entry == entry) {
-      if (!entry->used()) {
-        DeleteCodeEntry(entry);
-      } else {
-        used_entries_.push_back(entry);
-      }
+      code_entries_.DecRef(entry);
       code_map_.erase(i);
       return true;
     }
@@ -797,11 +829,7 @@ void CodeMap::ClearCodesInRange(Address start, Address end) {
   }
   auto right = left;
   for (; right != code_map_.end() && right->first < end; ++right) {
-    if (!right->second.entry->used()) {
-      DeleteCodeEntry(right->second.entry);
-    } else {
-      used_entries_.push_back(right->second.entry);
-    }
+    code_entries_.DecRef(right->second.entry);
   }
   code_map_.erase(left, right);
 }
@@ -844,16 +872,20 @@ void CodeMap::MoveCode(Address from, Address to) {
   code_map_.erase(range.first, it);
 }
 
-void CodeMap::DeleteCodeEntry(CodeEntry* entry) {
-  entry->ReleaseStrings(function_and_resource_names_);
-  delete entry;
-}
-
 void CodeMap::Print() {
   for (const auto& pair : code_map_) {
     base::OS::Print("%p %5d %s\n", reinterpret_cast<void*>(pair.first),
                     pair.second.size, pair.second.entry->name());
   }
+}
+
+size_t CodeMap::GetEstimatedMemoryUsage() const {
+  size_t map_size = 0;
+  for (const auto& pair : code_map_) {
+    map_size += sizeof(pair.first) + sizeof(pair.second) +
+                pair.second.entry->EstimatedSize();
+  }
+  return sizeof(*this) + map_size;
 }
 
 CpuProfilesCollection::CpuProfilesCollection(Isolate* isolate)
@@ -963,11 +995,13 @@ void CpuProfilesCollection::AddPathToCurrentProfiles(
   // method, we don't bother minimizing the duration of lock holding,
   // e.g. copying contents of the list to a local vector.
   current_profiles_semaphore_.Wait();
+  const ProfileStackTrace empty_path;
   for (const std::unique_ptr<CpuProfile>& profile : current_profiles_) {
-    if (profile->context_filter().Accept(native_context_address)) {
-      profile->AddPath(timestamp, path, src_line, update_stats,
-                       sampling_interval);
-    }
+    // If the context filter check failed, omit the contents of the stack.
+    bool accepts_context =
+        profile->context_filter().Accept(native_context_address);
+    profile->AddPath(timestamp, accepts_context ? path : empty_path, src_line,
+                     update_stats, sampling_interval);
   }
   current_profiles_semaphore_.Signal();
 }

@@ -91,6 +91,8 @@ class HeapObjectHeader {
   void Unmark();
   inline bool TryMarkAtomic();
 
+  inline void MarkNonAtomic();
+
   template <AccessMode = AccessMode::kNonAtomic>
   bool IsYoung() const;
 
@@ -118,14 +120,14 @@ class HeapObjectHeader {
 
   static constexpr size_t DecodeSize(uint16_t encoded) {
     // Essentially, gets optimized to << 1.
-    using SizeField = MarkBitField::Next<size_t, 15>;
-    return SizeField::decode(encoded) * kAllocationGranularity;
+    using SizeFieldImpl = MarkBitField::Next<size_t, 15>;
+    return SizeFieldImpl::decode(encoded) * kAllocationGranularity;
   }
 
   static constexpr uint16_t EncodeSize(size_t size) {
     // Essentially, gets optimized to >> 1.
-    using SizeField = MarkBitField::Next<size_t, 15>;
-    return SizeField::encode(size / kAllocationGranularity);
+    using SizeFieldImpl = MarkBitField::Next<size_t, 15>;
+    return SizeFieldImpl::encode(size / kAllocationGranularity);
   }
 
   V8_EXPORT_PRIVATE void CheckApiConstants();
@@ -264,6 +266,11 @@ bool HeapObjectHeader::TryMarkAtomic() {
   }
   return atomic_encoded->compare_exchange_strong(old_value, new_value,
                                                  std::memory_order_relaxed);
+}
+
+void HeapObjectHeader::MarkNonAtomic() {
+  DCHECK(!IsMarked<AccessMode::kNonAtomic>());
+  encoded_low_ |= MarkBitField::encode(true);
 }
 
 template <AccessMode mode>

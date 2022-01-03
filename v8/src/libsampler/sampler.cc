@@ -4,6 +4,9 @@
 
 #include "src/libsampler/sampler.h"
 
+#include "include/v8-isolate.h"
+#include "include/v8-unwinder.h"
+
 #ifdef USE_SIGNALS
 
 #include <errno.h>
@@ -13,7 +16,7 @@
 #include <atomic>
 
 #if !V8_OS_QNX && !V8_OS_AIX
-#include <sys/syscall.h>  // NOLINT
+#include <sys/syscall.h>
 #endif
 
 #if V8_OS_MACOSX
@@ -27,6 +30,8 @@
 #include <unistd.h>
 
 #elif V8_OS_WIN || V8_OS_CYGWIN
+
+#include <windows.h>
 
 #include "src/base/win32-headers.h"
 
@@ -410,6 +415,10 @@ void SignalHandler::FillRegisterState(void* context, RegisterState* state) {
   state->pc = reinterpret_cast<void*>(mcontext.pc);
   state->sp = reinterpret_cast<void*>(mcontext.gregs[29]);
   state->fp = reinterpret_cast<void*>(mcontext.gregs[30]);
+#elif V8_HOST_ARCH_LOONG64
+  state->pc = reinterpret_cast<void*>(mcontext.__pc);
+  state->sp = reinterpret_cast<void*>(mcontext.__gregs[3]);
+  state->fp = reinterpret_cast<void*>(mcontext.__gregs[22]);
 #elif V8_HOST_ARCH_PPC || V8_HOST_ARCH_PPC64
 #if V8_LIBC_GLIBC
   state->pc = reinterpret_cast<void*>(ucontext->uc_mcontext.regs->nip);

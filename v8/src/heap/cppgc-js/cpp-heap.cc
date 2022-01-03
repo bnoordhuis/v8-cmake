@@ -10,13 +10,15 @@
 
 #include "include/cppgc/heap-consistency.h"
 #include "include/cppgc/platform.h"
+#include "include/v8-local-handle.h"
 #include "include/v8-platform.h"
-#include "include/v8.h"
 #include "src/base/logging.h"
 #include "src/base/macros.h"
+#include "src/base/platform/platform.h"
 #include "src/base/platform/time.h"
-#include "src/execution/isolate.h"
+#include "src/execution/isolate-inl.h"
 #include "src/flags/flags.h"
+#include "src/handles/handles.h"
 #include "src/heap/base/stack.h"
 #include "src/heap/cppgc-js/cpp-snapshot.h"
 #include "src/heap/cppgc-js/unified-heap-marking-state.h"
@@ -29,12 +31,14 @@
 #include "src/heap/cppgc/marker.h"
 #include "src/heap/cppgc/marking-state.h"
 #include "src/heap/cppgc/marking-visitor.h"
+#include "src/heap/cppgc/metric-recorder.h"
 #include "src/heap/cppgc/object-allocator.h"
 #include "src/heap/cppgc/prefinalizer-handler.h"
 #include "src/heap/cppgc/raw-heap.h"
 #include "src/heap/cppgc/stats-collector.h"
 #include "src/heap/cppgc/sweeper.h"
 #include "src/heap/embedder-tracing.h"
+#include "src/heap/gc-tracer.h"
 #include "src/heap/marking-worklist.h"
 #include "src/heap/sweeper.h"
 #include "src/init/v8.h"
@@ -213,18 +217,119 @@ void UnifiedHeapMarker::AddObject(void* object) {
       cppgc::internal::HeapObjectHeader::FromObject(object));
 }
 
+void FatalOutOfMemoryHandlerImpl(const std::string& reason,
+                                 const SourceLocation&, HeapBase* heap) {
+  FatalProcessOutOfMemory(
+      reinterpret_cast<v8::internal::Isolate*>(
+          static_cast<v8::internal::CppHeap*>(heap)->isolate()),
+      reason.c_str());
+}
+
 }  // namespace
+
+void CppHeap::MetricRecorderAdapter::AddMainThreadEvent(
+    const FullCycle& cppgc_event) {
+  last_full_gc_event_ = cppgc_event;
+  GetIsolate()->heap()->tracer()->NotifyGCCompleted();
+}
+
+void CppHeap::MetricRecorderAdapter::AddMainThreadEvent(
+    const MainThreadIncrementalMark& cppgc_event) {
+  // Incremental marking steps might be nested in V8 marking steps. In such
+  // cases, stash the relevant values and delegate to V8 to report them. For
+  // non-nested steps, report to the Recorder directly.
+  if (cpp_heap_.is_in_v8_marking_step_) {
+    last_incremental_mark_event_ = cppgc_event;
+    return;
+  }
+  // This is a standalone incremental marking step.
+  const std::shared_ptr<metrics::Recorder>& recorder =
+      GetIsolate()->metrics_recorder();
+  DCHECK_NOT_NULL(recorder);
+  if (!recorder->HasEmbedderRecorder()) return;
+  incremental_mark_batched_events_.events.emplace_back();
+  incremental_mark_batched_events_.events.back().cpp_wall_clock_duration_in_us =
+      cppgc_event.duration_us;
+  // TODO(chromium:1154636): Populate event.wall_clock_duration_in_us.
+  if (incremental_mark_batched_events_.events.size() == kMaxBatchedEvents) {
+    recorder->AddMainThreadEvent(std::move(incremental_mark_batched_events_),
+                                 GetContextId());
+    incremental_mark_batched_events_ = {};
+  }
+}
+
+void CppHeap::MetricRecorderAdapter::AddMainThreadEvent(
+    const MainThreadIncrementalSweep& cppgc_event) {
+  // Incremental sweeping steps are never nested inside V8 sweeping steps, so
+  // report to the Recorder directly.
+  const std::shared_ptr<metrics::Recorder>& recorder =
+      GetIsolate()->metrics_recorder();
+  DCHECK_NOT_NULL(recorder);
+  if (!recorder->HasEmbedderRecorder()) return;
+  incremental_sweep_batched_events_.events.emplace_back();
+  incremental_sweep_batched_events_.events.back()
+      .cpp_wall_clock_duration_in_us = cppgc_event.duration_us;
+  // TODO(chromium:1154636): Populate event.wall_clock_duration_in_us.
+  if (incremental_sweep_batched_events_.events.size() == kMaxBatchedEvents) {
+    recorder->AddMainThreadEvent(std::move(incremental_sweep_batched_events_),
+                                 GetContextId());
+    incremental_sweep_batched_events_ = {};
+  }
+}
+
+void CppHeap::MetricRecorderAdapter::FlushBatchedIncrementalEvents() {
+  const std::shared_ptr<metrics::Recorder>& recorder =
+      GetIsolate()->metrics_recorder();
+  DCHECK_NOT_NULL(recorder);
+  if (!incremental_mark_batched_events_.events.empty()) {
+    recorder->AddMainThreadEvent(std::move(incremental_mark_batched_events_),
+                                 GetContextId());
+    incremental_mark_batched_events_ = {};
+  }
+  if (!incremental_sweep_batched_events_.events.empty()) {
+    recorder->AddMainThreadEvent(std::move(incremental_sweep_batched_events_),
+                                 GetContextId());
+    incremental_sweep_batched_events_ = {};
+  }
+}
+
+bool CppHeap::MetricRecorderAdapter::MetricsReportPending() const {
+  return last_full_gc_event_.has_value();
+}
+
+const base::Optional<cppgc::internal::MetricRecorder::FullCycle>
+CppHeap::MetricRecorderAdapter::ExtractLastFullGcEvent() {
+  return std::move(last_full_gc_event_);
+}
+
+const base::Optional<cppgc::internal::MetricRecorder::MainThreadIncrementalMark>
+CppHeap::MetricRecorderAdapter::ExtractLastIncrementalMarkEvent() {
+  return std::move(last_incremental_mark_event_);
+}
+
+Isolate* CppHeap::MetricRecorderAdapter::GetIsolate() const {
+  DCHECK_NOT_NULL(cpp_heap_.isolate());
+  return reinterpret_cast<Isolate*>(cpp_heap_.isolate());
+}
+
+v8::metrics::Recorder::ContextId CppHeap::MetricRecorderAdapter::GetContextId()
+    const {
+  DCHECK_NOT_NULL(GetIsolate());
+  if (GetIsolate()->context().is_null())
+    return v8::metrics::Recorder::ContextId::Empty();
+  HandleScope scope(GetIsolate());
+  return GetIsolate()->GetOrRegisterRecorderContextId(
+      GetIsolate()->native_context());
+}
 
 CppHeap::CppHeap(
     v8::Platform* platform,
     const std::vector<std::unique_ptr<cppgc::CustomSpaceBase>>& custom_spaces,
-    const v8::WrapperDescriptor& wrapper_descriptor,
-    std::unique_ptr<cppgc::internal::MetricRecorder> metric_recorder)
+    const v8::WrapperDescriptor& wrapper_descriptor)
     : cppgc::internal::HeapBase(
           std::make_shared<CppgcPlatformAdapter>(platform), custom_spaces,
           cppgc::internal::HeapBase::StackSupport::
-              kSupportsConservativeStackScan,
-          std::move(metric_recorder)),
+              kSupportsConservativeStackScan),
       wrapper_descriptor_(wrapper_descriptor) {
   CHECK_NE(WrapperDescriptor::kUnknownEmbedderId,
            wrapper_descriptor_.embedder_id_for_garbage_collected);
@@ -260,6 +365,9 @@ void CppHeap::AttachIsolate(Isolate* isolate) {
   isolate_->heap()->SetEmbedderHeapTracer(this);
   isolate_->heap()->local_embedder_heap_tracer()->SetWrapperDescriptor(
       wrapper_descriptor_);
+  SetMetricRecorder(std::make_unique<MetricRecorderAdapter>(*this));
+  SetStackStart(base::Stack::GetStackStart());
+  oom_handler().SetCustomHandler(&FatalOutOfMemoryHandlerImpl);
   no_gc_scope_--;
 }
 
@@ -277,9 +385,11 @@ void CppHeap::DetachIsolate() {
     isolate_->heap_profiler()->RemoveBuildEmbedderGraphCallback(
         &CppGraphBuilder::Run, this);
   }
+  SetMetricRecorder(nullptr);
   isolate_ = nullptr;
   // Any future garbage collections will ignore the V8->C++ references.
   isolate()->SetEmbedderHeapTracer(nullptr);
+  oom_handler().SetCustomHandler(nullptr);
   // Enter no GC scope.
   no_gc_scope_++;
 }
@@ -295,9 +405,17 @@ void CppHeap::RegisterV8References(
   marking_done_ = false;
 }
 
+namespace {
+
+bool ShouldReduceMemory(CppHeap::TraceFlags flags) {
+  return (flags == CppHeap::TraceFlags::kReduceMemory) ||
+         (flags == CppHeap::TraceFlags::kForced);
+}
+
+}  // namespace
+
 void CppHeap::TracePrologue(TraceFlags flags) {
-  // Finish sweeping in case it is still running.
-  sweeper_.FinishIfRunning();
+  CHECK(!sweeper_.IsSweepingInProgress());
 
   current_flags_ = flags;
   const UnifiedHeapMarker::MarkingConfig marking_config{
@@ -314,7 +432,7 @@ void CppHeap::TracePrologue(TraceFlags flags) {
   DCHECK_IMPLIES(!isolate_, (cppgc::Heap::MarkingType::kAtomic ==
                              marking_config.marking_type) ||
                                 force_incremental_marking_for_testing_);
-  if ((flags == TraceFlags::kReduceMemory) || (flags == TraceFlags::kForced)) {
+  if (ShouldReduceMemory(flags)) {
     // Only enable compaction when in a memory reduction garbage collection as
     // it may significantly increase the final garbage collection pause.
     compactor_.InitializeIfShouldCompact(marking_config.marking_type,
@@ -328,6 +446,7 @@ void CppHeap::TracePrologue(TraceFlags flags) {
 }
 
 bool CppHeap::AdvanceTracing(double deadline_in_ms) {
+  is_in_v8_marking_step_ = true;
   cppgc::internal::StatsCollector::EnabledScope stats_scope(
       stats_collector(),
       in_atomic_pause_ ? cppgc::internal::StatsCollector::kAtomicMark
@@ -341,6 +460,7 @@ bool CppHeap::AdvanceTracing(double deadline_in_ms) {
   marking_done_ =
       marker_->AdvanceMarkingWithLimits(deadline, marked_bytes_limit);
   DCHECK_IMPLIES(in_atomic_pause_, marking_done_);
+  is_in_v8_marking_step_ = false;
   return marking_done_;
 }
 
@@ -374,13 +494,17 @@ void CppHeap::TraceEpilogue(TraceSummary* trace_summary) {
         stats_collector_->marked_bytes(),
         stats_collector_->marking_time().InMillisecondsF());
   }
-  ExecutePreFinalizers();
-  // TODO(chromium:1056170): replace build flag with dedicated flag.
-#if DEBUG
+  // The allocated bytes counter in v8 was reset to the current marked bytes, so
+  // any pending allocated bytes updates should be discarded.
+  buffered_allocated_bytes_ = 0;
+  const size_t bytes_allocated_in_prefinalizers = ExecutePreFinalizers();
+#if CPPGC_VERIFY_HEAP
   UnifiedHeapMarkingVerifier verifier(*this);
-  verifier.Run(stack_state_of_prev_gc(), stack_end_of_current_gc(),
-               stats_collector()->marked_bytes());
-#endif
+  verifier.Run(
+      stack_state_of_prev_gc(), stack_end_of_current_gc(),
+      stats_collector()->marked_bytes() + bytes_allocated_in_prefinalizers);
+#endif  // CPPGC_VERIFY_HEAP
+  USE(bytes_allocated_in_prefinalizers);
 
   {
     cppgc::subtle::NoGarbageCollectionScope no_gc(*this);
@@ -392,7 +516,12 @@ void CppHeap::TraceEpilogue(TraceSummary* trace_summary) {
             ? cppgc::internal::Sweeper::SweepingConfig::SweepingType::kAtomic
             : cppgc::internal::Sweeper::SweepingConfig::SweepingType::
                   kIncrementalAndConcurrent,
-        compactable_space_handling};
+        compactable_space_handling,
+        ShouldReduceMemory(current_flags_)
+            ? cppgc::internal::Sweeper::SweepingConfig::FreeMemoryHandling::
+                  kDiscardWherePossible
+            : cppgc::internal::Sweeper::SweepingConfig::FreeMemoryHandling::
+                  kDoNotDiscard};
     DCHECK_IMPLIES(
         !isolate_,
         cppgc::internal::Sweeper::SweepingConfig::SweepingType::kAtomic ==
@@ -567,6 +696,13 @@ void CppHeap::CollectCustomSpaceStatisticsAtLastGC(
   ReportCustomSpaceStatistics(raw_heap(), std::move(custom_spaces),
                               std::move(receiver));
 }
+
+CppHeap::MetricRecorderAdapter* CppHeap::GetMetricRecorder() const {
+  return static_cast<MetricRecorderAdapter*>(
+      stats_collector_->GetMetricRecorder());
+}
+
+void CppHeap::FinishSweepingIfRunning() { sweeper_.FinishIfRunning(); }
 
 }  // namespace internal
 }  // namespace v8

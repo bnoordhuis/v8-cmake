@@ -4,14 +4,14 @@
 
 // Flags: --experimental-wasm-reftypes
 
-load("test/mjsunit/wasm/wasm-module-builder.js");
+d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
 
 (function TestExternRefTableSetWithMultipleTypes() {
   print(arguments.callee.name);
   let table = new WebAssembly.Table({element: "externref", initial: 10});
 
-  // Table should be initialized with null.
-  assertEquals(null, table.get(1));
+  // Table should be initialized with undefined.
+  assertEquals(undefined, table.get(1));
   let obj = {'hello' : 'world'};
   table.set(2, obj);
   assertSame(obj, table.get(2));
@@ -78,4 +78,61 @@ load("test/mjsunit/wasm/wasm-module-builder.js");
   const instance = builder.instantiate();
 
   assertTraps(kTrapTableOutOfBounds, () => instance.exports.init());
+})();
+
+
+(function TestExternRefTableConstructorWithDefaultValue() {
+  print(arguments.callee.name);
+  const testObject = {};
+  const argument = { "element": "externref", "initial": 3 };
+  const table = new WebAssembly.Table(argument, testObject);
+  assertEquals(table.length, 3);
+  assertEquals(table.get(0), testObject);
+  assertEquals(table.get(1), testObject);
+  assertEquals(table.get(2), testObject);
+})();
+
+function getDummy(val) {
+  let builder = new WasmModuleBuilder();
+  builder.addFunction('dummy', kSig_i_v)
+      .addBody([kExprI32Const, val])
+      .exportAs('dummy');
+  return builder.instantiate().exports.dummy;
+}
+
+(function TestFuncRefTableConstructorWithDefaultValue() {
+  print(arguments.callee.name);
+
+  const expected = 6;
+  let dummy = getDummy(expected);
+
+  const argument = { "element": "anyfunc", "initial": 3 };
+  const table = new WebAssembly.Table(argument, dummy);
+  assertEquals(table.length, 3);
+  assertEquals(table.get(0)(), expected);
+  assertEquals(table.get(1)(), expected);
+  assertEquals(table.get(2)(), expected);
+})();
+
+(function TestExternFuncTableSetWithoutValue() {
+  print(arguments.callee.name);
+
+  const expected = 6;
+  const dummy = getDummy(expected);
+  const argument = { "element": "anyfunc", "initial": 3 };
+  const table = new WebAssembly.Table(argument, dummy);
+  assertEquals(table.get(1)(), expected);
+  table.set(1);
+  assertEquals(table.get(1), null);
+})();
+
+(function TestExternRefTableSetWithoutValue() {
+  print(arguments.callee.name);
+
+  const testObject = {};
+  const argument = { "element": "externref", "initial": 3 };
+  const table = new WebAssembly.Table(argument, testObject);
+  assertEquals(table.get(1), testObject);
+  table.set(1);
+  assertEquals(table.get(1), undefined);
 })();

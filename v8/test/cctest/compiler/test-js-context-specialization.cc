@@ -137,9 +137,9 @@ TEST(ReduceJSLoadContext0) {
   const int slot = 5;
   native->set(slot, *expected);
 
-  Node* const_context = t.jsgraph()->Constant(ObjectRef(t.broker(), native));
+  Node* const_context = t.jsgraph()->Constant(MakeRef(t.broker(), native));
   Node* deep_const_context =
-      t.jsgraph()->Constant(ObjectRef(t.broker(), subcontext2));
+      t.jsgraph()->Constant(MakeRef(t.broker(), subcontext2));
   Node* param_context = t.graph()->NewNode(t.common()->Parameter(0), start);
 
   {
@@ -201,7 +201,7 @@ TEST(ReduceJSLoadContext1) {
 
   Node* start = t.graph()->NewNode(t.common()->Start(0));
   t.graph()->SetStart(start);
-  Handle<ScopeInfo> empty(ScopeInfo::Empty(t.main_isolate()), t.main_isolate());
+  ScopeInfoRef empty = MakeRef(t.broker(), ScopeInfo::Empty(t.main_isolate()));
   const i::compiler::Operator* create_function_context =
       t.javascript()->CreateFunctionContext(empty, 42, FUNCTION_SCOPE);
 
@@ -271,7 +271,7 @@ TEST(ReduceJSLoadContext2) {
 
   Node* start = t.graph()->NewNode(t.common()->Start(0));
   t.graph()->SetStart(start);
-  Handle<ScopeInfo> empty(ScopeInfo::Empty(t.main_isolate()), t.main_isolate());
+  ScopeInfoRef empty = MakeRef(t.broker(), ScopeInfo::Empty(t.main_isolate()));
   const i::compiler::Operator* create_function_context =
       t.javascript()->CreateFunctionContext(empty, 42, FUNCTION_SCOPE);
 
@@ -284,8 +284,7 @@ TEST(ReduceJSLoadContext2) {
   context_object0->set(Context::EXTENSION_INDEX, *slot_value0);
   context_object1->set(Context::EXTENSION_INDEX, *slot_value1);
 
-  Node* context0 =
-      t.jsgraph()->Constant(ObjectRef(t.broker(), context_object1));
+  Node* context0 = t.jsgraph()->Constant(MakeRef(t.broker(), context_object1));
   Node* context1 =
       t.graph()->NewNode(create_function_context, context0, start, start);
   Node* context2 =
@@ -366,8 +365,7 @@ TEST(ReduceJSLoadContext3) {
 
   Node* start = t.graph()->NewNode(t.common()->Start(2));
   t.graph()->SetStart(start);
-  Handle<ScopeInfo> empty(ScopeInfo::Empty(t.main_isolate()),
-                          handle_zone_scope.main_isolate());
+  ScopeInfoRef empty = MakeRef(t.broker(), ScopeInfo::Empty(t.main_isolate()));
   const i::compiler::Operator* create_function_context =
       t.javascript()->CreateFunctionContext(empty, 42, FUNCTION_SCOPE);
 
@@ -442,9 +440,9 @@ TEST(ReduceJSStoreContext0) {
   const int slot = 5;
   native->set(slot, *expected);
 
-  Node* const_context = t.jsgraph()->Constant(ObjectRef(t.broker(), native));
+  Node* const_context = t.jsgraph()->Constant(MakeRef(t.broker(), native));
   Node* deep_const_context =
-      t.jsgraph()->Constant(ObjectRef(t.broker(), subcontext2));
+      t.jsgraph()->Constant(MakeRef(t.broker(), subcontext2));
   Node* param_context = t.graph()->NewNode(t.common()->Parameter(0), start);
 
   {
@@ -497,7 +495,7 @@ TEST(ReduceJSStoreContext1) {
 
   Node* start = t.graph()->NewNode(t.common()->Start(0));
   t.graph()->SetStart(start);
-  Handle<ScopeInfo> empty(ScopeInfo::Empty(t.main_isolate()), t.main_isolate());
+  ScopeInfoRef empty = MakeRef(t.broker(), ScopeInfo::Empty(t.main_isolate()));
   const i::compiler::Operator* create_function_context =
       t.javascript()->CreateFunctionContext(empty, 42, FUNCTION_SCOPE);
 
@@ -541,7 +539,7 @@ TEST(ReduceJSStoreContext2) {
 
   Node* start = t.graph()->NewNode(t.common()->Start(0));
   t.graph()->SetStart(start);
-  Handle<ScopeInfo> empty(ScopeInfo::Empty(t.main_isolate()), t.main_isolate());
+  ScopeInfoRef empty = MakeRef(t.broker(), ScopeInfo::Empty(t.main_isolate()));
   const i::compiler::Operator* create_function_context =
       t.javascript()->CreateFunctionContext(empty, 42, FUNCTION_SCOPE);
 
@@ -554,8 +552,7 @@ TEST(ReduceJSStoreContext2) {
   context_object0->set(Context::EXTENSION_INDEX, *slot_value0);
   context_object1->set(Context::EXTENSION_INDEX, *slot_value1);
 
-  Node* context0 =
-      t.jsgraph()->Constant(ObjectRef(t.broker(), context_object1));
+  Node* context0 = t.jsgraph()->Constant(MakeRef(t.broker(), context_object1));
   Node* context1 =
       t.graph()->NewNode(create_function_context, context0, start, start);
   Node* context2 =
@@ -608,8 +605,7 @@ TEST(ReduceJSStoreContext3) {
 
   Node* start = t.graph()->NewNode(t.common()->Start(2));
   t.graph()->SetStart(start);
-  Handle<ScopeInfo> empty(ScopeInfo::Empty(t.main_isolate()),
-                          handle_zone_scope.main_isolate());
+  ScopeInfoRef empty = MakeRef(t.broker(), ScopeInfo::Empty(t.main_isolate()));
   const i::compiler::Operator* create_function_context =
       t.javascript()->CreateFunctionContext(empty, 42, FUNCTION_SCOPE);
 

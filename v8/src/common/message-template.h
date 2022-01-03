@@ -129,8 +129,12 @@ namespace internal {
   T(NonObjectAssertOption, "The 'assert' option must be an object")            \
   T(NonObjectInInstanceOfCheck,                                                \
     "Right-hand side of 'instanceof' is not an object")                        \
-  T(NonObjectPropertyLoad, "Cannot read property '%' of %")                    \
-  T(NonObjectPropertyStore, "Cannot set property '%' of %")                    \
+  T(NonObjectPropertyLoad, "Cannot read properties of %")                      \
+  T(NonObjectPropertyLoadWithProperty,                                         \
+    "Cannot read properties of % (reading '%')")                               \
+  T(NonObjectPropertyStore, "Cannot set properties of %")                      \
+  T(NonObjectPropertyStoreWithProperty,                                        \
+    "Cannot set properties of % (setting '%')")                                \
   T(NonObjectImportArgument,                                                   \
     "The second argument to import() must be an object")                       \
   T(NonStringImportAssertionValue, "Import assertion value must be a string")  \
@@ -376,6 +380,7 @@ namespace internal {
   T(TypedArrayTooLargeToSort,                                                  \
     "Custom comparefn not supported for huge TypedArrays")                     \
   T(ValueOutOfRange, "Value % out of range for % options property %")          \
+  T(CollectionGrowFailed, "% maximum size exceeded")                           \
   /* SyntaxError */                                                            \
   T(AmbiguousExport,                                                           \
     "The requested module '%' contains conflicting star exports for name '%'") \
@@ -435,6 +440,10 @@ namespace internal {
   T(InvalidRegExpFlags, "Invalid flags supplied to RegExp constructor '%'")    \
   T(InvalidOrUnexpectedToken, "Invalid or unexpected token")                   \
   T(InvalidPrivateBrand, "Object must be an instance of class %")              \
+  T(InvalidPrivateBrandReinitialization,                                       \
+    "Cannot initialize private methods of class % twice on the same object")   \
+  T(InvalidPrivateFieldReitialization,                                         \
+    "Cannot initialize % twice on the same object")                            \
   T(InvalidPrivateFieldResolution,                                             \
     "Private field '%' must be declared in an enclosing class")                \
   T(InvalidPrivateMemberRead,                                                  \
@@ -576,6 +585,7 @@ namespace internal {
   T(WasmTrapNullDereference, "dereferencing a null pointer")                   \
   T(WasmTrapIllegalCast, "illegal cast")                                       \
   T(WasmTrapArrayOutOfBounds, "array element access out of bounds")            \
+  T(WasmTrapArrayTooLarge, "requested new array is too large")                 \
   T(WasmExceptionError, "wasm exception")                                      \
   /* Asm.js validation related */                                              \
   T(AsmJsInvalid, "Invalid asm.js: %")                                         \

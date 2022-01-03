@@ -7,8 +7,8 @@
 // Needed for exceptions-utils.js.
 // Flags: --allow-natives-syntax
 
-load("test/mjsunit/wasm/wasm-module-builder.js");
-load("test/mjsunit/wasm/exceptions-utils.js");
+d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
+d8.file.execute("test/mjsunit/wasm/exceptions-utils.js");
 
 // Test that lowering a ror operator with int64-lowering does not produce
 // floating control, which is incompatible with loop unrolling.
@@ -93,8 +93,8 @@ load("test/mjsunit/wasm/exceptions-utils.js");
 (function TestRethrowNested() {
   print(arguments.callee.name);
   let builder = new WasmModuleBuilder();
-  let except1 = builder.addException(kSig_v_v);
-  let except2 = builder.addException(kSig_v_v);
+  let except1 = builder.addTag(kSig_v_v);
+  let except2 = builder.addTag(kSig_v_v);
   builder.addFunction("rethrow_nested", kSig_i_i)
     .addBody([
       kExprLoop, kWasmI32,
@@ -139,7 +139,7 @@ load("test/mjsunit/wasm/exceptions-utils.js");
 (function TestThrow() {
   print(arguments.callee.name);
   let builder = new WasmModuleBuilder();
-  let except1 = builder.addException(kSig_v_v);
+  let except1 = builder.addTag(kSig_v_v);
   builder.addFunction("throw", kSig_i_i)
     .addBody([
       kExprLoop, kWasmVoid,
@@ -167,7 +167,7 @@ load("test/mjsunit/wasm/exceptions-utils.js");
 (function TestThrowCatch() {
   print(arguments.callee.name);
   let builder = new WasmModuleBuilder();
-  let except1 = builder.addException(kSig_v_v);
+  let except1 = builder.addTag(kSig_v_v);
   builder.addFunction("throw_catch", kSig_i_i)
     .addBody([
       kExprLoop, kWasmI32,

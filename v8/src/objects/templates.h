@@ -122,10 +122,18 @@ class FunctionTemplateInfo
   // SharedFunctionInfo or an accessor), because TF relies on immutability to
   // safely read concurrently.
   DECL_BOOLEAN_ACCESSORS(published)
+
+  // This specifies the permissable range of instance type of objects that can
+  // be allowed to be used as receivers with the given template.
+  DECL_INT16_ACCESSORS(allowed_receiver_instance_type_range_start)
+  DECL_INT16_ACCESSORS(allowed_receiver_instance_type_range_end)
   // End flag bits ---------------------
 
   // Dispatched behavior.
   DECL_PRINTER(FunctionTemplateInfo)
+
+  inline int InstanceType() const;
+  inline void SetInstanceType(int instance_type);
 
   static Handle<SharedFunctionInfo> GetOrCreateSharedFunctionInfo(
       Isolate* isolate, Handle<FunctionTemplateInfo> info,
@@ -150,7 +158,8 @@ class FunctionTemplateInfo
   bool IsLeafTemplateForApiObject(Object object) const;
   inline bool instantiated();
 
-  inline bool BreakAtEntry();
+  bool BreakAtEntry();
+  bool HasInstanceType();
 
   // Helper function for cached accessors.
   static base::Optional<Name> TryGetCachedPropertyName(Isolate* isolate,
@@ -168,6 +177,7 @@ class FunctionTemplateInfo
   DEFINE_TORQUE_GENERATED_FUNCTION_TEMPLATE_INFO_FLAGS()
 
  private:
+  static constexpr int kNoJSApiObjectType = 0;
   static inline FunctionTemplateRareData EnsureFunctionTemplateRareData(
       Isolate* isolate, Handle<FunctionTemplateInfo> function_template_info);
 

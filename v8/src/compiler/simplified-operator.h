@@ -46,10 +46,6 @@ size_t hash_value(BaseTaggedness);
 
 std::ostream& operator<<(std::ostream&, BaseTaggedness);
 
-size_t hash_value(LoadSensitivity);
-
-std::ostream& operator<<(std::ostream&, LoadSensitivity);
-
 struct ConstFieldInfo {
   // the map that introduced the const field, if any. An access is considered
   // mutable iff the handle is null.
@@ -82,7 +78,6 @@ struct FieldAccess {
   Type type;                      // type of the field.
   MachineType machine_type;       // machine type of the field.
   WriteBarrierKind write_barrier_kind;  // write barrier hint.
-  LoadSensitivity load_sensitivity;     // load safety for poisoning.
   ConstFieldInfo const_field_info;      // the constness of this access, and the
                                     // field owner map, if the access is const
   bool is_store_in_literal;  // originates from a kStoreInLiteral access
@@ -96,14 +91,12 @@ struct FieldAccess {
         type(Type::None()),
         machine_type(MachineType::None()),
         write_barrier_kind(kFullWriteBarrier),
-        load_sensitivity(LoadSensitivity::kUnsafe),
         const_field_info(ConstFieldInfo::None()),
         is_store_in_literal(false) {}
 
   FieldAccess(BaseTaggedness base_is_tagged, int offset, MaybeHandle<Name> name,
               MaybeHandle<Map> map, Type type, MachineType machine_type,
               WriteBarrierKind write_barrier_kind,
-              LoadSensitivity load_sensitivity = LoadSensitivity::kUnsafe,
               ConstFieldInfo const_field_info = ConstFieldInfo::None(),
               bool is_store_in_literal = false
 #ifdef V8_HEAP_SANDBOX
@@ -118,7 +111,6 @@ struct FieldAccess {
         type(type),
         machine_type(machine_type),
         write_barrier_kind(write_barrier_kind),
-        load_sensitivity(load_sensitivity),
         const_field_info(const_field_info),
         is_store_in_literal(is_store_in_literal)
 #ifdef V8_HEAP_SANDBOX
@@ -162,25 +154,21 @@ struct ElementAccess {
   Type type;                      // type of the element.
   MachineType machine_type;       // machine type of the element.
   WriteBarrierKind write_barrier_kind;  // write barrier hint.
-  LoadSensitivity load_sensitivity;     // load safety for poisoning.
 
   ElementAccess()
       : base_is_tagged(kTaggedBase),
         header_size(0),
         type(Type::None()),
         machine_type(MachineType::None()),
-        write_barrier_kind(kFullWriteBarrier),
-        load_sensitivity(LoadSensitivity::kUnsafe) {}
+        write_barrier_kind(kFullWriteBarrier) {}
 
   ElementAccess(BaseTaggedness base_is_tagged, int header_size, Type type,
-                MachineType machine_type, WriteBarrierKind write_barrier_kind,
-                LoadSensitivity load_sensitivity = LoadSensitivity::kUnsafe)
+                MachineType machine_type, WriteBarrierKind write_barrier_kind)
       : base_is_tagged(base_is_tagged),
         header_size(header_size),
         type(type),
         machine_type(machine_type),
-        write_barrier_kind(write_barrier_kind),
-        load_sensitivity(load_sensitivity) {}
+        write_barrier_kind(write_barrier_kind) {}
 
   int tag() const { return base_is_tagged == kTaggedBase ? kHeapObjectTag : 0; }
 };
@@ -696,19 +684,33 @@ std::ostream& operator<<(std::ostream&, const NewArgumentsElementsParameters&);
 const NewArgumentsElementsParameters& NewArgumentsElementsParametersOf(
     const Operator*) V8_WARN_UNUSED_RESULT;
 
+struct FastApiCallFunction {
+  Address address;
+  const CFunctionInfo* signature;
+
+  bool operator==(const FastApiCallFunction& rhs) const {
+    return address == rhs.address && signature == rhs.signature;
+  }
+};
+typedef ZoneVector<FastApiCallFunction> FastApiCallFunctionVector;
+
 class FastApiCallParameters {
  public:
-  explicit FastApiCallParameters(const CFunctionInfo* signature,
+  explicit FastApiCallParameters(const FastApiCallFunctionVector& c_functions,
                                  FeedbackSource const& feedback,
                                  CallDescriptor* descriptor)
-      : signature_(signature), feedback_(feedback), descriptor_(descriptor) {}
+      : c_functions_(c_functions),
+        feedback_(feedback),
+        descriptor_(descriptor) {}
 
-  const CFunctionInfo* signature() const { return signature_; }
+  const FastApiCallFunctionVector& c_functions() const { return c_functions_; }
   FeedbackSource const& feedback() const { return feedback_; }
   CallDescriptor* descriptor() const { return descriptor_; }
 
  private:
-  const CFunctionInfo* signature_;
+  // A single FastApiCall node can represent multiple overloaded functions.
+  const FastApiCallFunctionVector c_functions_;
+
   const FeedbackSource feedback_;
   CallDescriptor* descriptor_;
 };
@@ -829,6 +831,7 @@ class V8_EXPORT_PRIVATE SimplifiedOperatorBuilder final
   const Operator* SpeculativeNumberBitwiseAnd(NumberOperationHint hint);
   const Operator* SpeculativeNumberBitwiseOr(NumberOperationHint hint);
   const Operator* SpeculativeNumberBitwiseXor(NumberOperationHint hint);
+  const Operator* SpeculativeNumberPow(NumberOperationHint hint);
 
   const Operator* SpeculativeNumberLessThan(NumberOperationHint hint);
   const Operator* SpeculativeNumberLessThanOrEqual(NumberOperationHint hint);
@@ -911,7 +914,6 @@ class V8_EXPORT_PRIVATE SimplifiedOperatorBuilder final
   const Operator* TruncateTaggedToBit();
   const Operator* TruncateTaggedPointerToBit();
 
-  const Operator* PoisonIndex();
   const Operator* CompareMaps(ZoneHandleSet<Map>);
   const Operator* MapGuard(ZoneHandleSet<Map> maps);
 
@@ -1093,9 +1095,9 @@ class V8_EXPORT_PRIVATE SimplifiedOperatorBuilder final
   const Operator* DateNow();
 
   // Represents the inputs necessary to construct a fast and a slow API call.
-  const Operator* FastApiCall(const CFunctionInfo* signature,
-                              FeedbackSource const& feedback,
-                              CallDescriptor* descriptor);
+  const Operator* FastApiCall(
+      const FastApiCallFunctionVector& c_candidate_functions,
+      FeedbackSource const& feedback, CallDescriptor* descriptor);
 
  private:
   Zone* zone() const { return zone_; }
@@ -1155,19 +1157,15 @@ class FastApiCallNode final : public SimplifiedNodeWrapperBase {
     return FastApiCallParametersOf(node()->op());
   }
 
-#define INPUTS(V)              \
-  V(Target, target, 0, Object) \
-  V(Receiver, receiver, 1, Object)
+#define INPUTS(V) V(Receiver, receiver, 0, Object)
   INPUTS(DEFINE_INPUT_ACCESSORS)
 #undef INPUTS
 
   // Besides actual arguments, FastApiCall nodes also take:
-  static constexpr int kFastTargetInputCount = 1;
   static constexpr int kSlowTargetInputCount = 1;
   static constexpr int kFastReceiverInputCount = 1;
   static constexpr int kSlowReceiverInputCount = 1;
-  static constexpr int kExtraInputCount =
-      kFastTargetInputCount + kFastReceiverInputCount;
+  static constexpr int kExtraInputCount = kFastReceiverInputCount;
 
   static constexpr int kArityInputCount = 1;
   static constexpr int kNewTargetInputCount = 1;
@@ -1184,8 +1182,7 @@ class FastApiCallNode final : public SimplifiedNodeWrapperBase {
 
   // This is the arity fed into FastApiCallArguments.
   static constexpr int ArityForArgc(int c_arg_count, int js_arg_count) {
-    return c_arg_count + kFastTargetInputCount + js_arg_count +
-           kEffectAndControlInputCount;
+    return c_arg_count + js_arg_count + kEffectAndControlInputCount;
   }
 
   int FastCallArgumentCount() const;
@@ -1203,9 +1200,7 @@ class FastApiCallNode final : public SimplifiedNodeWrapperBase {
         NodeProperties::GetValueInput(node(), FastCallArgumentIndex(i)));
   }
 
-  int FirstSlowCallArgumentIndex() const {
-    return FastCallArgumentCount() + FastApiCallNode::kFastTargetInputCount;
-  }
+  int FirstSlowCallArgumentIndex() const { return FastCallArgumentCount(); }
   int SlowCallArgumentIndex(int i) const {
     return FirstSlowCallArgumentIndex() + i;
   }

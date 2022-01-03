@@ -4,6 +4,7 @@
 
 #include "src/objects/stack-frame-info.h"
 
+#include "src/base/strings.h"
 #include "src/objects/shared-function-info.h"
 #include "src/objects/stack-frame-info-inl.h"
 #include "src/strings/string-builder-inl.h"
@@ -67,7 +68,11 @@ int StackFrameInfo::GetLineNumber(Handle<StackFrameInfo> info) {
   Handle<Script> script;
   if (GetScript(isolate, info).ToHandle(&script)) {
     int position = GetSourcePosition(info);
-    return Script::GetLineNumber(script, position) + 1;
+    int line_number = Script::GetLineNumber(script, position) + 1;
+    if (script->HasSourceURLComment()) {
+      line_number -= script->line_offset();
+    }
+    return line_number;
   }
   return Message::kNoLineNumberInfo;
 }
@@ -83,7 +88,13 @@ int StackFrameInfo::GetColumnNumber(Handle<StackFrameInfo> info) {
 #endif  // V8_ENABLE_WEBASSEMBLY
   Handle<Script> script;
   if (GetScript(isolate, info).ToHandle(&script)) {
-    return Script::GetColumnNumber(script, position) + 1;
+    int column_number = Script::GetColumnNumber(script, position) + 1;
+    if (script->HasSourceURLComment()) {
+      if (Script::GetLineNumber(script, position) == script->line_offset()) {
+        column_number -= script->column_offset();
+      }
+    }
+    return column_number;
   }
   return Message::kNoColumnInfo;
 }
@@ -281,7 +292,7 @@ PrimitiveHeapObject InferMethodNameFromFastObject(Isolate* isolate,
     auto details = descriptors.GetDetails(i);
     if (details.IsDontEnum()) continue;
     Object value;
-    if (details.location() == kField) {
+    if (details.location() == PropertyLocation::kField) {
       auto field_index = FieldIndex::ForPropertyIndex(
           map, details.field_index(), details.representation());
       if (field_index.is_double()) continue;
@@ -378,14 +389,14 @@ Handle<Object> StackFrameInfo::GetMethodName(Handle<StackFrameInfo> info) {
 
   // The static initializer function is not a method, so don't add a
   // class name, just return the function name.
-  if (name->HasOneBytePrefix(CStrVector("<static_fields_initializer>"))) {
+  if (name->HasOneBytePrefix(base::CStrVector("<static_fields_initializer>"))) {
     return name;
   }
 
   // ES2015 gives getters and setters name prefixes which must
   // be stripped to find the property name.
-  if (name->HasOneBytePrefix(CStrVector("get ")) ||
-      name->HasOneBytePrefix(CStrVector("set "))) {
+  if (name->HasOneBytePrefix(base::CStrVector("get ")) ||
+      name->HasOneBytePrefix(base::CStrVector("set "))) {
     name = isolate->factory()->NewProperSubString(name, 4, name->length());
   } else if (name->length() == 0) {
     // The function doesn't have a meaningful "name" property, however
@@ -403,7 +414,7 @@ Handle<Object> StackFrameInfo::GetMethodName(Handle<StackFrameInfo> info) {
   }
 
   if (name->length() != 0) {
-    LookupIterator::Key key(isolate, Handle<Name>::cast(name));
+    PropertyKey key(isolate, Handle<Name>::cast(name));
     LookupIterator it(isolate, receiver, key,
                       LookupIterator::PROTOTYPE_CHAIN_SKIP_INTERCEPTOR);
     if (it.state() == LookupIterator::DATA) {
@@ -618,7 +629,7 @@ bool StringEndsWithMethodName(Isolate* isolate, Handle<String> subject,
       return false;
     }
 
-    const uc32 subject_char = subject_reader.Get(subject_index);
+    const base::uc32 subject_char = subject_reader.Get(subject_index);
     if (i == pattern_reader.length()) {
       if (subject_char != '.') return false;
     } else if (subject_char != pattern_reader.Get(pattern_index)) {
@@ -707,12 +718,6 @@ void SerializeJSStackFrame(Isolate* isolate, Handle<StackFrameInfo> frame,
 }
 
 #if V8_ENABLE_WEBASSEMBLY
-bool IsAnonymousWasmScript(Isolate* isolate, Handle<Object> url) {
-  Handle<String> prefix =
-      isolate->factory()->NewStringFromStaticChars("wasm://wasm/");
-  return StringIndexOf(isolate, Handle<String>::cast(url), prefix) == 0;
-}
-
 void SerializeWasmStackFrame(Isolate* isolate, Handle<StackFrameInfo> frame,
                              IncrementalStringBuilder* builder) {
   Handle<Object> module_name = StackFrameInfo::GetWasmModuleName(frame);
@@ -732,7 +737,7 @@ void SerializeWasmStackFrame(Isolate* isolate, Handle<StackFrameInfo> frame,
   }
 
   Handle<Object> url(frame->GetScriptNameOrSourceURL(), isolate);
-  if (IsNonEmptyString(url) && !IsAnonymousWasmScript(isolate, url)) {
+  if (IsNonEmptyString(url)) {
     builder->AppendString(Handle<String>::cast(url));
   } else {
     builder->AppendCString("<anonymous>");
@@ -745,7 +750,7 @@ void SerializeWasmStackFrame(Isolate* isolate, Handle<StackFrameInfo> frame,
   builder->AppendCString("]:");
 
   char buffer[16];
-  SNPrintF(ArrayVector(buffer), "0x%x",
+  SNPrintF(base::ArrayVector(buffer), "0x%x",
            StackFrameInfo::GetColumnNumber(frame) - 1);
   builder->AppendCString(buffer);
 

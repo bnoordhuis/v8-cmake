@@ -46,7 +46,6 @@ class V8_EXPORT_PRIVATE LocalHeap {
   void Safepoint() {
     DCHECK(AllowSafepoints::IsAllowed());
     ThreadState current = state_relaxed();
-    STATIC_ASSERT(kSafepointRequested == kCollectionRequested);
 
     // The following condition checks for both kSafepointRequested (background
     // thread) and kCollectionRequested (main thread).
@@ -83,6 +82,7 @@ class V8_EXPORT_PRIVATE LocalHeap {
       std::unique_ptr<PersistentHandles> persistent_handles);
   std::unique_ptr<PersistentHandles> DetachPersistentHandles();
 #ifdef DEBUG
+  bool HasPersistentHandles() { return !!persistent_handles_; }
   bool ContainsPersistentHandle(Address* location);
   bool ContainsLocalHandle(Address* location);
   bool IsHandleDereferenceAllowed();
@@ -91,6 +91,7 @@ class V8_EXPORT_PRIVATE LocalHeap {
   bool IsParked();
 
   Heap* heap() { return heap_; }
+  Heap* AsHeap() { return heap(); }
 
   MarkingBarrier* marking_barrier() { return marking_barrier_.get(); }
   ConcurrentAllocator* old_space_allocator() { return &old_space_allocator_; }
@@ -130,7 +131,14 @@ class V8_EXPORT_PRIVATE LocalHeap {
       AllocationOrigin origin = AllocationOrigin::kRuntime,
       AllocationAlignment alignment = kWordAligned);
 
+  inline void CreateFillerObjectAt(Address addr, int size,
+                                   ClearRecordedSlots clear_slots_mode);
+
   bool is_main_thread() const { return is_main_thread_; }
+  bool deserialization_complete() const {
+    return heap_->deserialization_complete();
+  }
+  ReadOnlySpace* read_only_space() { return heap_->read_only_space(); }
 
   // Requests GC and blocks until the collection finishes.
   bool TryPerformCollection();
@@ -150,31 +158,16 @@ class V8_EXPORT_PRIVATE LocalHeap {
     // or manipulate the heap in any way. This is considered to be a safepoint.
     kParked,
 
-    // SafepointRequested is used for Running background threads to force
-    // Safepoint() and
+    // SafepointRequested is used for Running threads to force Safepoint() and
     // Park() into the slow path.
     kSafepointRequested,
-    // A background thread transitions into this state from SafepointRequested
-    // when it
+    // A thread transitions into this state from SafepointRequested when it
     // enters a safepoint.
     kSafepoint,
     // This state is used for Parked background threads and forces Unpark() into
-    // the slow
-    // path. It prevents Unpark() to succeed before the safepoint operation is
-    // finished.
+    // the slow path. It prevents Unpark() to succeed before the safepoint
+    // operation is finished.
     kParkedSafepointRequested,
-
-    // This state is used on the main thread when at least one background thread
-    // requested a GC while the main thread was Running.
-    // We can use the same value for CollectionRequested and SafepointRequested
-    // since the first is only used on the main thread, while the other one only
-    // occurs on background threads. This property is used to have a faster
-    // check in Safepoint().
-    kCollectionRequested = kSafepointRequested,
-
-    // This state is used on the main thread when at least one background thread
-    // requested a GC while the main thread was Parked.
-    kParkedCollectionRequested,
   };
 
   ThreadState state_relaxed() { return state_.load(std::memory_order_relaxed); }

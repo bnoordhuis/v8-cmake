@@ -79,6 +79,7 @@ class HeapObject : public Object {
   HEAP_OBJECT_TYPE_LIST(IS_TYPE_FUNCTION_DECL)
   IS_TYPE_FUNCTION_DECL(HashTableBase)
   IS_TYPE_FUNCTION_DECL(SmallOrderedHashTable)
+  IS_TYPE_FUNCTION_DECL(CodeT)
 #undef IS_TYPE_FUNCTION_DECL
 
   bool IsExternal(Isolate* isolate) const;
@@ -151,6 +152,7 @@ class HeapObject : public Object {
   // during marking GC.
   inline ObjectSlot RawField(int byte_offset) const;
   inline MaybeObjectSlot RawMaybeWeakField(int byte_offset) const;
+  inline CodeObjectSlot RawCodeField(int byte_offset) const;
 
   DECL_CAST(HeapObject)
 
@@ -177,6 +179,7 @@ class HeapObject : public Object {
   // Verify a pointer is a valid HeapObject pointer that points to object
   // areas in the heap.
   static void VerifyHeapPointer(Isolate* isolate, Object p);
+  static void VerifyCodePointer(Isolate* isolate, Object p);
 #endif
 
   static inline AllocationAlignment RequiredAlignment(Map map);
@@ -193,7 +196,8 @@ class HeapObject : public Object {
   bool CanBeRehashed() const;
 
   // Rehash the object based on the layout inferred from its map.
-  void RehashBasedOnMap(Isolate* isolate);
+  template <typename IsolateT>
+  void RehashBasedOnMap(IsolateT* isolate);
 
   // Layout description.
 #define HEAP_OBJECT_FIELDS(V) \

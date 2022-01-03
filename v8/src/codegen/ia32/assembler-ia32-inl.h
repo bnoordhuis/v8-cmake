@@ -86,7 +86,7 @@ HeapObject RelocInfo::target_object() {
   return HeapObject::cast(Object(ReadUnalignedValue<Address>(pc_)));
 }
 
-HeapObject RelocInfo::target_object_no_host(Isolate* isolate) {
+HeapObject RelocInfo::target_object_no_host(PtrComprCageBase cage_base) {
   return target_object();
 }
 
@@ -185,6 +185,14 @@ void Assembler::emit(Handle<HeapObject> handle) {
 void Assembler::emit(uint32_t x, RelocInfo::Mode rmode) {
   if (!RelocInfo::IsNone(rmode)) {
     RecordRelocInfo(rmode);
+    if (rmode == RelocInfo::FULL_EMBEDDED_OBJECT && IsOnHeap()) {
+      int offset = pc_offset();
+      Handle<HeapObject> object(reinterpret_cast<Address*>(x));
+      saved_handles_for_raw_object_ptr_.push_back(std::make_pair(offset, x));
+      emit(object->ptr());
+      DCHECK(EmbeddedObjectMatches(offset, object));
+      return;
+    }
   }
   emit(x);
 }
@@ -203,9 +211,17 @@ void Assembler::emit(const Immediate& x) {
   if (x.is_heap_object_request()) {
     RequestHeapObject(x.heap_object_request());
     emit(0);
-  } else {
-    emit(x.immediate());
+    return;
   }
+  if (x.is_embedded_object() && IsOnHeap()) {
+    int offset = pc_offset();
+    saved_handles_for_raw_object_ptr_.push_back(
+        std::make_pair(offset, x.immediate()));
+    emit(x.embedded_object()->ptr());
+    DCHECK(EmbeddedObjectMatches(offset, x.embedded_object()));
+    return;
+  }
+  emit(x.immediate());
 }
 
 void Assembler::emit_code_relative_offset(Label* label) {

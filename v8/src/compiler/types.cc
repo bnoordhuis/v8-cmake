@@ -258,7 +258,7 @@ Type::bitset BitsetType::Lub(const MapRefLike& map) {
     case JS_PROMISE_TYPE:
 #if V8_ENABLE_WEBASSEMBLY
     case WASM_ARRAY_TYPE:
-    case WASM_EXCEPTION_OBJECT_TYPE:
+    case WASM_TAG_OBJECT_TYPE:
     case WASM_GLOBAL_OBJECT_TYPE:
     case WASM_INSTANCE_OBJECT_TYPE:
     case WASM_MEMORY_OBJECT_TYPE:
@@ -275,6 +275,7 @@ Type::bitset BitsetType::Lub(const MapRefLike& map) {
       DCHECK(!map.is_undetectable());
       return kBoundFunction;
     case JS_FUNCTION_TYPE:
+    case JS_CLASS_CONSTRUCTOR_TYPE:
     case JS_PROMISE_CONSTRUCTOR_TYPE:
     case JS_REG_EXP_CONSTRUCTOR_TYPE:
     case JS_ARRAY_CONSTRUCTOR_TYPE:
@@ -337,6 +338,7 @@ Type::bitset BitsetType::Lub(const MapRefLike& map) {
     case WITH_CONTEXT_TYPE:
     case SCRIPT_TYPE:
     case CODE_TYPE:
+    case CODE_DATA_CONTAINER_TYPE:
     case PROPERTY_CELL_TYPE:
     case SOURCE_TEXT_MODULE_TYPE:
     case SOURCE_TEXT_MODULE_INFO_ENTRY_TYPE:

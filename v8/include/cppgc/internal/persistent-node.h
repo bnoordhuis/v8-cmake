@@ -75,16 +75,16 @@ class PersistentNode final {
   TraceCallback trace_ = nullptr;
 };
 
-class V8_EXPORT PersistentRegion final {
+class V8_EXPORT PersistentRegionBase {
   using PersistentNodeSlots = std::array<PersistentNode, 256u>;
 
  public:
-  PersistentRegion() = default;
+  PersistentRegionBase() = default;
   // Clears Persistent fields to avoid stale pointers after heap teardown.
-  ~PersistentRegion();
+  ~PersistentRegionBase();
 
-  PersistentRegion(const PersistentRegion&) = delete;
-  PersistentRegion& operator=(const PersistentRegion&) = delete;
+  PersistentRegionBase(const PersistentRegionBase&) = delete;
+  PersistentRegionBase& operator=(const PersistentRegionBase&) = delete;
 
   PersistentNode* AllocateNode(void* owner, TraceCallback trace) {
     if (!free_list_head_) {
@@ -116,6 +116,9 @@ class V8_EXPORT PersistentRegion final {
  private:
   void EnsureNodeSlots();
 
+  template <typename PersistentBaseClass>
+  void ClearAllUsedNodes();
+
   std::vector<std::unique_ptr<PersistentNodeSlots>> nodes_;
   PersistentNode* free_list_head_ = nullptr;
   size_t nodes_in_use_ = 0;
@@ -123,8 +126,39 @@ class V8_EXPORT PersistentRegion final {
   friend class CrossThreadPersistentRegion;
 };
 
-// CrossThreadPersistent uses PersistentRegion but protects it using this lock
-// when needed.
+// Variant of PersistentRegionBase that checks whether the allocation and
+// freeing happens only on the thread that created the region.
+class V8_EXPORT PersistentRegion final : public PersistentRegionBase {
+ public:
+  PersistentRegion();
+  // Clears Persistent fields to avoid stale pointers after heap teardown.
+  ~PersistentRegion() = default;
+
+  PersistentRegion(const PersistentRegion&) = delete;
+  PersistentRegion& operator=(const PersistentRegion&) = delete;
+
+  V8_INLINE PersistentNode* AllocateNode(void* owner, TraceCallback trace) {
+#if V8_ENABLE_CHECKS
+    CheckIsCreationThread();
+#endif  // V8_ENABLE_CHECKS
+    return PersistentRegionBase::AllocateNode(owner, trace);
+  }
+
+  V8_INLINE void FreeNode(PersistentNode* node) {
+#if V8_ENABLE_CHECKS
+    CheckIsCreationThread();
+#endif  // V8_ENABLE_CHECKS
+    PersistentRegionBase::FreeNode(node);
+  }
+
+ private:
+  void CheckIsCreationThread();
+
+  int creation_thread_id_;
+};
+
+// CrossThreadPersistent uses PersistentRegionBase but protects it using this
+// lock when needed.
 class V8_EXPORT PersistentRegionLock final {
  public:
   PersistentRegionLock();
@@ -133,9 +167,10 @@ class V8_EXPORT PersistentRegionLock final {
   static void AssertLocked();
 };
 
-// Variant of PersistentRegion that checks whether the PersistentRegionLock is
-// locked.
-class V8_EXPORT CrossThreadPersistentRegion final {
+// Variant of PersistentRegionBase that checks whether the PersistentRegionLock
+// is locked.
+class V8_EXPORT CrossThreadPersistentRegion final
+    : protected PersistentRegionBase {
  public:
   CrossThreadPersistentRegion() = default;
   // Clears Persistent fields to avoid stale pointers after heap teardown.
@@ -147,12 +182,12 @@ class V8_EXPORT CrossThreadPersistentRegion final {
 
   V8_INLINE PersistentNode* AllocateNode(void* owner, TraceCallback trace) {
     PersistentRegionLock::AssertLocked();
-    return persistent_region_.AllocateNode(owner, trace);
+    return PersistentRegionBase::AllocateNode(owner, trace);
   }
 
   V8_INLINE void FreeNode(PersistentNode* node) {
     PersistentRegionLock::AssertLocked();
-    persistent_region_.FreeNode(node);
+    PersistentRegionBase::FreeNode(node);
   }
 
   void Trace(Visitor*);
@@ -160,9 +195,6 @@ class V8_EXPORT CrossThreadPersistentRegion final {
   size_t NodesInUse() const;
 
   void ClearAllUsedNodes();
-
- private:
-  PersistentRegion persistent_region_;
 };
 
 }  // namespace internal

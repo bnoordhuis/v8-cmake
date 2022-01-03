@@ -45,8 +45,10 @@ namespace internal {
   HR(array_buffer_new_size_failures, V8.ArrayBufferNewSizeFailures, 0, 4096,   \
      13)                                                                       \
   HR(shared_array_allocations, V8.SharedArrayAllocationSizes, 0, 4096, 13)     \
-  HR(wasm_asm_function_size_bytes, V8.WasmFunctionSizeBytes.asm, 1, GB, 51)    \
-  HR(wasm_wasm_function_size_bytes, V8.WasmFunctionSizeBytes.wasm, 1, GB, 51)  \
+  HR(wasm_asm_huge_function_size_bytes, V8.WasmHugeFunctionSizeBytes.asm,      \
+     100 * KB, GB, 51)                                                         \
+  HR(wasm_wasm_huge_function_size_bytes, V8.WasmHugeFunctionSizeBytes.wasm,    \
+     100 * KB, GB, 51)                                                         \
   HR(wasm_asm_module_size_bytes, V8.WasmModuleSizeBytes.asm, 1, GB, 51)        \
   HR(wasm_wasm_module_size_bytes, V8.WasmModuleSizeBytes.wasm, 1, GB, 51)      \
   HR(wasm_asm_min_mem_pages_count, V8.WasmMinMemPagesCount.asm, 1, 2 << 16,    \
@@ -57,6 +59,8 @@ namespace internal {
      51)                                                                       \
   HR(wasm_compile_function_peak_memory_bytes,                                  \
      V8.WasmCompileFunctionPeakMemoryBytes, 1, GB, 51)                         \
+  HR(wasm_compile_huge_function_peak_memory_bytes,                             \
+     V8.WasmCompileHugeFunctionPeakMemoryBytes, 1, GB, 51)                     \
   HR(asm_module_size_bytes, V8.AsmModuleSizeBytes, 1, GB, 51)                  \
   HR(compile_script_cache_behaviour, V8.CompileScript.CacheBehaviour, 0, 20,   \
      21)                                                                       \
@@ -86,10 +90,8 @@ namespace internal {
   /* bailout reason if Liftoff failed, or {kSuccess} (per function) */         \
   HR(liftoff_bailout_reasons, V8.LiftoffBailoutReasons, 0, 20, 21)             \
   /* support for PKEYs/PKU by testing result of pkey_alloc() */                \
-  /* TODO(chromium:1207318): Only values 0 and 1 are actually used, but 3 */   \
-  /* buckets needed until {BooleanHistogram} is supported in Chromium UMA. */  \
   HR(wasm_memory_protection_keys_support, V8.WasmMemoryProtectionKeysSupport,  \
-     0, 2, 3)                                                                  \
+     0, 1, 2)                                                                  \
   /* number of thrown exceptions per isolate */                                \
   HR(wasm_throw_count, V8.WasmThrowCount, 0, 100000, 30)                       \
   /* number of rethrown exceptions per isolate */                              \
@@ -100,32 +102,39 @@ namespace internal {
   HR(turbofan_ticks, V8.TurboFan1KTicks, 0, 100000, 200)                       \
   /* Backtracks observed in a single regexp interpreter execution */           \
   /* The maximum of 100M backtracks takes roughly 2 seconds on my machine. */  \
-  HR(regexp_backtracks, V8.RegExpBacktracks, 1, 100000000, 50)
+  HR(regexp_backtracks, V8.RegExpBacktracks, 1, 100000000, 50)                 \
+  /* See the CagedMemoryAllocationOutcome enum in backing-store.cc */          \
+  HR(caged_memory_allocation_outcome, V8.CagedMemoryAllocationOutcome, 0, 2, 3)
 
-#define HISTOGRAM_TIMER_LIST(HT)                                               \
-  /* Timer histograms, not thread safe: HT(name, caption, max, unit) */        \
-  /* Garbage collection timers. */                                             \
-  HT(gc_idle_notification, V8.GCIdleNotification, 10000, MILLISECOND)          \
-  HT(gc_incremental_marking, V8.GCIncrementalMarking, 10000, MILLISECOND)      \
-  HT(gc_incremental_marking_start, V8.GCIncrementalMarkingStart, 10000,        \
-     MILLISECOND)                                                              \
-  HT(gc_incremental_marking_finalize, V8.GCIncrementalMarkingFinalize, 10000,  \
-     MILLISECOND)                                                              \
-  HT(gc_low_memory_notification, V8.GCLowMemoryNotification, 10000,            \
-     MILLISECOND)                                                              \
-  /* Compilation times. */                                                     \
-  HT(collect_source_positions, V8.CollectSourcePositions, 1000000,             \
-     MICROSECOND)                                                              \
-  HT(compile, V8.CompileMicroSeconds, 1000000, MICROSECOND)                    \
-  HT(compile_eval, V8.CompileEvalMicroSeconds, 1000000, MICROSECOND)           \
-  /* Serialization as part of compilation (code caching) */                    \
-  HT(compile_serialize, V8.CompileSerializeMicroSeconds, 100000, MICROSECOND)  \
-  HT(compile_deserialize, V8.CompileDeserializeMicroSeconds, 1000000,          \
-     MICROSECOND)                                                              \
-  /* Total compilation time incl. caching/parsing */                           \
-  HT(compile_script, V8.CompileScriptMicroSeconds, 1000000, MICROSECOND)       \
-  /* Total JavaScript execution time (including callbacks and runtime calls */ \
-  HT(execute, V8.Execute, 1000000, MICROSECOND)
+#define NESTED_TIMED_HISTOGRAM_LIST(HT)                                       \
+  /* Timer histograms, not thread safe: HT(name, caption, max, unit) */       \
+  /* Garbage collection timers. */                                            \
+  HT(gc_idle_notification, V8.GCIdleNotification, 10000, MILLISECOND)         \
+  HT(gc_incremental_marking, V8.GCIncrementalMarking, 10000, MILLISECOND)     \
+  HT(gc_incremental_marking_start, V8.GCIncrementalMarkingStart, 10000,       \
+     MILLISECOND)                                                             \
+  HT(gc_incremental_marking_finalize, V8.GCIncrementalMarkingFinalize, 10000, \
+     MILLISECOND)                                                             \
+  HT(gc_low_memory_notification, V8.GCLowMemoryNotification, 10000,           \
+     MILLISECOND)                                                             \
+  /* Compilation times. */                                                    \
+  HT(collect_source_positions, V8.CollectSourcePositions, 1000000,            \
+     MICROSECOND)                                                             \
+  HT(compile, V8.CompileMicroSeconds, 1000000, MICROSECOND)                   \
+  HT(compile_eval, V8.CompileEvalMicroSeconds, 1000000, MICROSECOND)          \
+  /* Serialization as part of compilation (code caching) */                   \
+  HT(compile_serialize, V8.CompileSerializeMicroSeconds, 100000, MICROSECOND) \
+  HT(compile_deserialize, V8.CompileDeserializeMicroSeconds, 1000000,         \
+     MICROSECOND)                                                             \
+  /* Total compilation time incl. caching/parsing */                          \
+  HT(compile_script, V8.CompileScriptMicroSeconds, 1000000, MICROSECOND)      \
+  /* Time for lazily compiling Wasm functions. */                             \
+  HT(wasm_lazy_compile_time, V8.WasmLazyCompileTimeMicroSeconds, 100000000,   \
+     MICROSECOND)
+
+#define NESTED_TIMED_HISTOGRAM_LIST_SLOW(HT)                               \
+  /* Total V8 time (including JS and runtime calls, exluding callbacks) */ \
+  HT(execute_precise, V8.ExecuteMicroSeconds, 1000000, MICROSECOND)
 
 #define TIMED_HISTOGRAM_LIST(HT)                                               \
   /* Timer histograms, thread safe: HT(name, caption, max, unit) */            \
@@ -188,12 +197,16 @@ namespace internal {
      V8.WasmCompileModuleStreamingMicroSeconds, 100000000, MICROSECOND)        \
   HT(wasm_streaming_finish_wasm_module_time,                                   \
      V8.WasmFinishModuleStreamingMicroSeconds, 100000000, MICROSECOND)         \
+  HT(wasm_deserialization_time, V8.WasmDeserializationTimeMilliSeconds, 10000, \
+     MILLISECOND)                                                              \
   HT(wasm_tier_up_module_time, V8.WasmTierUpModuleMicroSeconds, 100000000,     \
      MICROSECOND)                                                              \
   HT(wasm_compile_asm_function_time, V8.WasmCompileFunctionMicroSeconds.asm,   \
      1000000, MICROSECOND)                                                     \
   HT(wasm_compile_wasm_function_time, V8.WasmCompileFunctionMicroSeconds.wasm, \
      1000000, MICROSECOND)                                                     \
+  HT(wasm_compile_huge_function_time, V8.WasmCompileHugeFunctionMilliSeconds,  \
+     100000, MILLISECOND)                                                      \
   HT(wasm_instantiate_wasm_module_time,                                        \
      V8.WasmInstantiateModuleMicroSeconds.wasm, 10000000, MICROSECOND)         \
   HT(wasm_instantiate_asm_module_time,                                         \

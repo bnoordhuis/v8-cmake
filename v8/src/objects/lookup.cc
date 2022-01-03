@@ -17,12 +17,17 @@
 #include "src/objects/heap-number-inl.h"
 #include "src/objects/map-updater.h"
 #include "src/objects/ordered-hash-table.h"
+#include "src/objects/property-details.h"
 #include "src/objects/struct-inl.h"
+
+#if V8_ENABLE_WEBASSEMBLY
+#include "src/wasm/wasm-objects-inl.h"
+#endif  // V8_ENABLE_WEBASSEMBLY
 
 namespace v8 {
 namespace internal {
 
-LookupIterator::Key::Key(Isolate* isolate, Handle<Object> key, bool* success) {
+PropertyKey::PropertyKey(Isolate* isolate, Handle<Object> key, bool* success) {
   if (key->ToIntegerIndex(&index_)) {
     *success = true;
     return;
@@ -30,7 +35,7 @@ LookupIterator::Key::Key(Isolate* isolate, Handle<Object> key, bool* success) {
   *success = Object::ToName(isolate, key).ToHandle(&name_);
   if (!*success) {
     DCHECK(isolate->has_pending_exception());
-    index_ = kInvalidIndex;
+    index_ = LookupIterator::kInvalidIndex;
     return;
   }
   if (!name_->AsIntegerIndex(&index_)) {
@@ -326,6 +331,9 @@ void LookupIterator::InternalUpdateProtector(Isolate* isolate,
 void LookupIterator::PrepareForDataProperty(Handle<Object> value) {
   DCHECK(state_ == DATA || state_ == ACCESSOR);
   DCHECK(HolderIsReceiverOrHiddenPrototype());
+#if V8_ENABLE_WEBASSEMBLY
+  DCHECK(!receiver_->IsWasmObject(isolate_));
+#endif  // V8_ENABLE_WEBASSEMBLY
 
   Handle<JSReceiver> holder = GetHolder<JSReceiver>();
   // We are not interested in tracking constness of a JSProxy's direct
@@ -453,6 +461,9 @@ void LookupIterator::ReconfigureDataProperty(Handle<Object> value,
   DCHECK(HolderIsReceiverOrHiddenPrototype());
 
   Handle<JSReceiver> holder = GetHolder<JSReceiver>();
+#if V8_ENABLE_WEBASSEMBLY
+  if (V8_UNLIKELY(holder->IsWasmObject())) UNREACHABLE();
+#endif  // V8_ENABLE_WEBASSEMBLY
 
   // Property details can never change for private properties.
   if (holder->IsJSProxy(isolate_)) {
@@ -852,6 +863,17 @@ Handle<Object> LookupIterator::FetchValue(
     AllocationPolicy allocation_policy) const {
   Object result;
   if (IsElement(*holder_)) {
+#if V8_ENABLE_WEBASSEMBLY
+    if (V8_UNLIKELY(holder_->IsWasmObject(isolate_))) {
+      if (holder_->IsWasmStruct()) {
+        // WasmStructs don't have elements.
+        return isolate_->factory()->undefined_value();
+      }
+      Handle<WasmArray> holder = GetHolder<WasmArray>();
+      return WasmArray::GetElement(isolate_, holder, number_.as_uint32());
+    }
+#endif  // V8_ENABLE_WEBASSEMBLY
+    DCHECK(holder_->IsJSObject(isolate_));
     Handle<JSObject> holder = GetHolder<JSObject>();
     ElementsAccessor* accessor = holder->GetElementsAccessor(isolate_);
     return accessor->Get(holder, number_);
@@ -867,8 +889,29 @@ Handle<Object> LookupIterator::FetchValue(
       result = holder_->property_dictionary(isolate_).ValueAt(
           isolate_, dictionary_entry());
     }
-  } else if (property_details_.location() == kField) {
+  } else if (property_details_.location() == PropertyLocation::kField) {
     DCHECK_EQ(kData, property_details_.kind());
+#if V8_ENABLE_WEBASSEMBLY
+    if (V8_UNLIKELY(holder_->IsWasmObject(isolate_))) {
+      if (allocation_policy == AllocationPolicy::kAllocationDisallowed) {
+        // TODO(ishell): consider taking field type into account and relaxing
+        // this a bit.
+        return isolate_->factory()->undefined_value();
+      }
+      if (holder_->IsWasmArray(isolate_)) {
+        // WasmArrays don't have other named properties besides "length".
+        DCHECK_EQ(*name_, ReadOnlyRoots(isolate_).length_string());
+        Handle<WasmArray> holder = GetHolder<WasmArray>();
+        uint32_t length = holder->length();
+        return isolate_->factory()->NewNumberFromUint(length);
+      }
+      Handle<WasmStruct> holder = GetHolder<WasmStruct>();
+      return WasmStruct::GetField(isolate_, holder,
+                                  property_details_.field_index());
+    }
+#endif  // V8_ENABLE_WEBASSEMBLY
+
+    DCHECK(holder_->IsJSObject(isolate_));
     Handle<JSObject> holder = GetHolder<JSObject>();
     FieldIndex field_index =
         FieldIndex::ForDescriptor(holder->map(isolate_), descriptor_number());
@@ -889,7 +932,7 @@ Handle<Object> LookupIterator::FetchValue(
 bool LookupIterator::IsConstFieldValueEqualTo(Object value) const {
   DCHECK(!IsElement(*holder_));
   DCHECK(holder_->HasFastProperties(isolate_));
-  DCHECK_EQ(kField, property_details_.location());
+  DCHECK_EQ(PropertyLocation::kField, property_details_.location());
   DCHECK_EQ(PropertyConstness::kConst, property_details_.constness());
   if (value.IsUninitialized(isolate())) {
     // Storing uninitialized value means that we are preparing for a computed
@@ -905,7 +948,7 @@ bool LookupIterator::IsConstFieldValueEqualTo(Object value) const {
     uint64_t bits;
     Object current_value = holder->RawFastPropertyAt(isolate_, field_index);
     DCHECK(current_value.IsHeapNumber(isolate_));
-    bits = HeapNumber::cast(current_value).value_as_bits();
+    bits = HeapNumber::cast(current_value).value_as_bits(kRelaxedLoad);
     // Use bit representation of double to check for hole double, since
     // manipulating the signaling NaN used for the hole in C++, e.g. with
     // bit_cast or value(), will change its value on ia32 (the x87 stack is
@@ -961,7 +1004,7 @@ bool LookupIterator::IsConstDictValueEqualTo(Object value) const {
 int LookupIterator::GetFieldDescriptorIndex() const {
   DCHECK(has_property_);
   DCHECK(holder_->HasFastProperties());
-  DCHECK_EQ(kField, property_details_.location());
+  DCHECK_EQ(PropertyLocation::kField, property_details_.location());
   DCHECK_EQ(kData, property_details_.kind());
   // TODO(jkummerow): Propagate InternalIndex further.
   return descriptor_number().as_int();
@@ -970,7 +1013,7 @@ int LookupIterator::GetFieldDescriptorIndex() const {
 int LookupIterator::GetAccessorIndex() const {
   DCHECK(has_property_);
   DCHECK(holder_->HasFastProperties(isolate_));
-  DCHECK_EQ(kDescriptor, property_details_.location());
+  DCHECK_EQ(PropertyLocation::kDescriptor, property_details_.location());
   DCHECK_EQ(kAccessor, property_details_.kind());
   return descriptor_number().as_int();
 }
@@ -978,7 +1021,7 @@ int LookupIterator::GetAccessorIndex() const {
 FieldIndex LookupIterator::GetFieldIndex() const {
   DCHECK(has_property_);
   DCHECK(holder_->HasFastProperties(isolate_));
-  DCHECK_EQ(kField, property_details_.location());
+  DCHECK_EQ(PropertyLocation::kField, property_details_.location());
   DCHECK(!IsElement(*holder_));
   return FieldIndex::ForDescriptor(holder_->map(isolate_), descriptor_number());
 }
@@ -1006,13 +1049,20 @@ Handle<Object> LookupIterator::GetDataValue(
 void LookupIterator::WriteDataValue(Handle<Object> value,
                                     bool initializing_store) {
   DCHECK_EQ(DATA, state_);
+#if V8_ENABLE_WEBASSEMBLY
+  // WriteDataValueToWasmObject() must be used instead for writing to
+  // WasmObjects.
+  DCHECK(!holder_->IsWasmObject(isolate_));
+#endif  // V8_ENABLE_WEBASSEMBLY
+
   Handle<JSReceiver> holder = GetHolder<JSReceiver>();
   if (IsElement(*holder)) {
     Handle<JSObject> object = Handle<JSObject>::cast(holder);
     ElementsAccessor* accessor = object->GetElementsAccessor(isolate_);
     accessor->Set(object, number_, *value);
   } else if (holder->HasFastProperties(isolate_)) {
-    if (property_details_.location() == kField) {
+    DCHECK(holder->IsJSObject(isolate_));
+    if (property_details_.location() == PropertyLocation::kField) {
       // Check that in case of VariableMode::kConst field the existing value is
       // equal to |value|.
       DCHECK_IMPLIES(!initializing_store && property_details_.constness() ==
@@ -1021,7 +1071,7 @@ void LookupIterator::WriteDataValue(Handle<Object> value,
       JSObject::cast(*holder).WriteToField(descriptor_number(),
                                            property_details_, *value);
     } else {
-      DCHECK_EQ(kDescriptor, property_details_.location());
+      DCHECK_EQ(PropertyLocation::kDescriptor, property_details_.location());
       DCHECK_EQ(PropertyConstness::kConst, property_details_.constness());
     }
   } else if (holder->IsJSGlobalObject(isolate_)) {
@@ -1053,6 +1103,42 @@ void LookupIterator::WriteDataValue(Handle<Object> value,
     }
   }
 }
+
+#if V8_ENABLE_WEBASSEMBLY
+
+wasm::ValueType LookupIterator::wasm_value_type() const {
+  DCHECK(has_property_);
+  DCHECK(holder_->IsWasmObject(isolate_));
+  if (holder_->IsWasmStruct(isolate_)) {
+    wasm::StructType* wasm_struct_type = WasmStruct::cast(*holder_).type();
+    return wasm_struct_type->field(property_details_.field_index());
+
+  } else {
+    DCHECK(holder_->IsWasmArray(isolate_));
+    wasm::ArrayType* wasm_array_type = WasmArray::cast(*holder_).type();
+    return wasm_array_type->element_type();
+  }
+}
+
+void LookupIterator::WriteDataValueToWasmObject(Handle<Object> value) {
+  DCHECK_EQ(DATA, state_);
+  DCHECK(holder_->IsWasmObject(isolate_));
+  Handle<JSReceiver> holder = GetHolder<JSReceiver>();
+
+  if (IsElement(*holder)) {
+    // TODO(ishell): consider supporting indexed access to WasmStruct fields.
+    // TODO(v8:11804): implement stores to WasmArrays.
+    UNIMPLEMENTED();
+  } else {
+    // WasmArrays don't have writable properties.
+    DCHECK(holder->IsWasmStruct());
+    Handle<WasmStruct> holder = GetHolder<WasmStruct>();
+    WasmStruct::SetField(isolate_, holder, property_details_.field_index(),
+                         value);
+  }
+}
+
+#endif  // V8_ENABLE_WEBASSEMBLY
 
 template <bool is_element>
 bool LookupIterator::SkipInterceptor(JSObject holder) {
@@ -1122,6 +1208,11 @@ LookupIterator::State LookupIterator::LookupInSpecialHolder(
       if (map.IsJSProxyMap()) {
         if (is_element || !name_->IsPrivate(isolate_)) return JSPROXY;
       }
+#if V8_ENABLE_WEBASSEMBLY
+      if (map.IsWasmObjectMap()) {
+        return LookupInRegularHolder<is_element>(map, holder);
+      }
+#endif  // V8_ENABLE_WEBASSEMBLY
       if (map.is_access_check_needed()) {
         if (is_element || !name_->IsPrivate(isolate_)) return ACCESS_CHECK;
       }
@@ -1172,20 +1263,40 @@ LookupIterator::State LookupIterator::LookupInRegularHolder(
   }
 
   if (is_element && IsElement(holder)) {
-    JSObject js_object = JSObject::cast(holder);
-    ElementsAccessor* accessor = js_object.GetElementsAccessor(isolate_);
-    FixedArrayBase backing_store = js_object.elements(isolate_);
-    number_ =
-        accessor->GetEntryForIndex(isolate_, js_object, backing_store, index_);
-    if (number_.is_not_found()) {
-      return holder.IsJSTypedArray(isolate_) ? INTEGER_INDEXED_EXOTIC
-                                             : NOT_FOUND;
-    }
-    property_details_ = accessor->GetDetails(js_object, number_);
-    if (map.has_frozen_elements()) {
-      property_details_ = property_details_.CopyAddAttributes(FROZEN);
-    } else if (map.has_sealed_elements()) {
-      property_details_ = property_details_.CopyAddAttributes(SEALED);
+#if V8_ENABLE_WEBASSEMBLY
+    if (V8_UNLIKELY(holder.IsWasmObject(isolate_))) {
+      // TODO(ishell): consider supporting indexed access to WasmStruct fields.
+      if (holder.IsWasmArray(isolate_)) {
+        WasmArray wasm_array = WasmArray::cast(holder);
+        number_ = index_ < wasm_array.length() ? InternalIndex(index_)
+                                               : InternalIndex::NotFound();
+        wasm::ArrayType* wasm_array_type = wasm_array.type();
+        property_details_ = PropertyDetails(
+            kData, wasm_array_type->mutability() ? SEALED : FROZEN,
+            PropertyCellType::kNoCell);
+
+      } else {
+        DCHECK(holder.IsWasmStruct(isolate_));
+        DCHECK(number_.is_not_found());
+      }
+    } else  // NOLINT(readability/braces)
+#endif      // V8_ENABLE_WEBASSEMBLY
+    {
+      JSObject js_object = JSObject::cast(holder);
+      ElementsAccessor* accessor = js_object.GetElementsAccessor(isolate_);
+      FixedArrayBase backing_store = js_object.elements(isolate_);
+      number_ = accessor->GetEntryForIndex(isolate_, js_object, backing_store,
+                                           index_);
+      if (number_.is_not_found()) {
+        return holder.IsJSTypedArray(isolate_) ? INTEGER_INDEXED_EXOTIC
+                                               : NOT_FOUND;
+      }
+      property_details_ = accessor->GetDetails(js_object, number_);
+      if (map.has_frozen_elements()) {
+        property_details_ = property_details_.CopyAddAttributes(FROZEN);
+      } else if (map.has_sealed_elements()) {
+        property_details_ = property_details_.CopyAddAttributes(SEALED);
+      }
     }
   } else if (!map.is_dictionary_map()) {
     DescriptorArray descriptors = map.instance_descriptors(isolate_);
@@ -1336,6 +1447,7 @@ ConcurrentLookupIterator::TryGetOwnConstantElement(
   // - single_character_string_cache()->get().
 
   if (IsFrozenElementsKind(elements_kind)) {
+    if (!elements.IsFixedArray()) return kGaveUp;
     FixedArray elements_fixed_array = FixedArray::cast(elements);
     if (index >= static_cast<uint32_t>(elements_fixed_array.length())) {
       return kGaveUp;
@@ -1348,7 +1460,7 @@ ConcurrentLookupIterator::TryGetOwnConstantElement(
     *result_out = result;
     return kPresent;
   } else if (IsDictionaryElementsKind(elements_kind)) {
-    DCHECK(elements.IsNumberDictionary());
+    if (!elements.IsNumberDictionary()) return kGaveUp;
     // TODO(jgruber, v8:7790): Add support. Dictionary elements require racy
     // NumberDictionary lookups. This should be okay in general (slot iteration
     // depends only on the dict's capacity), but 1. we'd need to update
@@ -1361,32 +1473,9 @@ ConcurrentLookupIterator::TryGetOwnConstantElement(
 
     JSPrimitiveWrapper js_value = JSPrimitiveWrapper::cast(holder);
     String wrapped_string = String::cast(js_value.value());
-
-    // The access guard below protects only internalized string accesses.
-    // TODO(jgruber): Support other string kinds.
-    Map wrapped_string_map = wrapped_string.map(isolate, kAcquireLoad);
-    if (!InstanceTypeChecker::IsInternalizedString(
-            wrapped_string_map.instance_type())) {
-      return kGaveUp;
-    }
-
-    const uint32_t length = static_cast<uint32_t>(wrapped_string.length());
-    if (index >= length) return kGaveUp;
-
-    uint16_t charcode;
-    {
-      SharedStringAccessGuardIfNeeded access_guard(local_isolate);
-      charcode = wrapped_string.Get(static_cast<int>(index));
-    }
-
-    if (charcode > unibrow::Latin1::kMaxChar) return kGaveUp;
-
-    Object value = isolate->factory()->single_character_string_cache()->get(
-        charcode, kRelaxedLoad);
-    if (value == ReadOnlyRoots(isolate).undefined_value()) return kGaveUp;
-
-    *result_out = value;
-    return kPresent;
+    return ConcurrentLookupIterator::TryGetOwnChar(
+        static_cast<String*>(result_out), isolate, local_isolate,
+        wrapped_string, index);
   } else {
     DCHECK(!IsFrozenElementsKind(elements_kind));
     DCHECK(!IsDictionaryElementsKind(elements_kind));
@@ -1395,6 +1484,79 @@ ConcurrentLookupIterator::TryGetOwnConstantElement(
   }
 
   UNREACHABLE();
+}
+
+// static
+ConcurrentLookupIterator::Result ConcurrentLookupIterator::TryGetOwnChar(
+    String* result_out, Isolate* isolate, LocalIsolate* local_isolate,
+    String string, size_t index) {
+  DisallowGarbageCollection no_gc;
+  // The access guard below protects string accesses related to internalized
+  // strings.
+  // TODO(jgruber): Support other string kinds.
+  Map string_map = string.map(isolate, kAcquireLoad);
+  InstanceType type = string_map.instance_type();
+  if (!(InstanceTypeChecker::IsInternalizedString(type)) ||
+      InstanceTypeChecker::IsThinString(type)) {
+    return kGaveUp;
+  }
+
+  const uint32_t length = static_cast<uint32_t>(string.length());
+  if (index >= length) return kGaveUp;
+
+  uint16_t charcode;
+  {
+    SharedStringAccessGuardIfNeeded access_guard(local_isolate);
+    charcode = string.Get(static_cast<int>(index), PtrComprCageBase(isolate),
+                          access_guard);
+  }
+
+  if (charcode > unibrow::Latin1::kMaxChar) return kGaveUp;
+
+  Object value = isolate->factory()->single_character_string_cache()->get(
+      charcode, kRelaxedLoad);
+  if (value == ReadOnlyRoots(isolate).undefined_value()) return kGaveUp;
+
+  *result_out = String::cast(value);
+  return kPresent;
+}
+
+// static
+base::Optional<PropertyCell> ConcurrentLookupIterator::TryGetPropertyCell(
+    Isolate* isolate, LocalIsolate* local_isolate,
+    Handle<JSGlobalObject> holder, Handle<Name> name) {
+  DisallowGarbageCollection no_gc;
+
+  Map holder_map = holder->map();
+  if (holder_map.is_access_check_needed()) return {};
+  if (holder_map.has_named_interceptor()) return {};
+
+  GlobalDictionary dict = holder->global_dictionary(kAcquireLoad);
+  base::Optional<PropertyCell> cell =
+      dict.TryFindPropertyCellForConcurrentLookupIterator(isolate, name,
+                                                          kRelaxedLoad);
+  if (!cell.has_value()) return {};
+
+  if (cell->property_details(kAcquireLoad).kind() == kAccessor) {
+    Object maybe_accessor_pair = cell->value(kAcquireLoad);
+    if (!maybe_accessor_pair.IsAccessorPair()) return {};
+
+    base::Optional<Name> maybe_cached_property_name =
+        FunctionTemplateInfo::TryGetCachedPropertyName(
+            isolate, AccessorPair::cast(maybe_accessor_pair)
+                         .getter(isolate, kAcquireLoad));
+    if (!maybe_cached_property_name.has_value()) return {};
+
+    cell = dict.TryFindPropertyCellForConcurrentLookupIterator(
+        isolate, handle(*maybe_cached_property_name, local_isolate),
+        kRelaxedLoad);
+    if (!cell.has_value()) return {};
+    if (cell->property_details(kAcquireLoad).kind() != kData) return {};
+  }
+
+  DCHECK(cell.has_value());
+  DCHECK_EQ(cell->property_details(kAcquireLoad).kind(), kData);
+  return cell;
 }
 
 }  // namespace internal

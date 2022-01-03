@@ -8,12 +8,13 @@
 #include <cstdint>
 #include <map>
 
-#include "include/v8.h"
+#include "include/v8-traced-handle.h"
 #include "src/api/api-inl.h"
 #include "src/base/compiler-specific.h"
 #include "src/base/sanitizer/asan.h"
 #include "src/execution/vm-state-inl.h"
 #include "src/heap/embedder-tracing.h"
+#include "src/heap/heap-inl.h"
 #include "src/heap/heap-write-barrier-inl.h"
 #include "src/init/v8.h"
 #include "src/logging/counters.h"

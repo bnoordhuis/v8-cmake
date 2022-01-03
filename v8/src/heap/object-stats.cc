@@ -93,6 +93,12 @@ class FieldStatsCollector : public ObjectVisitor {
     *tagged_fields_count_ += (end - start);
   }
 
+  V8_INLINE void VisitCodePointer(HeapObject host,
+                                  CodeObjectSlot slot) override {
+    CHECK(V8_EXTERNAL_CODE_SPACE_BOOL);
+    *tagged_fields_count_ += 1;
+  }
+
   void VisitCodeTarget(Code host, RelocInfo* rinfo) override {
     // Code target is most likely encoded as a relative 32-bit offset and not
     // as a full tagged value, so there's nothing to count.
@@ -100,6 +106,10 @@ class FieldStatsCollector : public ObjectVisitor {
 
   void VisitEmbeddedPointer(Code host, RelocInfo* rinfo) override {
     *tagged_fields_count_ += 1;
+  }
+
+  void VisitMapPointer(HeapObject host) override {
+    // Just do nothing, but avoid the inherited UNREACHABLE implementation.
   }
 
  private:
@@ -135,7 +145,7 @@ FieldStatsCollector::GetInobjectFieldStats(Map map) {
     DescriptorArray descriptors = map.instance_descriptors();
     for (InternalIndex descriptor : map.IterateOwnDescriptors()) {
       PropertyDetails details = descriptors.GetDetails(descriptor);
-      if (details.location() == kField) {
+      if (details.location() == PropertyLocation::kField) {
         FieldIndex index = FieldIndex::ForDescriptor(map, descriptor);
         // Stop on first out-of-object field.
         if (!index.is_inobject()) break;
@@ -181,7 +191,7 @@ V8_NOINLINE static void PrintJSONArray(size_t* array, const int len) {
 
 V8_NOINLINE static void DumpJSONArray(std::stringstream& stream, size_t* array,
                                       const int len) {
-  stream << PrintCollection(Vector<size_t>(array, len));
+  stream << PrintCollection(base::Vector<size_t>(array, len));
 }
 
 void ObjectStats::PrintKeyAndId(const char* key, int gc_count) {

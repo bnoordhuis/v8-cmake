@@ -14,15 +14,16 @@
 
 #include "src/base/bits.h"
 #include "src/base/memory.h"
+#include "src/base/numbers/double.h"
 #include "src/builtins/builtins.h"
 #include "src/common/external-pointer-inl.h"
 #include "src/common/globals.h"
+#include "src/common/ptr-compr-inl.h"
 #include "src/handles/handles-inl.h"
 #include "src/heap/factory.h"
 #include "src/heap/heap-write-barrier-inl.h"
 #include "src/heap/read-only-heap-inl.h"
-#include "src/numbers/conversions.h"
-#include "src/numbers/double.h"
+#include "src/numbers/conversions-inl.h"
 #include "src/objects/bigint.h"
 #include "src/objects/heap-number-inl.h"
 #include "src/objects/heap-object.h"
@@ -34,8 +35,7 @@
 #include "src/objects/oddball-inl.h"
 #include "src/objects/property-details.h"
 #include "src/objects/property.h"
-#include "src/objects/regexp-match-info.h"
-#include "src/objects/scope-info-inl.h"
+#include "src/objects/regexp-match-info-inl.h"
 #include "src/objects/shared-function-info.h"
 #include "src/objects/slots-inl.h"
 #include "src/objects/smi-inl.h"
@@ -60,7 +60,7 @@ Smi PropertyDetails::AsSmi() const {
 }
 
 int PropertyDetails::field_width_in_words() const {
-  DCHECK_EQ(location(), kField);
+  DCHECK_EQ(location(), PropertyLocation::kField);
   return 1;
 }
 
@@ -82,6 +82,7 @@ bool Object::IsTaggedIndex() const {
 HEAP_OBJECT_TYPE_LIST(IS_TYPE_FUNCTION_DEF)
 IS_TYPE_FUNCTION_DEF(HashTableBase)
 IS_TYPE_FUNCTION_DEF(SmallOrderedHashTable)
+IS_TYPE_FUNCTION_DEF(CodeT)
 #undef IS_TYPE_FUNCTION_DEF
 
 #define IS_TYPE_FUNCTION_DEF(Type, Value)                        \
@@ -145,6 +146,11 @@ bool HeapObject::IsNullOrUndefined(ReadOnlyRoots roots) const {
 
 bool HeapObject::IsNullOrUndefined() const {
   return IsNullOrUndefined(GetReadOnlyRoots());
+}
+
+DEF_GETTER(HeapObject, IsCodeT, bool) {
+  return V8_EXTERNAL_CODE_SPACE_BOOL ? IsCodeDataContainer(cage_base)
+                                     : IsCode(cage_base);
 }
 
 DEF_GETTER(HeapObject, IsUniqueName, bool) {
@@ -434,7 +440,6 @@ bool Object::IsMinusZero() const {
          i::IsMinusZero(HeapNumber::cast(*this).value());
 }
 
-OBJECT_CONSTRUCTORS_IMPL(RegExpMatchInfo, FixedArray)
 OBJECT_CONSTRUCTORS_IMPL(BigIntBase, PrimitiveHeapObject)
 OBJECT_CONSTRUCTORS_IMPL(BigInt, BigIntBase)
 OBJECT_CONSTRUCTORS_IMPL(FreshlyAllocatedBigInt, BigIntBase)
@@ -444,7 +449,6 @@ OBJECT_CONSTRUCTORS_IMPL(FreshlyAllocatedBigInt, BigIntBase)
 
 CAST_ACCESSOR(BigIntBase)
 CAST_ACCESSOR(BigInt)
-CAST_ACCESSOR(RegExpMatchInfo)
 
 bool Object::HasValidElements() {
   // Dictionary is covered under FixedArray. ByteArray is used
@@ -468,22 +472,17 @@ bool Object::FilterKey(PropertyFilter filter) {
 }
 
 Representation Object::OptimalRepresentation(PtrComprCageBase cage_base) const {
-  if (!FLAG_track_fields) return Representation::Tagged();
   if (IsSmi()) {
     return Representation::Smi();
   }
   HeapObject heap_object = HeapObject::cast(*this);
-  if (FLAG_track_double_fields && heap_object.IsHeapNumber(cage_base)) {
+  if (heap_object.IsHeapNumber(cage_base)) {
     return Representation::Double();
-  } else if (FLAG_track_computed_fields &&
-             heap_object.IsUninitialized(
+  } else if (heap_object.IsUninitialized(
                  heap_object.GetReadOnlyRoots(cage_base))) {
     return Representation::None();
-  } else if (FLAG_track_heap_object_fields) {
-    return Representation::HeapObject();
-  } else {
-    return Representation::Tagged();
   }
+  return Representation::HeapObject();
 }
 
 ElementsKind Object::OptimalElementsKind(PtrComprCageBase cage_base) const {
@@ -492,14 +491,15 @@ ElementsKind Object::OptimalElementsKind(PtrComprCageBase cage_base) const {
   return PACKED_ELEMENTS;
 }
 
-bool Object::FitsRepresentation(Representation representation) {
-  if (FLAG_track_fields && representation.IsSmi()) {
+bool Object::FitsRepresentation(Representation representation,
+                                bool allow_coercion) const {
+  if (representation.IsSmi()) {
     return IsSmi();
-  } else if (FLAG_track_double_fields && representation.IsDouble()) {
-    return IsNumber();
-  } else if (FLAG_track_heap_object_fields && representation.IsHeapObject()) {
+  } else if (representation.IsDouble()) {
+    return allow_coercion ? IsNumber() : IsHeapNumber();
+  } else if (representation.IsHeapObject()) {
     return IsHeapObject();
-  } else if (FLAG_track_fields && representation.IsNone()) {
+  } else if (representation.IsNone()) {
     return false;
   }
   return true;
@@ -649,6 +649,10 @@ MaybeObjectSlot HeapObject::RawMaybeWeakField(int byte_offset) const {
   return MaybeObjectSlot(field_address(byte_offset));
 }
 
+CodeObjectSlot HeapObject::RawCodeField(int byte_offset) const {
+  return CodeObjectSlot(field_address(byte_offset));
+}
+
 MapWord MapWord::FromMap(const Map map) {
   DCHECK(map.is_null() || !MapWord::IsPacked(map.ptr()));
 #ifdef V8_MAP_PACKING
@@ -676,6 +680,22 @@ MapWord MapWord::FromForwardingAddress(HeapObject object) {
 
 HeapObject MapWord::ToForwardingAddress() {
   DCHECK(IsForwardingAddress());
+  HeapObject obj = HeapObject::FromAddress(value_);
+  // For objects allocated outside of the main pointer compression cage the
+  // variant with explicit cage base must be used.
+  DCHECK_IMPLIES(V8_EXTERNAL_CODE_SPACE_BOOL, !obj.IsCode());
+  return obj;
+}
+
+HeapObject MapWord::ToForwardingAddress(PtrComprCageBase host_cage_base) {
+  DCHECK(IsForwardingAddress());
+  if (V8_EXTERNAL_CODE_SPACE_BOOL) {
+    // Recompress value_ using proper host_cage_base since the map word
+    // has the upper 32 bits that correspond to the main cage base value.
+    Address value =
+        DecompressTaggedPointer(host_cage_base, CompressTagged(value_));
+    return HeapObject::FromAddress(value);
+  }
   return HeapObject::FromAddress(value_);
 }
 
@@ -731,12 +751,8 @@ void HeapObject::set_map(Map value) {
 #endif
 }
 
-Map HeapObject::map(AcquireLoadTag tag) const {
-  PtrComprCageBase cage_base = GetPtrComprCageBase(*this);
-  return HeapObject::map(cage_base, tag);
-}
-Map HeapObject::map(PtrComprCageBase cage_base, AcquireLoadTag tag) const {
-  return map_word(cage_base, tag).ToMap();
+DEF_ACQUIRE_GETTER(HeapObject, map, Map) {
+  return map_word(cage_base, kAcquireLoad).ToMap();
 }
 
 void HeapObject::set_map(Map value, ReleaseStoreTag tag) {
@@ -782,11 +798,7 @@ ObjectSlot HeapObject::map_slot() const {
   return ObjectSlot(MapField::address(*this));
 }
 
-MapWord HeapObject::map_word(RelaxedLoadTag tag) const {
-  PtrComprCageBase cage_base = GetPtrComprCageBase(*this);
-  return HeapObject::map_word(cage_base, tag);
-}
-MapWord HeapObject::map_word(PtrComprCageBase cage_base, RelaxedLoadTag) const {
+DEF_RELAXED_GETTER(HeapObject, map_word, MapWord) {
   return MapField::Relaxed_Load_Map_Word(cage_base, *this);
 }
 
@@ -794,11 +806,7 @@ void HeapObject::set_map_word(MapWord map_word, RelaxedStoreTag) {
   MapField::Relaxed_Store_Map_Word(*this, map_word);
 }
 
-MapWord HeapObject::map_word(AcquireLoadTag tag) const {
-  PtrComprCageBase cage_base = GetPtrComprCageBase(*this);
-  return HeapObject::map_word(cage_base, tag);
-}
-MapWord HeapObject::map_word(PtrComprCageBase cage_base, AcquireLoadTag) const {
+DEF_ACQUIRE_GETTER(HeapObject, map_word, MapWord) {
   return MapField::Acquire_Load_No_Unpack(cage_base, *this);
 }
 
@@ -867,48 +875,6 @@ bool Object::ToIntegerIndex(size_t* index) const {
     return true;
   }
   return false;
-}
-
-int RegExpMatchInfo::NumberOfCaptureRegisters() {
-  DCHECK_GE(length(), kLastMatchOverhead);
-  Object obj = get(kNumberOfCapturesIndex);
-  return Smi::ToInt(obj);
-}
-
-void RegExpMatchInfo::SetNumberOfCaptureRegisters(int value) {
-  DCHECK_GE(length(), kLastMatchOverhead);
-  set(kNumberOfCapturesIndex, Smi::FromInt(value));
-}
-
-String RegExpMatchInfo::LastSubject() {
-  DCHECK_GE(length(), kLastMatchOverhead);
-  return String::cast(get(kLastSubjectIndex));
-}
-
-void RegExpMatchInfo::SetLastSubject(String value, WriteBarrierMode mode) {
-  DCHECK_GE(length(), kLastMatchOverhead);
-  set(kLastSubjectIndex, value, mode);
-}
-
-Object RegExpMatchInfo::LastInput() {
-  DCHECK_GE(length(), kLastMatchOverhead);
-  return get(kLastInputIndex);
-}
-
-void RegExpMatchInfo::SetLastInput(Object value, WriteBarrierMode mode) {
-  DCHECK_GE(length(), kLastMatchOverhead);
-  set(kLastInputIndex, value, mode);
-}
-
-int RegExpMatchInfo::Capture(int i) {
-  DCHECK_LT(i, NumberOfCaptureRegisters());
-  Object obj = get(kFirstCaptureIndex + i);
-  return Smi::ToInt(obj);
-}
-
-void RegExpMatchInfo::SetCapture(int i, int value) {
-  DCHECK_LT(i, NumberOfCaptureRegisters());
-  set(kFirstCaptureIndex + i, Smi::FromInt(value));
 }
 
 WriteBarrierMode HeapObject::GetWriteBarrierMode(
@@ -1010,7 +976,7 @@ Maybe<bool> Object::LessThanOrEqual(Isolate* isolate, Handle<Object> x,
 MaybeHandle<Object> Object::GetPropertyOrElement(Isolate* isolate,
                                                  Handle<Object> object,
                                                  Handle<Name> name) {
-  LookupIterator::Key key(isolate, name);
+  PropertyKey key(isolate, name);
   LookupIterator it(isolate, object, key);
   return GetProperty(&it);
 }
@@ -1019,7 +985,7 @@ MaybeHandle<Object> Object::SetPropertyOrElement(
     Isolate* isolate, Handle<Object> object, Handle<Name> name,
     Handle<Object> value, Maybe<ShouldThrow> should_throw,
     StoreOrigin store_origin) {
-  LookupIterator::Key key(isolate, name);
+  PropertyKey key(isolate, name);
   LookupIterator it(isolate, object, key);
   MAYBE_RETURN_NULL(SetProperty(&it, value, store_origin, should_throw));
   return value;
@@ -1029,7 +995,7 @@ MaybeHandle<Object> Object::GetPropertyOrElement(Handle<Object> receiver,
                                                  Handle<Name> name,
                                                  Handle<JSReceiver> holder) {
   Isolate* isolate = holder->GetIsolate();
-  LookupIterator::Key key(isolate, name);
+  PropertyKey key(isolate, name);
   LookupIterator it(isolate, receiver, key, holder);
   return GetProperty(&it);
 }
@@ -1051,7 +1017,7 @@ Object Object::GetSimpleHash(Object object) {
     if (num >= kMinInt && num <= kMaxInt && FastI2D(FastD2I(num)) == num) {
       hash = ComputeUnseededHash(FastD2I(num));
     } else {
-      hash = ComputeLongHash(double_to_uint64(num));
+      hash = ComputeLongHash(base::double_to_uint64(num));
     }
     return Smi::FromInt(hash & Smi::kMaxValue);
   }

@@ -544,7 +544,7 @@ Reduction MachineOperatorReducer::Reduce(Node* node) {
     case IrOpcode::kFloat64Sub: {
       Float64BinopMatcher m(node);
       if (allow_signalling_nan_ && m.right().Is(0) &&
-          (Double(m.right().ResolvedValue()).Sign() > 0)) {
+          (base::Double(m.right().ResolvedValue()).Sign() > 0)) {
         return Replace(m.left().node());  // x - 0 => x
       }
       if (m.right().IsNaN()) {  // x - NaN => NaN
@@ -947,6 +947,20 @@ Reduction MachineOperatorReducer::Reduce(Node* node) {
       }
       return ReduceWord64Comparisons(node);
     }
+    case IrOpcode::kFloat32Select:
+    case IrOpcode::kFloat64Select:
+    case IrOpcode::kWord32Select:
+    case IrOpcode::kWord64Select: {
+      Int32Matcher match(node->InputAt(0));
+      if (match.HasResolvedValue()) {
+        if (match.Is(0)) {
+          return Replace(node->InputAt(2));
+        } else {
+          return Replace(node->InputAt(1));
+        }
+      }
+      break;
+    }
     default:
       break;
   }
@@ -1240,17 +1254,12 @@ Reduction MachineOperatorReducer::ReduceUint32Mod(Node* node) {
 
 Reduction MachineOperatorReducer::ReduceStore(Node* node) {
   NodeMatcher nm(node);
-  MachineRepresentation rep;
-  int value_input;
-  if (nm.IsStore()) {
-    rep = StoreRepresentationOf(node->op()).representation();
-    value_input = 2;
-  } else {
-    DCHECK(nm.IsUnalignedStore());
-    rep = UnalignedStoreRepresentationOf(node->op());
-    value_input = 2;
-  }
+  DCHECK(nm.IsStore() || nm.IsUnalignedStore());
+  MachineRepresentation rep =
+      nm.IsStore() ? StoreRepresentationOf(node->op()).representation()
+                   : UnalignedStoreRepresentationOf(node->op());
 
+  const int value_input = 2;
   Node* const value = node->InputAt(value_input);
 
   switch (value->opcode()) {
@@ -1718,11 +1727,21 @@ Reduction MachineOperatorReducer::ReduceWordNAnd(Node* node) {
 namespace {
 
 // Represents an operation of the form `(source & mask) == masked_value`.
+// where each bit set in masked_value also has to be set in mask.
 struct BitfieldCheck {
-  Node* source;
-  uint32_t mask;
-  uint32_t masked_value;
-  bool truncate_from_64_bit;
+  Node* const source;
+  uint32_t const mask;
+  uint32_t const masked_value;
+  bool const truncate_from_64_bit;
+
+  BitfieldCheck(Node* source, uint32_t mask, uint32_t masked_value,
+                bool truncate_from_64_bit)
+      : source(source),
+        mask(mask),
+        masked_value(masked_value),
+        truncate_from_64_bit(truncate_from_64_bit) {
+    CHECK_EQ(masked_value & ~mask, 0);
+  }
 
   static base::Optional<BitfieldCheck> Detect(Node* node) {
     // There are two patterns to check for here:
@@ -1737,14 +1756,16 @@ struct BitfieldCheck {
       if (eq.left().IsWord32And()) {
         Uint32BinopMatcher mand(eq.left().node());
         if (mand.right().HasResolvedValue() && eq.right().HasResolvedValue()) {
-          BitfieldCheck result{mand.left().node(), mand.right().ResolvedValue(),
-                               eq.right().ResolvedValue(), false};
+          uint32_t mask = mand.right().ResolvedValue();
+          uint32_t masked_value = eq.right().ResolvedValue();
+          if ((masked_value & ~mask) != 0) return {};
           if (mand.left().IsTruncateInt64ToInt32()) {
-            result.truncate_from_64_bit = true;
-            result.source =
-                NodeProperties::GetValueInput(mand.left().node(), 0);
+            return BitfieldCheck(
+                NodeProperties::GetValueInput(mand.left().node(), 0), mask,
+                masked_value, true);
+          } else {
+            return BitfieldCheck(mand.left().node(), mask, masked_value, false);
           }
-          return result;
         }
       }
     } else {
@@ -1836,17 +1857,20 @@ Reduction MachineOperatorReducer::ReduceWord64And(Node* node) {
 }
 
 Reduction MachineOperatorReducer::TryMatchWord32Ror(Node* node) {
+  // Recognize rotation, we are matching and transforming as follows:
+  //   x << y         |  x >>> (32 - y)    =>  x ror (32 - y)
+  //   x << (32 - y)  |  x >>> y           =>  x ror y
+  //   x << y         ^  x >>> (32 - y)    =>  x ror (32 - y)   if y & 31 != 0
+  //   x << (32 - y)  ^  x >>> y           =>  x ror y          if y & 31 != 0
+  // (As well as the commuted forms.)
+  // Note the side condition for XOR: the optimization doesn't hold for
+  // multiples of 32.
+
   DCHECK(IrOpcode::kWord32Or == node->opcode() ||
          IrOpcode::kWord32Xor == node->opcode());
   Int32BinopMatcher m(node);
   Node* shl = nullptr;
   Node* shr = nullptr;
-  // Recognize rotation, we are matching:
-  //  * x << y | x >>> (32 - y) => x ror (32 - y), i.e  x rol y
-  //  * x << (32 - y) | x >>> y => x ror y
-  //  * x << y ^ x >>> (32 - y) => x ror (32 - y), i.e. x rol y
-  //  * x << (32 - y) ^ x >>> y => x ror y
-  // as well as their commuted form.
   if (m.left().IsWord32Shl() && m.right().IsWord32Shr()) {
     shl = m.left().node();
     shr = m.right().node();
@@ -1863,8 +1887,13 @@ Reduction MachineOperatorReducer::TryMatchWord32Ror(Node* node) {
 
   if (mshl.right().HasResolvedValue() && mshr.right().HasResolvedValue()) {
     // Case where y is a constant.
-    if (mshl.right().ResolvedValue() + mshr.right().ResolvedValue() != 32)
+    if (mshl.right().ResolvedValue() + mshr.right().ResolvedValue() != 32) {
       return NoChange();
+    }
+    if (node->opcode() == IrOpcode::kWord32Xor &&
+        (mshl.right().ResolvedValue() & 31) == 0) {
+      return NoChange();
+    }
   } else {
     Node* sub = nullptr;
     Node* y = nullptr;
@@ -1880,6 +1909,9 @@ Reduction MachineOperatorReducer::TryMatchWord32Ror(Node* node) {
 
     Int32BinopMatcher msub(sub);
     if (!msub.left().Is(32) || msub.right().node() != y) return NoChange();
+    if (node->opcode() == IrOpcode::kWord32Xor) {
+      return NoChange();  // Can't guarantee y & 31 != 0.
+    }
   }
 
   node->ReplaceInput(0, mshl.left().node());
@@ -2037,7 +2069,6 @@ bool IsFloat64RepresentableAsFloat32(const Float64Matcher& m) {
 }
 
 }  // namespace
-
 
 Reduction MachineOperatorReducer::ReduceFloat64Compare(Node* node) {
   DCHECK(IrOpcode::kFloat64Equal == node->opcode() ||

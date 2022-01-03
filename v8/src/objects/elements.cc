@@ -5,6 +5,7 @@
 #include "src/objects/elements.h"
 
 #include "src/base/atomicops.h"
+#include "src/base/safe_conversions.h"
 #include "src/common/message-template.h"
 #include "src/execution/arguments.h"
 #include "src/execution/frames.h"
@@ -2540,6 +2541,7 @@ class FastSmiOrObjectElementsAccessor
         TYPED_ARRAYS(TYPED_ARRAY_CASE)
         RAB_GSAB_TYPED_ARRAYS(TYPED_ARRAY_CASE)
 #undef TYPED_ARRAY_CASE
+      case WASM_ARRAY_ELEMENTS:
         // This function is currently only used for JSArrays with non-zero
         // length.
         UNREACHABLE();
@@ -2951,6 +2953,7 @@ class FastDoubleElementsAccessor
       case SLOW_SLOPPY_ARGUMENTS_ELEMENTS:
       case FAST_STRING_WRAPPER_ELEMENTS:
       case SLOW_STRING_WRAPPER_ELEMENTS:
+      case WASM_ARRAY_ELEMENTS:
       case NO_ELEMENTS:
 #define TYPED_ARRAY_CASE(Type, type, TYPE, ctype) case TYPE##_ELEMENTS:
         TYPED_ARRAYS(TYPED_ARRAY_CASE)
@@ -3293,11 +3296,21 @@ class TypedElementsAccessor
     Handle<JSTypedArray> typed_array = Handle<JSTypedArray>::cast(receiver);
     DCHECK(!typed_array->WasDetached());
     DCHECK_LE(start, end);
-    DCHECK_LE(end, typed_array->length());
+    DCHECK_LE(end, typed_array->GetLength());
     DisallowGarbageCollection no_gc;
     ElementType scalar = FromHandle(value);
     ElementType* data = static_cast<ElementType*>(typed_array->DataPtr());
-    if (COMPRESS_POINTERS_BOOL && alignof(ElementType) > kTaggedSize) {
+    if (typed_array->buffer().is_shared()) {
+      // TypedArrays backed by shared buffers need to be filled using atomic
+      // operations. Since 8-byte data are not currently always 8-byte aligned,
+      // manually fill using SetImpl, which abstracts over alignment and atomic
+      // complexities.
+      ElementType* first = data + start;
+      ElementType* last = data + end;
+      for (; first != last; ++first) {
+        AccessorClass::SetImpl(first, scalar, kShared);
+      }
+    } else if (COMPRESS_POINTERS_BOOL && alignof(ElementType) > kTaggedSize) {
       // TODO(ishell, v8:8875): See UnalignedSlot<T> for details.
       std::fill(UnalignedSlot<ElementType>(data + start),
                 UnalignedSlot<ElementType>(data + end), scalar);
@@ -3314,8 +3327,6 @@ class TypedElementsAccessor
     DisallowGarbageCollection no_gc;
     JSTypedArray typed_array = JSTypedArray::cast(*receiver);
 
-    // TODO(caitp): return Just(false) here when implementing strict throwing on
-    // detached views.
     if (typed_array.WasDetached()) {
       return Just(value->IsUndefined(isolate) && length > start_from);
     }
@@ -3355,8 +3366,8 @@ class TypedElementsAccessor
           }
           return Just(false);
         }
-      } else if (search_value < std::numeric_limits<ElementType>::lowest() ||
-                 search_value > std::numeric_limits<ElementType>::max()) {
+      } else if (!base::IsValueInRangeForNumericType<ElementType>(
+                     search_value)) {
         // Return false if value can't be represented in this space.
         return Just(false);
       }
@@ -3402,8 +3413,8 @@ class TypedElementsAccessor
         if (std::isnan(search_value)) {
           return Just<int64_t>(-1);
         }
-      } else if (search_value < std::numeric_limits<ElementType>::lowest() ||
-                 search_value > std::numeric_limits<ElementType>::max()) {
+      } else if (!base::IsValueInRangeForNumericType<ElementType>(
+                     search_value)) {
         // Return false if value can't be represented in this ElementsKind.
         return Just<int64_t>(-1);
       }
@@ -3455,8 +3466,8 @@ class TypedElementsAccessor
           // Strict Equality Comparison of NaN is always false.
           return Just<int64_t>(-1);
         }
-      } else if (search_value < std::numeric_limits<ElementType>::lowest() ||
-                 search_value > std::numeric_limits<ElementType>::max()) {
+      } else if (!base::IsValueInRangeForNumericType<ElementType>(
+                     search_value)) {
         // Return -1 if value can't be represented in this ElementsKind.
         return Just<int64_t>(-1);
       }
@@ -3486,7 +3497,19 @@ class TypedElementsAccessor
     if (len == 0) return;
 
     ElementType* data = static_cast<ElementType*>(typed_array.DataPtr());
-    if (COMPRESS_POINTERS_BOOL && alignof(ElementType) > kTaggedSize) {
+    if (typed_array.buffer().is_shared()) {
+      // TypedArrays backed by shared buffers need to be reversed using atomic
+      // operations. Since 8-byte data are not currently always 8-byte aligned,
+      // manually reverse using GetImpl and SetImpl, which abstract over
+      // alignment and atomic complexities.
+      for (ElementType *first = data, *last = data + len - 1; first < last;
+           ++first, --last) {
+        ElementType first_value = AccessorClass::GetImpl(first, kShared);
+        ElementType last_value = AccessorClass::GetImpl(last, kShared);
+        AccessorClass::SetImpl(first, last_value, kShared);
+        AccessorClass::SetImpl(last, first_value, kShared);
+      }
+    } else if (COMPRESS_POINTERS_BOOL && alignof(ElementType) > kTaggedSize) {
       // TODO(ishell, v8:8875): See UnalignedSlot<T> for details.
       std::reverse(UnalignedSlot<ElementType>(data),
                    UnalignedSlot<ElementType>(data + len));
@@ -3516,7 +3539,7 @@ class TypedElementsAccessor
     CHECK(!source.WasDetached());
     CHECK(!destination.WasDetached());
     DCHECK_LE(start, end);
-    DCHECK_LE(end, source.length());
+    DCHECK_LE(end, source.GetLength());
     size_t count = end - start;
     DCHECK_LE(count, destination.length());
     ElementType* dest_data = static_cast<ElementType*>(destination.DataPtr());
@@ -3533,6 +3556,16 @@ class TypedElementsAccessor
     break;                                                                   \
   }
       TYPED_ARRAYS(TYPED_ARRAY_CASE)
+#undef TYPED_ARRAY_CASE
+
+#define TYPED_ARRAY_CASE(Type, type, TYPE, ctype, NON_RAB_GSAB_TYPE)         \
+  case TYPE##_ELEMENTS: {                                                    \
+    ctype* source_data = reinterpret_cast<ctype*>(source.DataPtr()) + start; \
+    CopyBetweenBackingStores<NON_RAB_GSAB_TYPE##_ELEMENTS, ctype>(           \
+        source_data, dest_data, count, is_shared);                           \
+    break;                                                                   \
+  }
+      RAB_GSAB_TYPED_ARRAYS_WITH_NON_RAB_GSAB_ELEMENTS_KIND(TYPED_ARRAY_CASE)
 #undef TYPED_ARRAY_CASE
       default:
         UNREACHABLE();

@@ -2,10 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "include/v8-wasm.h"
 #include "src/base/memory.h"
 #include "src/base/platform/mutex.h"
 #include "src/execution/arguments-inl.h"
 #include "src/execution/frames-inl.h"
+#include "src/heap/heap-inl.h"
 #include "src/logging/counters.h"
 #include "src/objects/smi.h"
 #include "src/runtime/runtime-utils.h"
@@ -237,7 +239,7 @@ RUNTIME_FUNCTION(Runtime_IsAsmWasmCode) {
     return ReadOnlyRoots(isolate).false_value();
   }
   if (function.shared().HasBuiltinId() &&
-      function.shared().builtin_id() == Builtins::kInstantiateAsmJs) {
+      function.shared().builtin_id() == Builtin::kInstantiateAsmJs) {
     // Hasn't been compiled yet.
     return ReadOnlyRoots(isolate).false_value();
   }
@@ -267,10 +269,9 @@ RUNTIME_FUNCTION(Runtime_IsWasmCode) {
   SealHandleScope shs(isolate);
   DCHECK_EQ(1, args.length());
   CONVERT_ARG_CHECKED(JSFunction, function, 0);
-  bool is_js_to_wasm =
-      function.code().kind() == CodeKind::JS_TO_WASM_FUNCTION ||
-      (function.code().is_builtin() &&
-       function.code().builtin_index() == Builtins::kGenericJSToWasmWrapper);
+  Code code = function.code();
+  bool is_js_to_wasm = code.kind() == CodeKind::JS_TO_WASM_FUNCTION ||
+                       (code.builtin_id() == Builtin::kGenericJSToWasmWrapper);
   return isolate->heap()->ToBoolean(is_js_to_wasm);
 }
 
@@ -293,7 +294,7 @@ RUNTIME_FUNCTION(Runtime_GetWasmRecoveredTrapCount) {
   return *isolate->factory()->NewNumberFromSize(trap_count);
 }
 
-RUNTIME_FUNCTION(Runtime_GetWasmExceptionId) {
+RUNTIME_FUNCTION(Runtime_GetWasmExceptionTagId) {
   HandleScope scope(isolate);
   DCHECK_EQ(2, args.length());
   CONVERT_ARG_HANDLE_CHECKED(WasmExceptionPackage, exception, 0);
@@ -301,9 +302,9 @@ RUNTIME_FUNCTION(Runtime_GetWasmExceptionId) {
   Handle<Object> tag =
       WasmExceptionPackage::GetExceptionTag(isolate, exception);
   CHECK(tag->IsWasmExceptionTag());
-  Handle<FixedArray> exceptions_table(instance->exceptions_table(), isolate);
-  for (int index = 0; index < exceptions_table->length(); ++index) {
-    if (exceptions_table->get(index) == *tag) return Smi::FromInt(index);
+  Handle<FixedArray> tags_table(instance->tags_table(), isolate);
+  for (int index = 0; index < tags_table->length(); ++index) {
+    if (tags_table->get(index) == *tag) return Smi::FromInt(index);
   }
   UNREACHABLE();
 }
@@ -355,11 +356,11 @@ RUNTIME_FUNCTION(Runtime_DeserializeWasmModule) {
   CHECK(!wire_bytes->WasDetached());
 
   Handle<JSArrayBuffer> wire_bytes_buffer = wire_bytes->GetBuffer();
-  Vector<const uint8_t> wire_bytes_vec{
+  base::Vector<const uint8_t> wire_bytes_vec{
       reinterpret_cast<const uint8_t*>(wire_bytes_buffer->backing_store()) +
           wire_bytes->byte_offset(),
       wire_bytes->byte_length()};
-  Vector<uint8_t> buffer_vec{
+  base::Vector<uint8_t> buffer_vec{
       reinterpret_cast<uint8_t*>(buffer->backing_store()),
       buffer->byte_length()};
 
@@ -435,8 +436,8 @@ RUNTIME_FUNCTION(Runtime_WasmTierUpFunction) {
   CONVERT_ARG_HANDLE_CHECKED(WasmInstanceObject, instance, 0);
   CONVERT_SMI_ARG_CHECKED(function_index, 1);
   auto* native_module = instance->module_object().native_module();
-  isolate->wasm_engine()->CompileFunction(
-      isolate, native_module, function_index, wasm::ExecutionTier::kTurbofan);
+  wasm::GetWasmEngine()->CompileFunction(isolate, native_module, function_index,
+                                         wasm::ExecutionTier::kTurbofan);
   CHECK(!native_module->compilation_state()->failed());
   return ReadOnlyRoots(isolate).undefined_value();
 }
@@ -444,14 +445,14 @@ RUNTIME_FUNCTION(Runtime_WasmTierUpFunction) {
 RUNTIME_FUNCTION(Runtime_WasmTierDown) {
   HandleScope scope(isolate);
   DCHECK_EQ(0, args.length());
-  isolate->wasm_engine()->TierDownAllModulesPerIsolate(isolate);
+  wasm::GetWasmEngine()->TierDownAllModulesPerIsolate(isolate);
   return ReadOnlyRoots(isolate).undefined_value();
 }
 
 RUNTIME_FUNCTION(Runtime_WasmTierUp) {
   HandleScope scope(isolate);
   DCHECK_EQ(0, args.length());
-  isolate->wasm_engine()->TierUpAllModulesPerIsolate(isolate);
+  wasm::GetWasmEngine()->TierUpAllModulesPerIsolate(isolate);
   return ReadOnlyRoots(isolate).undefined_value();
 }
 

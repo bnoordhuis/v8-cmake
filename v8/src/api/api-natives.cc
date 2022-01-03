@@ -7,6 +7,8 @@
 #include "src/api/api-inl.h"
 #include "src/common/message-template.h"
 #include "src/execution/isolate-inl.h"
+#include "src/heap/heap-inl.h"
+#include "src/logging/runtime-call-stats-scope.h"
 #include "src/objects/api-callbacks.h"
 #include "src/objects/hash-table-inl.h"
 #include "src/objects/lookup.h"
@@ -109,7 +111,7 @@ MaybeHandle<Object> DefineDataProperty(Isolate* isolate,
   ASSIGN_RETURN_ON_EXCEPTION(isolate, value,
                              Instantiate(isolate, prop_data, name), Object);
 
-  LookupIterator::Key key(isolate, name);
+  PropertyKey key(isolate, name);
   LookupIterator it(isolate, object, key, LookupIterator::OWN_SKIP_INTERCEPTOR);
 
 #ifdef DEBUG
@@ -526,12 +528,14 @@ MaybeHandle<JSFunction> InstantiateFunction(
                                   Handle<HeapObject>::cast(parent_prototype));
     }
   }
-  InstanceType function_type =
-      (!data->needs_access_check() &&
-       data->GetNamedPropertyHandler().IsUndefined(isolate) &&
-       data->GetIndexedPropertyHandler().IsUndefined(isolate))
-          ? JS_API_OBJECT_TYPE
-          : JS_SPECIAL_API_OBJECT_TYPE;
+  InstanceType function_type = JS_SPECIAL_API_OBJECT_TYPE;
+  if (!data->needs_access_check() &&
+      data->GetNamedPropertyHandler().IsUndefined(isolate) &&
+      data->GetIndexedPropertyHandler().IsUndefined(isolate)) {
+    function_type = FLAG_embedder_instance_types && data->HasInstanceType()
+                        ? static_cast<InstanceType>(data->InstanceType())
+                        : JS_API_OBJECT_TYPE;
+  }
 
   Handle<JSFunction> function = ApiNatives::CreateApiFunction(
       isolate, native_context, data, prototype, function_type, maybe_name);

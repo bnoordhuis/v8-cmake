@@ -1503,6 +1503,100 @@ TEST(RVC_JUMP) {
   CHECK_EQ(expected_res, res);
 }
 
+TEST(RVC_CB) {
+  // Test RV64C extension CI type instructions.
+  FLAG_riscv_c_extension = true;
+  CcTest::InitializeVM();
+
+  // Test c.srai
+  {
+    auto fn = [](MacroAssembler& assm) { __ c_srai(a0, 13); };
+    auto res = GenAndRunTest<int64_t>(0x1234'5678ULL, fn);
+    CHECK_EQ(0x1234'5678ULL >> 13, res);
+  }
+
+  // Test c.srli
+  {
+    auto fn = [](MacroAssembler& assm) { __ c_srli(a0, 13); };
+    auto res = GenAndRunTest<int64_t>(0x1234'5678ULL, fn);
+    CHECK_EQ(0x1234'5678ULL >> 13, res);
+  }
+
+  // Test c.andi
+  {
+    auto fn = [](MacroAssembler& assm) { __ c_andi(a0, 13); };
+    auto res = GenAndRunTest<int64_t>(LARGE_INT_EXCEED_32_BIT, fn);
+    CHECK_EQ(LARGE_INT_EXCEED_32_BIT & 13, res);
+  }
+}
+
+TEST(RVC_CB_BRANCH) {
+  FLAG_riscv_c_extension = true;
+  // Test floating point compare and
+  // branch instructions.
+  CcTest::InitializeVM();
+  Isolate* isolate = CcTest::i_isolate();
+  HandleScope scope(isolate);
+
+  struct T {
+    double a;
+    double b;
+    double c;
+    double d;
+    double e;
+    double f;
+    int32_t result;
+  } t;
+
+  // Create a function that accepts &t,
+  // and loads, manipulates, and stores
+  // the doubles t.a ... t.f.
+  Label neither_is_nan, less_than, outa_here;
+  auto fn = [&neither_is_nan, &less_than, &outa_here](MacroAssembler& assm) {
+    __ fld(ft0, a0, offsetof(T, a));
+    __ fld(ft1, a0, offsetof(T, b));
+
+    __ fclass_d(t5, ft0);
+    __ fclass_d(t6, ft1);
+    __ or_(a1, t5, t6);
+    __ andi(a1, a1, kSignalingNaN | kQuietNaN);
+    __ c_beqz(a1, &neither_is_nan);
+    __ sw(zero_reg, a0, offsetof(T, result));
+    __ j(&outa_here);
+
+    __ bind(&neither_is_nan);
+
+    __ flt_d(a1, ft1, ft0);
+    __ c_bnez(a1, &less_than);
+
+    __ sw(zero_reg, a0, offsetof(T, result));
+    __ j(&outa_here);
+
+    __ bind(&less_than);
+    __ RV_li(a4, 1);
+    __ sw(a4, a0, offsetof(T, result));  // Set true.
+
+    // This test-case should have additional
+    // tests.
+
+    __ bind(&outa_here);
+  };
+
+  auto f = AssembleCode<F3>(fn);
+
+  t.a = 1.5e14;
+  t.b = 2.75e11;
+  t.c = 2.0;
+  t.d = -4.0;
+  t.e = 0.0;
+  t.f = 0.0;
+  t.result = 0;
+  f.Call(&t, 0, 0, 0, 0);
+  CHECK_EQ(1.5e14, t.a);
+  CHECK_EQ(2.75e11, t.b);
+  CHECK_EQ(1, t.result);
+}
+
 TEST(TARGET_ADDR) {
   CcTest::InitializeVM();
   Isolate* isolate = CcTest::i_isolate();
@@ -1729,8 +1823,7 @@ TEST(jump_tables1) {
 
     for (int i = 0; i < kNumCases; ++i) {
       __ bind(&labels[i]);
-      __ lui(a0, (values[i] + 0x800) >> 12);
-      __ addi(a0, a0, (values[i] << 20 >> 20));
+      __ RV_li(a0, values[i]);
       __ j(&done);
     }
 
@@ -1766,8 +1859,7 @@ TEST(jump_tables2) {
 
     for (int i = 0; i < kNumCases; ++i) {
       __ bind(&labels[i]);
-      __ lui(a0, (values[i] + 0x800) >> 12);
-      __ addi(a0, a0, (values[i] << 20 >> 20));
+      __ RV_li(a0, values[i]);
       __ j(&done);
     }
 
@@ -1832,11 +1924,10 @@ TEST(jump_tables3) {
       __ j(&done);
     }
 
-    __ Align(8);
     __ bind(&dispatch);
     {
       __ BlockTrampolinePoolFor(kNumCases * 2 + 6);
-
+      __ Align(8);
       __ auipc(ra, 0);
       __ slli(t3, a0, 3);
       __ add(t3, t3, ra);
@@ -1885,6 +1976,39 @@ TEST(li_estimate) {
     CHECK_EQ(count, expected_count);
   }
 }
+
+#define UTEST_LOAD_STORE_RVV(ldname, stname, SEW, arg...)            \
+  TEST(RISCV_UTEST_##stname##ldname##SEW) {                          \
+    CcTest::InitializeVM();                                          \
+    Isolate* isolate = CcTest::i_isolate();                          \
+    HandleScope scope(isolate);                                      \
+    int8_t src[16] = {arg};                                          \
+    int8_t dst[16];                                                  \
+    auto fn = [](MacroAssembler& assm) {                             \
+      __ VU.set(t0, SEW, Vlmul::m1);                                 \
+      __ vl(v2, a0, 0, VSew::E8);                                    \
+      __ vs(v2, a1, 0, VSew::E8);                                    \
+    };                                                               \
+    GenAndRunTest<int32_t, int64_t>((int64_t)src, (int64_t)dst, fn); \
+    CHECK(!memcmp(src, dst, sizeof(src)));                           \
+  }
+
+#ifdef CAN_USE_RVV_INSTRUCTIONS
+UTEST_LOAD_STORE_RVV(vl, vs, E8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
+                     15, 16)
+// UTEST_LOAD_STORE_RVV(vl, vs, E8, 127, 127, 127, 127, 127, 127, 127)
+
+TEST(RVV_VSETIVLI) {
+  CcTest::InitializeVM();
+  Isolate* isolate = CcTest::i_isolate();
+  HandleScope scope(isolate);
+  auto fn = [](MacroAssembler& assm) {
+    __ VU.set(t0, VSew::E8, Vlmul::m1);
+    __ vsetivli(t0, 16, VSew::E128, Vlmul::m1);
+  };
+  GenAndRunTest(fn);
+}
+#endif
 
 #undef __
 

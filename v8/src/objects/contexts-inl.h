@@ -5,6 +5,7 @@
 #ifndef V8_OBJECTS_CONTEXTS_INL_H_
 #define V8_OBJECTS_CONTEXTS_INL_H_
 
+#include "src/common/globals.h"
 #include "src/heap/heap-write-barrier.h"
 #include "src/objects/contexts.h"
 #include "src/objects/dictionary-inl.h"
@@ -30,12 +31,12 @@ namespace internal {
 OBJECT_CONSTRUCTORS_IMPL(ScriptContextTable, FixedArray)
 CAST_ACCESSOR(ScriptContextTable)
 
-int ScriptContextTable::synchronized_used() const {
-  return Smi::ToInt(get(kUsedSlotIndex, kAcquireLoad));
+int ScriptContextTable::used(AcquireLoadTag tag) const {
+  return Smi::ToInt(get(kUsedSlotIndex, tag));
 }
 
-void ScriptContextTable::synchronized_set_used(int used) {
-  set(kUsedSlotIndex, Smi::FromInt(used), kReleaseStore);
+void ScriptContextTable::set_used(int used, ReleaseStoreTag tag) {
+  set(kUsedSlotIndex, Smi::FromInt(used), tag);
 }
 
 // static
@@ -46,14 +47,21 @@ Handle<Context> ScriptContextTable::GetContext(Isolate* isolate,
 }
 
 Context ScriptContextTable::get_context(int i) const {
-  DCHECK_LT(i, synchronized_used());
-  return Context::cast(this->get(i + kFirstContextSlotIndex));
+  DCHECK_LT(i, used(kAcquireLoad));
+  return Context::cast(get(i + kFirstContextSlotIndex));
+}
+
+Context ScriptContextTable::get_context(int i, AcquireLoadTag tag) const {
+  DCHECK_LT(i, used(kAcquireLoad));
+  return Context::cast(get(i + kFirstContextSlotIndex, tag));
 }
 
 TQ_OBJECT_CONSTRUCTORS_IMPL(Context)
 NEVER_READ_ONLY_SPACE_IMPL(Context)
 
 CAST_ACCESSOR(NativeContext)
+
+RELAXED_SMI_ACCESSORS(Context, length, kLengthOffset)
 
 Object Context::get(int index) const {
   PtrComprCageBase cage_base = GetPtrComprCageBase(*this);
@@ -62,14 +70,14 @@ Object Context::get(int index) const {
 
 Object Context::get(PtrComprCageBase cage_base, int index) const {
   DCHECK_LT(static_cast<unsigned int>(index),
-            static_cast<unsigned int>(length()));
+            static_cast<unsigned int>(length(kRelaxedLoad)));
   return TaggedField<Object>::Relaxed_Load(cage_base, *this,
                                            OffsetOfElementAt(index));
 }
 
 void Context::set(int index, Object value, WriteBarrierMode mode) {
   DCHECK_LT(static_cast<unsigned int>(index),
-            static_cast<unsigned int>(length()));
+            static_cast<unsigned int>(length(kRelaxedLoad)));
   const int offset = OffsetOfElementAt(index);
   RELAXED_WRITE_FIELD(*this, offset, value);
   CONDITIONAL_WRITE_BARRIER(*this, offset, value, mode);
@@ -83,14 +91,14 @@ Object Context::get(int index, AcquireLoadTag tag) const {
 Object Context::get(PtrComprCageBase cage_base, int index,
                     AcquireLoadTag) const {
   DCHECK_LT(static_cast<unsigned int>(index),
-            static_cast<unsigned int>(length()));
+            static_cast<unsigned int>(length(kRelaxedLoad)));
   return ACQUIRE_READ_FIELD(*this, OffsetOfElementAt(index));
 }
 
 void Context::set(int index, Object value, WriteBarrierMode mode,
                   ReleaseStoreTag) {
   DCHECK_LT(static_cast<unsigned int>(index),
-            static_cast<unsigned int>(length()));
+            static_cast<unsigned int>(length(kRelaxedLoad)));
   const int offset = OffsetOfElementAt(index);
   RELEASE_WRITE_FIELD(*this, offset, value);
   CONDITIONAL_WRITE_BARRIER(*this, offset, value, mode);
@@ -291,6 +299,22 @@ ScriptContextTable NativeContext::synchronized_script_context_table() const {
 
 OSROptimizedCodeCache NativeContext::GetOSROptimizedCodeCache() {
   return OSROptimizedCodeCache::cast(osr_code_cache());
+}
+
+void NativeContext::SetOptimizedCodeListHead(Object head) {
+  set(OPTIMIZED_CODE_LIST, head, UPDATE_WEAK_WRITE_BARRIER, kReleaseStore);
+}
+
+Object NativeContext::OptimizedCodeListHead() {
+  return get(OPTIMIZED_CODE_LIST);
+}
+
+void NativeContext::SetDeoptimizedCodeListHead(Object head) {
+  set(DEOPTIMIZED_CODE_LIST, head, UPDATE_WEAK_WRITE_BARRIER, kReleaseStore);
+}
+
+Object NativeContext::DeoptimizedCodeListHead() {
+  return get(DEOPTIMIZED_CODE_LIST);
 }
 
 OBJECT_CONSTRUCTORS_IMPL(NativeContext, Context)

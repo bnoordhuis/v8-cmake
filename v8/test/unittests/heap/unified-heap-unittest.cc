@@ -5,13 +5,19 @@
 #include <memory>
 
 #include "include/cppgc/allocation.h"
+#include "include/cppgc/explicit-management.h"
 #include "include/cppgc/garbage-collected.h"
+#include "include/cppgc/heap-consistency.h"
+#include "include/cppgc/internal/api-constants.h"
 #include "include/cppgc/persistent.h"
 #include "include/cppgc/platform.h"
 #include "include/cppgc/testing.h"
 #include "include/libplatform/libplatform.h"
+#include "include/v8-context.h"
 #include "include/v8-cppgc.h"
-#include "include/v8.h"
+#include "include/v8-local-handle.h"
+#include "include/v8-object.h"
+#include "include/v8-traced-handle.h"
 #include "src/api/api-inl.h"
 #include "src/base/platform/time.h"
 #include "src/heap/cppgc-js/cpp-heap.h"
@@ -131,6 +137,61 @@ TEST_F(UnifiedHeapTest, WriteBarrierCppToV8Reference) {
   EXPECT_EQ(kMagicAddress,
             wrappable->wrapper()->GetAlignedPointerFromInternalField(1));
 }
+
+#if DEBUG
+namespace {
+class Unreferenced : public cppgc::GarbageCollected<Unreferenced> {
+ public:
+  void Trace(cppgc::Visitor*) const {}
+};
+}  // namespace
+
+TEST_F(UnifiedHeapTest, FreeUnreferencedDuringNoGcScope) {
+  v8::HandleScope handle_scope(v8_isolate());
+  v8::Local<v8::Context> context = v8::Context::New(v8_isolate());
+  v8::Context::Scope context_scope(context);
+  auto* unreferenced = cppgc::MakeGarbageCollected<Unreferenced>(
+      allocation_handle(),
+      cppgc::AdditionalBytes(cppgc::internal::api_constants::kMB));
+  // Force safepoint to force flushing of cached allocated/freed sizes in cppgc.
+  cpp_heap().stats_collector()->NotifySafePointForTesting();
+  {
+    cppgc::subtle::NoGarbageCollectionScope no_gc_scope(cpp_heap());
+    cppgc::internal::FreeUnreferencedObject(cpp_heap(), unreferenced);
+    // Force safepoint to make sure allocated size decrease due to freeing
+    // unreferenced object is reported to CppHeap. Due to
+    // NoGarbageCollectionScope, CppHeap will cache the reported decrease and
+    // won't report it further.
+    cpp_heap().stats_collector()->NotifySafePointForTesting();
+  }
+  // Running a GC resets the allocated size counters to the current marked bytes
+  // counter.
+  CollectGarbageWithoutEmbedderStack(cppgc::Heap::SweepingType::kAtomic);
+  // If CppHeap didn't clear it's cached values when the counters were reset,
+  // the next safepoint will try to decrease the cached value from the last
+  // marked bytes (which is smaller than the cached value) and crash.
+  cppgc::MakeGarbageCollected<Unreferenced>(allocation_handle());
+  cpp_heap().stats_collector()->NotifySafePointForTesting();
+}
+#endif  // DEBUG
+
+#if !V8_OS_FUCHSIA
+TEST_F(UnifiedHeapTest, TracedReferenceRetainsFromStack) {
+  v8::HandleScope handle_scope(v8_isolate());
+  v8::Local<v8::Context> context = v8::Context::New(v8_isolate());
+  v8::Context::Scope context_scope(context);
+  TracedReference<v8::Object> holder;
+  {
+    v8::HandleScope inner_handle_scope(v8_isolate());
+    auto local = v8::Object::New(v8_isolate());
+    EXPECT_TRUE(local->IsObject());
+    holder.Reset(v8_isolate(), local);
+  }
+  CollectGarbageWithEmbedderStack(cppgc::Heap::SweepingType::kAtomic);
+  auto local = holder.Get(v8_isolate());
+  EXPECT_TRUE(local->IsObject());
+}
+#endif  // !V8_OS_FUCHSIA
 
 TEST_F(UnifiedHeapDetachedTest, AllocationBeforeConfigureHeap) {
   auto heap = v8::CppHeap::Create(
@@ -280,6 +341,8 @@ class UnifiedHeapWithCustomSpaceTest : public UnifiedHeapTest {
 }  // namespace
 
 TEST_F(UnifiedHeapWithCustomSpaceTest, CollectCustomSpaceStatisticsAtLastGC) {
+  // TPH does not support kIncrementalAndConcurrent yet.
+  if (FLAG_enable_third_party_heap) return;
   StatisticsReceiver::num_calls_ = 0;
   // Initial state.
   cpp_heap().CollectCustomSpaceStatisticsAtLastGC(

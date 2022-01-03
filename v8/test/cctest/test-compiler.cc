@@ -27,18 +27,21 @@
 
 #include <stdlib.h>
 #include <wchar.h>
+
 #include <memory>
 
-#include "src/init/v8.h"
-
+#include "include/v8-function.h"
+#include "include/v8-local-handle.h"
 #include "include/v8-profiler.h"
-#include "include/v8.h"
+#include "include/v8-script.h"
 #include "src/api/api-inl.h"
 #include "src/codegen/compilation-cache.h"
 #include "src/codegen/compiler.h"
+#include "src/codegen/script-details.h"
 #include "src/diagnostics/disasm.h"
 #include "src/heap/factory.h"
 #include "src/heap/spaces.h"
+#include "src/init/v8.h"
 #include "src/interpreter/interpreter.h"
 #include "src/objects/allocation-site-inl.h"
 #include "src/objects/objects-inl.h"
@@ -67,12 +70,12 @@ static void SetGlobalProperty(const char* name, Object value) {
 
 static Handle<JSFunction> Compile(const char* source) {
   Isolate* isolate = CcTest::i_isolate();
-  Handle<String> source_code = isolate->factory()->NewStringFromUtf8(
-      CStrVector(source)).ToHandleChecked();
+  Handle<String> source_code = isolate->factory()
+                                   ->NewStringFromUtf8(base::CStrVector(source))
+                                   .ToHandleChecked();
   Handle<SharedFunctionInfo> shared =
       Compiler::GetSharedFunctionInfoForScript(
-          isolate, source_code, Compiler::ScriptDetails(),
-          v8::ScriptOriginOptions(), nullptr, nullptr,
+          isolate, source_code, ScriptDetails(),
           v8::ScriptCompiler::kNoCompileOptions,
           ScriptCompiler::kNoCacheNoReason, NOT_NATIVES_CODE)
           .ToHandleChecked();
@@ -83,7 +86,7 @@ static Handle<JSFunction> Compile(const char* source) {
 
 static double Inc(Isolate* isolate, int x) {
   const char* source = "result = %d + 1;";
-  EmbeddedVector<char, 512> buffer;
+  base::EmbeddedVector<char, 512> buffer;
   SNPrintF(buffer, source, x);
 
   Handle<JSFunction> fun = Compile(buffer.begin());
@@ -247,7 +250,7 @@ TEST(C2JSFrames) {
   CHECK(fun1->IsJSFunction());
 
   Handle<Object> argv[] = {
-      isolate->factory()->InternalizeString(StaticCharVector("hello"))};
+      isolate->factory()->InternalizeString(base::StaticCharVector("hello"))};
   Execution::Call(isolate,
                   Handle<JSFunction>::cast(fun1),
                   global,
@@ -280,7 +283,7 @@ TEST(GetScriptLineNumber) {
   const char function_f[] = "function f() {}";
   const int max_rows = 1000;
   const int buffer_size = max_rows + sizeof(function_f);
-  ScopedVector<char> buffer(buffer_size);
+  base::ScopedVector<char> buffer(buffer_size);
   memset(buffer.begin(), '\n', buffer_size - 1);
   buffer[buffer_size - 1] = '\0';
 

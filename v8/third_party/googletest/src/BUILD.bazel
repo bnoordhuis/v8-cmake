@@ -30,13 +30,16 @@
 #
 #   Bazel Build for Google C++ Testing Framework(Google Test)
 
-load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
-
 package(default_visibility = ["//visibility:public"])
 
 licenses(["notice"])
 
 exports_files(["LICENSE"])
+
+config_setting(
+    name = "qnx",
+    constraint_values = ["@platforms//os:qnx"],
+)
 
 config_setting(
     name = "windows",
@@ -86,6 +89,7 @@ cc_library(
         "googlemock/include/gmock/*.h",
     ]),
     copts = select({
+        ":qnx": [],
         ":windows": [],
         "//conditions:default": ["-pthread"],
     }),
@@ -104,6 +108,7 @@ cc_library(
         "googletest/include",
     ],
     linkopts = select({
+        ":qnx": ["-lregex"],
         ":windows": [],
         "//conditions:default": ["-pthread"],
     }),

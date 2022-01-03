@@ -23,6 +23,12 @@
 #include "src/wasm/wasm-module.h"
 
 namespace v8 {
+
+namespace base {
+template <typename T>
+class Vector;
+}  // namespace base
+
 namespace internal {
 
 class JSArrayBuffer;
@@ -31,9 +37,6 @@ class Counters;
 class WasmModuleObject;
 class WasmInstanceObject;
 
-template <typename T>
-class Vector;
-
 namespace wasm {
 
 struct CompilationEnv;
@@ -41,9 +44,11 @@ class CompilationResultResolver;
 class ErrorThrower;
 class ModuleCompiler;
 class NativeModule;
+class StreamingDecoder;
 class WasmCode;
 struct WasmModule;
 
+V8_EXPORT_PRIVATE
 std::shared_ptr<NativeModule> CompileToNativeModule(
     Isolate* isolate, const WasmFeatures& enabled, ErrorThrower* thrower,
     std::shared_ptr<const WasmModule> module, const ModuleWireBytes& wire_bytes,
@@ -61,7 +66,7 @@ void CompileJsToWasmWrappers(Isolate* isolate, const WasmModule* module,
 // compiled yet.
 V8_EXPORT_PRIVATE
 WasmCode* CompileImportWrapper(
-    WasmEngine* wasm_engine, NativeModule* native_module, Counters* counters,
+    NativeModule* native_module, Counters* counters,
     compiler::WasmImportCallKind kind, const FunctionSig* sig,
     int expected_arity, WasmImportWrapperCache::ModificationScope* cache_scope);
 

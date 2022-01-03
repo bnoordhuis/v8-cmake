@@ -7,10 +7,13 @@
 #include <memory>
 #include <vector>
 
-#include "include/v8.h"
+#include "include/v8-callbacks.h"
+#include "include/v8-primitive.h"
+#include "src/base/strings.h"
 #include "src/common/globals.h"
+#include "src/execution/isolate-utils.h"
 #include "src/handles/handles.h"
-#include "src/logging/counters.h"
+#include "src/logging/runtime-call-stats-scope.h"
 #include "src/objects/objects-inl.h"
 #include "src/parsing/scanner.h"
 #include "src/strings/unicode-inl.h"
@@ -100,7 +103,7 @@ class ExternalStringStream {
   ExternalStringStream(ExternalString string, size_t start_offset,
                        size_t length)
       : lock_(string),
-        data_(string.GetChars() + start_offset),
+        data_(string.GetChars(GetPtrComprCageBase(string)) + start_offset),
         length_(length) {}
 
   ExternalStringStream(const ExternalStringStream& other) V8_NOEXCEPT
@@ -278,7 +281,7 @@ class BufferedCharacterStream : public Utf16CharacterStream {
       : byte_stream_(other.byte_stream_) {}
 
   static const size_t kBufferSize = 512;
-  uc16 buffer_[kBufferSize];
+  base::uc16 buffer_[kBufferSize];
   ByteStream<uint8_t> byte_stream_;
 };
 
@@ -392,7 +395,7 @@ class BufferedUtf16CharacterStream : public Utf16CharacterStream {
 
   // Fixed sized buffer that this class reads from.
   // The base class' buffer_start_ should always point to buffer_.
-  uc16 buffer_[kBufferSize];
+  base::uc16 buffer_[kBufferSize];
 };
 
 BufferedUtf16CharacterStream::BufferedUtf16CharacterStream()
@@ -418,7 +421,7 @@ bool BufferedUtf16CharacterStream::ReadBlock() {
 
 namespace {
 
-static const uc16 kWindows1252ToUC16[256] = {
+static const base::uc16 kWindows1252ToUC16[256] = {
     0x0000, 0x0001, 0x0002, 0x0003, 0x0004, 0x0005, 0x0006, 0x0007,  // 00-07
     0x0008, 0x0009, 0x000A, 0x000B, 0x000C, 0x000D, 0x000E, 0x000F,  // 08-0F
     0x0010, 0x0011, 0x0012, 0x0013, 0x0014, 0x0015, 0x0016, 0x0017,  // 10-17
@@ -504,7 +507,7 @@ class Windows1252CharacterStream final : public Utf16CharacterStream {
       V8_NOEXCEPT : byte_stream_(other.byte_stream_) {}
 
   static const size_t kBufferSize = 512;
-  uc16 buffer_[kBufferSize];
+  base::uc16 buffer_[kBufferSize];
   ChunkedStream<uint8_t> byte_stream_;
 };
 
@@ -653,7 +656,7 @@ void Utf8ExternalStreamingStream::FillBufferFromCurrentChunk() {
     unibrow::uchar t = unibrow::Utf8::ValueOfIncrementalFinish(&state);
     if (t != unibrow::Utf8::kBufferEmpty) {
       DCHECK_EQ(t, unibrow::Utf8::kBadChar);
-      *output_cursor = static_cast<uc16>(t);
+      *output_cursor = static_cast<base::uc16>(t);
       buffer_end_++;
       current_.pos.chars++;
       current_.pos.incomplete_char = 0;
@@ -672,13 +675,14 @@ void Utf8ExternalStreamingStream::FillBufferFromCurrentChunk() {
       unibrow::uchar t =
           unibrow::Utf8::ValueOfIncremental(&cursor, &state, &incomplete_char);
       if (V8_LIKELY(t < kUtf8Bom)) {
-        *(output_cursor++) = static_cast<uc16>(t);  // The most frequent case.
+        *(output_cursor++) =
+            static_cast<base::uc16>(t);  // The most frequent case.
       } else if (t == unibrow::Utf8::kIncomplete) {
         continue;
       } else if (t == kUtf8Bom) {
         // BOM detected at beginning of the stream. Don't copy it.
       } else if (t <= unibrow::Utf16::kMaxNonSurrogateCharCode) {
-        *(output_cursor++) = static_cast<uc16>(t);
+        *(output_cursor++) = static_cast<base::uc16>(t);
       } else {
         *(output_cursor++) = unibrow::Utf16::LeadSurrogate(t);
         *(output_cursor++) = unibrow::Utf16::TrailSurrogate(t);
@@ -692,7 +696,8 @@ void Utf8ExternalStreamingStream::FillBufferFromCurrentChunk() {
     unibrow::uchar t =
         unibrow::Utf8::ValueOfIncremental(&cursor, &state, &incomplete_char);
     if (V8_LIKELY(t <= unibrow::Utf16::kMaxNonSurrogateCharCode)) {
-      *(output_cursor++) = static_cast<uc16>(t);  // The most frequent case.
+      *(output_cursor++) =
+          static_cast<base::uc16>(t);  // The most frequent case.
     } else if (t == unibrow::Utf8::kIncomplete) {
       continue;
     } else {
