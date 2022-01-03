@@ -773,19 +773,12 @@ file(GLOB_RECURSE torque-objects
   RELATIVE ${PROJECT_SOURCE_DIR}/v8
   CONFIGURE_DEPENDS v8/src/objects/*.tq
 )
-file(GLOB_RECURSE torque-webassembly
-        RELATIVE ${PROJECT_SOURCE_DIR}/v8
-        CONFIGURE_DEPENDS
-        v8/src/debug/debug-wasm-objects.tq,
-        v8/src/builtins/wasm.tq,
-        v8/src/wasm/wasm-objects.tq,
-)
 
 list(APPEND torque_files ${torque-builtins})
 list(APPEND torque_files ${torque-objects})
-list(APPEND torque_files ${torque-webassembly})
 
 list(APPEND torque_files
+  src/debug/debug-wasm-objects.tq
   src/ic/handler-configuration.tq
   src/wasm/wasm-objects.tq
   test/torque/test-torque.tq
