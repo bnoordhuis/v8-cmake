@@ -15,7 +15,8 @@ if(MSVC)
     PROPERTY LANGUAGE ASM_MASM)
 
 endif()
-add_definitions("-DV8_ENABLE_WEBASSEMBLY")
+
+add_definitions("-DV8_ENABLE_WEBASSEMBLY -DV8_ADVANCED_BIGINT_ALGORITHMS")
 
 list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
 set(THREADS_PREFER_PTHREAD_FLAG ON)
@@ -179,6 +180,8 @@ file(GLOB api-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/ap
 file(GLOB asmjs-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/asmjs/*.cc)
 file(GLOB ast-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/ast/*.cc)
 file(GLOB builtin-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/builtins/*.cc)
+file(GLOB baseline-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/baseline/*.cc)
+file(GLOB bigint-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/bigint/*.cc)
 file(GLOB codegen-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/codegen/*.cc)
 file(GLOB debug-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/debug/*.cc)
 file(GLOB deoptimizer-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/deoptimizer/*.cc)
@@ -189,7 +192,7 @@ file(GLOB handles-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/sr
 file(GLOB interpreter-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/interpreter/*.cc)
 file(GLOB json-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/json/*.cc)
 file(GLOB logging-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/logging/*.cc)
-file(GLOB numbers-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/numbers/*.cc)
+file(GLOB numbers-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/base/numbers/*.cc v8/src/numbers/*.cc)
 file(GLOB object-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/objects/*.cc)
 file(GLOB parsing-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/parsing/*.cc)
 file(GLOB profiler-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/profiler/*.cc)
@@ -242,6 +245,7 @@ list(REMOVE_ITEM builtin-sources
 )
 
 list(REMOVE_ITEM diagnostic-sources v8/src/diagnostics/unwinding-info-win64.cc)
+list(REMOVE_ITEM diagnostic-sources v8/src/diagnostics/system-jit-win.cc)
 list(REMOVE_ITEM object-sources ${i18n-sources})
 list(REMOVE_ITEM regexp-sources v8/src/regexp/gen-regexp-special-case.cc)
 list(REMOVE_ITEM runtime-sources v8/src/runtime/runtime-intl.cc)
@@ -259,6 +263,7 @@ add_library(v8_base_without_compiler STATIC
   $<$<AND:${is-x64},${is-posix}>:v8/src/trap-handler/handler-inside-posix.cc>
   $<$<AND:${is-x64},${is-posix}>:v8/src/trap-handler/handler-outside-posix.cc>
   $<$<AND:${is-x64},${is-win}>:v8/src/diagnostics/unwinding-info-win64.cc>
+  $<$<AND:${is-x64},${is-win}>:v8/src/diagnostics/system-jit-win.cc>
   $<$<AND:${is-x64},${is-win}>:v8/src/trap-handler/handler-inside-win.cc>
   $<$<AND:${is-x64},${is-win}>:v8/src/trap-handler/handler-outside-win.cc>
   $<${is-x64}:v8/src/codegen/x64/assembler-x64.cc>
@@ -295,6 +300,8 @@ add_library(v8_base_without_compiler STATIC
   ${asmjs-sources}
   ${ast-sources}
   ${builtin-sources}
+  ${baseline-sources}
+  ${bigint-sources}
   ${codegen-sources}
   v8/src/common/assert-scope.cc
   v8/src/compiler-dispatcher/lazy-compile-dispatcher.cc
@@ -705,6 +712,7 @@ add_library(v8_libbase STATIC
   v8/src/base/platform/time.cc
   v8/src/base/region-allocator.cc
   v8/src/base/sys-info.cc
+  v8/src/base/strings.cc
   v8/src/base/utils/random-number-generator.cc
   v8/src/base/vlq-base64.cc
   $<$<NOT:$<OR:${is-win},${is-aix}>>:v8/src/base/platform/platform-posix-time.cc>
