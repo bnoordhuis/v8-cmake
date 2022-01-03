@@ -117,6 +117,7 @@ add_executable(
   v8/src/d8/async-hooks-wrapper.cc
   v8/src/d8/d8-console.cc
   v8/src/d8/d8-js.cc
+  v8/src/d8/d8-test.cc
   v8/src/d8/d8-platforms.cc
   v8/src/d8/d8.cc
 )
@@ -204,6 +205,7 @@ file(GLOB utils-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/
 file(GLOB wasm-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/wasm/*.cc)
 file(GLOB wasm-baseline-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/wasm/baseline/*.cc)
 file(GLOB zone-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/zone/*.cc)
+file(GLOB zlib-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/third_party/zlib/*.c v8/third_party/zlib/google/compression_utils_portable.cc)
 
 file(GLOB heap-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS
   v8/src/heap/*.cc
@@ -260,8 +262,8 @@ list(APPEND snapshot-sources v8/src/snapshot/embedded/embedded-data.cc)
 list(APPEND wasm-sources ${wasm-baseline-sources})
 
 add_library(v8_base_without_compiler STATIC
-  $<$<AND:${is-x64},${is-posix}>:v8/src/trap-handler/handler-inside-posix.cc>
-  $<$<AND:${is-x64},${is-posix}>:v8/src/trap-handler/handler-outside-posix.cc>
+  $<${is-posix}:v8/src/trap-handler/handler-inside-posix.cc>
+  $<${is-posix}:v8/src/trap-handler/handler-outside-posix.cc>
   $<$<AND:${is-x64},${is-win}>:v8/src/diagnostics/unwinding-info-win64.cc>
   $<$<AND:${is-x64},${is-win}>:v8/src/diagnostics/system-jit-win.cc>
   $<$<AND:${is-x64},${is-win}>:v8/src/trap-handler/handler-inside-win.cc>
@@ -347,6 +349,7 @@ add_library(v8_base_without_compiler STATIC
   v8/src/third_party/siphash/halfsiphash.cc
   v8/src/tracing/trace-event.cc
   v8/src/tracing/traced-value.cc
+  v8/src/web-snapshot/web-snapshot.cc
   v8/src/tracing/tracing-category-observer.cc
   v8/src/trap-handler/handler-inside.cc
   v8/src/trap-handler/handler-outside.cc
@@ -354,6 +357,7 @@ add_library(v8_base_without_compiler STATIC
   ${utils-sources}
   ${wasm-sources}
   ${zone-sources}
+  ${zlib-sources}
   $<TARGET_OBJECTS:v8-adler32>
 )
 
