@@ -297,7 +297,7 @@ add_library(v8_base_without_compiler STATIC
   ${builtin-sources}
   ${codegen-sources}
   v8/src/common/assert-scope.cc
-  v8/src/compiler-dispatcher/compiler-dispatcher.cc
+  v8/src/compiler-dispatcher/lazy-compile-dispatcher.cc
   v8/src/compiler-dispatcher/optimizing-compile-dispatcher.cc
   v8/src/date/date.cc
   v8/src/date/dateparser.cc
