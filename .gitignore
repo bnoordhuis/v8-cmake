@@ -2,3 +2,8 @@
 /build/
 cmake-build-debug/
 .idea/
+
+# vs
+.vs/
+out/
+CMakeFiles/

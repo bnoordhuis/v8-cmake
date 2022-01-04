@@ -217,6 +217,7 @@ file(GLOB heap-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS
   v8/src/heap/base/*.cc
   v8/src/heap/cppgc-js/*.cc
   v8/src/heap/cppgc/*.cc
+  v8/src/heap/third-party/*.cc
 )
 
 # Caged heap feature is x64/arm64-only at the moment.
