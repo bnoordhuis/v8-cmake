@@ -271,6 +271,7 @@ add_library(v8_base_without_compiler STATIC
   $<${is-x64}:v8/src/codegen/x64/assembler-x64.cc>
   $<${is-x64}:v8/src/codegen/x64/cpu-x64.cc>
   $<${is-x64}:v8/src/codegen/x64/macro-assembler-x64.cc>
+  $<${is-x64}:v8/src/codegen/shared-ia32-x64/macro-assembler-shared-ia32-x64.cc>
   $<${is-x64}:v8/src/compiler/backend/x64/code-generator-x64.cc>
   $<${is-x64}:v8/src/compiler/backend/x64/instruction-scheduler-x64.cc>
   $<${is-x64}:v8/src/compiler/backend/x64/instruction-selector-x64.cc>
