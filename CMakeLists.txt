@@ -56,12 +56,20 @@ set(is-ia32 0)
 set(is-mips 0)
 set(is-mips64 0)
 set(is-ppc 0)
-
+set(is-x64 0)
 set(is-s390 $<STREQUAL:${CMAKE_SYSTEM_PROCESSOR},S390>)
-string(CONCAT is-x64 $<OR:
-  $<STREQUAL:${CMAKE_SYSTEM_PROCESSOR},AMD64>,
-  $<STREQUAL:${CMAKE_SYSTEM_PROCESSOR},x86_64>
->)
+
+if ((${CMAKE_SYSTEM_PROCESSOR} STREQUAL AMD64) OR  (${CMAKE_SYSTEM_PROCESSOR} STREQUAL x86_64))
+  if (${CMAKE_SIZEOF_VOID_P} STREQUAL 8) 
+    set(is-x64 1)
+  else()
+    set(is-ia32 1)
+  endif()
+endif()
+if (${CMAKE_SYSTEM_PROCESSOR} STREQUAL x86)
+  # its not itanium but there are no other 32bit options in the v8 build.. it works though.
+  set(is-ia32 1)
+endif()
 
 option(V8_ENABLE_CONCURRENT_MARKING "Enable concurrent marking" ON)
 option(V8_ENABLE_I18N "Enable Internationalization support")
@@ -75,11 +83,28 @@ set(
   $<${is-win}:V8_HAVE_TARGET_OS>
   $<${is-win}:V8_TARGET_OS_WIN>
   $<${is-x64}:V8_TARGET_ARCH_X64>
+  $<${is-ia32}:V8_TARGET_ARCH_IA32>
+  $<${is-ia32}:DISABLE_UNTRUSTED_CODE_MITIGATIONS> # lest we get FATAL("Poisoning is not supported on ia32.");
   $<${is-win}:NOMINMAX>
-  $<$<AND:${is-win},${is-x64}>:V8_OS_WIN_X64>
+  # $<$<AND:${is-win},${is-x64}>:V8_OS_WIN_X64> # This is set by v8 sources - should not be needed here.
   $<$<BOOL:${V8_ENABLE_CONCURRENT_MARKING}>:V8_CONCURRENT_MARKING>
   $<${is-win}:V8_OS_WIN32>
 )
+
+set(msvc-x86-no-safeseh)
+if (${is-ia32}) 
+  if (MSVC) 
+    set(msvc-x86-no-safeseh /SAFESEH:NO)
+  endif()
+  if (${is-win})
+      # From Build.GN: Ensure no surprising artifacts from 80bit double math with x86.
+      if (MSVC) 
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /arch:SSE2")
+      else()
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -msse2")
+      endif()
+  endif()
+endif()
 
 set(disable-exceptions
   $<$<CXX_COMPILER_ID:MSVC>:/EHs-c->
@@ -94,6 +119,8 @@ set(enable-exceptions
   $<$<CXX_COMPILER_ID:Clang>:-fexceptions>
   $<$<CXX_COMPILER_ID:GNU>:-fexceptions>
 )
+
+set(has_control_flow_integrity ${is-arm64})
 
 #
 # d8
@@ -112,6 +139,7 @@ add_executable(
 
 target_compile_definitions(d8 PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 target_compile_options(d8 PRIVATE ${disable-exceptions})
+target_link_options(d8 PRIVATE ${msvc-x86-no-safeseh})
 
 target_include_directories(d8
   PUBLIC
@@ -171,7 +199,6 @@ file(GLOB ast-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/as
 file(GLOB builtin-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/builtins/*.cc)
 file(GLOB codegen-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/codegen/*.cc)
 file(GLOB debug-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/debug/*.cc)
-file(GLOB deoptimizer-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/deoptimizer/*.cc)
 file(GLOB diagnostic-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/diagnostics/*.cc)
 file(GLOB execution-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/execution/*.cc)
 file(GLOB extensions-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/extensions/*.cc)
@@ -196,6 +223,13 @@ file(GLOB heap-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS
   v8/src/heap/*.cc
   v8/src/heap/base/*.cc
   v8/src/heap/third-party/*.cc
+)
+
+set(deoptimizer-sources
+  "v8/src/deoptimizer/deoptimizer.cc"
+  "v8/src/deoptimizer/deoptimize-reason.cc"
+  $<${has_control_flow_integrity}:"v8/src/deoptimizer/deoptimizer-cfi-builtins.cc">
+  $<${has_control_flow_integrity}:"v8/src/deoptimizer/deoptimizer-cfi-empty.cc">
 )
 
 list(REMOVE_ITEM builtin-sources
@@ -238,6 +272,18 @@ add_library(v8_base_without_compiler STATIC
   $<${is-x64}:v8/src/diagnostics/x64/eh-frame-x64.cc>
   $<${is-x64}:v8/src/execution/x64/frame-constants-x64.cc>
   $<${is-x64}:v8/src/regexp/x64/regexp-macro-assembler-x64.cc>
+  $<${is-ia32}:v8/src/codegen/ia32/assembler-ia32.cc>
+  $<${is-ia32}:v8/src/codegen/ia32/cpu-ia32.cc>
+  $<${is-ia32}:v8/src/codegen/ia32/interface-descriptors-ia32.cc>
+  $<${is-ia32}:v8/src/codegen/ia32/macro-assembler-ia32.cc>
+  $<${is-ia32}:v8/src/compiler/backend/ia32/code-generator-ia32.cc>
+  $<${is-ia32}:v8/src/compiler/backend/ia32/instruction-scheduler-ia32.cc>
+  $<${is-ia32}:v8/src/compiler/backend/ia32/instruction-selector-ia32.cc>
+  $<${is-ia32}:v8/src/debug/ia32/debug-ia32.cc>
+  $<${is-ia32}:v8/src/deoptimizer/ia32/deoptimizer-ia32.cc>
+  $<${is-ia32}:v8/src/diagnostics/ia32/disasm-ia32.cc>
+  $<${is-ia32}:v8/src/execution/ia32/frame-constants-ia32.cc>
+  $<${is-ia32}:v8/src/regexp/ia32/regexp-macro-assembler-ia32.cc>
   $<$<BOOL:${V8_ENABLE_I18N}>:$<TARGET_OBJECTS:v8-i18n-support>>
   ${api-sources}
   ${asmjs-sources}
@@ -858,6 +904,7 @@ add_executable(mksnapshot
 
 target_compile_definitions(mksnapshot PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 target_compile_options(mksnapshot PRIVATE ${disable-exceptions})
+target_link_options(mksnapshot PRIVATE ${msvc-x86-no-safeseh})
 target_include_directories(mksnapshot PRIVATE ${PROJECT_SOURCE_DIR}/v8)
 target_link_libraries(mksnapshot
   PRIVATE
