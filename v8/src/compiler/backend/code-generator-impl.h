@@ -187,9 +187,10 @@ class InstructionOperandConverter {
 // Deoptimization exit.
 class DeoptimizationExit : public ZoneObject {
  public:
-  explicit DeoptimizationExit(SourcePosition pos, BailoutId bailout_id,
+  explicit DeoptimizationExit(SourcePosition pos, BytecodeOffset bailout_id,
                               int translation_id, int pc_offset,
-                              DeoptimizeKind kind, DeoptimizeReason reason)
+                              DeoptimizeKind kind, DeoptimizeReason reason,
+                              NodeId node_id)
       : deoptimization_id_(kNoDeoptIndex),
         pos_(pos),
         bailout_id_(bailout_id),
@@ -197,6 +198,7 @@ class DeoptimizationExit : public ZoneObject {
         pc_offset_(pc_offset),
         kind_(kind),
         reason_(reason),
+        node_id_(node_id),
         immediate_args_(nullptr),
         emitted_(false) {}
 
@@ -215,11 +217,12 @@ class DeoptimizationExit : public ZoneObject {
   Label* label() { return &label_; }
   // The label after the deoptimization check, which will resume execution.
   Label* continue_label() { return &continue_label_; }
-  BailoutId bailout_id() const { return bailout_id_; }
+  BytecodeOffset bailout_id() const { return bailout_id_; }
   int translation_id() const { return translation_id_; }
   int pc_offset() const { return pc_offset_; }
   DeoptimizeKind kind() const { return kind_; }
   DeoptimizeReason reason() const { return reason_; }
+  NodeId node_id() const { return node_id_; }
   const ZoneVector<ImmediateOperand*>* immediate_args() const {
     return immediate_args_;
   }
@@ -238,11 +241,12 @@ class DeoptimizationExit : public ZoneObject {
   const SourcePosition pos_;
   Label label_;
   Label continue_label_;
-  const BailoutId bailout_id_;
+  const BytecodeOffset bailout_id_;
   const int translation_id_;
   const int pc_offset_;
   const DeoptimizeKind kind_;
   const DeoptimizeReason reason_;
+  const NodeId node_id_;
   ZoneVector<ImmediateOperand*>* immediate_args_;
   bool emitted_;
 };

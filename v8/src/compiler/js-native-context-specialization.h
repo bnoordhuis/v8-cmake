@@ -6,6 +6,7 @@
 #define V8_COMPILER_JS_NATIVE_CONTEXT_SPECIALIZATION_H_
 
 #include "src/base/flags.h"
+#include "src/base/optional.h"
 #include "src/compiler/graph-reducer.h"
 #include "src/compiler/js-heap-broker.h"
 #include "src/deoptimizer/deoptimize-reason.h"
@@ -111,10 +112,6 @@ class V8_EXPORT_PRIVATE JSNativeContextSpecialization final
       FeedbackSource const& source);
   Reduction ReduceGlobalAccess(Node* node, Node* lookup_start_object,
                                Node* receiver, Node* value, NameRef const& name,
-                               AccessMode access_mode, Node* key = nullptr,
-                               Node* effect = nullptr);
-  Reduction ReduceGlobalAccess(Node* node, Node* lookup_start_object,
-                               Node* receiver, Node* value, NameRef const& name,
                                AccessMode access_mode, Node* key,
                                PropertyCellRef const& property_cell,
                                Node* effect = nullptr);
@@ -150,18 +147,17 @@ class V8_EXPORT_PRIVATE JSNativeContextSpecialization final
     Node* control_;
   };
 
-  // Construct the appropriate subgraph for property access.
-  ValueEffectControl BuildPropertyAccess(
+  // Construct the appropriate subgraph for property access. Return {} if the
+  // property access couldn't be built.
+  base::Optional<ValueEffectControl> BuildPropertyAccess(
       Node* lookup_start_object, Node* receiver, Node* value, Node* context,
       Node* frame_state, Node* effect, Node* control, NameRef const& name,
       ZoneVector<Node*>* if_exceptions, PropertyAccessInfo const& access_info,
       AccessMode access_mode);
-  ValueEffectControl BuildPropertyLoad(Node* lookup_start_object,
-                                       Node* receiver, Node* context,
-                                       Node* frame_state, Node* effect,
-                                       Node* control, NameRef const& name,
-                                       ZoneVector<Node*>* if_exceptions,
-                                       PropertyAccessInfo const& access_info);
+  base::Optional<ValueEffectControl> BuildPropertyLoad(
+      Node* lookup_start_object, Node* receiver, Node* context,
+      Node* frame_state, Node* effect, Node* control, NameRef const& name,
+      ZoneVector<Node*>* if_exceptions, PropertyAccessInfo const& access_info);
 
   ValueEffectControl BuildPropertyStore(Node* receiver, Node* value,
                                         Node* context, Node* frame_state,
@@ -188,7 +184,6 @@ class V8_EXPORT_PRIVATE JSNativeContextSpecialization final
                                 PropertyAccessInfo const& access_info);
   Node* InlineApiCall(Node* receiver, Node* holder, Node* frame_state,
                       Node* value, Node** effect, Node** control,
-                      SharedFunctionInfoRef const& shared_info,
                       FunctionTemplateInfoRef const& function_template_info);
 
   // Construct the appropriate subgraph for element access.
@@ -215,17 +210,16 @@ class V8_EXPORT_PRIVATE JSNativeContextSpecialization final
   // Checks if we can turn the hole into undefined when loading an element
   // from an object with one of the {receiver_maps}; sets up appropriate
   // code dependencies and might use the array protector cell.
-  bool CanTreatHoleAsUndefined(ZoneVector<Handle<Map>> const& receiver_maps);
+  bool CanTreatHoleAsUndefined(ZoneVector<MapRef> const& receiver_maps);
 
-  void RemoveImpossibleMaps(Node* object, ZoneVector<Handle<Map>>* maps) const;
+  void RemoveImpossibleMaps(Node* object, ZoneVector<MapRef>* maps) const;
 
   ElementAccessFeedback const& TryRefineElementAccessFeedback(
       ElementAccessFeedback const& feedback, Node* receiver,
-      Node* effect) const;
+      Effect effect) const;
 
   // Try to infer maps for the given {object} at the current {effect}.
-  bool InferMaps(Node* object, Node* effect,
-                 ZoneVector<Handle<Map>>* maps) const;
+  bool InferMaps(Node* object, Effect effect, ZoneVector<MapRef>* maps) const;
 
   // Try to infer a root map for the {object} independent of the current program
   // location.
@@ -240,7 +234,7 @@ class V8_EXPORT_PRIVATE JSNativeContextSpecialization final
     kMayBeInPrototypeChain
   };
   InferHasInPrototypeChainResult InferHasInPrototypeChain(
-      Node* receiver, Node* effect, HeapObjectRef const& prototype);
+      Node* receiver, Effect effect, HeapObjectRef const& prototype);
 
   Node* BuildLoadPrototypeFromObject(Node* object, Node* effect, Node* control);
 

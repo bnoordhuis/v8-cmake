@@ -89,6 +89,19 @@ class JSHeapBroker;
   static void Test##Name()
 #endif
 
+// Similar to TEST, but used when test definitions appear as members of a
+// (probably parameterized) class. This allows re-using the given tests multiple
+// times. For this to work, the following conditions must hold:
+//   1. The class has a template parameter named kTestFileName of type  char
+//      const*, which is instantiated with __FILE__ at the *use site*, in order
+//      to correctly associate the tests with the test suite using them.
+//   2. To actually execute the tests, create an instance of the class
+//      containing the MEMBER_TESTs.
+#define MEMBER_TEST(Name)                                   \
+  CcTest register_test_##Name =                             \
+      CcTest(Test##Name, kTestFileName, #Name, true, true); \
+  static void Test##Name()
+
 #define EXTENSION_LIST(V)                                                      \
   V(GC_EXTENSION,       "v8/gc")                                               \
   V(PRINT_EXTENSION,    "v8/print")                                            \
@@ -365,6 +378,10 @@ static inline v8::Local<v8::Integer> v8_int(int32_t x) {
   return v8::Integer::New(v8::Isolate::GetCurrent(), x);
 }
 
+static inline v8::Local<v8::BigInt> v8_bigint(int64_t x) {
+  return v8::BigInt::New(v8::Isolate::GetCurrent(), x);
+}
+
 static inline v8::Local<v8::String> v8_str(const char* x) {
   return v8::String::NewFromUtf8(v8::Isolate::GetCurrent(), x).ToLocalChecked();
 }
@@ -409,10 +426,11 @@ static inline int32_t v8_run_int32value(v8::Local<v8::Script> script) {
 static inline v8::Local<v8::Script> CompileWithOrigin(
     v8::Local<v8::String> source, v8::Local<v8::String> origin_url,
     bool is_shared_cross_origin) {
-  v8::ScriptOrigin origin(origin_url, 0, 0, is_shared_cross_origin);
+  v8::Isolate* isolate = v8::Isolate::GetCurrent();
+  v8::ScriptOrigin origin(isolate, origin_url, 0, 0, is_shared_cross_origin);
   v8::ScriptCompiler::Source script_source(source, origin);
-  return v8::ScriptCompiler::Compile(
-             v8::Isolate::GetCurrent()->GetCurrentContext(), &script_source)
+  return v8::ScriptCompiler::Compile(isolate->GetCurrentContext(),
+                                     &script_source)
       .ToLocalChecked();
 }
 
@@ -486,7 +504,8 @@ static inline v8::Local<v8::Value> CompileRunWithOrigin(const char* source,
                                                         int column_number) {
   v8::Isolate* isolate = v8::Isolate::GetCurrent();
   v8::Local<v8::Context> context = isolate->GetCurrentContext();
-  v8::ScriptOrigin origin(v8_str(origin_url), line_number, column_number);
+  v8::ScriptOrigin origin(isolate, v8_str(origin_url), line_number,
+                          column_number);
   v8::ScriptCompiler::Source script_source(v8_str(source), origin);
   return CompileRun(context, &script_source,
                     v8::ScriptCompiler::CompileOptions());
@@ -498,7 +517,7 @@ static inline v8::Local<v8::Value> CompileRunWithOrigin(
   v8::Isolate* isolate = v8::Isolate::GetCurrent();
   v8::Local<v8::Context> context = isolate->GetCurrentContext();
   v8::ScriptCompiler::Source script_source(
-      source, v8::ScriptOrigin(v8_str(origin_url)));
+      source, v8::ScriptOrigin(isolate, v8_str(origin_url)));
   return CompileRun(context, &script_source,
                     v8::ScriptCompiler::CompileOptions());
 }
@@ -600,7 +619,7 @@ class InitializedHandleScopeImpl;
 
 class V8_NODISCARD InitializedHandleScope {
  public:
-  InitializedHandleScope();
+  explicit InitializedHandleScope(i::Isolate* isolate = nullptr);
   ~InitializedHandleScope();
 
   // Prefixing the below with main_ reduces a lot of naming clashes.
@@ -823,11 +842,11 @@ DEFINE_OPERATORS_FOR_FLAGS(ApiCheckerResultFlags)
 
 bool IsValidUnwrapObject(v8::Object* object);
 
-template <typename T, int offset>
+template <typename T>
 T* GetInternalField(v8::Object* wrapper) {
-  assert(offset < wrapper->InternalFieldCount());
+  assert(kV8WrapperObjectIndex < wrapper->InternalFieldCount());
   return reinterpret_cast<T*>(
-      wrapper->GetAlignedPointerFromInternalField(offset));
+      wrapper->GetAlignedPointerFromInternalField(kV8WrapperObjectIndex));
 }
 
 #endif  // ifndef CCTEST_H_

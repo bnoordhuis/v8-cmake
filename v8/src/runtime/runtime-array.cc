@@ -28,7 +28,15 @@ RUNTIME_FUNCTION(Runtime_TransitionElementsKind) {
   CONVERT_ARG_HANDLE_CHECKED(JSObject, object, 0);
   CONVERT_ARG_HANDLE_CHECKED(Map, to_map, 1);
   ElementsKind to_kind = to_map->elements_kind();
-  ElementsAccessor::ForKind(to_kind)->TransitionElementsKind(object, to_map);
+  if (ElementsAccessor::ForKind(to_kind)
+          ->TransitionElementsKind(object, to_map)
+          .IsNothing()) {
+    // TODO(victorgomes): EffectControlLinearizer::LowerTransitionElementsKind
+    // does not handle exceptions.
+    FATAL(
+        "Fatal JavaScript invalid size error when transitioning elements kind");
+    UNREACHABLE();
+  }
   return *object;
 }
 
@@ -180,7 +188,11 @@ RUNTIME_FUNCTION(Runtime_GrowArrayElements) {
   uint32_t capacity = static_cast<uint32_t>(object->elements().length());
 
   if (index >= capacity) {
-    if (!object->GetElementsAccessor()->GrowCapacity(object, index)) {
+    bool has_grown;
+    MAYBE_ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+        isolate, has_grown,
+        object->GetElementsAccessor()->GrowCapacity(object, index));
+    if (!has_grown) {
       return Smi::zero();
     }
   }
@@ -301,7 +313,7 @@ RUNTIME_FUNCTION(Runtime_ArrayIncludes_Slow) {
     // Let elementK be the result of ? Get(O, ! ToString(k)).
     Handle<Object> element_k;
     {
-      LookupIterator::Key key(isolate, static_cast<double>(index));
+      PropertyKey key(isolate, static_cast<double>(index));
       LookupIterator it(isolate, object, key);
       ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, element_k,
                                          Object::GetProperty(&it));
@@ -362,7 +374,7 @@ RUNTIME_FUNCTION(Runtime_ArrayIndexOf) {
     if (fp > len) return Smi::FromInt(-1);
     if (V8_LIKELY(fp >=
                   static_cast<double>(std::numeric_limits<int64_t>::min()))) {
-      DCHECK(fp < std::numeric_limits<int64_t>::max());
+      DCHECK(fp < static_cast<double>(std::numeric_limits<int64_t>::max()));
       start_from = static_cast<int64_t>(fp);
     } else {
       start_from = std::numeric_limits<int64_t>::min();
@@ -398,7 +410,7 @@ RUNTIME_FUNCTION(Runtime_ArrayIndexOf) {
     // Let elementK be the result of ? Get(O, ! ToString(k)).
     Handle<Object> element_k;
     {
-      LookupIterator::Key key(isolate, static_cast<double>(index));
+      PropertyKey key(isolate, static_cast<double>(index));
       LookupIterator it(isolate, object, key);
       Maybe<bool> present = JSReceiver::HasProperty(&it);
       MAYBE_RETURN(present, ReadOnlyRoots(isolate).exception());

@@ -5,6 +5,8 @@
 #include "src/compiler/graph-assembler.h"
 
 #include "src/codegen/code-factory.h"
+#include "src/compiler/access-builder.h"
+#include "src/compiler/graph-reducer.h"
 #include "src/compiler/linkage.h"
 #include "src/compiler/schedule.h"
 // For TNode types.
@@ -329,6 +331,21 @@ BasicBlock* GraphAssembler::BasicBlockUpdater::Finalize(BasicBlock* original) {
   return block;
 }
 
+class V8_NODISCARD GraphAssembler::BlockInlineReduction {
+ public:
+  explicit BlockInlineReduction(GraphAssembler* gasm) : gasm_(gasm) {
+    DCHECK(!gasm_->inline_reductions_blocked_);
+    gasm_->inline_reductions_blocked_ = true;
+  }
+  ~BlockInlineReduction() {
+    DCHECK(gasm_->inline_reductions_blocked_);
+    gasm_->inline_reductions_blocked_ = false;
+  }
+
+ private:
+  GraphAssembler* gasm_;
+};
+
 GraphAssembler::GraphAssembler(
     MachineGraph* mcgraph, Zone* zone,
     base::Optional<NodeChangedCallback> node_changed_callback,
@@ -342,6 +359,8 @@ GraphAssembler::GraphAssembler(
                          ? new BasicBlockUpdater(schedule, mcgraph->graph(),
                                                  mcgraph->common(), zone)
                          : nullptr),
+      inline_reducers_(zone),
+      inline_reductions_blocked_(false),
       loop_headers_(zone),
       mark_loop_exits_(mark_loop_exits) {}
 
@@ -530,6 +549,40 @@ Node* JSGraphAssembler::StoreField(FieldAccess const& access, Node* object,
                                   value, effect(), control()));
 }
 
+#ifdef V8_MAP_PACKING
+TNode<Map> GraphAssembler::UnpackMapWord(Node* map_word) {
+  map_word = BitcastTaggedToWordForTagAndSmiBits(map_word);
+  // TODO(wenyuzhao): Clear header metadata.
+  Node* map = WordXor(map_word, IntPtrConstant(Internals::kMapWordXorMask));
+  return TNode<Map>::UncheckedCast(BitcastWordToTagged(map));
+}
+
+Node* GraphAssembler::PackMapWord(TNode<Map> map) {
+  Node* map_word = BitcastTaggedToWordForTagAndSmiBits(map);
+  Node* packed = WordXor(map_word, IntPtrConstant(Internals::kMapWordXorMask));
+  return BitcastWordToTaggedSigned(packed);
+}
+#endif
+
+TNode<Map> GraphAssembler::LoadMap(Node* object) {
+  Node* map_word = Load(MachineType::TaggedPointer(), object,
+                        HeapObject::kMapOffset - kHeapObjectTag);
+#ifdef V8_MAP_PACKING
+  return UnpackMapWord(map_word);
+#else
+  return TNode<Map>::UncheckedCast(map_word);
+#endif
+}
+
+void GraphAssembler::StoreMap(Node* object, TNode<Map> map) {
+#ifdef V8_MAP_PACKING
+  map = PackMapWord(map);
+#endif
+  StoreRepresentation rep(MachineType::TaggedRepresentation(),
+                          kMapWriteBarrier);
+  Store(rep, object, HeapObject::kMapOffset - kHeapObjectTag, map);
+}
+
 Node* JSGraphAssembler::StoreElement(ElementAccess const& access, Node* object,
                                      Node* index, Node* value) {
   return AddNode(graph()->NewNode(simplified()->StoreElement(access), object,
@@ -555,6 +608,12 @@ TNode<Boolean> JSGraphAssembler::ReferenceEqual(TNode<Object> lhs,
                                                 TNode<Object> rhs) {
   return AddNode<Boolean>(
       graph()->NewNode(simplified()->ReferenceEqual(), lhs, rhs));
+}
+
+TNode<Boolean> JSGraphAssembler::NumberEqual(TNode<Number> lhs,
+                                             TNode<Number> rhs) {
+  return AddNode<Boolean>(
+      graph()->NewNode(simplified()->NumberEqual(), lhs, rhs));
 }
 
 TNode<Number> JSGraphAssembler::NumberMin(TNode<Number> lhs,
@@ -770,55 +829,48 @@ Node* GraphAssembler::BitcastMaybeObjectToWord(Node* value) {
                                   effect(), control()));
 }
 
-Node* GraphAssembler::Word32PoisonOnSpeculation(Node* value) {
-  return AddNode(graph()->NewNode(machine()->Word32PoisonOnSpeculation(), value,
-                                  effect(), control()));
-}
-
 Node* GraphAssembler::DeoptimizeIf(DeoptimizeReason reason,
                                    FeedbackSource const& feedback,
-                                   Node* condition, Node* frame_state,
-                                   IsSafetyCheck is_safety_check) {
-  return AddNode(
-      graph()->NewNode(common()->DeoptimizeIf(DeoptimizeKind::kEager, reason,
-                                              feedback, is_safety_check),
-                       condition, frame_state, effect(), control()));
+                                   Node* condition, Node* frame_state) {
+  return AddNode(graph()->NewNode(
+      common()->DeoptimizeIf(DeoptimizeKind::kEager, reason, feedback),
+      condition, frame_state, effect(), control()));
 }
 
 Node* GraphAssembler::DeoptimizeIf(DeoptimizeKind kind, DeoptimizeReason reason,
                                    FeedbackSource const& feedback,
-                                   Node* condition, Node* frame_state,
-                                   IsSafetyCheck is_safety_check) {
-  return AddNode(graph()->NewNode(
-      common()->DeoptimizeIf(kind, reason, feedback, is_safety_check),
-      condition, frame_state, effect(), control()));
+                                   Node* condition, Node* frame_state) {
+  return AddNode(
+      graph()->NewNode(common()->DeoptimizeIf(kind, reason, feedback),
+                       condition, frame_state, effect(), control()));
 }
 
 Node* GraphAssembler::DeoptimizeIfNot(DeoptimizeKind kind,
                                       DeoptimizeReason reason,
                                       FeedbackSource const& feedback,
-                                      Node* condition, Node* frame_state,
-                                      IsSafetyCheck is_safety_check) {
-  return AddNode(graph()->NewNode(
-      common()->DeoptimizeUnless(kind, reason, feedback, is_safety_check),
-      condition, frame_state, effect(), control()));
+                                      Node* condition, Node* frame_state) {
+  return AddNode(
+      graph()->NewNode(common()->DeoptimizeUnless(kind, reason, feedback),
+                       condition, frame_state, effect(), control()));
 }
 
 Node* GraphAssembler::DeoptimizeIfNot(DeoptimizeReason reason,
                                       FeedbackSource const& feedback,
-                                      Node* condition, Node* frame_state,
-                                      IsSafetyCheck is_safety_check) {
+                                      Node* condition, Node* frame_state) {
   return DeoptimizeIfNot(DeoptimizeKind::kEager, reason, feedback, condition,
-                         frame_state, is_safety_check);
+                         frame_state);
 }
 
 Node* GraphAssembler::DynamicCheckMapsWithDeoptUnless(Node* condition,
                                                       Node* slot_index,
                                                       Node* value, Node* map,
-                                                      Node* frame_state) {
-  return AddNode(graph()->NewNode(common()->DynamicCheckMapsWithDeoptUnless(),
-                                  condition, slot_index, value, map,
-                                  frame_state, effect(), control()));
+                                                      Node* feedback_vector,
+                                                      FrameState frame_state) {
+  return AddNode(graph()->NewNode(
+      common()->DynamicCheckMapsWithDeoptUnless(
+          frame_state.outer_frame_state()->opcode() == IrOpcode::kFrameState),
+      condition, slot_index, value, map, feedback_vector, frame_state, effect(),
+      control()));
 }
 
 TNode<Object> GraphAssembler::Call(const CallDescriptor* call_descriptor,
@@ -862,8 +914,7 @@ void GraphAssembler::BranchWithCriticalSafetyCheck(
     hint = if_false->IsDeferred() ? BranchHint::kTrue : BranchHint::kFalse;
   }
 
-  BranchImpl(condition, if_true, if_false, hint,
-             IsSafetyCheck::kCriticalSafetyCheck);
+  BranchImpl(condition, if_true, if_false, hint);
 }
 
 void GraphAssembler::RecordBranchInBlockUpdater(Node* branch,
@@ -968,6 +1019,28 @@ Node* GraphAssembler::AddClonedNode(Node* node) {
 }
 
 Node* GraphAssembler::AddNode(Node* node) {
+  if (!inline_reducers_.empty() && !inline_reductions_blocked_) {
+    // Reducers may add new nodes to the graph using this graph assembler,
+    // however they should never introduce nodes that need further reduction,
+    // so block reduction
+    BlockInlineReduction scope(this);
+    Reduction reduction;
+    for (auto reducer : inline_reducers_) {
+      reduction = reducer->Reduce(node, nullptr);
+      if (reduction.Changed()) break;
+    }
+    if (reduction.Changed()) {
+      Node* replacement = reduction.replacement();
+      if (replacement != node) {
+        // Replace all uses of node and kill the node to make sure we don't
+        // leave dangling dead uses.
+        NodeProperties::ReplaceUses(node, replacement, effect(), control());
+        node->Kill();
+        return replacement;
+      }
+    }
+  }
+
   if (block_updater_) {
     block_updater_->AddNode(node);
   }
@@ -996,7 +1069,7 @@ void GraphAssembler::InitializeEffectControl(Node* effect, Node* control) {
 Operator const* JSGraphAssembler::PlainPrimitiveToNumberOperator() {
   if (!to_number_operator_.is_set()) {
     Callable callable =
-        Builtins::CallableFor(isolate(), Builtins::kPlainPrimitiveToNumber);
+        Builtins::CallableFor(isolate(), Builtin::kPlainPrimitiveToNumber);
     CallDescriptor::Flags flags = CallDescriptor::kNoFlags;
     auto call_descriptor = Linkage::GetStubCallDescriptor(
         graph()->zone(), callable.descriptor(),

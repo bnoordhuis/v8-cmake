@@ -5,7 +5,7 @@
 #include "test/unittests/test-utils.h"
 
 #include "include/libplatform/libplatform.h"
-#include "include/v8.h"
+#include "include/v8-isolate.h"
 #include "src/api/api-inl.h"
 #include "src/base/platform/time.h"
 #include "src/execution/isolate.h"
@@ -68,7 +68,7 @@ namespace internal {
 SaveFlags::SaveFlags() {
   // For each flag, save the current flag value.
 #define FLAG_MODE_APPLY(ftype, ctype, nam, def, cmt) SAVED_##nam = FLAG_##nam;
-#include "src/flags/flag-definitions.h"  // NOLINT
+#include "src/flags/flag-definitions.h"
 #undef FLAG_MODE_APPLY
 }
 

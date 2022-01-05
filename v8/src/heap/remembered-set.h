@@ -84,7 +84,6 @@ class RememberedSetOperations {
   }
 };
 
-// TODO(ulan): Investigate performance of de-templatizing this class.
 template <RememberedSetType type>
 class RememberedSet : public AllStatic {
  public:
@@ -279,11 +278,14 @@ class RememberedSet : public AllStatic {
 
   // Clear all old to old slots from the remembered set.
   static void ClearAll(Heap* heap) {
-    STATIC_ASSERT(type == OLD_TO_OLD);
+    STATIC_ASSERT(type == OLD_TO_OLD || type == OLD_TO_CODE);
     OldGenerationMemoryChunkIterator it(heap);
     MemoryChunk* chunk;
     while ((chunk = it.next()) != nullptr) {
       chunk->ReleaseSlotSet<OLD_TO_OLD>();
+      if (V8_EXTERNAL_CODE_SPACE_BOOL) {
+        chunk->ReleaseSlotSet<OLD_TO_CODE>();
+      }
       chunk->ReleaseTypedSlotSet<OLD_TO_OLD>();
       chunk->ReleaseInvalidatedSlots<OLD_TO_OLD>();
     }

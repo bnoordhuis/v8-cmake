@@ -34,6 +34,7 @@ void WriteBarrierForCode(Code host);
 
 // Generational write barrier.
 void GenerationalBarrier(HeapObject object, ObjectSlot slot, Object value);
+void GenerationalBarrier(HeapObject object, ObjectSlot slot, Code value);
 void GenerationalBarrier(HeapObject object, ObjectSlot slot, HeapObject value);
 void GenerationalBarrier(HeapObject object, MaybeObjectSlot slot,
                          MaybeObject value);
@@ -57,6 +58,8 @@ class V8_EXPORT_PRIVATE WriteBarrier {
 
   static void SetForThread(MarkingBarrier*);
   static void ClearForThread(MarkingBarrier*);
+
+  static MarkingBarrier* CurrentMarkingBarrier(Heap* heap);
 
  private:
   static void MarkingSlow(Heap* heap, HeapObject host, HeapObjectSlot,

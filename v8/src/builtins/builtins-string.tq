@@ -32,7 +32,7 @@ transitioning macro ToStringImpl(context: Context, o: JSAny): String {
         ThrowTypeError(MessageTemplate::kSymbolToString);
       }
       case (JSAny): {
-        return runtime::ToString(context, o);
+        return runtime::ToString(context, result);
       }
     }
   }
@@ -90,8 +90,8 @@ transitioning builtin StringToList(implicit context: Context)(string: String):
     i = i + value.length_intptr;
     arrayLength++;
   }
-  assert(arrayLength >= 0);
-  assert(SmiTag(stringLength) >= arrayLength);
+  dcheck(arrayLength >= 0);
+  dcheck(SmiTag(stringLength) >= arrayLength);
   array.length = arrayLength;
 
   return array;
@@ -116,14 +116,12 @@ IfInBounds(String, uintptr, uintptr), IfOutOfBounds {
       const index: uintptr = Unsigned(Convert<intptr>(indexSmi));
       // Max string length fits Smi range, so we can do an unsigned bounds
       // check.
-      const kMaxStringLengthFitsSmi: constexpr bool =
-          kStringMaxLengthUintptr < kSmiMaxValue;
-      static_assert(kMaxStringLengthFitsSmi);
+      StaticAssertStringLengthFitsSmi();
       if (index >= length) goto IfOutOfBounds;
       goto IfInBounds(string, index, length);
     }
     case (indexHeapNumber: HeapNumber): {
-      assert(IsNumberNormalized(indexHeapNumber));
+      dcheck(IsNumberNormalized(indexHeapNumber));
       // Valid string indices fit into Smi range, so HeapNumber index is
       // definitely an out of bounds case.
       goto IfOutOfBounds;

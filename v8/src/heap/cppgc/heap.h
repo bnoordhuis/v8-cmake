@@ -46,9 +46,8 @@ class V8_EXPORT_PRIVATE Heap final : public HeapBase,
 
   void FinalizeIncrementalGarbageCollectionIfNeeded(Config::StackState) final;
 
-  void PostGarbageCollection() final;
-
-  bool IsMarking() const;
+  void StartIncrementalGarbageCollectionForTesting() final;
+  void FinalizeIncrementalGarbageCollectionForTesting(EmbedderStackState) final;
 
   Config config_;
   GCInvoker gc_invoker_;

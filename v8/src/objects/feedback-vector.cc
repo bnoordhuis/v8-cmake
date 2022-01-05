@@ -4,6 +4,8 @@
 
 #include "src/objects/feedback-vector.h"
 
+#include "src/common/globals.h"
+#include "src/deoptimizer/deoptimizer.h"
 #include "src/diagnostics/code-tracer.h"
 #include "src/heap/heap-inl.h"
 #include "src/heap/local-factory-inl.h"
@@ -54,6 +56,7 @@ static bool IsPropertyNameFeedback(MaybeObject feedback) {
   Symbol symbol = Symbol::cast(heap_object);
   ReadOnlyRoots roots = symbol.GetReadOnlyRoots();
   return symbol != roots.uninitialized_symbol() &&
+         symbol != roots.mega_dom_symbol() &&
          symbol != roots.megamorphic_symbol();
 }
 
@@ -75,8 +78,8 @@ void FeedbackMetadata::SetKind(FeedbackSlot slot, FeedbackSlotKind kind) {
 }
 
 // static
-template <typename LocalIsolate>
-Handle<FeedbackMetadata> FeedbackMetadata::New(LocalIsolate* isolate,
+template <typename IsolateT>
+Handle<FeedbackMetadata> FeedbackMetadata::New(IsolateT* isolate,
                                                const FeedbackVectorSpec* spec) {
   auto* factory = isolate->factory();
 
@@ -205,6 +208,12 @@ FeedbackSlotKind FeedbackVector::GetKind(FeedbackSlot slot) const {
   return metadata().GetKind(slot);
 }
 
+FeedbackSlotKind FeedbackVector::GetKind(FeedbackSlot slot,
+                                         AcquireLoadTag tag) const {
+  DCHECK(!is_empty());
+  return metadata(tag).GetKind(slot);
+}
+
 FeedbackSlot FeedbackVector::GetTypeProfileSlot() const {
   DCHECK(metadata().HasTypeProfileSlot());
   FeedbackSlot slot =
@@ -253,8 +262,6 @@ Handle<FeedbackVector> FeedbackVector::New(
   DCHECK_EQ(vector->optimization_marker(),
             FLAG_log_function_events ? OptimizationMarker::kLogFirstExecution
                                      : OptimizationMarker::kNone);
-  // TODO(mythria): This might change if NCI code is installed on feedback
-  // vector. Update this accordingly.
   DCHECK_EQ(vector->optimization_tier(), OptimizationTier::kNone);
   DCHECK_EQ(vector->invocation_count(), 0);
   DCHECK_EQ(vector->profiler_ticks(), 0);
@@ -309,7 +316,6 @@ Handle<FeedbackVector> FeedbackVector::New(
       case FeedbackSlotKind::kInvalid:
       case FeedbackSlotKind::kKindsNumber:
         UNREACHABLE();
-        break;
     }
     for (int j = 1; j < entry_size; j++) {
       vector->Set(slot.WithOffset(j), extra_value, SKIP_WRITE_BARRIER);
@@ -332,7 +338,7 @@ Handle<FeedbackVector> NewFeedbackVectorForTesting(
   Handle<FeedbackMetadata> metadata = FeedbackMetadata::New(isolate, spec);
   Handle<SharedFunctionInfo> shared =
       isolate->factory()->NewSharedFunctionInfoForBuiltin(
-          isolate->factory()->empty_string(), Builtins::kIllegal);
+          isolate->factory()->empty_string(), Builtin::kIllegal);
   // Set the raw feedback metadata to circumvent checks that we are not
   // overwriting existing metadata.
   shared->set_raw_outer_scope_info_or_feedback_metadata(*metadata);
@@ -381,31 +387,61 @@ void FeedbackVector::SaturatingIncrementProfilerTicks() {
 
 // static
 void FeedbackVector::SetOptimizedCode(Handle<FeedbackVector> vector,
-                                      Handle<Code> code) {
+                                      Handle<Code> code,
+                                      FeedbackCell feedback_cell) {
   DCHECK(CodeKindIsOptimizedJSFunction(code->kind()));
-  // We should only set optimized code only when there is no valid optimized
-  // code or we are tiering up.
+  // We should set optimized code only when there is no valid optimized code or
+  // we are tiering up.
   DCHECK(!vector->has_optimized_code() ||
          vector->optimized_code().marked_for_deoptimization() ||
          (vector->optimized_code().kind() == CodeKind::TURBOPROP &&
-          code->kind() == CodeKind::TURBOFAN));
+          code->kind() == CodeKind::TURBOFAN) ||
+         FLAG_stress_concurrent_inlining_attach_code);
   // TODO(mythria): We could see a CompileOptimized marker here either from
   // tests that use %OptimizeFunctionOnNextCall, --always-opt or because we
   // re-mark the function for non-concurrent optimization after an OSR. We
   // should avoid these cases and also check that marker isn't
   // kCompileOptimized or kCompileOptimizedConcurrent.
-  vector->set_maybe_optimized_code(HeapObjectReference::Weak(*code));
+  vector->set_maybe_optimized_code(HeapObjectReference::Weak(ToCodeT(*code)),
+                                   kReleaseStore);
   int32_t state = vector->flags();
   state = OptimizationTierBits::update(state, GetTierForCodeKind(code->kind()));
   state = OptimizationMarkerBits::update(state, OptimizationMarker::kNone);
   vector->set_flags(state);
+  // With FLAG_turboprop, we would have an interrupt budget necessary for
+  // tiering up to Turboprop code. Once we install turboprop code, set it to a
+  // higher value as required for tiering up from Turboprop to TurboFan.
+  if (FLAG_turboprop) {
+    FeedbackVector::SetInterruptBudget(feedback_cell);
+  }
 }
 
-void FeedbackVector::ClearOptimizedCode() {
+// static
+void FeedbackVector::SetInterruptBudget(FeedbackCell feedback_cell) {
+  DCHECK(feedback_cell.value().IsFeedbackVector());
+  FeedbackVector vector = FeedbackVector::cast(feedback_cell.value());
+  // Set the interrupt budget as required for tiering up to next level. Without
+  // Turboprop, this is used only to tier up to TurboFan and hence always set to
+  // FLAG_interrupt_budget. With Turboprop, we use this budget to both tier up
+  // to Turboprop and TurboFan. When there is no optimized code, set it to
+  // FLAG_interrupt_budget required for tiering up to Turboprop. When there is
+  // optimized code, set it to a higher value required for tiering up from
+  // Turboprop to TurboFan.
+  if (FLAG_turboprop && vector.has_optimized_code()) {
+    feedback_cell.set_interrupt_budget(
+        FLAG_interrupt_budget *
+        FLAG_interrupt_budget_scale_factor_for_top_tier);
+  } else {
+    feedback_cell.set_interrupt_budget(FLAG_interrupt_budget);
+  }
+}
+
+void FeedbackVector::ClearOptimizedCode(FeedbackCell feedback_cell) {
   DCHECK(has_optimized_code());
   DCHECK_NE(optimization_tier(), OptimizationTier::kNone);
-  set_maybe_optimized_code(HeapObjectReference::ClearedValue(GetIsolate()));
-  ClearOptimizationTier();
+  set_maybe_optimized_code(HeapObjectReference::ClearedValue(GetIsolate()),
+                           kReleaseStore);
+  ClearOptimizationTier(feedback_cell);
 }
 
 void FeedbackVector::ClearOptimizationMarker() {
@@ -418,10 +454,15 @@ void FeedbackVector::SetOptimizationMarker(OptimizationMarker marker) {
   set_flags(state);
 }
 
-void FeedbackVector::ClearOptimizationTier() {
+void FeedbackVector::ClearOptimizationTier(FeedbackCell feedback_cell) {
   int32_t state = flags();
   state = OptimizationTierBits::update(state, OptimizationTier::kNone);
   set_flags(state);
+  // We are discarding the optimized code, adjust the interrupt budget
+  // so we have the correct budget required for the tier up.
+  if (FLAG_turboprop) {
+    FeedbackVector::SetInterruptBudget(feedback_cell);
+  }
 }
 
 void FeedbackVector::InitializeOptimizationState() {
@@ -434,20 +475,20 @@ void FeedbackVector::InitializeOptimizationState() {
 }
 
 void FeedbackVector::EvictOptimizedCodeMarkedForDeoptimization(
-    SharedFunctionInfo shared, const char* reason) {
-  MaybeObject slot = maybe_optimized_code();
+    FeedbackCell feedback_cell, SharedFunctionInfo shared, const char* reason) {
+  MaybeObject slot = maybe_optimized_code(kAcquireLoad);
   if (slot->IsCleared()) {
-    ClearOptimizationTier();
+    ClearOptimizationTier(feedback_cell);
     return;
   }
 
-  Code code = Code::cast(slot->GetHeapObject());
+  Code code = FromCodeT(CodeT::cast(slot->GetHeapObject()));
   if (code.marked_for_deoptimization()) {
     Deoptimizer::TraceEvictFromOptimizedCodeCache(shared, reason);
     if (!code.deopt_already_counted()) {
       code.set_deopt_already_counted(true);
     }
-    ClearOptimizedCode();
+    ClearOptimizedCode(feedback_cell);
   }
 }
 
@@ -529,7 +570,7 @@ FeedbackNexus::FeedbackNexus(Handle<FeedbackVector> vector, FeedbackSlot slot,
                              const NexusConfig& config)
     : vector_handle_(vector),
       slot_(slot),
-      kind_(vector->GetKind(slot)),
+      kind_(vector->GetKind(slot, kAcquireLoad)),
       config_(config) {}
 
 Handle<WeakFixedArray> FeedbackNexus::CreateArrayOfSize(int length) {
@@ -642,6 +683,13 @@ bool FeedbackNexus::ConfigureMegamorphic() {
   return false;
 }
 
+void FeedbackNexus::ConfigureMegaDOM(const MaybeObjectHandle& handler) {
+  DisallowGarbageCollection no_gc;
+  MaybeObject sentinel = MegaDOMSentinel();
+
+  SetFeedback(sentinel, SKIP_WRITE_BARRIER, *handler, UPDATE_WRITE_BARRIER);
+}
+
 bool FeedbackNexus::ConfigureMegamorphic(IcCheckType property_type) {
   DisallowGarbageCollection no_gc;
   MaybeObject sentinel = MegamorphicSentinel();
@@ -702,6 +750,10 @@ InlineCacheState FeedbackNexus::ic_state() const {
       }
       if (feedback == MegamorphicSentinel()) {
         return MEGAMORPHIC;
+      }
+      if (feedback == MegaDOMSentinel()) {
+        DCHECK(IsLoadICKind(kind()));
+        return MEGADOM;
       }
       if (feedback->IsWeakOrCleared()) {
         // Don't check if the map is cleared.
@@ -948,11 +1000,10 @@ void FeedbackNexus::SetSpeculationMode(SpeculationMode mode) {
   Object call_count = GetFeedbackExtra()->cast<Object>();
   CHECK(call_count.IsSmi());
   uint32_t count = static_cast<uint32_t>(Smi::ToInt(call_count));
-  uint32_t value = CallCountField::encode(CallCountField::decode(count));
-  int result = static_cast<int>(value | SpeculationModeField::encode(mode));
+  count = SpeculationModeField::update(count, mode);
   MaybeObject feedback = GetFeedback();
   // We can skip the write barrier for {feedback} because it's not changing.
-  SetFeedback(feedback, SKIP_WRITE_BARRIER, Smi::FromInt(result),
+  SetFeedback(feedback, SKIP_WRITE_BARRIER, Smi::FromInt(count),
               SKIP_WRITE_BARRIER);
 }
 
@@ -965,10 +1016,19 @@ SpeculationMode FeedbackNexus::GetSpeculationMode() {
   return SpeculationModeField::decode(value);
 }
 
+CallFeedbackContent FeedbackNexus::GetCallFeedbackContent() {
+  DCHECK(IsCallICKind(kind()));
+
+  Object call_count = GetFeedbackExtra()->cast<Object>();
+  CHECK(call_count.IsSmi());
+  uint32_t value = static_cast<uint32_t>(Smi::ToInt(call_count));
+  return CallFeedbackContentField::decode(value);
+}
+
 float FeedbackNexus::ComputeCallFrequency() {
   DCHECK(IsCallICKind(kind()));
 
-  double const invocation_count = vector().invocation_count();
+  double const invocation_count = vector().invocation_count(kRelaxedLoad);
   double const call_count = GetCallCount();
   if (invocation_count == 0.0) {  // Prevent division by 0.
     return 0.0f;
@@ -1119,21 +1179,21 @@ KeyedAccessLoadMode FeedbackNexus::GetKeyedAccessLoadMode() const {
 
 namespace {
 
-bool BuiltinHasKeyedAccessStoreMode(int builtin_index) {
-  DCHECK(Builtins::IsBuiltinId(builtin_index));
-  switch (builtin_index) {
-    case Builtins::kKeyedStoreIC_SloppyArguments_Standard:
-    case Builtins::kKeyedStoreIC_SloppyArguments_GrowNoTransitionHandleCOW:
-    case Builtins::kKeyedStoreIC_SloppyArguments_NoTransitionIgnoreOOB:
-    case Builtins::kKeyedStoreIC_SloppyArguments_NoTransitionHandleCOW:
-    case Builtins::kStoreFastElementIC_Standard:
-    case Builtins::kStoreFastElementIC_GrowNoTransitionHandleCOW:
-    case Builtins::kStoreFastElementIC_NoTransitionIgnoreOOB:
-    case Builtins::kStoreFastElementIC_NoTransitionHandleCOW:
-    case Builtins::kElementsTransitionAndStore_Standard:
-    case Builtins::kElementsTransitionAndStore_GrowNoTransitionHandleCOW:
-    case Builtins::kElementsTransitionAndStore_NoTransitionIgnoreOOB:
-    case Builtins::kElementsTransitionAndStore_NoTransitionHandleCOW:
+bool BuiltinHasKeyedAccessStoreMode(Builtin builtin) {
+  DCHECK(Builtins::IsBuiltinId(builtin));
+  switch (builtin) {
+    case Builtin::kKeyedStoreIC_SloppyArguments_Standard:
+    case Builtin::kKeyedStoreIC_SloppyArguments_GrowNoTransitionHandleCOW:
+    case Builtin::kKeyedStoreIC_SloppyArguments_NoTransitionIgnoreOOB:
+    case Builtin::kKeyedStoreIC_SloppyArguments_NoTransitionHandleCOW:
+    case Builtin::kStoreFastElementIC_Standard:
+    case Builtin::kStoreFastElementIC_GrowNoTransitionHandleCOW:
+    case Builtin::kStoreFastElementIC_NoTransitionIgnoreOOB:
+    case Builtin::kStoreFastElementIC_NoTransitionHandleCOW:
+    case Builtin::kElementsTransitionAndStore_Standard:
+    case Builtin::kElementsTransitionAndStore_GrowNoTransitionHandleCOW:
+    case Builtin::kElementsTransitionAndStore_NoTransitionIgnoreOOB:
+    case Builtin::kElementsTransitionAndStore_NoTransitionHandleCOW:
       return true;
     default:
       return false;
@@ -1141,24 +1201,24 @@ bool BuiltinHasKeyedAccessStoreMode(int builtin_index) {
   UNREACHABLE();
 }
 
-KeyedAccessStoreMode KeyedAccessStoreModeForBuiltin(int builtin_index) {
-  DCHECK(BuiltinHasKeyedAccessStoreMode(builtin_index));
-  switch (builtin_index) {
-    case Builtins::kKeyedStoreIC_SloppyArguments_Standard:
-    case Builtins::kStoreFastElementIC_Standard:
-    case Builtins::kElementsTransitionAndStore_Standard:
+KeyedAccessStoreMode KeyedAccessStoreModeForBuiltin(Builtin builtin) {
+  DCHECK(BuiltinHasKeyedAccessStoreMode(builtin));
+  switch (builtin) {
+    case Builtin::kKeyedStoreIC_SloppyArguments_Standard:
+    case Builtin::kStoreFastElementIC_Standard:
+    case Builtin::kElementsTransitionAndStore_Standard:
       return STANDARD_STORE;
-    case Builtins::kKeyedStoreIC_SloppyArguments_GrowNoTransitionHandleCOW:
-    case Builtins::kStoreFastElementIC_GrowNoTransitionHandleCOW:
-    case Builtins::kElementsTransitionAndStore_GrowNoTransitionHandleCOW:
+    case Builtin::kKeyedStoreIC_SloppyArguments_GrowNoTransitionHandleCOW:
+    case Builtin::kStoreFastElementIC_GrowNoTransitionHandleCOW:
+    case Builtin::kElementsTransitionAndStore_GrowNoTransitionHandleCOW:
       return STORE_AND_GROW_HANDLE_COW;
-    case Builtins::kKeyedStoreIC_SloppyArguments_NoTransitionIgnoreOOB:
-    case Builtins::kStoreFastElementIC_NoTransitionIgnoreOOB:
-    case Builtins::kElementsTransitionAndStore_NoTransitionIgnoreOOB:
+    case Builtin::kKeyedStoreIC_SloppyArguments_NoTransitionIgnoreOOB:
+    case Builtin::kStoreFastElementIC_NoTransitionIgnoreOOB:
+    case Builtin::kElementsTransitionAndStore_NoTransitionIgnoreOOB:
       return STORE_IGNORE_OUT_OF_BOUNDS;
-    case Builtins::kKeyedStoreIC_SloppyArguments_NoTransitionHandleCOW:
-    case Builtins::kStoreFastElementIC_NoTransitionHandleCOW:
-    case Builtins::kElementsTransitionAndStore_NoTransitionHandleCOW:
+    case Builtin::kKeyedStoreIC_SloppyArguments_NoTransitionHandleCOW:
+    case Builtin::kStoreFastElementIC_NoTransitionHandleCOW:
+    case Builtin::kElementsTransitionAndStore_NoTransitionHandleCOW:
       return STORE_HANDLE_COW;
     default:
       UNREACHABLE();
@@ -1191,29 +1251,34 @@ KeyedAccessStoreMode FeedbackNexus::GetKeyedAccessStoreMode() const {
         if (mode != STANDARD_STORE) return mode;
         continue;
       } else {
-        handler = handle(Code::cast(data_handler->smi_handler()),
-                         vector().GetIsolate());
+        Code code = FromCodeT(CodeT::cast(data_handler->smi_handler()));
+        handler = config()->NewHandle(code);
       }
 
     } else if (maybe_code_handler.object()->IsSmi()) {
       // Skip for Proxy Handlers.
-      if (*(maybe_code_handler.object()) ==
-          *StoreHandler::StoreProxy(GetIsolate()))
+      if (*maybe_code_handler.object() == StoreHandler::StoreProxy()) {
         continue;
+      }
       // Decode the KeyedAccessStoreMode information from the Handler.
       mode = StoreHandler::GetKeyedAccessStoreMode(*maybe_code_handler);
       if (mode != STANDARD_STORE) return mode;
       continue;
     } else {
       // Element store without prototype chain check.
-      handler = Handle<Code>::cast(maybe_code_handler.object());
+      if (V8_EXTERNAL_CODE_SPACE_BOOL) {
+        Code code = FromCodeT(CodeT::cast(*maybe_code_handler.object()));
+        handler = config()->NewHandle(code);
+      } else {
+        handler = Handle<Code>::cast(maybe_code_handler.object());
+      }
     }
 
     if (handler->is_builtin()) {
-      const int builtin_index = handler->builtin_index();
-      if (!BuiltinHasKeyedAccessStoreMode(builtin_index)) continue;
+      Builtin builtin = handler->builtin_id();
+      if (!BuiltinHasKeyedAccessStoreMode(builtin)) continue;
 
-      mode = KeyedAccessStoreModeForBuiltin(builtin_index);
+      mode = KeyedAccessStoreModeForBuiltin(builtin);
       break;
     }
   }
@@ -1371,52 +1436,6 @@ std::vector<Handle<String>> FeedbackNexus::GetTypesForSourcePositions(
   }
 
   return types_for_position;
-}
-
-namespace {
-
-Handle<JSObject> ConvertToJSObject(Isolate* isolate,
-                                   Handle<SimpleNumberDictionary> feedback) {
-  Handle<JSObject> type_profile =
-      isolate->factory()->NewJSObject(isolate->object_function());
-
-  for (int index = SimpleNumberDictionary::kElementsStartIndex;
-       index < feedback->length();
-       index += SimpleNumberDictionary::kEntrySize) {
-    int key_index = index + SimpleNumberDictionary::kEntryKeyIndex;
-    Object key = feedback->get(key_index);
-    if (key.IsSmi()) {
-      int value_index = index + SimpleNumberDictionary::kEntryValueIndex;
-
-      Handle<ArrayList> position_specific_types(
-          ArrayList::cast(feedback->get(value_index)), isolate);
-
-      int position = Smi::ToInt(key);
-      JSObject::AddDataElement(
-          type_profile, position,
-          isolate->factory()->NewJSArrayWithElements(
-              ArrayList::Elements(isolate, position_specific_types)),
-          PropertyAttributes::NONE);
-    }
-  }
-  return type_profile;
-}
-}  // namespace
-
-JSObject FeedbackNexus::GetTypeProfile() const {
-  DCHECK(IsTypeProfileKind(kind()));
-  Isolate* isolate = GetIsolate();
-
-  MaybeObject const feedback = GetFeedback();
-
-  if (feedback == UninitializedSentinel()) {
-    return *isolate->factory()->NewJSObject(isolate->object_function());
-  }
-
-  return *ConvertToJSObject(isolate,
-                            handle(SimpleNumberDictionary::cast(
-                                       feedback->GetHeapObjectAssumeStrong()),
-                                   isolate));
 }
 
 void FeedbackNexus::ResetTypeProfile() {

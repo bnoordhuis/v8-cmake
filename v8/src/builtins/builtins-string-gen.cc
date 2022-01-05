@@ -4,6 +4,7 @@
 
 #include "src/builtins/builtins-string-gen.h"
 
+#include "src/base/strings.h"
 #include "src/builtins/builtins-regexp-gen.h"
 #include "src/builtins/builtins-utils-gen.h"
 #include "src/builtins/builtins.h"
@@ -17,8 +18,6 @@
 
 namespace v8 {
 namespace internal {
-
-using Node = compiler::Node;
 
 TNode<RawPtrT> StringBuiltinsAssembler::DirectStringData(
     TNode<String> string, TNode<Word32T> string_instance_type) {
@@ -48,46 +47,6 @@ TNode<RawPtrT> StringBuiltinsAssembler::DirectStringData(
   return var_data.value();
 }
 
-void StringBuiltinsAssembler::DispatchOnStringEncodings(
-    TNode<Word32T> const lhs_instance_type,
-    TNode<Word32T> const rhs_instance_type, Label* if_one_one,
-    Label* if_one_two, Label* if_two_one, Label* if_two_two) {
-  STATIC_ASSERT(kStringEncodingMask == 0x8);
-  STATIC_ASSERT(kTwoByteStringTag == 0x0);
-  STATIC_ASSERT(kOneByteStringTag == 0x8);
-
-  // First combine the encodings.
-
-  const TNode<Int32T> encoding_mask = Int32Constant(kStringEncodingMask);
-  const TNode<Word32T> lhs_encoding =
-      Word32And(lhs_instance_type, encoding_mask);
-  const TNode<Word32T> rhs_encoding =
-      Word32And(rhs_instance_type, encoding_mask);
-
-  const TNode<Word32T> combined_encodings =
-      Word32Or(lhs_encoding, Word32Shr(rhs_encoding, 1));
-
-  // Then dispatch on the combined encoding.
-
-  Label unreachable(this, Label::kDeferred);
-
-  int32_t values[] = {
-      kOneByteStringTag | (kOneByteStringTag >> 1),
-      kOneByteStringTag | (kTwoByteStringTag >> 1),
-      kTwoByteStringTag | (kOneByteStringTag >> 1),
-      kTwoByteStringTag | (kTwoByteStringTag >> 1),
-  };
-  Label* labels[] = {
-      if_one_one, if_one_two, if_two_one, if_two_two,
-  };
-
-  STATIC_ASSERT(arraysize(values) == arraysize(labels));
-  Switch(combined_encodings, &unreachable, values, labels, arraysize(values));
-
-  BIND(&unreachable);
-  Unreachable();
-}
-
 template <typename SubjectChar, typename PatternChar>
 TNode<IntPtrT> StringBuiltinsAssembler::CallSearchStringRaw(
     const TNode<RawPtrT> subject_ptr, const TNode<IntPtrT> subject_length,
@@ -111,15 +70,57 @@ TNode<IntPtrT> StringBuiltinsAssembler::CallSearchStringRaw(
 
   return result;
 }
-
-TNode<RawPtrT> StringBuiltinsAssembler::PointerToStringDataAtIndex(
-    TNode<RawPtrT> string_data, TNode<IntPtrT> index,
-    String::Encoding encoding) {
-  const ElementsKind kind = (encoding == String::ONE_BYTE_ENCODING)
-                                ? UINT8_ELEMENTS
-                                : UINT16_ELEMENTS;
-  TNode<IntPtrT> offset_in_bytes = ElementOffsetFromIndex(index, kind);
-  return RawPtrAdd(string_data, offset_in_bytes);
+TNode<IntPtrT> StringBuiltinsAssembler::SearchOneByteStringInTwoByteString(
+    const TNode<RawPtrT> subject_ptr, const TNode<IntPtrT> subject_length,
+    const TNode<RawPtrT> search_ptr, const TNode<IntPtrT> search_length,
+    const TNode<IntPtrT> start_position) {
+  return CallSearchStringRaw<const base::uc16, const uint8_t>(
+      subject_ptr, subject_length, search_ptr, search_length, start_position);
+}
+TNode<IntPtrT> StringBuiltinsAssembler::SearchOneByteStringInOneByteString(
+    const TNode<RawPtrT> subject_ptr, const TNode<IntPtrT> subject_length,
+    const TNode<RawPtrT> search_ptr, const TNode<IntPtrT> search_length,
+    const TNode<IntPtrT> start_position) {
+  return CallSearchStringRaw<const uint8_t, const uint8_t>(
+      subject_ptr, subject_length, search_ptr, search_length, start_position);
+}
+TNode<IntPtrT> StringBuiltinsAssembler::SearchTwoByteStringInTwoByteString(
+    const TNode<RawPtrT> subject_ptr, const TNode<IntPtrT> subject_length,
+    const TNode<RawPtrT> search_ptr, const TNode<IntPtrT> search_length,
+    const TNode<IntPtrT> start_position) {
+  return CallSearchStringRaw<const base::uc16, const base::uc16>(
+      subject_ptr, subject_length, search_ptr, search_length, start_position);
+}
+TNode<IntPtrT> StringBuiltinsAssembler::SearchTwoByteStringInOneByteString(
+    const TNode<RawPtrT> subject_ptr, const TNode<IntPtrT> subject_length,
+    const TNode<RawPtrT> search_ptr, const TNode<IntPtrT> search_length,
+    const TNode<IntPtrT> start_position) {
+  return CallSearchStringRaw<const uint8_t, const base::uc16>(
+      subject_ptr, subject_length, search_ptr, search_length, start_position);
+}
+TNode<IntPtrT> StringBuiltinsAssembler::SearchOneByteInOneByteString(
+    const TNode<RawPtrT> subject_ptr, const TNode<IntPtrT> subject_length,
+    const TNode<RawPtrT> search_ptr, const TNode<IntPtrT> start_position) {
+  const TNode<RawPtrT> subject_start_ptr =
+      RawPtrAdd(subject_ptr, start_position);
+  const TNode<IntPtrT> search_byte =
+      ChangeInt32ToIntPtr(Load<Uint8T>(search_ptr));
+  const TNode<UintPtrT> search_length =
+      Unsigned(IntPtrSub(subject_length, start_position));
+  const TNode<ExternalReference> memchr =
+      ExternalConstant(ExternalReference::libc_memchr_function());
+  const TNode<RawPtrT> result_address = UncheckedCast<RawPtrT>(
+      CallCFunction(memchr, MachineType::Pointer(),
+                    std::make_pair(MachineType::Pointer(), subject_start_ptr),
+                    std::make_pair(MachineType::IntPtr(), search_byte),
+                    std::make_pair(MachineType::UintPtr(), search_length)));
+  return Select<IntPtrT>(
+      WordEqual(result_address, IntPtrConstant(0)),
+      [=] { return IntPtrConstant(-1); },
+      [=] {
+        return IntPtrAdd(RawPtrSub(result_address, subject_start_ptr),
+                         start_position);
+      });
 }
 
 void StringBuiltinsAssembler::GenerateStringEqual(TNode<String> left,
@@ -166,8 +167,8 @@ void StringBuiltinsAssembler::StringEqual_Core(
     TNode<String> lhs, TNode<Word32T> lhs_instance_type, TNode<String> rhs,
     TNode<Word32T> rhs_instance_type, TNode<IntPtrT> length, Label* if_equal,
     Label* if_not_equal, Label* if_indirect) {
-  CSA_ASSERT(this, WordEqual(LoadStringLengthAsWord(lhs), length));
-  CSA_ASSERT(this, WordEqual(LoadStringLengthAsWord(rhs), length));
+  CSA_DCHECK(this, WordEqual(LoadStringLengthAsWord(lhs), length));
+  CSA_DCHECK(this, WordEqual(LoadStringLengthAsWord(rhs), length));
   // Fast check to see if {lhs} and {rhs} refer to the same String object.
   GotoIf(TaggedEqual(lhs, rhs), if_equal);
 
@@ -243,8 +244,8 @@ void StringBuiltinsAssembler::StringEqual_Loop(
     TNode<String> lhs, TNode<Word32T> lhs_instance_type, MachineType lhs_type,
     TNode<String> rhs, TNode<Word32T> rhs_instance_type, MachineType rhs_type,
     TNode<IntPtrT> length, Label* if_equal, Label* if_not_equal) {
-  CSA_ASSERT(this, WordEqual(LoadStringLengthAsWord(lhs), length));
-  CSA_ASSERT(this, WordEqual(LoadStringLengthAsWord(rhs), length));
+  CSA_DCHECK(this, WordEqual(LoadStringLengthAsWord(lhs), length));
+  CSA_DCHECK(this, WordEqual(LoadStringLengthAsWord(rhs), length));
 
   // Compute the effective offset of the first character.
   TNode<RawPtrT> lhs_data = DirectStringData(lhs, lhs_instance_type);
@@ -340,7 +341,7 @@ TNode<String> StringBuiltinsAssembler::AllocateConsString(TNode<Uint32T> length,
 TNode<String> StringBuiltinsAssembler::StringAdd(
     TNode<ContextOrEmptyContext> context, TNode<String> left,
     TNode<String> right) {
-  CSA_ASSERT(this, IsZeroOrContext(context));
+  CSA_DCHECK(this, IsZeroOrContext(context));
 
   TVARIABLE(String, result);
   Label check_right(this), runtime(this, Label::kDeferred), cons(this),
@@ -539,7 +540,7 @@ TF_BUILTIN(StringAdd_CheckNone, StringBuiltinsAssembler) {
   auto right = Parameter<String>(Descriptor::kRight);
   TNode<ContextOrEmptyContext> context =
       UncheckedParameter<ContextOrEmptyContext>(Descriptor::kContext);
-  CSA_ASSERT(this, IsZeroOrContext(context));
+  CSA_DCHECK(this, IsZeroOrContext(context));
   Return(StringAdd(context, left, right));
 }
 
@@ -791,12 +792,12 @@ TF_BUILTIN(StringFromCharCode, StringBuiltinsAssembler) {
 
   CodeStubArguments arguments(this, argc);
   TNode<Uint32T> unsigned_argc =
-      Unsigned(TruncateIntPtrToInt32(arguments.GetLength()));
+      Unsigned(TruncateIntPtrToInt32(arguments.GetLengthWithoutReceiver()));
   // Check if we have exactly one argument (plus the implicit receiver), i.e.
   // if the parent frame is not an arguments adaptor frame.
   Label if_oneargument(this), if_notoneargument(this);
-  Branch(IntPtrEqual(arguments.GetLength(), IntPtrConstant(1)), &if_oneargument,
-         &if_notoneargument);
+  Branch(IntPtrEqual(arguments.GetLengthWithoutReceiver(), IntPtrConstant(1)),
+         &if_oneargument, &if_notoneargument);
 
   BIND(&if_oneargument);
   {
@@ -887,273 +888,6 @@ TF_BUILTIN(StringFromCharCode, StringBuiltinsAssembler) {
   }
 }
 
-void StringBuiltinsAssembler::StringIndexOf(
-    const TNode<String> subject_string, const TNode<String> search_string,
-    const TNode<Smi> position,
-    const std::function<void(TNode<Smi>)>& f_return) {
-  const TNode<IntPtrT> int_zero = IntPtrConstant(0);
-  const TNode<IntPtrT> search_length = LoadStringLengthAsWord(search_string);
-  const TNode<IntPtrT> subject_length = LoadStringLengthAsWord(subject_string);
-  const TNode<IntPtrT> start_position = IntPtrMax(SmiUntag(position), int_zero);
-
-  Label zero_length_needle(this), return_minus_1(this);
-  {
-    GotoIf(IntPtrEqual(int_zero, search_length), &zero_length_needle);
-
-    // Check that the needle fits in the start position.
-    GotoIfNot(IntPtrLessThanOrEqual(search_length,
-                                    IntPtrSub(subject_length, start_position)),
-              &return_minus_1);
-  }
-
-  // If the string pointers are identical, we can just return 0. Note that this
-  // implies {start_position} == 0 since we've passed the check above.
-  Label return_zero(this);
-  GotoIf(TaggedEqual(subject_string, search_string), &return_zero);
-
-  // Try to unpack subject and search strings. Bail to runtime if either needs
-  // to be flattened.
-  ToDirectStringAssembler subject_to_direct(state(), subject_string);
-  ToDirectStringAssembler search_to_direct(state(), search_string);
-
-  Label call_runtime_unchecked(this, Label::kDeferred);
-
-  subject_to_direct.TryToDirect(&call_runtime_unchecked);
-  search_to_direct.TryToDirect(&call_runtime_unchecked);
-
-  // Load pointers to string data.
-  const TNode<RawPtrT> subject_ptr =
-      subject_to_direct.PointerToData(&call_runtime_unchecked);
-  const TNode<RawPtrT> search_ptr =
-      search_to_direct.PointerToData(&call_runtime_unchecked);
-
-  const TNode<IntPtrT> subject_offset = subject_to_direct.offset();
-  const TNode<IntPtrT> search_offset = search_to_direct.offset();
-
-  // Like String::IndexOf, the actual matching is done by the optimized
-  // SearchString method in string-search.h. Dispatch based on string instance
-  // types, then call straight into C++ for matching.
-
-  CSA_ASSERT(this, IntPtrGreaterThan(search_length, int_zero));
-  CSA_ASSERT(this, IntPtrGreaterThanOrEqual(start_position, int_zero));
-  CSA_ASSERT(this, IntPtrGreaterThanOrEqual(subject_length, start_position));
-  CSA_ASSERT(this,
-             IntPtrLessThanOrEqual(search_length,
-                                   IntPtrSub(subject_length, start_position)));
-
-  Label one_one(this), one_two(this), two_one(this), two_two(this);
-  DispatchOnStringEncodings(subject_to_direct.instance_type(),
-                            search_to_direct.instance_type(), &one_one,
-                            &one_two, &two_one, &two_two);
-
-  using onebyte_t = const uint8_t;
-  using twobyte_t = const uc16;
-
-  BIND(&one_one);
-  {
-    const TNode<RawPtrT> adjusted_subject_ptr = PointerToStringDataAtIndex(
-        subject_ptr, subject_offset, String::ONE_BYTE_ENCODING);
-    const TNode<RawPtrT> adjusted_search_ptr = PointerToStringDataAtIndex(
-        search_ptr, search_offset, String::ONE_BYTE_ENCODING);
-
-    Label direct_memchr_call(this), generic_fast_path(this);
-    Branch(IntPtrEqual(search_length, IntPtrConstant(1)), &direct_memchr_call,
-           &generic_fast_path);
-
-    // An additional fast path that calls directly into memchr for 1-length
-    // search strings.
-    BIND(&direct_memchr_call);
-    {
-      const TNode<RawPtrT> string_addr =
-          RawPtrAdd(adjusted_subject_ptr, start_position);
-      const TNode<IntPtrT> search_length =
-          IntPtrSub(subject_length, start_position);
-      const TNode<IntPtrT> search_byte =
-          ChangeInt32ToIntPtr(Load<Uint8T>(adjusted_search_ptr));
-
-      const TNode<ExternalReference> memchr =
-          ExternalConstant(ExternalReference::libc_memchr_function());
-      const TNode<RawPtrT> result_address = UncheckedCast<RawPtrT>(
-          CallCFunction(memchr, MachineType::Pointer(),
-                        std::make_pair(MachineType::Pointer(), string_addr),
-                        std::make_pair(MachineType::IntPtr(), search_byte),
-                        std::make_pair(MachineType::UintPtr(), search_length)));
-      GotoIf(WordEqual(result_address, int_zero), &return_minus_1);
-      const TNode<IntPtrT> result_index =
-          IntPtrAdd(RawPtrSub(result_address, string_addr), start_position);
-      f_return(SmiTag(result_index));
-    }
-
-    BIND(&generic_fast_path);
-    {
-      const TNode<IntPtrT> result = CallSearchStringRaw<onebyte_t, onebyte_t>(
-          adjusted_subject_ptr, subject_length, adjusted_search_ptr,
-          search_length, start_position);
-      f_return(SmiTag(result));
-    }
-  }
-
-  BIND(&one_two);
-  {
-    const TNode<RawPtrT> adjusted_subject_ptr = PointerToStringDataAtIndex(
-        subject_ptr, subject_offset, String::ONE_BYTE_ENCODING);
-    const TNode<RawPtrT> adjusted_search_ptr = PointerToStringDataAtIndex(
-        search_ptr, search_offset, String::TWO_BYTE_ENCODING);
-
-    const TNode<IntPtrT> result = CallSearchStringRaw<onebyte_t, twobyte_t>(
-        adjusted_subject_ptr, subject_length, adjusted_search_ptr,
-        search_length, start_position);
-    f_return(SmiTag(result));
-  }
-
-  BIND(&two_one);
-  {
-    const TNode<RawPtrT> adjusted_subject_ptr = PointerToStringDataAtIndex(
-        subject_ptr, subject_offset, String::TWO_BYTE_ENCODING);
-    const TNode<RawPtrT> adjusted_search_ptr = PointerToStringDataAtIndex(
-        search_ptr, search_offset, String::ONE_BYTE_ENCODING);
-
-    const TNode<IntPtrT> result = CallSearchStringRaw<twobyte_t, onebyte_t>(
-        adjusted_subject_ptr, subject_length, adjusted_search_ptr,
-        search_length, start_position);
-    f_return(SmiTag(result));
-  }
-
-  BIND(&two_two);
-  {
-    const TNode<RawPtrT> adjusted_subject_ptr = PointerToStringDataAtIndex(
-        subject_ptr, subject_offset, String::TWO_BYTE_ENCODING);
-    const TNode<RawPtrT> adjusted_search_ptr = PointerToStringDataAtIndex(
-        search_ptr, search_offset, String::TWO_BYTE_ENCODING);
-
-    const TNode<IntPtrT> result = CallSearchStringRaw<twobyte_t, twobyte_t>(
-        adjusted_subject_ptr, subject_length, adjusted_search_ptr,
-        search_length, start_position);
-    f_return(SmiTag(result));
-  }
-
-  BIND(&return_minus_1);
-  f_return(SmiConstant(-1));
-
-  BIND(&return_zero);
-  f_return(SmiConstant(0));
-
-  BIND(&zero_length_needle);
-  {
-    Comment("0-length search_string");
-    f_return(SmiTag(IntPtrMin(subject_length, start_position)));
-  }
-
-  BIND(&call_runtime_unchecked);
-  {
-    // Simplified version of the runtime call where the types of the arguments
-    // are already known due to type checks in this stub.
-    Comment("Call Runtime Unchecked");
-    TNode<Smi> result =
-        CAST(CallRuntime(Runtime::kStringIndexOfUnchecked, NoContextConstant(),
-                         subject_string, search_string, position));
-    f_return(result);
-  }
-}
-
-// ES6 String.prototype.indexOf(searchString [, position])
-// #sec-string.prototype.indexof
-// Unchecked helper for builtins lowering.
-TF_BUILTIN(StringIndexOf, StringBuiltinsAssembler) {
-  auto receiver = Parameter<String>(Descriptor::kReceiver);
-  auto search_string = Parameter<String>(Descriptor::kSearchString);
-  auto position = Parameter<Smi>(Descriptor::kPosition);
-  StringIndexOf(receiver, search_string, position,
-                [this](TNode<Smi> result) { this->Return(result); });
-}
-
-// ES6 String.prototype.includes(searchString [, position])
-// #sec-string.prototype.includes
-TF_BUILTIN(StringPrototypeIncludes, StringIncludesIndexOfAssembler) {
-  TNode<IntPtrT> argc = ChangeInt32ToIntPtr(
-      UncheckedParameter<Int32T>(Descriptor::kJSActualArgumentsCount));
-  auto context = Parameter<Context>(Descriptor::kContext);
-  Generate(kIncludes, argc, context);
-}
-
-// ES6 String.prototype.indexOf(searchString [, position])
-// #sec-string.prototype.indexof
-TF_BUILTIN(StringPrototypeIndexOf, StringIncludesIndexOfAssembler) {
-  TNode<IntPtrT> argc = ChangeInt32ToIntPtr(
-      UncheckedParameter<Int32T>(Descriptor::kJSActualArgumentsCount));
-  auto context = Parameter<Context>(Descriptor::kContext);
-  Generate(kIndexOf, argc, context);
-}
-
-void StringIncludesIndexOfAssembler::Generate(SearchVariant variant,
-                                              TNode<IntPtrT> argc,
-                                              TNode<Context> context) {
-  CodeStubArguments arguments(this, argc);
-  const TNode<Object> receiver = arguments.GetReceiver();
-
-  TVARIABLE(Object, var_search_string);
-  TVARIABLE(Object, var_position);
-  Label argc_1(this), argc_2(this), call_runtime(this, Label::kDeferred),
-      fast_path(this);
-
-  GotoIf(IntPtrEqual(arguments.GetLength(), IntPtrConstant(1)), &argc_1);
-  GotoIf(IntPtrGreaterThan(arguments.GetLength(), IntPtrConstant(1)), &argc_2);
-  {
-    Comment("0 Argument case");
-    CSA_ASSERT(this, IntPtrEqual(arguments.GetLength(), IntPtrConstant(0)));
-    TNode<Oddball> undefined = UndefinedConstant();
-    var_search_string = undefined;
-    var_position = undefined;
-    Goto(&call_runtime);
-  }
-  BIND(&argc_1);
-  {
-    Comment("1 Argument case");
-    var_search_string = arguments.AtIndex(0);
-    var_position = SmiConstant(0);
-    Goto(&fast_path);
-  }
-  BIND(&argc_2);
-  {
-    Comment("2 Argument case");
-    var_search_string = arguments.AtIndex(0);
-    var_position = arguments.AtIndex(1);
-    GotoIfNot(TaggedIsSmi(var_position.value()), &call_runtime);
-    Goto(&fast_path);
-  }
-  BIND(&fast_path);
-  {
-    Comment("Fast Path");
-    const TNode<Object> search = var_search_string.value();
-    const TNode<Smi> position = CAST(var_position.value());
-    GotoIf(TaggedIsSmi(receiver), &call_runtime);
-    GotoIf(TaggedIsSmi(search), &call_runtime);
-    GotoIfNot(IsString(CAST(receiver)), &call_runtime);
-    GotoIfNot(IsString(CAST(search)), &call_runtime);
-
-    StringIndexOf(CAST(receiver), CAST(search), position,
-                  [&](TNode<Smi> result) {
-                    if (variant == kIndexOf) {
-                      arguments.PopAndReturn(result);
-                    } else {
-                      arguments.PopAndReturn(SelectBooleanConstant(
-                          SmiGreaterThanOrEqual(result, SmiConstant(0))));
-                    }
-                  });
-  }
-  BIND(&call_runtime);
-  {
-    Comment("Call Runtime");
-    Runtime::FunctionId runtime = variant == kIndexOf
-                                      ? Runtime::kStringIndexOf
-                                      : Runtime::kStringIncludes;
-    const TNode<Object> result =
-        CallRuntime(runtime, context, receiver, var_search_string.value(),
-                    var_position.value());
-    arguments.PopAndReturn(result);
-  }
-}
-
 void StringBuiltinsAssembler::MaybeCallFunctionAtSymbol(
     const TNode<Context> context, const TNode<Object> object,
     const TNode<Object> maybe_string, Handle<Symbol> symbol,
@@ -1222,9 +956,8 @@ const TNode<Smi> StringBuiltinsAssembler::IndexOfDollarChar(
     const TNode<Context> context, const TNode<String> string) {
   const TNode<String> dollar_string = HeapConstant(
       isolate()->factory()->LookupSingleCharacterStringFromCode('$'));
-  const TNode<Smi> dollar_ix =
-      CAST(CallBuiltin(Builtins::kStringIndexOf, context, string, dollar_string,
-                       SmiConstant(0)));
+  const TNode<Smi> dollar_ix = CAST(CallBuiltin(
+      Builtin::kStringIndexOf, context, string, dollar_string, SmiConstant(0)));
   return dollar_ix;
 }
 
@@ -1232,8 +965,8 @@ TNode<String> StringBuiltinsAssembler::GetSubstitution(
     TNode<Context> context, TNode<String> subject_string,
     TNode<Smi> match_start_index, TNode<Smi> match_end_index,
     TNode<String> replace_string) {
-  CSA_ASSERT(this, TaggedIsPositiveSmi(match_start_index));
-  CSA_ASSERT(this, TaggedIsPositiveSmi(match_end_index));
+  CSA_DCHECK(this, TaggedIsPositiveSmi(match_start_index));
+  CSA_DCHECK(this, TaggedIsPositiveSmi(match_end_index));
 
   TVARIABLE(String, var_result, replace_string);
   Label runtime(this), out(this);
@@ -1251,10 +984,10 @@ TNode<String> StringBuiltinsAssembler::GetSubstitution(
 
   BIND(&runtime);
   {
-    CSA_ASSERT(this, TaggedIsPositiveSmi(dollar_index));
+    CSA_DCHECK(this, TaggedIsPositiveSmi(dollar_index));
 
     const TNode<Object> matched =
-        CallBuiltin(Builtins::kStringSubstring, context, subject_string,
+        CallBuiltin(Builtin::kStringSubstring, context, subject_string,
                     SmiUntag(match_start_index), SmiUntag(match_end_index));
     const TNode<String> replacement_string = CAST(
         CallRuntime(Runtime::kGetSubstitution, context, matched, subject_string,
@@ -1289,7 +1022,7 @@ TF_BUILTIN(StringPrototypeReplace, StringBuiltinsAssembler) {
                                RootIndex::kreplace_symbol,
                                Context::REGEXP_REPLACE_FUNCTION_INDEX},
       [=]() {
-        Return(CallBuiltin(Builtins::kRegExpReplace, context, search, receiver,
+        Return(CallBuiltin(Builtin::kRegExpReplace, context, search, receiver,
                            replace));
       },
       [=](TNode<Object> fn) {
@@ -1338,7 +1071,7 @@ TF_BUILTIN(StringPrototypeReplace, StringBuiltinsAssembler) {
   // (2-byte).
 
   const TNode<Smi> match_start_index =
-      CAST(CallBuiltin(Builtins::kStringIndexOf, context, subject_string,
+      CAST(CallBuiltin(Builtin::kStringIndexOf, context, subject_string,
                        search_string, smi_zero));
 
   // Early exit if no match found.
@@ -1376,7 +1109,7 @@ TF_BUILTIN(StringPrototypeReplace, StringBuiltinsAssembler) {
 
     GotoIf(SmiEqual(match_start_index, smi_zero), &next);
     const TNode<String> prefix =
-        CAST(CallBuiltin(Builtins::kStringSubstring, context, subject_string,
+        CAST(CallBuiltin(Builtin::kStringSubstring, context, subject_string,
                          IntPtrConstant(0), SmiUntag(match_start_index)));
     var_result = prefix;
 
@@ -1398,7 +1131,7 @@ TF_BUILTIN(StringPrototypeReplace, StringBuiltinsAssembler) {
              match_start_index, subject_string);
     const TNode<String> replacement_string =
         ToString_Inline(context, replacement);
-    var_result = CAST(CallBuiltin(Builtins::kStringAdd_CheckNone, context,
+    var_result = CAST(CallBuiltin(Builtin::kStringAdd_CheckNone, context,
                                   var_result.value(), replacement_string));
     Goto(&out);
   }
@@ -1409,7 +1142,7 @@ TF_BUILTIN(StringPrototypeReplace, StringBuiltinsAssembler) {
     const TNode<Object> replacement =
         GetSubstitution(context, subject_string, match_start_index,
                         match_end_index, replace_string);
-    var_result = CAST(CallBuiltin(Builtins::kStringAdd_CheckNone, context,
+    var_result = CAST(CallBuiltin(Builtin::kStringAdd_CheckNone, context,
                                   var_result.value(), replacement));
     Goto(&out);
   }
@@ -1417,93 +1150,12 @@ TF_BUILTIN(StringPrototypeReplace, StringBuiltinsAssembler) {
   BIND(&out);
   {
     const TNode<Object> suffix =
-        CallBuiltin(Builtins::kStringSubstring, context, subject_string,
+        CallBuiltin(Builtin::kStringSubstring, context, subject_string,
                     SmiUntag(match_end_index), subject_length);
     const TNode<Object> result = CallBuiltin(
-        Builtins::kStringAdd_CheckNone, context, var_result.value(), suffix);
+        Builtin::kStringAdd_CheckNone, context, var_result.value(), suffix);
     Return(result);
   }
-}
-
-class StringMatchSearchAssembler : public StringBuiltinsAssembler {
- public:
-  explicit StringMatchSearchAssembler(compiler::CodeAssemblerState* state)
-      : StringBuiltinsAssembler(state) {}
-
- protected:
-  enum Variant { kMatch, kSearch };
-
-  void Generate(Variant variant, const char* method_name,
-                TNode<Object> receiver, TNode<Object> maybe_regexp,
-                TNode<Context> context) {
-    Label call_regexp_match_search(this);
-
-    Builtins::Name builtin;
-    Handle<Symbol> symbol;
-    DescriptorIndexNameValue property_to_check;
-    if (variant == kMatch) {
-      builtin = Builtins::kRegExpMatchFast;
-      symbol = isolate()->factory()->match_symbol();
-      property_to_check = DescriptorIndexNameValue{
-          JSRegExp::kSymbolMatchFunctionDescriptorIndex,
-          RootIndex::kmatch_symbol, Context::REGEXP_MATCH_FUNCTION_INDEX};
-    } else {
-      builtin = Builtins::kRegExpSearchFast;
-      symbol = isolate()->factory()->search_symbol();
-      property_to_check = DescriptorIndexNameValue{
-          JSRegExp::kSymbolSearchFunctionDescriptorIndex,
-          RootIndex::ksearch_symbol, Context::REGEXP_SEARCH_FUNCTION_INDEX};
-    }
-
-    RequireObjectCoercible(context, receiver, method_name);
-
-    MaybeCallFunctionAtSymbol(
-        context, maybe_regexp, receiver, symbol, property_to_check,
-        [=] { Return(CallBuiltin(builtin, context, maybe_regexp, receiver)); },
-        [=](TNode<Object> fn) {
-          Return(Call(context, fn, maybe_regexp, receiver));
-        });
-
-    // maybe_regexp is not a RegExp nor has [@@match / @@search] property.
-    {
-      RegExpBuiltinsAssembler regexp_asm(state());
-
-      TNode<String> receiver_string = ToString_Inline(context, receiver);
-      TNode<NativeContext> native_context = LoadNativeContext(context);
-      TNode<HeapObject> regexp_function = CAST(
-          LoadContextElement(native_context, Context::REGEXP_FUNCTION_INDEX));
-      TNode<Map> initial_map = CAST(LoadObjectField(
-          regexp_function, JSFunction::kPrototypeOrInitialMapOffset));
-      TNode<Object> regexp = regexp_asm.RegExpCreate(
-          context, initial_map, maybe_regexp, EmptyStringConstant());
-
-      // TODO(jgruber): Handle slow flag accesses on the fast path and make this
-      // permissive.
-      Label fast_path(this), slow_path(this);
-      regexp_asm.BranchIfFastRegExp(
-          context, CAST(regexp), initial_map,
-          PrototypeCheckAssembler::kCheckPrototypePropertyConstness,
-          property_to_check, &fast_path, &slow_path);
-
-      BIND(&fast_path);
-      Return(CallBuiltin(builtin, context, regexp, receiver_string));
-
-      BIND(&slow_path);
-      {
-        TNode<Object> maybe_func = GetProperty(context, regexp, symbol);
-        Return(Call(context, maybe_func, regexp, receiver_string));
-      }
-    }
-  }
-};
-
-// ES6 #sec-string.prototype.match
-TF_BUILTIN(StringPrototypeMatch, StringMatchSearchAssembler) {
-  auto receiver = Parameter<Object>(Descriptor::kReceiver);
-  auto maybe_regexp = Parameter<Object>(Descriptor::kRegexp);
-  auto context = Parameter<Context>(Descriptor::kContext);
-
-  Generate(kMatch, "String.prototype.match", receiver, maybe_regexp, context);
 }
 
 // ES #sec-string.prototype.matchAll
@@ -1533,8 +1185,8 @@ TF_BUILTIN(StringPrototypeMatchAll, StringBuiltinsAssembler) {
     //        TypeError exception.
     GotoIf(TaggedIsSmi(maybe_regexp), &next);
     TNode<HeapObject> heap_maybe_regexp = CAST(maybe_regexp);
-    regexp_asm.BranchIfFastRegExp_Strict(context, heap_maybe_regexp, &fast,
-                                         &slow);
+    regexp_asm.BranchIfFastRegExpForMatch(context, heap_maybe_regexp, &fast,
+                                          &slow);
 
     BIND(&fast);
     {
@@ -1556,7 +1208,7 @@ TF_BUILTIN(StringPrototypeMatchAll, StringBuiltinsAssembler) {
       TNode<String> flags_string = ToString_Inline(context, flags);
       TNode<String> global_char_string = StringConstant("g");
       TNode<Smi> global_ix =
-          CAST(CallBuiltin(Builtins::kStringIndexOf, context, flags_string,
+          CAST(CallBuiltin(Builtin::kStringIndexOf, context, flags_string,
                            global_char_string, SmiConstant(0)));
       Branch(SmiEqual(global_ix, SmiConstant(-1)), &throw_exception, &next);
     }
@@ -1605,18 +1257,10 @@ TF_BUILTIN(StringPrototypeMatchAll, StringBuiltinsAssembler) {
   Return(Call(context, match_all_func, rx, s));
 }
 
-// ES6 #sec-string.prototype.search
-TF_BUILTIN(StringPrototypeSearch, StringMatchSearchAssembler) {
-  auto receiver = Parameter<Object>(Descriptor::kReceiver);
-  auto maybe_regexp = Parameter<Object>(Descriptor::kRegexp);
-  auto context = Parameter<Context>(Descriptor::kContext);
-  Generate(kSearch, "String.prototype.search", receiver, maybe_regexp, context);
-}
-
 TNode<JSArray> StringBuiltinsAssembler::StringToArray(
     TNode<NativeContext> context, TNode<String> subject_string,
     TNode<Smi> subject_length, TNode<Number> limit_number) {
-  CSA_ASSERT(this, SmiGreaterThan(subject_length, SmiConstant(0)));
+  CSA_DCHECK(this, SmiGreaterThan(subject_length, SmiConstant(0)));
 
   Label done(this), call_runtime(this, Label::kDeferred),
       fill_thehole_and_call_runtime(this, Label::kDeferred);
@@ -1655,7 +1299,7 @@ TNode<JSArray> StringBuiltinsAssembler::StringToArray(
           // TODO(jkummerow): Implement a CSA version of
           // DisallowGarbageCollection and use that to guard
           // ToDirectStringAssembler.PointerToData().
-          CSA_ASSERT(this, WordEqual(to_direct.PointerToData(&call_runtime),
+          CSA_DCHECK(this, WordEqual(to_direct.PointerToData(&call_runtime),
                                      string_data));
           TNode<Int32T> char_code =
               UncheckedCast<Int32T>(Load(MachineType::Uint8(), string_data,
@@ -1720,8 +1364,8 @@ TF_BUILTIN(StringPrototypeSplit, StringBuiltinsAssembler) {
                                RootIndex::ksplit_symbol,
                                Context::REGEXP_SPLIT_FUNCTION_INDEX},
       [&]() {
-        args.PopAndReturn(CallBuiltin(Builtins::kRegExpSplit, context,
-                                      separator, receiver, limit));
+        args.PopAndReturn(CallBuiltin(Builtin::kRegExpSplit, context, separator,
+                                      receiver, limit));
       },
       [&](TNode<Object> fn) {
         args.PopAndReturn(Call(context, fn, separator, receiver, limit));
@@ -1790,9 +1434,10 @@ TF_BUILTIN(StringPrototypeSplit, StringBuiltinsAssembler) {
 
     TNode<Smi> length = smi_zero;
     TNode<IntPtrT> capacity = IntPtrConstant(0);
-    TNode<JSArray> result = AllocateJSArray(kind, array_map, capacity, length);
+    TNode<JSArray> result_array =
+        AllocateJSArray(kind, array_map, capacity, length);
 
-    args.PopAndReturn(result);
+    args.PopAndReturn(result_array);
   }
 }
 
@@ -1834,12 +1479,12 @@ TNode<Int32T> StringBuiltinsAssembler::LoadSurrogatePairAt(
     TNode<Int32T> trail = var_trail.value();
 
     // Check that this path is only taken if a surrogate pair is found
-    CSA_SLOW_ASSERT(this,
+    CSA_SLOW_DCHECK(this,
                     Uint32GreaterThanOrEqual(lead, Int32Constant(0xD800)));
-    CSA_SLOW_ASSERT(this, Uint32LessThan(lead, Int32Constant(0xDC00)));
-    CSA_SLOW_ASSERT(this,
+    CSA_SLOW_DCHECK(this, Uint32LessThan(lead, Int32Constant(0xDC00)));
+    CSA_SLOW_DCHECK(this,
                     Uint32GreaterThanOrEqual(trail, Int32Constant(0xDC00)));
-    CSA_SLOW_ASSERT(this, Uint32LessThan(trail, Int32Constant(0xE000)));
+    CSA_SLOW_DCHECK(this, Uint32LessThan(trail, Int32Constant(0xE000)));
 
     switch (encoding) {
       case UnicodeEncoding::UTF16:
@@ -2113,7 +1758,7 @@ TNode<String> StringBuiltinsAssembler::SubString(TNode<String> string,
 
   BIND(&original_string_or_invalid_length);
   {
-    CSA_ASSERT(this, IntPtrEqual(substr_length, string_length));
+    CSA_DCHECK(this, IntPtrEqual(substr_length, string_length));
 
     // Equal length - check if {from, to} == {0, str.length}.
     GotoIf(UintPtrGreaterThan(from, IntPtrConstant(0)), &runtime);

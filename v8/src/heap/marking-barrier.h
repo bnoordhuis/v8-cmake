@@ -53,6 +53,11 @@ class MarkingBarrier {
   void DeactivateSpace(PagedSpace*);
   void DeactivateSpace(NewSpace*);
 
+  bool IsCurrentMarkingBarrier();
+
+  template <typename TSlot>
+  inline void MarkRange(HeapObject value, TSlot start, TSlot end);
+
   Heap* heap_;
   MarkCompactCollector* collector_;
   IncrementalMarking* incremental_marking_;

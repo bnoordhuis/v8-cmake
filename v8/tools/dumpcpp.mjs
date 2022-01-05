@@ -5,8 +5,8 @@
 import { LogReader, parseString } from "./logreader.mjs";
 import { CodeMap, CodeEntry } from "./codemap.mjs";
 export {
-    ArgumentsProcessor, UnixCppEntriesProvider,
-    WindowsCppEntriesProvider, MacCppEntriesProvider,
+    ArgumentsProcessor, LinuxCppEntriesProvider,
+    WindowsCppEntriesProvider, MacOSCppEntriesProvider,
   } from  "./tickprocessor.mjs";
 
 
@@ -27,7 +27,7 @@ export class CppProcessor extends LogReader {
    * @override
    */
   printError(str) {
-    print(str);
+    console.log(str);
   }
 
   processLogFile(fileName) {
@@ -41,7 +41,7 @@ export class CppProcessor extends LogReader {
   processLogFileInTest(fileName) {
     // Hack file name to avoid dealing with platform specifics.
     this.lastLogFileName_ = 'v8.log';
-    const contents = readFile(fileName);
+    const contents = d8.file.read(fileName);
     this.processLogChunk(contents);
   }
 
@@ -61,7 +61,7 @@ export class CppProcessor extends LogReader {
       const entry = staticEntries[i];
       const printValues = ['cpp', `0x${entry[0].toString(16)}`, entry[1].size,
                         `"${entry[1].name}"`];
-      print(printValues.join(','));
+                        console.log(printValues.join(','));
     }
   }
 }

@@ -52,7 +52,7 @@ Object DeclareGlobal(Isolate* isolate, Handle<JSGlobalObject> global,
                      RedeclarationType redeclaration_type) {
   Handle<ScriptContextTable> script_contexts(
       global->native_context().script_context_table(), isolate);
-  ScriptContextTable::LookupResult lookup;
+  VariableLookupResult lookup;
   if (ScriptContextTable::Lookup(isolate, *script_contexts, *name, &lookup) &&
       IsLexicalVariableMode(lookup.mode)) {
     // ES#sec-globaldeclarationinstantiation 6.a:
@@ -380,17 +380,7 @@ std::unique_ptr<Handle<Object>[]> GetCallerArguments(Isolate* isolate,
 
     return param_data;
   } else {
-#ifdef V8_NO_ARGUMENTS_ADAPTOR
     int args_count = frame->GetActualArgumentCount();
-#else
-    if (it.frame()->has_adapted_arguments()) {
-      it.AdvanceOneFrame();
-      DCHECK(it.frame()->is_arguments_adaptor());
-    }
-    frame = it.frame();
-    int args_count = frame->ComputeParametersCount();
-#endif
-
     *total_argc = args_count;
     std::unique_ptr<Handle<Object>[]> param_data(
         NewArray<Handle<Object>>(*total_argc));
@@ -411,7 +401,8 @@ Handle<JSObject> NewSloppyArguments(Isolate* isolate, Handle<JSFunction> callee,
       isolate->factory()->NewArgumentsObject(callee, argument_count);
 
   // Allocate the elements if needed.
-  int parameter_count = callee->shared().internal_formal_parameter_count();
+  int parameter_count =
+      callee->shared().internal_formal_parameter_count_without_receiver();
   if (argument_count > 0) {
     if (parameter_count > 0) {
       int mapped_count = std::min(argument_count, parameter_count);
@@ -520,7 +511,7 @@ RUNTIME_FUNCTION(Runtime_NewStrictArguments) {
       isolate->factory()->NewArgumentsObject(callee, argument_count);
   if (argument_count) {
     Handle<FixedArray> array =
-        isolate->factory()->NewUninitializedFixedArray(argument_count);
+        isolate->factory()->NewFixedArray(argument_count);
     DisallowGarbageCollection no_gc;
     WriteBarrierMode mode = array->GetWriteBarrierMode(no_gc);
     for (int i = 0; i < argument_count; i++) {
@@ -536,7 +527,8 @@ RUNTIME_FUNCTION(Runtime_NewRestParameter) {
   HandleScope scope(isolate);
   DCHECK_EQ(1, args.length());
   CONVERT_ARG_HANDLE_CHECKED(JSFunction, callee, 0)
-  int start_index = callee->shared().internal_formal_parameter_count();
+  int start_index =
+      callee->shared().internal_formal_parameter_count_without_receiver();
   // This generic runtime function can also be used when the caller has been
   // inlined, we use the slow but accurate {GetCallerArguments}.
   int argument_count = 0;
@@ -869,7 +861,7 @@ RUNTIME_FUNCTION(Runtime_StoreLookupSlot_SloppyHoisting) {
                                LanguageMode::kSloppy, lookup_flags));
 }
 
-RUNTIME_FUNCTION(Runtime_StoreGlobalNoHoleCheckForReplLet) {
+RUNTIME_FUNCTION(Runtime_StoreGlobalNoHoleCheckForReplLetOrConst) {
   HandleScope scope(isolate);
   DCHECK_EQ(2, args.length());
   CONVERT_ARG_HANDLE_CHECKED(String, name, 0);
@@ -879,7 +871,7 @@ RUNTIME_FUNCTION(Runtime_StoreGlobalNoHoleCheckForReplLet) {
   Handle<ScriptContextTable> script_contexts(
       native_context->script_context_table(), isolate);
 
-  ScriptContextTable::LookupResult lookup_result;
+  VariableLookupResult lookup_result;
   bool found = ScriptContextTable::Lookup(isolate, *script_contexts, *name,
                                           &lookup_result);
   CHECK(found);

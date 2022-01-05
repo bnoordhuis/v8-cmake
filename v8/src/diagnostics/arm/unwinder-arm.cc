@@ -2,7 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <memory>
+
 #include "include/v8-unwinder-state.h"
+#include "include/v8-unwinder.h"
 #include "src/diagnostics/unwinder.h"
 #include "src/execution/frame-constants.h"
 
@@ -12,7 +15,7 @@ void GetCalleeSavedRegistersFromEntryFrame(void* fp,
                                            RegisterState* register_state) {
   const i::Address base_addr =
       reinterpret_cast<i::Address>(fp) +
-      i::EntryFrameConstants::kDirectCallerRRegistersOffset;
+      i::EntryFrameConstants::kDirectCallerGeneralRegistersOffset;
 
   if (!register_state->callee_saved) {
     register_state->callee_saved = std::make_unique<CalleeSavedRegisters>();

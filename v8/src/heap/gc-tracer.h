@@ -5,7 +5,9 @@
 #ifndef V8_HEAP_GC_TRACER_H_
 #define V8_HEAP_GC_TRACER_H_
 
+#include "include/v8-metrics.h"
 #include "src/base/compiler-specific.h"
+#include "src/base/macros.h"
 #include "src/base/optional.h"
 #include "src/base/platform/platform.h"
 #include "src/base/platform/time.h"
@@ -30,23 +32,24 @@ enum ScavengeSpeedMode { kForAllObjects, kForSurvivedObjects };
 #define TRACE_GC_CATEGORIES \
   "devtools.timeline," TRACE_DISABLED_BY_DEFAULT("v8.gc")
 
-#define TRACE_GC(tracer, scope_id)                            \
-  GCTracer::Scope::ScopeId gc_tracer_scope_id(scope_id);      \
-  GCTracer::Scope gc_tracer_scope(tracer, gc_tracer_scope_id, \
-                                  ThreadKind::kMain);         \
-  TRACE_EVENT0(TRACE_GC_CATEGORIES, GCTracer::Scope::Name(gc_tracer_scope_id))
+#define TRACE_GC(tracer, scope_id)                                    \
+  GCTracer::Scope UNIQUE_IDENTIFIER(gc_tracer_scope)(                 \
+      tracer, GCTracer::Scope::ScopeId(scope_id), ThreadKind::kMain); \
+  TRACE_EVENT0(TRACE_GC_CATEGORIES,                                   \
+               GCTracer::Scope::Name(GCTracer::Scope::ScopeId(scope_id)))
 
-#define TRACE_GC1(tracer, scope_id, thread_kind)                            \
-  GCTracer::Scope::ScopeId gc_tracer_scope_id(scope_id);                    \
-  GCTracer::Scope gc_tracer_scope(tracer, gc_tracer_scope_id, thread_kind); \
-  TRACE_EVENT0(TRACE_GC_CATEGORIES, GCTracer::Scope::Name(gc_tracer_scope_id))
+#define TRACE_GC1(tracer, scope_id, thread_kind)                \
+  GCTracer::Scope UNIQUE_IDENTIFIER(gc_tracer_scope)(           \
+      tracer, GCTracer::Scope::ScopeId(scope_id), thread_kind); \
+  TRACE_EVENT0(TRACE_GC_CATEGORIES,                             \
+               GCTracer::Scope::Name(GCTracer::Scope::ScopeId(scope_id)))
 
-#define TRACE_GC_EPOCH(tracer, scope_id, thread_kind)                          \
-  GCTracer::Scope::ScopeId gc_tracer_scope_id(scope_id);                       \
-  GCTracer::Scope gc_tracer_scope(tracer, gc_tracer_scope_id, thread_kind);    \
-  CollectionEpoch gc_tracer_epoch = tracer->CurrentEpoch(scope_id);            \
-  TRACE_EVENT1(TRACE_GC_CATEGORIES, GCTracer::Scope::Name(gc_tracer_scope_id), \
-               "epoch", gc_tracer_epoch)
+#define TRACE_GC_EPOCH(tracer, scope_id, thread_kind)                     \
+  GCTracer::Scope UNIQUE_IDENTIFIER(gc_tracer_scope)(                     \
+      tracer, GCTracer::Scope::ScopeId(scope_id), thread_kind);           \
+  TRACE_EVENT1(TRACE_GC_CATEGORIES,                                       \
+               GCTracer::Scope::Name(GCTracer::Scope::ScopeId(scope_id)), \
+               "epoch", tracer->CurrentEpoch(scope_id))
 
 // GCTracer collects and prints ONE line after each garbage collector
 // invocation IFF --trace_gc is used.
@@ -58,11 +61,11 @@ class V8_EXPORT_PRIVATE GCTracer {
   struct IncrementalMarkingInfos {
     IncrementalMarkingInfos() : duration(0), longest_step(0), steps(0) {}
 
-    void Update(double duration) {
+    void Update(double delta) {
       steps++;
-      this->duration += duration;
-      if (duration > longest_step) {
-        longest_step = duration;
+      duration += delta;
+      if (delta > longest_step) {
+        longest_step = delta;
       }
     }
 
@@ -113,9 +116,11 @@ class V8_EXPORT_PRIVATE GCTracer {
     ScopeId scope_;
     ThreadKind thread_kind_;
     double start_time_;
+#ifdef V8_RUNTIME_CALL_STATS
     RuntimeCallTimer timer_;
     RuntimeCallStats* runtime_stats_ = nullptr;
     base::Optional<WorkerThreadRuntimeCallStatsScope> runtime_call_stats_scope_;
+#endif  // defined(V8_RUNTIME_CALL_STATS)
   };
 
   class Event {
@@ -195,7 +200,9 @@ class V8_EXPORT_PRIVATE GCTracer {
   static double CombineSpeedsInBytesPerMillisecond(double default_speed,
                                                    double optional_speed);
 
+#ifdef V8_RUNTIME_CALL_STATS
   static RuntimeCallCounterId RCSCounterFromScope(Scope::ScopeId id);
+#endif  // defined(V8_RUNTIME_CALL_STATS)
 
   explicit GCTracer(Heap* heap);
 
@@ -210,6 +217,8 @@ class V8_EXPORT_PRIVATE GCTracer {
 
   void NotifySweepingCompleted();
 
+  void NotifyGCCompleted();
+
   void NotifyYoungGenerationHandling(
       YoungGenerationHandling young_generation_handling);
 
@@ -220,8 +229,6 @@ class V8_EXPORT_PRIVATE GCTracer {
 
   // Log the accumulated new space allocation bytes.
   void AddAllocation(double current_ms);
-
-  void AddContextDisposalTime(double time);
 
   void AddCompactionEvent(double duration, size_t live_bytes_compacted);
 
@@ -297,12 +304,6 @@ class V8_EXPORT_PRIVATE GCTracer {
   // Returns 0 if no allocation events have been recorded.
   double CurrentEmbedderAllocationThroughputInBytesPerMillisecond() const;
 
-  // Computes the context disposal rate in milliseconds. It takes the time
-  // frame of the first recorded context disposal to the current time and
-  // divides it by the number of recorded events.
-  // Returns 0 if no events have been recorded.
-  double ContextDisposalRateInMilliseconds() const;
-
   // Computes the average survival ratio based on the last recorded survival
   // events.
   // Returns 0 if no events have been recorded.
@@ -343,7 +344,9 @@ class V8_EXPORT_PRIVATE GCTracer {
   double AverageTimeToIncrementalMarkingTask() const;
   void RecordTimeToIncrementalMarkingTask(double time_to_task);
 
+#ifdef V8_RUNTIME_CALL_STATS
   WorkerThreadRuntimeCallStats* worker_thread_runtime_call_stats();
+#endif  // defined(V8_RUNTIME_CALL_STATS)
 
   CollectionEpoch CurrentEpoch(Scope::ScopeId id);
 
@@ -416,6 +419,9 @@ class V8_EXPORT_PRIVATE GCTracer {
   void FetchBackgroundMarkCompactCounters();
   void FetchBackgroundGeneralCounters();
 
+  void ReportFullCycleToRecorder();
+  void ReportIncrementalMarkingStepToRecorder();
+
   // Pointer to the heap that owns this tracer.
   Heap* heap_;
 
@@ -479,8 +485,12 @@ class V8_EXPORT_PRIVATE GCTracer {
   base::RingBuffer<BytesAndDuration> recorded_new_generation_allocations_;
   base::RingBuffer<BytesAndDuration> recorded_old_generation_allocations_;
   base::RingBuffer<BytesAndDuration> recorded_embedder_generation_allocations_;
-  base::RingBuffer<double> recorded_context_disposal_times_;
   base::RingBuffer<double> recorded_survival_ratios_;
+
+  bool metrics_report_pending_ = false;
+
+  v8::metrics::GarbageCollectionFullMainThreadBatchedIncrementalMark
+      incremental_mark_batched_events_;
 
   base::Mutex background_counter_mutex_;
   BackgroundCounter background_counter_[Scope::NUMBER_OF_SCOPES];

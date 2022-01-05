@@ -105,16 +105,19 @@ class MarkingVisitorBase : public HeapVisitor<int, ConcreteVisitor> {
                      MarkingWorklists::Local* local_marking_worklists,
                      WeakObjects* weak_objects, Heap* heap,
                      unsigned mark_compact_epoch,
-                     BytecodeFlushMode bytecode_flush_mode,
-                     bool is_embedder_tracing_enabled, bool is_forced_gc)
-      : local_marking_worklists_(local_marking_worklists),
+                     base::EnumSet<CodeFlushMode> code_flush_mode,
+                     bool is_embedder_tracing_enabled,
+                     bool should_keep_ages_unchanged)
+      : HeapVisitor<int, ConcreteVisitor>(heap),
+        local_marking_worklists_(local_marking_worklists),
         weak_objects_(weak_objects),
         heap_(heap),
         task_id_(task_id),
         mark_compact_epoch_(mark_compact_epoch),
-        bytecode_flush_mode_(bytecode_flush_mode),
+        code_flush_mode_(code_flush_mode),
         is_embedder_tracing_enabled_(is_embedder_tracing_enabled),
-        is_forced_gc_(is_forced_gc) {}
+        should_keep_ages_unchanged_(should_keep_ages_unchanged),
+        is_shared_heap_(heap->IsShared()) {}
 
   V8_INLINE int VisitBytecodeArray(Map map, BytecodeArray object);
   V8_INLINE int VisitDescriptorArray(Map map, DescriptorArray object);
@@ -133,6 +136,7 @@ class MarkingVisitorBase : public HeapVisitor<int, ConcreteVisitor> {
   V8_INLINE int VisitWeakCell(Map map, WeakCell object);
 
   // ObjectVisitor overrides.
+  V8_INLINE void VisitMapPointer(HeapObject host) final;
   V8_INLINE void VisitPointer(HeapObject host, ObjectSlot p) final {
     VisitPointersImpl(host, p, p + 1);
   }
@@ -146,6 +150,9 @@ class MarkingVisitorBase : public HeapVisitor<int, ConcreteVisitor> {
   V8_INLINE void VisitPointers(HeapObject host, MaybeObjectSlot start,
                                MaybeObjectSlot end) final {
     VisitPointersImpl(host, start, end);
+  }
+  V8_INLINE void VisitCodePointer(HeapObject host, CodeObjectSlot slot) final {
+    VisitCodePointerImpl(host, slot);
   }
   V8_INLINE void VisitEmbeddedPointer(Code host, RelocInfo* rinfo) final;
   V8_INLINE void VisitCodeTarget(Code host, RelocInfo* rinfo) final;
@@ -172,6 +179,10 @@ class MarkingVisitorBase : public HeapVisitor<int, ConcreteVisitor> {
   template <typename TSlot>
   V8_INLINE void VisitPointersImpl(HeapObject host, TSlot start, TSlot end);
 
+  // Similar to VisitPointersImpl() but using code cage base for loading from
+  // the slot.
+  V8_INLINE void VisitCodePointerImpl(HeapObject host, CodeObjectSlot slot);
+
   V8_INLINE void VisitDescriptors(DescriptorArray descriptors,
                                   int number_of_own_descriptors);
 
@@ -180,7 +191,7 @@ class MarkingVisitorBase : public HeapVisitor<int, ConcreteVisitor> {
   template <typename T>
   int VisitEmbedderTracingSubclass(Map map, T object);
   V8_INLINE int VisitFixedArrayWithProgressBar(Map map, FixedArray object,
-                                               MemoryChunk* chunk);
+                                               ProgressBar& progress_bar);
   // Marks the descriptor array black without pushing it on the marking work
   // list and visits its header. Returns the size of the descriptor array
   // if it was successully marked as black.
@@ -193,9 +204,10 @@ class MarkingVisitorBase : public HeapVisitor<int, ConcreteVisitor> {
   Heap* const heap_;
   const int task_id_;
   const unsigned mark_compact_epoch_;
-  const BytecodeFlushMode bytecode_flush_mode_;
+  const base::EnumSet<CodeFlushMode> code_flush_mode_;
   const bool is_embedder_tracing_enabled_;
-  const bool is_forced_gc_;
+  const bool should_keep_ages_unchanged_;
+  const bool is_shared_heap_;
 };
 
 }  // namespace internal

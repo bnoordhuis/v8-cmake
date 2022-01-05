@@ -25,11 +25,13 @@ void WeakObjects::UpdateAfterScavenge() {
 #undef INVOKE_UPDATE
 }
 
+// static
 void WeakObjects::UpdateTransitionArrays(
     WeakObjectWorklist<TransitionArray>& transition_arrays) {
   DCHECK(!ContainsYoungObjects(transition_arrays));
 }
 
+// static
 void WeakObjects::UpdateEphemeronHashTables(
     WeakObjectWorklist<EphemeronHashTable>& ephemeron_hash_tables) {
   ephemeron_hash_tables.Update(
@@ -61,21 +63,25 @@ bool EphemeronUpdater(Ephemeron slot_in, Ephemeron* slot_out) {
 }
 }  // anonymous namespace
 
+// static
 void WeakObjects::UpdateCurrentEphemerons(
     WeakObjectWorklist<Ephemeron>& current_ephemerons) {
   current_ephemerons.Update(EphemeronUpdater);
 }
 
+// static
 void WeakObjects::UpdateNextEphemerons(
     WeakObjectWorklist<Ephemeron>& next_ephemerons) {
   next_ephemerons.Update(EphemeronUpdater);
 }
 
+// static
 void WeakObjects::UpdateDiscoveredEphemerons(
     WeakObjectWorklist<Ephemeron>& discovered_ephemerons) {
   discovered_ephemerons.Update(EphemeronUpdater);
 }
 
+// static
 void WeakObjects::UpdateWeakReferences(
     WeakObjectWorklist<HeapObjectAndSlot>& weak_references) {
   weak_references.Update(
@@ -96,6 +102,7 @@ void WeakObjects::UpdateWeakReferences(
       });
 }
 
+// static
 void WeakObjects::UpdateWeakObjectsInCode(
     WeakObjectWorklist<HeapObjectAndCode>& weak_objects_in_code) {
   weak_objects_in_code.Update(
@@ -113,33 +120,35 @@ void WeakObjects::UpdateWeakObjectsInCode(
       });
 }
 
+// static
 void WeakObjects::UpdateJSWeakRefs(
     WeakObjectWorklist<JSWeakRef>& js_weak_refs) {
-  if (FLAG_harmony_weak_refs) {
-    js_weak_refs.Update(
-        [](JSWeakRef js_weak_ref_in, JSWeakRef* js_weak_ref_out) -> bool {
-          JSWeakRef forwarded = ForwardingAddress(js_weak_ref_in);
+  js_weak_refs.Update(
+      [](JSWeakRef js_weak_ref_in, JSWeakRef* js_weak_ref_out) -> bool {
+        JSWeakRef forwarded = ForwardingAddress(js_weak_ref_in);
 
-          if (!forwarded.is_null()) {
-            *js_weak_ref_out = forwarded;
-            return true;
-          }
+        if (!forwarded.is_null()) {
+          *js_weak_ref_out = forwarded;
+          return true;
+        }
 
-          return false;
-        });
-  }
+        return false;
+      });
 }
 
+// static
 void WeakObjects::UpdateWeakCells(WeakObjectWorklist<WeakCell>& weak_cells) {
   // TODO(syg, marja): Support WeakCells in the young generation.
   DCHECK(!ContainsYoungObjects(weak_cells));
 }
 
-void WeakObjects::UpdateBytecodeFlushingCandidates(
-    WeakObjectWorklist<SharedFunctionInfo>& bytecode_flushing_candidates) {
-  DCHECK(!ContainsYoungObjects(bytecode_flushing_candidates));
+// static
+void WeakObjects::UpdateCodeFlushingCandidates(
+    WeakObjectWorklist<SharedFunctionInfo>& code_flushing_candidates) {
+  DCHECK(!ContainsYoungObjects(code_flushing_candidates));
 }
 
+// static
 void WeakObjects::UpdateFlushedJSFunctions(
     WeakObjectWorklist<JSFunction>& flushed_js_functions) {
   flushed_js_functions.Update(
@@ -155,7 +164,24 @@ void WeakObjects::UpdateFlushedJSFunctions(
       });
 }
 
+// static
+void WeakObjects::UpdateBaselineFlushingCandidates(
+    WeakObjectWorklist<JSFunction>& baseline_flush_candidates) {
+  baseline_flush_candidates.Update(
+      [](JSFunction slot_in, JSFunction* slot_out) -> bool {
+        JSFunction forwarded = ForwardingAddress(slot_in);
+
+        if (!forwarded.is_null()) {
+          *slot_out = forwarded;
+          return true;
+        }
+
+        return false;
+      });
+}
+
 #ifdef DEBUG
+// static
 template <typename Type>
 bool WeakObjects::ContainsYoungObjects(WeakObjectWorklist<Type>& worklist) {
   bool result = false;

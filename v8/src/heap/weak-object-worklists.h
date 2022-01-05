@@ -57,8 +57,8 @@ class TransitionArray;
   F(HeapObjectAndCode, weak_objects_in_code, WeakObjectsInCode)              \
   F(JSWeakRef, js_weak_refs, JSWeakRefs)                                     \
   F(WeakCell, weak_cells, WeakCells)                                         \
-  F(SharedFunctionInfo, bytecode_flushing_candidates,                        \
-    BytecodeFlushingCandidates)                                              \
+  F(SharedFunctionInfo, code_flushing_candidates, CodeFlushingCandidates)    \
+  F(JSFunction, baseline_flushing_candidates, BaselineFlushingCandidates)    \
   F(JSFunction, flushed_js_functions, FlushedJSFunctions)
 
 class WeakObjects {
@@ -74,13 +74,13 @@ class WeakObjects {
 
  private:
 #define DECLARE_UPDATE_METHODS(Type, _, Name) \
-  void Update##Name(WeakObjectWorklist<Type>&);
+  static void Update##Name(WeakObjectWorklist<Type>&);
   WEAK_OBJECT_WORKLISTS(DECLARE_UPDATE_METHODS)
 #undef DECLARE_UPDATE_METHODS
 
 #ifdef DEBUG
   template <typename Type>
-  bool ContainsYoungObjects(WeakObjectWorklist<Type>& worklist);
+  static bool ContainsYoungObjects(WeakObjectWorklist<Type>& worklist);
 #endif
 };
 

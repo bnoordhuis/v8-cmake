@@ -139,72 +139,6 @@ RUNTIME_FUNCTION(Runtime_StringReplaceOneCharWithString) {
   return isolate->StackOverflow();
 }
 
-// ES6 #sec-string.prototype.includes
-// String.prototype.includes(searchString [, position])
-RUNTIME_FUNCTION(Runtime_StringIncludes) {
-  HandleScope scope(isolate);
-  DCHECK_EQ(3, args.length());
-
-  Handle<Object> receiver = args.at(0);
-  if (receiver->IsNullOrUndefined(isolate)) {
-    THROW_NEW_ERROR_RETURN_FAILURE(
-        isolate, NewTypeError(MessageTemplate::kCalledOnNullOrUndefined,
-                              isolate->factory()->NewStringFromAsciiChecked(
-                                  "String.prototype.includes")));
-  }
-  Handle<String> receiver_string;
-  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, receiver_string,
-                                     Object::ToString(isolate, receiver));
-
-  // Check if the search string is a regExp and fail if it is.
-  Handle<Object> search = args.at(1);
-  Maybe<bool> is_reg_exp = RegExpUtils::IsRegExp(isolate, search);
-  if (is_reg_exp.IsNothing()) {
-    DCHECK(isolate->has_pending_exception());
-    return ReadOnlyRoots(isolate).exception();
-  }
-  if (is_reg_exp.FromJust()) {
-    THROW_NEW_ERROR_RETURN_FAILURE(
-        isolate, NewTypeError(MessageTemplate::kFirstArgumentNotRegExp,
-                              isolate->factory()->NewStringFromStaticChars(
-                                  "String.prototype.includes")));
-  }
-  Handle<String> search_string;
-  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, search_string,
-                                     Object::ToString(isolate, args.at(1)));
-  Handle<Object> position;
-  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, position,
-                                     Object::ToInteger(isolate, args.at(2)));
-
-  uint32_t index = receiver_string->ToValidIndex(*position);
-  int index_in_str =
-      String::IndexOf(isolate, receiver_string, search_string, index);
-  return *isolate->factory()->ToBoolean(index_in_str != -1);
-}
-
-// ES6 #sec-string.prototype.indexof
-// String.prototype.indexOf(searchString [, position])
-RUNTIME_FUNCTION(Runtime_StringIndexOf) {
-  HandleScope scope(isolate);
-  DCHECK_EQ(3, args.length());
-  return String::IndexOf(isolate, args.at(0), args.at(1), args.at(2));
-}
-
-// ES6 #sec-string.prototype.indexof
-// String.prototype.indexOf(searchString, position)
-// Fast version that assumes that does not perform conversions of the incoming
-// arguments.
-RUNTIME_FUNCTION(Runtime_StringIndexOfUnchecked) {
-  HandleScope scope(isolate);
-  DCHECK_EQ(3, args.length());
-  Handle<String> receiver_string = args.at<String>(0);
-  Handle<String> search_string = args.at<String>(1);
-  int index = std::min(std::max(args.smi_at(2), 0), receiver_string->length());
-
-  return Smi::FromInt(String::IndexOf(isolate, receiver_string, search_string,
-                                      static_cast<uint32_t>(index)));
-}
-
 RUNTIME_FUNCTION(Runtime_StringLastIndexOf) {
   HandleScope handle_scope(isolate);
   return String::LastIndexOf(isolate, args.at(0), args.at(1),
@@ -381,12 +315,12 @@ RUNTIME_FUNCTION(Runtime_StringToArray) {
   int position = 0;
   if (s->IsFlat() && s->IsOneByteRepresentation()) {
     // Try using cached chars where possible.
-    elements = isolate->factory()->NewUninitializedFixedArray(length);
+    elements = isolate->factory()->NewFixedArray(length);
 
     DisallowGarbageCollection no_gc;
     String::FlatContent content = s->GetFlatContent(no_gc);
     if (content.IsOneByte()) {
-      Vector<const uint8_t> chars = content.ToOneByteVector();
+      base::Vector<const uint8_t> chars = content.ToOneByteVector();
       // Note, this will initialize all elements (not only the prefix)
       // to prevent GC from seeing partially initialized array.
       position = CopyCachedOneByteCharsToArray(isolate->heap(), chars.begin(),

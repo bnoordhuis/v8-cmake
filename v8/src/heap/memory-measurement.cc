@@ -4,18 +4,17 @@
 
 #include "src/heap/memory-measurement.h"
 
-#include "include/v8.h"
+#include "include/v8-local-handle.h"
 #include "src/api/api-inl.h"
-#include "src/api/api.h"
 #include "src/execution/isolate-inl.h"
-#include "src/execution/isolate.h"
+#include "src/handles/global-handles-inl.h"
 #include "src/heap/factory-inl.h"
-#include "src/heap/factory.h"
 #include "src/heap/incremental-marking.h"
 #include "src/heap/marking-worklist.h"
 #include "src/logging/counters.h"
+#include "src/objects/js-array-buffer-inl.h"
 #include "src/objects/js-promise-inl.h"
-#include "src/objects/js-promise.h"
+#include "src/objects/smi.h"
 #include "src/tasks/task-utils.h"
 
 namespace v8 {
@@ -339,7 +338,7 @@ std::unique_ptr<v8::MeasureMemoryDelegate> MemoryMeasurement::DefaultDelegate(
 
 bool NativeContextInferrer::InferForContext(Isolate* isolate, Context context,
                                             Address* native_context) {
-  Map context_map = context.synchronized_map();
+  Map context_map = context.map(kAcquireLoad);
   Object maybe_native_context =
       TaggedField<Object, Map::kConstructorOrBackPointerOrNativeContextOffset>::
           Acquire_Load(isolate, context_map);
@@ -358,7 +357,7 @@ bool NativeContextInferrer::InferForJSFunction(Isolate* isolate,
                                                                     function);
   // The context may be a smi during deserialization.
   if (maybe_context.IsSmi()) {
-    DCHECK_EQ(maybe_context, Deserializer::uninitialized_field_value());
+    DCHECK_EQ(maybe_context, Smi::uninitialized_deserialization_value());
     return false;
   }
   if (!maybe_context.IsContext()) {

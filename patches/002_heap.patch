@@ -1,0 +1,31 @@
+diff --git a/v8/src/heap/third-party/heap-api-stub.cc b/v8/src/heap/third-party/heap-api-stub.cc
+index 3ca562fe..1120862e 100644
+--- a/v8/src/heap/third-party/heap-api-stub.cc
++++ b/v8/src/heap/third-party/heap-api-stub.cc
+@@ -50,14 +50,26 @@ bool Heap::InOldSpace(Address) { return false; }
+ // static
+ bool Heap::InReadOnlySpace(Address) { return false; }
+ 
++// static
++bool Heap::InLargeObjectSpace(Address address) { return false; }
++
+ // static
+ bool Heap::IsValidHeapObject(HeapObject) { return false; }
+ 
++// static
++bool Heap::IsImmovable(HeapObject) { return false; }
++
+ // static
+ bool Heap::IsValidCodeObject(HeapObject) { return false; }
+ 
++void Heap::ResetIterator() { }
++
++HeapObject Heap::NextObject() { return HeapObject(); }
++
+ bool Heap::CollectGarbage() { return false; }
+ 
++size_t Heap::Capacity() { return 0; }
++
+ }  // namespace third_party_heap
+ }  // namespace internal
+ }  // namespace v8

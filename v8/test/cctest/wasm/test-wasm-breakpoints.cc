@@ -75,8 +75,8 @@ class BreakHandler : public debug::DebugDelegate {
  public:
   enum Action {
     Continue = StepAction::LastStepAction + 1,
-    StepNext = StepAction::StepNext,
-    StepIn = StepAction::StepIn,
+    StepOver = StepAction::StepOver,
+    StepInto = StepAction::StepInto,
     StepOut = StepAction::StepOut
   };
   struct BreakPoint {
@@ -124,8 +124,8 @@ class BreakHandler : public debug::DebugDelegate {
     switch (next_action) {
       case Continue:
         break;
-      case StepNext:
-      case StepIn:
+      case StepOver:
+      case StepInto:
       case StepOut:
         isolate_->debug()->PrepareStep(static_cast<StepAction>(next_action));
         break;
@@ -179,16 +179,16 @@ struct WasmValWrapper {
 #ifdef DEBUG
 std::ostream& operator<<(std::ostream& out, const WasmValWrapper& wrapper) {
   switch (wrapper.val.type().kind()) {
-    case ValueType::kI32:
+    case kI32:
       out << "i32: " << wrapper.val.to<int32_t>();
       break;
-    case ValueType::kI64:
+    case kI64:
       out << "i64: " << wrapper.val.to<int64_t>();
       break;
-    case ValueType::kF32:
+    case kF32:
       out << "f32: " << wrapper.val.to<float>();
       break;
-    case ValueType::kF64:
+    case kF64:
       out << "f64: " << wrapper.val.to<double>();
       break;
     default:
@@ -237,7 +237,7 @@ class CollectValuesBreakHandler : public debug::DebugDelegate {
     CHECK_EQ(expected.locals.size(), num_locals);
     for (int i = 0; i < num_locals; ++i) {
       WasmValue local_value = debug_info->GetLocalValue(
-          i, frame->pc(), frame->fp(), frame->callee_fp());
+          i, frame->pc(), frame->fp(), frame->callee_fp(), isolate_);
       CHECK_EQ(WasmValWrapper{expected.locals[i]}, WasmValWrapper{local_value});
     }
 
@@ -245,11 +245,11 @@ class CollectValuesBreakHandler : public debug::DebugDelegate {
     CHECK_EQ(expected.stack.size(), stack_depth);
     for (int i = 0; i < stack_depth; ++i) {
       WasmValue stack_value = debug_info->GetStackValue(
-          i, frame->pc(), frame->fp(), frame->callee_fp());
+          i, frame->pc(), frame->fp(), frame->callee_fp(), isolate_);
       CHECK_EQ(WasmValWrapper{expected.stack[i]}, WasmValWrapper{stack_value});
     }
 
-    isolate_->debug()->PrepareStep(StepAction::StepIn);
+    isolate_->debug()->PrepareStep(StepAction::StepInto);
   }
 };
 
@@ -328,7 +328,7 @@ WASM_COMPILED_EXEC_TEST(WasmNonBreakablePosition) {
   WasmRunner<int> runner(execution_tier);
   Isolate* isolate = runner.main_isolate();
 
-  BUILD(runner, WASM_RETURN1(WASM_I32V_2(1024)));
+  BUILD(runner, WASM_RETURN(WASM_I32V_2(1024)));
 
   Handle<JSFunction> main_fun_wrapper =
       runner.builder().WrapCode(runner.function_index());
@@ -355,8 +355,8 @@ WASM_COMPILED_EXEC_TEST(WasmSimpleStepping) {
 
   BreakHandler count_breaks(isolate,
                             {
-                                {1, BreakHandler::StepNext},  // I32Const
-                                {3, BreakHandler::StepNext},  // I32Const
+                                {1, BreakHandler::StepOver},  // I32Const
+                                {3, BreakHandler::StepOver},  // I32Const
                                 {5, BreakHandler::Continue}   // I32Add
                             });
 
@@ -377,7 +377,7 @@ WASM_COMPILED_EXEC_TEST(WasmStepInAndOut) {
   // functions in the code section matches the function indexes.
 
   // return arg0
-  BUILD(runner, WASM_RETURN1(WASM_LOCAL_GET(0)));
+  BUILD(runner, WASM_RETURN(WASM_LOCAL_GET(0)));
   // for (int i = 0; i < 10; ++i) { f2(i); }
   BUILD(f2, WASM_LOOP(
                 WASM_BR_IF(0, WASM_BINOP(kExprI32GeU, WASM_LOCAL_GET(0),
@@ -396,10 +396,10 @@ WASM_COMPILED_EXEC_TEST(WasmStepInAndOut) {
 
   BreakHandler count_breaks(isolate,
                             {
-                                {19, BreakHandler::StepIn},   // LocalGet
-                                {21, BreakHandler::StepIn},   // Call
-                                {1, BreakHandler::StepOut},   // in f2
-                                {23, BreakHandler::Continue}  // After Call
+                                {19, BreakHandler::StepInto},  // LocalGet
+                                {21, BreakHandler::StepInto},  // Call
+                                {1, BreakHandler::StepOut},    // in f2
+                                {23, BreakHandler::Continue}   // After Call
                             });
 
   Handle<Object> global(isolate->context().global_object(), isolate);
@@ -546,7 +546,6 @@ WASM_COMPILED_EXEC_TEST(WasmBreakInPostMVP) {
   // being used. There was a bug where we were trying to update the "detected"
   // features set, but we were passing a nullptr when compiling with
   // breakpoints.
-  EXPERIMENTAL_FLAG_SCOPE(mv);
   WasmRunner<int> runner(execution_tier);
   Isolate* isolate = runner.main_isolate();
 

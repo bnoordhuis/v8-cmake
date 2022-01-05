@@ -10,6 +10,7 @@
 #include "src/heap/concurrent-allocator.h"
 #include "src/heap/heap.h"
 #include "src/heap/incremental-marking.h"
+#include "src/heap/local-heap.h"
 #include "src/heap/spaces-inl.h"
 #include "src/heap/spaces.h"
 #include "src/objects/heap-object.h"
@@ -20,9 +21,8 @@ namespace internal {
 AllocationResult ConcurrentAllocator::AllocateRaw(int object_size,
                                                   AllocationAlignment alignment,
                                                   AllocationOrigin origin) {
+  DCHECK(!FLAG_enable_third_party_heap);
   // TODO(dinfuehr): Add support for allocation observers
-  CHECK(FLAG_concurrent_allocation);
-
 #ifdef DEBUG
   local_heap_->VerifyCurrent();
 #endif

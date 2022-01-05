@@ -6,22 +6,22 @@
 
 #include <vector>
 
-#include "include/v8-inspector.h"
-#include "include/v8.h"
+#include "include/v8-isolate.h"
+#include "include/v8-script.h"
 #include "test/inspector/isolate-data.h"
 #include "test/inspector/utils.h"
 
 namespace v8 {
 namespace internal {
 
-void ExecuteStringTask::Run(IsolateData* data) {
+void ExecuteStringTask::Run(InspectorIsolateData* data) {
   v8::MicrotasksScope microtasks_scope(data->isolate(),
                                        v8::MicrotasksScope::kRunMicrotasks);
   v8::HandleScope handle_scope(data->isolate());
   v8::Local<v8::Context> context = data->GetDefaultContext(context_group_id_);
   v8::Context::Scope context_scope(context);
-  v8::ScriptOrigin origin(ToV8String(data->isolate(), name_), line_offset_,
-                          column_offset_,
+  v8::ScriptOrigin origin(data->isolate(), ToV8String(data->isolate(), name_),
+                          line_offset_, column_offset_,
                           /* resource_is_shared_cross_origin */ false,
                           /* script_id */ -1,
                           /* source_map_url */ v8::Local<v8::Value>(),

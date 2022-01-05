@@ -37,11 +37,11 @@
 
 #include <utility>
 
-#include "src/init/v8.h"
-
+#include "include/v8-locker.h"
 #include "src/handles/global-handles.h"
 #include "src/heap/mark-compact-inl.h"
 #include "src/heap/mark-compact.h"
+#include "src/init/v8.h"
 #include "src/objects/objects-inl.h"
 #include "test/cctest/cctest.h"
 #include "test/cctest/heap/heap-tester.h"
@@ -427,6 +427,7 @@ UNINITIALIZED_TEST(RegressJoinThreadsOnIsolateDeinit) {
 }
 
 TEST(Regress5829) {
+  if (!FLAG_incremental_marking) return;
   FLAG_stress_concurrent_allocation = false;  // For SealCurrentObjects.
   CcTest::InitializeVM();
   Isolate* isolate = CcTest::i_isolate();

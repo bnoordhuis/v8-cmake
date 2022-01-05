@@ -2,8 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include 'src/builtins/builtins-string-gen.h'
+
 @abstract
-@generateCppClass
 @reserveBitsInInstanceType(6)
 extern class String extends Name {
   macro StringInstanceType(): StringInstanceType {
@@ -29,7 +30,6 @@ bitfield struct StringInstanceType extends uint16 {
   is_not_internalized: bool: 1 bit;
 }
 
-@generateCppClass
 @generateBodyDescriptor
 @doNotGenerateCast
 extern class ConsString extends String {
@@ -90,30 +90,25 @@ extern class ExternalTwoByteString extends ExternalString {
   }
 }
 
-@generateCppClass
 @doNotGenerateCast
 extern class InternalizedString extends String {
 }
 
 @abstract
-@generateCppClass
 @doNotGenerateCast
 extern class SeqString extends String {
 }
-@generateCppClass
 @generateBodyDescriptor
 @doNotGenerateCast
 extern class SeqOneByteString extends SeqString {
   const chars[length]: char8;
 }
-@generateCppClass
 @generateBodyDescriptor
 @doNotGenerateCast
 extern class SeqTwoByteString extends SeqString {
   const chars[length]: char16;
 }
 
-@generateCppClass
 @generateBodyDescriptor
 @doNotGenerateCast
 extern class SlicedString extends String {
@@ -121,7 +116,6 @@ extern class SlicedString extends String {
   offset: Smi;
 }
 
-@generateCppClass
 @generateBodyDescriptor
 @doNotGenerateCast
 extern class ThinString extends String {
@@ -134,7 +128,7 @@ type DirectString extends String;
 
 macro AllocateNonEmptySeqOneByteString<Iterator: type>(
     length: uint32, content: Iterator): SeqOneByteString {
-  assert(length != 0 && length <= kStringMaxLength);
+  dcheck(length != 0 && length <= kStringMaxLength);
   return new SeqOneByteString{
     map: kOneByteStringMap,
     raw_hash_field: kNameEmptyHashField,
@@ -145,7 +139,7 @@ macro AllocateNonEmptySeqOneByteString<Iterator: type>(
 
 macro AllocateNonEmptySeqTwoByteString<Iterator: type>(
     length: uint32, content: Iterator): SeqTwoByteString {
-  assert(length > 0 && length <= kStringMaxLength);
+  dcheck(length > 0 && length <= kStringMaxLength);
   return new SeqTwoByteString{
     map: kStringMap,
     raw_hash_field: kNameEmptyHashField,
@@ -183,8 +177,10 @@ macro AllocateSeqTwoByteString(length: uint32): SeqTwoByteString|EmptyString {
   return AllocateSeqTwoByteString(length, UninitializedIterator{});
 }
 
-extern macro StringWriteToFlatOneByte(String, RawPtr<char8>, int32, int32);
-extern macro StringWriteToFlatTwoByte(String, RawPtr<char16>, int32, int32);
+extern macro StringWriteToFlatOneByte(
+    String, RawPtr<char8>, int32, int32): void;
+extern macro StringWriteToFlatTwoByte(
+    String, RawPtr<char16>, int32, int32): void;
 
 // Corresponds to String::SlowFlatten in the C++ runtime.
 builtin StringSlowFlatten(cons: ConsString): String {
@@ -228,7 +224,7 @@ macro Flatten(string: String): String {
       return Flatten(cons);
     }
     case (thin: ThinString): {
-      assert(!Is<ConsString>(thin.actual));
+      dcheck(!Is<ConsString>(thin.actual));
       return thin.actual;
     }
     case (other: String): {
@@ -305,4 +301,88 @@ macro TwoStringsToSlices<Result: type, Functor: type>(
       return Call(f, s1Slice, s2Slice);
     }
   }
+}
+
+macro StaticAssertStringLengthFitsSmi(): void {
+  const kMaxStringLengthFitsSmi: constexpr bool =
+      kStringMaxLengthUintptr < kSmiMaxValue;
+  static_assert(kMaxStringLengthFitsSmi);
+}
+
+extern macro StringBuiltinsAssembler::SearchOneByteStringInTwoByteString(
+    RawPtr<char16>, intptr, RawPtr<char8>, intptr, intptr): intptr;
+extern macro StringBuiltinsAssembler::SearchOneByteStringInOneByteString(
+    RawPtr<char8>, intptr, RawPtr<char8>, intptr, intptr): intptr;
+extern macro StringBuiltinsAssembler::SearchTwoByteStringInTwoByteString(
+    RawPtr<char16>, intptr, RawPtr<char16>, intptr, intptr): intptr;
+extern macro StringBuiltinsAssembler::SearchTwoByteStringInOneByteString(
+    RawPtr<char8>, intptr, RawPtr<char16>, intptr, intptr): intptr;
+extern macro StringBuiltinsAssembler::SearchOneByteInOneByteString(
+    RawPtr<char8>, intptr, RawPtr<char8>, intptr): intptr;
+
+macro AbstractStringIndexOf(
+    subject: RawPtr<char16>, subjectLen: intptr, search: RawPtr<char8>,
+    searchLen: intptr, fromIndex: intptr): intptr {
+  return SearchOneByteStringInTwoByteString(
+      subject, subjectLen, search, searchLen, fromIndex);
+}
+macro AbstractStringIndexOf(
+    subject: RawPtr<char8>, subjectLen: intptr, search: RawPtr<char8>,
+    searchLen: intptr, fromIndex: intptr): intptr {
+  if (searchLen == 1) {
+    return SearchOneByteInOneByteString(subject, subjectLen, search, fromIndex);
+  }
+  return SearchOneByteStringInOneByteString(
+      subject, subjectLen, search, searchLen, fromIndex);
+}
+macro AbstractStringIndexOf(
+    subject: RawPtr<char16>, subjectLen: intptr, search: RawPtr<char16>,
+    searchLen: intptr, fromIndex: intptr): intptr {
+  return SearchTwoByteStringInTwoByteString(
+      subject, subjectLen, search, searchLen, fromIndex);
+}
+macro AbstractStringIndexOf(
+    subject: RawPtr<char8>, subjectLen: intptr, search: RawPtr<char16>,
+    searchLen: intptr, fromIndex: intptr): intptr {
+  return SearchTwoByteStringInOneByteString(
+      subject, subjectLen, search, searchLen, fromIndex);
+}
+
+struct AbstractStringIndexOfFunctor {
+  fromIndex: Smi;
+}
+// Ideally, this would be a method of AbstractStringIndexOfFunctor, but
+// currently methods don't support templates.
+macro Call<A: type, B: type>(
+    self: AbstractStringIndexOfFunctor, string: ConstSlice<A>,
+    searchStr: ConstSlice<B>): Smi {
+  return Convert<Smi>(AbstractStringIndexOf(
+      string.GCUnsafeStartPointer(), string.length,
+      searchStr.GCUnsafeStartPointer(), searchStr.length,
+      Convert<intptr>(self.fromIndex)));
+}
+
+macro AbstractStringIndexOf(implicit context: Context)(
+    string: String, searchString: String, fromIndex: Smi): Smi {
+  // Special case the empty string.
+  const searchStringLength = searchString.length_intptr;
+  const stringLength = string.length_intptr;
+  if (searchStringLength == 0 && SmiUntag(fromIndex) <= stringLength) {
+    return fromIndex;
+  }
+
+  // Don't bother to search if the searchString would go past the end
+  // of the string. This is actually necessary because of runtime
+  // checks.
+  if (SmiUntag(fromIndex) + searchStringLength > stringLength) {
+    return -1;
+  }
+
+  return TwoStringsToSlices<Smi>(
+      string, searchString, AbstractStringIndexOfFunctor{fromIndex: fromIndex});
+}
+
+builtin StringIndexOf(implicit context: Context)(
+    s: String, searchString: String, start: Smi): Smi {
+  return AbstractStringIndexOf(s, searchString, SmiMax(start, 0));
 }

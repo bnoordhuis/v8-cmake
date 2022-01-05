@@ -6,7 +6,6 @@
 #define V8_OBJECTS_FEEDBACK_VECTOR_INL_H_
 
 #include "src/common/globals.h"
-#include "src/heap/factory-inl.h"
 #include "src/heap/heap-write-barrier-inl.h"
 #include "src/objects/code-inl.h"
 #include "src/objects/feedback-cell-inl.h"
@@ -14,6 +13,7 @@
 #include "src/objects/maybe-object-inl.h"
 #include "src/objects/shared-function-info.h"
 #include "src/objects/smi.h"
+#include "src/roots/roots-inl.h"
 
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
@@ -38,9 +38,11 @@ INT32_ACCESSORS(FeedbackMetadata, slot_count, kSlotCountOffset)
 INT32_ACCESSORS(FeedbackMetadata, create_closure_slot_count,
                 kCreateClosureSlotCountOffset)
 
-int32_t FeedbackMetadata::synchronized_slot_count() const {
-  return base::Acquire_Load(
-      reinterpret_cast<const base::Atomic32*>(field_address(kSlotCountOffset)));
+RELEASE_ACQUIRE_WEAK_ACCESSORS(FeedbackVector, maybe_optimized_code,
+                               kMaybeOptimizedCodeOffset)
+
+int32_t FeedbackMetadata::slot_count(AcquireLoadTag) const {
+  return ACQUIRE_READ_INT32_FIELD(*this, kSlotCountOffset);
 }
 
 int32_t FeedbackMetadata::get(int index) const {
@@ -100,20 +102,35 @@ Handle<FeedbackCell> ClosureFeedbackCellArray::GetFeedbackCell(int index) {
   return handle(FeedbackCell::cast(get(index)), GetIsolate());
 }
 
+FeedbackCell ClosureFeedbackCellArray::cell(int index) {
+  return FeedbackCell::cast(get(index));
+}
+
 bool FeedbackVector::is_empty() const { return length() == 0; }
 
 FeedbackMetadata FeedbackVector::metadata() const {
   return shared_function_info().feedback_metadata();
 }
 
-void FeedbackVector::clear_invocation_count() { set_invocation_count(0); }
+FeedbackMetadata FeedbackVector::metadata(AcquireLoadTag tag) const {
+  return shared_function_info().feedback_metadata(tag);
+}
+
+RELAXED_INT32_ACCESSORS(FeedbackVector, invocation_count,
+                        kInvocationCountOffset)
+
+void FeedbackVector::clear_invocation_count(RelaxedStoreTag tag) {
+  set_invocation_count(0, tag);
+}
 
 Code FeedbackVector::optimized_code() const {
-  MaybeObject slot = maybe_optimized_code();
+  MaybeObject slot = maybe_optimized_code(kAcquireLoad);
   DCHECK(slot->IsWeakOrCleared());
   HeapObject heap_object;
-  Code code =
-      slot->GetHeapObject(&heap_object) ? Code::cast(heap_object) : Code();
+  Code code;
+  if (slot->GetHeapObject(&heap_object)) {
+    code = FromCodeT(CodeT::cast(heap_object));
+  }
   // It is possible that the maybe_optimized_code slot is cleared but the
   // optimization tier hasn't been updated yet. We update the tier when we
   // execute the function next time / when we create new closure.
@@ -131,7 +148,7 @@ OptimizationTier FeedbackVector::optimization_tier() const {
   // It is possible that the optimization tier bits aren't updated when the code
   // was cleared due to a GC.
   DCHECK_IMPLIES(tier == OptimizationTier::kNone,
-                 maybe_optimized_code()->IsCleared());
+                 maybe_optimized_code(kAcquireLoad)->IsCleared());
   return tier;
 }
 
@@ -165,22 +182,27 @@ bool FeedbackVector::IsOfLegacyType(MaybeObject value) {
 #endif  // DEBUG
 
 MaybeObject FeedbackVector::Get(FeedbackSlot slot) const {
-  MaybeObject value = raw_feedback_slots(GetIndex(slot));
+  MaybeObject value = raw_feedback_slots(GetIndex(slot), kRelaxedLoad);
   DCHECK(!IsOfLegacyType(value));
   return value;
 }
 
-MaybeObject FeedbackVector::Get(IsolateRoot isolate, FeedbackSlot slot) const {
-  MaybeObject value = raw_feedback_slots(isolate, GetIndex(slot));
+MaybeObject FeedbackVector::Get(PtrComprCageBase cage_base,
+                                FeedbackSlot slot) const {
+  MaybeObject value =
+      raw_feedback_slots(cage_base, GetIndex(slot), kRelaxedLoad);
   DCHECK(!IsOfLegacyType(value));
   return value;
 }
 
 Handle<FeedbackCell> FeedbackVector::GetClosureFeedbackCell(int index) const {
   DCHECK_GE(index, 0);
-  ClosureFeedbackCellArray cell_array =
-      ClosureFeedbackCellArray::cast(closure_feedback_cell_array());
-  return cell_array.GetFeedbackCell(index);
+  return closure_feedback_cell_array().GetFeedbackCell(index);
+}
+
+FeedbackCell FeedbackVector::closure_feedback_cell(int index) const {
+  DCHECK_GE(index, 0);
+  return closure_feedback_cell_array().cell(index);
 }
 
 MaybeObject FeedbackVector::SynchronizedGet(FeedbackSlot slot) const {
@@ -307,11 +329,15 @@ ForInHint ForInHintFromFeedback(ForInFeedback type_feedback) {
 }
 
 Handle<Symbol> FeedbackVector::UninitializedSentinel(Isolate* isolate) {
-  return isolate->factory()->uninitialized_symbol();
+  return ReadOnlyRoots(isolate).uninitialized_symbol_handle();
 }
 
 Handle<Symbol> FeedbackVector::MegamorphicSentinel(Isolate* isolate) {
-  return isolate->factory()->megamorphic_symbol();
+  return ReadOnlyRoots(isolate).megamorphic_symbol_handle();
+}
+
+Handle<Symbol> FeedbackVector::MegaDOMSentinel(Isolate* isolate) {
+  return ReadOnlyRoots(isolate).mega_dom_symbol_handle();
 }
 
 Symbol FeedbackVector::RawUninitializedSentinel(Isolate* isolate) {
@@ -354,6 +380,11 @@ MaybeObject FeedbackNexus::UninitializedSentinel() const {
 MaybeObject FeedbackNexus::MegamorphicSentinel() const {
   return MaybeObject::FromObject(
       *FeedbackVector::MegamorphicSentinel(GetIsolate()));
+}
+
+MaybeObject FeedbackNexus::MegaDOMSentinel() const {
+  return MaybeObject::FromObject(
+      *FeedbackVector::MegaDOMSentinel(GetIsolate()));
 }
 
 MaybeObject FeedbackNexus::FromHandle(MaybeObjectHandle slot) const {

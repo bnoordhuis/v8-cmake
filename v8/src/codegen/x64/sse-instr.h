@@ -10,10 +10,12 @@
   V(sqrtps, 0F, 51)                  \
   V(rsqrtps, 0F, 52)                 \
   V(rcpps, 0F, 53)                   \
+  V(cvtps2pd, 0F, 5A)                \
   V(cvtdq2ps, 0F, 5B)
 
 // SSE instructions whose AVX version has three operands.
 #define SSE_BINOP_INSTRUCTION_LIST(V) \
+  V(unpcklps, 0F, 14)                 \
   V(andps, 0F, 54)                    \
   V(andnps, 0F, 55)                   \
   V(orps, 0F, 56)                     \
@@ -30,6 +32,7 @@
   V(sqrtss, F3, 0F, 51)            \
   V(addss, F3, 0F, 58)             \
   V(mulss, F3, 0F, 59)             \
+  V(cvtss2sd, F3, 0F, 5A)          \
   V(subss, F3, 0F, 5C)             \
   V(minss, F3, 0F, 5D)             \
   V(divss, F3, 0F, 5E)             \
@@ -108,7 +111,9 @@
 #define SSE2_UNOP_INSTRUCTION_LIST(V) \
   V(ucomisd, 66, 0F, 2E)              \
   V(sqrtpd, 66, 0F, 51)               \
-  V(cvtps2dq, 66, 0F, 5B)
+  V(cvtpd2ps, 66, 0F, 5A)             \
+  V(cvtps2dq, 66, 0F, 5B)             \
+  V(cvttpd2dq, 66, 0F, E6)
 
 // SSE2 shift instructions with an immediate operand. The last element is the
 // extension to the opcode.
@@ -183,6 +188,7 @@
 
 // These require AVX2, and we only define the VEX-128 versions.
 #define AVX2_BROADCAST_LIST(V)    \
+  V(vpbroadcastd, 66, 0F, 38, 58) \
   V(vpbroadcastb, 66, 0F, 38, 78) \
   V(vpbroadcastw, 66, 0F, 38, 79)
 

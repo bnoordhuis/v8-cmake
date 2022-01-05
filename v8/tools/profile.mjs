@@ -27,15 +27,22 @@
 
 import { CodeMap, CodeEntry } from "./codemap.mjs";
 import { ConsArray } from "./consarray.mjs";
+import { WebInspector } from "./sourcemap.mjs";
 
 // Used to associate log entries with source positions in scripts.
 // TODO: move to separate modules
 export class SourcePosition {
+  script = null;
+  line = -1;
+  column = -1;
+  entries = [];
+  isFunction = false;
+  originalPosition = undefined;
+
   constructor(script, line, column) {
     this.script = script;
     this.line = line;
     this.column = column;
-    this.entries = [];
   }
 
   addEntry(entry) {
@@ -43,28 +50,42 @@ export class SourcePosition {
   }
 
   toString() {
-   return `${this.script.name}:${this.line}:${this.column}`;
+    return `${this.script.name}:${this.line}:${this.column}`;
   }
 
-  toStringLong() {
-    return this.toString();
+  get functionPosition() {
+    // TODO(cbruni)
+    return undefined;
+  }
+
+  get toolTipDict() {
+    return {
+      title: this.toString(),
+      __this__: this,
+      script: this.script,
+      entries: this.entries,
+    }
   }
 }
 
 export class Script {
-  name;
+  url;
   source;
+  name;
+  sourcePosition = undefined;
   // Map<line, Map<column, SourcePosition>>
   lineToColumn = new Map();
   _entries = [];
+  _sourceMapState = "unknown";
 
   constructor(id) {
     this.id = id;
     this.sourcePositions = [];
   }
 
-  update(name, source) {
-    this.name = name;
+  update(url, source) {
+    this.url = url;
+    this.name = Script.getShortestUniqueName(url, this);
     this.source = source;
   }
 
@@ -76,11 +97,29 @@ export class Script {
     return this._entries;
   }
 
+  get startLine() {
+    return this.sourcePosition?.line ?? 1;
+  }
+
+  get sourceMapState() {
+    return this._sourceMapState;
+  }
+
+  findFunctionSourcePosition(sourcePosition) {
+    // TODO(cbruni) implmenent
+    return undefined;
+  }
+
   addSourcePosition(line, column, entry) {
     let sourcePosition = this.lineToColumn.get(line)?.get(column);
     if (sourcePosition === undefined) {
-      sourcePosition = new SourcePosition(this, line, column, )
+      sourcePosition = new SourcePosition(this, line, column,)
       this._addSourcePosition(line, column, sourcePosition);
+    }
+    if (this.sourcePosition === undefined && entry.entry?.type === "Script") {
+      // Mark the source position of scripts, for inline scripts which don't
+      // start at line 1.
+      this.sourcePosition = sourcePosition;
     }
     sourcePosition.addEntry(entry);
     this._entries.push(entry);
@@ -103,20 +142,106 @@ export class Script {
     return `Script(${this.id}): ${this.name}`;
   }
 
-  toStringLong() {
-    return this.source;
+  get toolTipDict() {
+    return {
+      title: this.toString(),
+      __this__: this,
+      id: this.id,
+      url: this.url,
+      source: this.source,
+      sourcePositions: this.sourcePositions
+    }
+  }
+
+  static getShortestUniqueName(url, script) {
+    const parts = url.split('/');
+    const filename = parts[parts.length -1];
+    const dict = this._dict ?? (this._dict = new Map());
+    const matchingScripts = dict.get(filename);
+    if (matchingScripts == undefined) {
+      dict.set(filename, [script]);
+      return filename;
+    }
+    // TODO: find shortest unique substring
+    // Update all matching scripts to have a unique filename again.
+    for (let matchingScript of matchingScripts) {
+      matchingScript.name = script.url
+    }
+    matchingScripts.push(script);
+    return url;
+  }
+
+  ensureSourceMapCalculated(sourceMapFetchPrefix=undefined) {
+    if (this._sourceMapState !== "unknown") return;
+
+    const sourceMapURLMatch =
+        this.source.match(/\/\/# sourceMappingURL=(.*)\n/);
+    if (!sourceMapURLMatch) {
+      this._sourceMapState = "none";
+      return;
+    }
+
+    this._sourceMapState = "loading";
+    let sourceMapURL = sourceMapURLMatch[1];
+    (async () => {
+      try {
+        let sourceMapPayload;
+        try {
+          sourceMapPayload = await fetch(sourceMapURL);
+        } catch (e) {
+          if (e instanceof TypeError && sourceMapFetchPrefix) {
+            // Try again with fetch prefix.
+            // TODO(leszeks): Remove the retry once the prefix is
+            // configurable.
+            sourceMapPayload =
+                await fetch(sourceMapFetchPrefix + sourceMapURL);
+          } else {
+            throw e;
+          }
+        }
+        sourceMapPayload = await sourceMapPayload.text();
+
+        if (sourceMapPayload.startsWith(')]}')) {
+          sourceMapPayload =
+              sourceMapPayload.substring(sourceMapPayload.indexOf('\n'));
+        }
+        sourceMapPayload = JSON.parse(sourceMapPayload);
+        const sourceMap =
+            new WebInspector.SourceMap(sourceMapURL, sourceMapPayload);
+
+        const startLine = this.startLine;
+        for (const sourcePosition of this.sourcePositions) {
+          const line = sourcePosition.line - startLine;
+          const column = sourcePosition.column - 1;
+          const mapping = sourceMap.findEntry(line, column);
+          if (mapping) {
+            sourcePosition.originalPosition = {
+              source: new URL(mapping[2], sourceMapURL).href,
+              line: mapping[3] + 1,
+              column: mapping[4] + 1
+            };
+          } else {
+            sourcePosition.originalPosition = {source: null, line:0, column:0};
+          }
+        }
+        this._sourceMapState = "loaded";
+      } catch (e) {
+        console.error(e);
+        this._sourceMapState = "failed";
+      }
+    })();
   }
 }
 
 
 class SourceInfo {
-   script;
-   start;
-   end;
-   positions;
-   inlined ;
-   fns;
-   disassemble;
+  script;
+  start;
+  end;
+  positions;
+  inlined;
+  fns;
+  disassemble;
 
   setSourcePositionInfo(script, startPos, endPos, sourcePositionTable, inliningPositions, inlinedFunctions) {
     this.script = script;
@@ -147,13 +272,20 @@ export class Profile {
   topDownTree_ = new CallTree();
   bottomUpTree_ = new CallTree();
   c_entries_ = {};
-  ticks_ = [];
   scripts_ = [];
   urlToScript_ = new Map();
 
+  serializeVMSymbols() {
+    let result = this.codeMap_.getAllStaticEntriesWithAddresses();
+    result.concat(this.codeMap_.getAllLibraryEntriesWithAddresses())
+    return result.map(([startAddress, codeEntry]) => {
+      return [codeEntry.getName(), startAddress, startAddress + codeEntry.size]
+    });
+  }
+
   /**
    * Returns whether a function with the specified name must be skipped.
-   * Should be overriden by subclasses.
+   * Should be overridden by subclasses.
    *
    * @param {string} name Function name.
    */
@@ -181,9 +313,26 @@ export class Profile {
   static CodeState = {
     COMPILED: 0,
     IGNITION: 1,
-    NATIVE_CONTEXT_INDEPENDENT: 2,
-    TURBOPROP: 3,
-    TURBOFAN: 4,
+    BASELINE: 2,
+    TURBOPROP: 4,
+    TURBOFAN: 5,
+  }
+
+  static VMState = {
+    JS: 0,
+    GC: 1,
+    PARSER: 2,
+    BYTECODE_COMPILER: 3,
+    // TODO(cbruni): add BASELINE_COMPILER
+    COMPILER: 4,
+    OTHER: 5,
+    EXTERNAL: 6,
+    IDLE: 7,
+  }
+
+  static CodeType = {
+    CPP: 0,
+    SHARED_LIB: 1
   }
 
   /**
@@ -195,8 +344,8 @@ export class Profile {
         return this.CodeState.COMPILED;
       case '~':
         return this.CodeState.IGNITION;
-      case '-':
-        return this.CodeState.NATIVE_CONTEXT_INDEPENDENT;
+      case '^':
+        return this.CodeState.BASELINE;
       case '+':
         return this.CodeState.TURBOPROP;
       case '*':
@@ -210,14 +359,36 @@ export class Profile {
       return "Builtin";
     } else if (state === this.CodeState.IGNITION) {
       return "Unopt";
-    } else if (state === this.CodeState.NATIVE_CONTEXT_INDEPENDENT) {
-      return "NCI";
+    } else if (state === this.CodeState.BASELINE) {
+      return "Baseline";
     } else if (state === this.CodeState.TURBOPROP) {
       return "Turboprop";
     } else if (state === this.CodeState.TURBOFAN) {
       return "Opt";
     }
     throw new Error(`unknown code state: ${state}`);
+  }
+
+  static vmStateString(state) {
+    switch (state) {
+      case this.VMState.JS:
+        return 'JS';
+      case this.VMState.GC:
+        return 'GC';
+      case this.VMState.PARSER:
+        return 'Parse';
+      case this.VMState.BYTECODE_COMPILER:
+        return 'Compile Bytecode';
+      case this.VMState.COMPILER:
+        return 'Compile';
+      case this.VMState.OTHER:
+        return 'Other';
+      case this.VMState.EXTERNAL:
+        return 'External';
+      case this.VMState.IDLE:
+        return 'Idle';
+    }
+    return 'unknown';
   }
 
   /**
@@ -232,7 +403,7 @@ export class Profile {
    *     during stack strace processing, specifies a position of the frame
    *     containing the address.
    */
-  handleUnknownCode(operation, addr, opt_stackPos) {}
+  handleUnknownCode(operation, addr, opt_stackPos) { }
 
   /**
    * Registers a library.
@@ -255,7 +426,7 @@ export class Profile {
    * @param {number} endAddr Ending address.
    */
   addStaticCode(name, startAddr, endAddr) {
-      const entry = new CodeEntry(endAddr - startAddr, name, 'CPP');
+    const entry = new CodeEntry(endAddr - startAddr, name, 'CPP');
     this.codeMap_.addStaticCode(startAddr, entry);
     return entry;
   }
@@ -370,14 +541,14 @@ export class Profile {
     }
 
     this.getOrCreateSourceInfo(entry).setSourcePositionInfo(
-          script, startPos, endPos, sourcePositionTable, inliningPositions,
-          inlinedFunctions);
+      script, startPos, endPos, sourcePositionTable, inliningPositions,
+      inlinedFunctions);
   }
 
   addDisassemble(start, kind, disassemble) {
     const entry = this.codeMap_.findDynamicEntryByStartAddress(start);
-    if (!entry) return;
-    this.getOrCreateSourceInfo(entry).setDisassemble(disassemble);
+    if (entry) this.getOrCreateSourceInfo(entry).setDisassemble(disassemble);
+    return entry;
   }
 
   getOrCreateSourceInfo(entry) {
@@ -431,10 +602,11 @@ export class Profile {
    * @param {Array<number>} stack Stack sample.
    */
   recordTick(time_ns, vmState, stack) {
-    const processedStack = this.resolveAndFilterFuncs_(stack);
-    this.bottomUpTree_.addPath(processedStack);
-    processedStack.reverse();
-    this.topDownTree_.addPath(processedStack);
+    const {nameStack, entryStack} = this.resolveAndFilterFuncs_(stack);
+    this.bottomUpTree_.addPath(nameStack);
+    nameStack.reverse();
+    this.topDownTree_.addPath(nameStack);
+    return entryStack;
   }
 
   /**
@@ -444,12 +616,15 @@ export class Profile {
    * @param {Array<number>} stack Stack sample.
    */
   resolveAndFilterFuncs_(stack) {
-    const result = [];
+    const nameStack = [];
+    const entryStack = [];
     let last_seen_c_function = '';
     let look_for_first_c_function = false;
     for (let i = 0; i < stack.length; ++i) {
-      const entry = this.codeMap_.findEntry(stack[i]);
+      const pc = stack[i];
+      const entry = this.codeMap_.findEntry(pc);
       if (entry) {
+        entryStack.push(entry);
         const name = entry.getName();
         if (i === 0 && (entry.type === 'CPP' || entry.type === 'SHARED_LIB')) {
           look_for_first_c_function = true;
@@ -458,16 +633,15 @@ export class Profile {
           last_seen_c_function = name;
         }
         if (!this.skipThisFunction(name)) {
-          result.push(name);
+          nameStack.push(name);
         }
       } else {
-        this.handleUnknownCode(Profile.Operation.TICK, stack[i], i);
-        if (i === 0) result.push("UNKNOWN");
+        this.handleUnknownCode(Profile.Operation.TICK, pc, i);
+        if (i === 0) nameStack.push("UNKNOWN");
+        entryStack.push(pc);
       }
-      if (look_for_first_c_function &&
-        i > 0 &&
-        (!entry || entry.type !== 'CPP') &&
-        last_seen_c_function !== '') {
+      if (look_for_first_c_function && i > 0 &&
+          (!entry || entry.type !== 'CPP') && last_seen_c_function !== '') {
         if (this.c_entries_[last_seen_c_function] === undefined) {
           this.c_entries_[last_seen_c_function] = 0;
         }
@@ -475,7 +649,7 @@ export class Profile {
         look_for_first_c_function = false;  // Found it, we're done.
       }
     }
-    return result;
+    return {nameStack, entryStack};
   }
 
   /**
@@ -646,7 +820,7 @@ class DynamicCodeEntry extends CodeEntry {
   constructor(size, type, name) {
     super(size, name, type);
   }
-  
+
   getName() {
     return this.type + ': ' + this.name;
   }
@@ -693,7 +867,7 @@ class DynamicFuncCodeEntry extends CodeEntry {
     return this.source?.getSourceCode();
   }
 
-  static STATE_PREFIX = ["", "~", "-", "+", "*"];
+  static STATE_PREFIX = ["", "~", "^", "-", "+", "*"];
   getState() {
     return DynamicFuncCodeEntry.STATE_PREFIX[this.state];
   }
@@ -726,7 +900,7 @@ class DynamicFuncCodeEntry extends CodeEntry {
  * @constructor
  */
 class FunctionEntry extends CodeEntry {
-  
+
   // Contains the list of generated code for this function.
   _codeEntries = new Set();
 
@@ -748,13 +922,17 @@ class FunctionEntry extends CodeEntry {
     return this._codeEntries.values().next().value.getSourceCode();
   }
 
+  get codeEntries() {
+    return this._codeEntries;
+  }
+
   /**
    * Returns node name.
    */
   getName() {
     let name = this.name;
     if (name.length == 0) {
-       return '<anonymous>';
+      return '<anonymous>';
     } else if (name.charAt(0) == ' ') {
       // An anonymous function with location: " aaa.js:10".
       return `<anonymous>${name}`;
@@ -888,7 +1066,7 @@ class CallTree {
    * @param {function(CallTreeNode)} exit A function called
    *     after visiting node's children.
    */
-    traverseInDepth(enter, exit) {
+  traverseInDepth(enter, exit) {
     function traverse(node) {
       enter(node);
       node.forEachChild(traverse);
@@ -905,7 +1083,7 @@ class CallTree {
  * @param {string} label Node label.
  * @param {CallTreeNode} opt_parent Node parent.
  */
- class CallTreeNode {
+class CallTreeNode {
   /**
    * Node self weight (how many times this node was the last node in
    * a call path).
@@ -1164,7 +1342,9 @@ JsonProfile.prototype.addSourcePositions = function (
 };
 
 JsonProfile.prototype.addScriptSource = function (id, url, source) {
-  this.scripts_[id] = new Script(id, url, source);
+  const script = new Script(id);
+  script.update(url, source);
+  this.scripts_[id] = script;
 };
 
 JsonProfile.prototype.deoptCode = function (

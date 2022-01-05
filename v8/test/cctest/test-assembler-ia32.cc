@@ -27,6 +27,7 @@
 
 #include <stdlib.h>
 
+#include "include/v8-function.h"
 #include "src/base/platform/platform.h"
 #include "src/base/utils/random-number-generator.h"
 #include "src/codegen/assembler-inl.h"
@@ -501,9 +502,9 @@ TEST(AssemblerIa32Extractps) {
 
   F4 f = FUNCTION_CAST<F4>(code->entry());
   uint64_t value1 = 0x1234'5678'8765'4321;
-  CHECK_EQ(0x12345678, f(uint64_to_double(value1)));
+  CHECK_EQ(0x12345678, f(base::uint64_to_double(value1)));
   uint64_t value2 = 0x8765'4321'1234'5678;
-  CHECK_EQ(static_cast<int>(0x87654321), f(uint64_to_double(value2)));
+  CHECK_EQ(static_cast<int>(0x87654321), f(base::uint64_to_double(value2)));
 }
 
 using F8 = int (*)(float x, float y);
@@ -1532,14 +1533,14 @@ TEST(DeoptExitSizeIsFixed) {
     Label before_exit;
     masm.bind(&before_exit);
     if (kind == DeoptimizeKind::kEagerWithResume) {
-      Builtins::Name target = Deoptimizer::GetDeoptWithResumeBuiltin(
+      Builtin target = Deoptimizer::GetDeoptWithResumeBuiltin(
           DeoptimizeReason::kDynamicCheckMaps);
       masm.CallForDeoptimization(target, 42, &before_exit, kind, &before_exit,
                                  nullptr);
       CHECK_EQ(masm.SizeOfCodeGeneratedSince(&before_exit),
                Deoptimizer::kEagerWithResumeBeforeArgsSize);
     } else {
-      Builtins::Name target = Deoptimizer::GetDeoptimizationEntry(kind);
+      Builtin target = Deoptimizer::GetDeoptimizationEntry(kind);
       masm.CallForDeoptimization(target, 42, &before_exit, kind, &before_exit,
                                  nullptr);
       CHECK_EQ(masm.SizeOfCodeGeneratedSince(&before_exit),
@@ -1548,6 +1549,35 @@ TEST(DeoptExitSizeIsFixed) {
                    : Deoptimizer::kNonLazyDeoptExitSize);
     }
   }
+}
+
+TEST(CpuFeatures_ProbeImpl) {
+  // Support for a newer extension implies support for the older extensions.
+  CHECK_IMPLIES(CpuFeatures::IsSupported(FMA3), CpuFeatures::IsSupported(AVX));
+  CHECK_IMPLIES(CpuFeatures::IsSupported(AVX2), CpuFeatures::IsSupported(AVX));
+  CHECK_IMPLIES(CpuFeatures::IsSupported(AVX),
+                CpuFeatures::IsSupported(SSE4_2));
+  CHECK_IMPLIES(CpuFeatures::IsSupported(SSE4_2),
+                CpuFeatures::IsSupported(SSE4_1));
+  CHECK_IMPLIES(CpuFeatures::IsSupported(SSE4_1),
+                CpuFeatures::IsSupported(SSSE3));
+  CHECK_IMPLIES(CpuFeatures::IsSupported(SSSE3),
+                CpuFeatures::IsSupported(SSE3));
+
+  // Check the reverse, if an older extension is not supported, a newer
+  // extension cannot be supported.
+  CHECK_IMPLIES(!CpuFeatures::IsSupported(SSE3),
+                !CpuFeatures::IsSupported(SSSE3));
+  CHECK_IMPLIES(!CpuFeatures::IsSupported(SSSE3),
+                !CpuFeatures::IsSupported(SSE4_1));
+  CHECK_IMPLIES(!CpuFeatures::IsSupported(SSE4_1),
+                !CpuFeatures::IsSupported(SSE4_2));
+  CHECK_IMPLIES(!CpuFeatures::IsSupported(SSE4_2),
+                !CpuFeatures::IsSupported(AVX));
+  CHECK_IMPLIES(!CpuFeatures::IsSupported(AVX),
+                !CpuFeatures::IsSupported(AVX2));
+  CHECK_IMPLIES(!CpuFeatures::IsSupported(AVX),
+                !CpuFeatures::IsSupported(FMA3));
 }
 
 #undef __

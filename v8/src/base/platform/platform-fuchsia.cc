@@ -121,14 +121,24 @@ bool OS::SetPermissions(void* address, size_t size, MemoryPermission access) {
   DCHECK_EQ(0, reinterpret_cast<uintptr_t>(address) % CommitPageSize());
   DCHECK_EQ(0, size % CommitPageSize());
   uint32_t prot = GetProtectionFromMemoryPermission(access);
-  return zx::vmar::root_self()->protect2(
+  return zx::vmar::root_self()->protect(
              prot, reinterpret_cast<uintptr_t>(address), size) == ZX_OK;
 }
 
 // static
 bool OS::DiscardSystemPages(void* address, size_t size) {
-  // TODO(hpayer): Does Fuchsia have madvise?
-  return true;
+  uint64_t address_int = reinterpret_cast<uint64_t>(address);
+  zx_status_t status = zx::vmar::root_self()->op_range(
+      ZX_VMO_OP_DECOMMIT, address_int, size, nullptr, 0);
+  return status == ZX_OK;
+}
+
+bool OS::DecommitPages(void* address, size_t size) {
+  // We rely on DiscardSystemPages decommitting the pages immediately (via
+  // ZX_VMO_OP_DECOMMIT) so that they are guaranteed to be zero-initialized
+  // should they be accessed again later on.
+  return SetPermissions(address, size, MemoryPermission::kNoAccess) &&
+         DiscardSystemPages(address, size);
 }
 
 // static

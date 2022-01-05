@@ -11,6 +11,7 @@
 #include "src/objects/tagged-field.h"
 #include "src/roots/roots.h"
 #include "src/torque/runtime-macro-shims.h"
+#include "src/torque/runtime-support.h"
 
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
@@ -42,8 +43,8 @@ class HeapObject : public Object {
   inline void set_map_no_write_barrier(Map value);
 
   // Access the map using acquire load and release store.
-  DECL_GETTER(synchronized_map, Map)
-  inline void synchronized_set_map(Map value);
+  DECL_ACQUIRE_GETTER(map, Map)
+  inline void set_map(Map value, ReleaseStoreTag);
 
   // Compare-and-swaps map word using release store, returns true if the map
   // word was actually swapped.
@@ -57,27 +58,28 @@ class HeapObject : public Object {
 
   // During garbage collection, the map word of a heap object does not
   // necessarily contain a map pointer.
-  DECL_GETTER(map_word, MapWord)
-  inline void set_map_word(MapWord map_word);
+  DECL_RELAXED_GETTER(map_word, MapWord)
+  inline void set_map_word(MapWord map_word, RelaxedStoreTag);
 
   // Access the map word using acquire load and release store.
-  DECL_GETTER(synchronized_map_word, MapWord)
-  inline void synchronized_set_map_word(MapWord map_word);
+  DECL_ACQUIRE_GETTER(map_word, MapWord)
+  inline void set_map_word(MapWord map_word, ReleaseStoreTag);
 
   // This method exists to help remove GetIsolate/GetHeap from HeapObject, in a
   // way that doesn't require passing Isolate/Heap down huge call chains or to
   // places where it might not be safe to access it.
   inline ReadOnlyRoots GetReadOnlyRoots() const;
   // This version is intended to be used for the isolate values produced by
-  // i::GetIsolateForPtrCompr(HeapObject) function which may return nullptr.
-  inline ReadOnlyRoots GetReadOnlyRoots(IsolateRoot isolate) const;
+  // i::GetPtrComprCageBase(HeapObject) function which may return nullptr.
+  inline ReadOnlyRoots GetReadOnlyRoots(PtrComprCageBase cage_base) const;
 
 #define IS_TYPE_FUNCTION_DECL(Type) \
   V8_INLINE bool Is##Type() const;  \
-  V8_INLINE bool Is##Type(IsolateRoot isolate) const;
+  V8_INLINE bool Is##Type(PtrComprCageBase cage_base) const;
   HEAP_OBJECT_TYPE_LIST(IS_TYPE_FUNCTION_DECL)
   IS_TYPE_FUNCTION_DECL(HashTableBase)
   IS_TYPE_FUNCTION_DECL(SmallOrderedHashTable)
+  IS_TYPE_FUNCTION_DECL(CodeT)
 #undef IS_TYPE_FUNCTION_DECL
 
   bool IsExternal(Isolate* isolate) const;
@@ -95,7 +97,7 @@ class HeapObject : public Object {
 
 #define DECL_STRUCT_PREDICATE(NAME, Name, name) \
   V8_INLINE bool Is##Name() const;              \
-  V8_INLINE bool Is##Name(IsolateRoot isolate) const;
+  V8_INLINE bool Is##Name(PtrComprCageBase cage_base) const;
   STRUCT_LIST(DECL_STRUCT_PREDICATE)
 #undef DECL_STRUCT_PREDICATE
 
@@ -150,6 +152,7 @@ class HeapObject : public Object {
   // during marking GC.
   inline ObjectSlot RawField(int byte_offset) const;
   inline MaybeObjectSlot RawMaybeWeakField(int byte_offset) const;
+  inline CodeObjectSlot RawCodeField(int byte_offset) const;
 
   DECL_CAST(HeapObject)
 
@@ -162,9 +165,9 @@ class HeapObject : public Object {
       const DisallowGarbageCollection& promise);
 
   // Dispatched behavior.
-  void HeapObjectShortPrint(std::ostream& os);  // NOLINT
+  void HeapObjectShortPrint(std::ostream& os);
 #ifdef OBJECT_PRINT
-  void PrintHeader(std::ostream& os, const char* id);  // NOLINT
+  void PrintHeader(std::ostream& os, const char* id);
 #endif
   DECL_PRINTER(HeapObject)
   EXPORT_DECL_VERIFIER(HeapObject)
@@ -176,6 +179,7 @@ class HeapObject : public Object {
   // Verify a pointer is a valid HeapObject pointer that points to object
   // areas in the heap.
   static void VerifyHeapPointer(Isolate* isolate, Object p);
+  static void VerifyCodePointer(Isolate* isolate, Object p);
 #endif
 
   static inline AllocationAlignment RequiredAlignment(Map map);
@@ -192,7 +196,8 @@ class HeapObject : public Object {
   bool CanBeRehashed() const;
 
   // Rehash the object based on the layout inferred from its map.
-  void RehashBasedOnMap(Isolate* isolate);
+  template <typename IsolateT>
+  void RehashBasedOnMap(IsolateT* isolate);
 
   // Layout description.
 #define HEAP_OBJECT_FIELDS(V) \

@@ -103,7 +103,9 @@ struct ParserTypes<Parser> {
   using Block = v8::internal::Block*;
   using BreakableStatement = v8::internal::BreakableStatement*;
   using ClassLiteralProperty = ClassLiteral::Property*;
+  using ClassLiteralStaticElement = ClassLiteral::StaticElement*;
   using ClassPropertyList = ZonePtrList<ClassLiteral::Property>*;
+  using ClassStaticElementList = ZonePtrList<ClassLiteral::StaticElement>*;
   using Expression = v8::internal::Expression*;
   using ExpressionList = ScopedPtrList<v8::internal::Expression>;
   using FormalParameters = ParserFormalParameters;
@@ -159,8 +161,8 @@ class V8_EXPORT_PRIVATE Parser : public NON_EXPORTED_BASE(ParserBase<Parser>) {
 
   // Move statistics to Isolate
   void UpdateStatistics(Isolate* isolate, Handle<Script> script);
-  template <typename LocalIsolate>
-  void HandleSourceURLComments(LocalIsolate* isolate, Handle<Script> script);
+  template <typename IsolateT>
+  void HandleSourceURLComments(IsolateT* isolate, Handle<Script> script);
 
  private:
   friend class ParserBase<Parser>;
@@ -313,9 +315,9 @@ class V8_EXPORT_PRIVATE Parser : public NON_EXPORTED_BASE(ParserBase<Parser>) {
   Variable* CreatePrivateNameVariable(ClassScope* scope, VariableMode mode,
                                       IsStaticFlag is_static_flag,
                                       const AstRawString* name);
-  FunctionLiteral* CreateInitializerFunction(
-      const char* name, DeclarationScope* scope,
-      ZonePtrList<ClassLiteral::Property>* fields);
+  FunctionLiteral* CreateInitializerFunction(const char* name,
+                                             DeclarationScope* scope,
+                                             Statement* initializer_stmt);
 
   bool IdentifierEquals(const AstRawString* identifier,
                         const AstRawString* other) {
@@ -347,6 +349,7 @@ class V8_EXPORT_PRIVATE Parser : public NON_EXPORTED_BASE(ParserBase<Parser>) {
                          const AstRawString* property_name, bool is_static,
                          bool is_computed_name, bool is_private,
                          ClassInfo* class_info);
+  void AddClassStaticBlock(Block* block, ClassInfo* class_info);
   Expression* RewriteClassLiteral(ClassScope* block_scope,
                                   const AstRawString* name,
                                   ClassInfo* class_info, int pos, int end_pos);
@@ -490,16 +493,12 @@ class V8_EXPORT_PRIVATE Parser : public NON_EXPORTED_BASE(ParserBase<Parser>) {
 
   ArrayLiteral* ArrayLiteralFromListWithSpread(
       const ScopedPtrList<Expression>& list);
-  Expression* SpreadCall(Expression* function,
-                         const ScopedPtrList<Expression>& args, int pos,
-                         Call::PossiblyEval is_possibly_eval,
-                         bool optional_chain);
-  Expression* SpreadCallNew(Expression* function,
-                            const ScopedPtrList<Expression>& args, int pos);
   Expression* RewriteSuperCall(Expression* call_expression);
 
   void SetLanguageMode(Scope* scope, LanguageMode mode);
+#if V8_ENABLE_WEBASSEMBLY
   void SetAsmModule();
+#endif  // V8_ENABLE_WEBASSEMBLY
 
   Expression* RewriteSpreads(ArrayLiteral* lit);
 
@@ -557,7 +556,7 @@ class V8_EXPORT_PRIVATE Parser : public NON_EXPORTED_BASE(ParserBase<Parser>) {
     return property != nullptr && property->IsPrivateReference();
   }
 
-  // This returns true if the expression is an indentifier (wrapped
+  // This returns true if the expression is an identifier (wrapped
   // inside a variable proxy).  We exclude the case of 'this', which
   // has been converted to a variable proxy.
   V8_INLINE static bool IsIdentifier(Expression* expression) {
@@ -586,6 +585,10 @@ class V8_EXPORT_PRIVATE Parser : public NON_EXPORTED_BASE(ParserBase<Parser>) {
       ObjectLiteral::Property* property) {
     return !property->IsPrototype();
   }
+
+  V8_INLINE v8::Extension* extension() const { return info_->extension(); }
+
+  V8_INLINE bool ParsingExtension() const { return extension() != nullptr; }
 
   V8_INLINE bool IsNative(Expression* expr) const {
     DCHECK_NOT_NULL(expr);
@@ -655,15 +658,6 @@ class V8_EXPORT_PRIVATE Parser : public NON_EXPORTED_BASE(ParserBase<Parser>) {
     }
   }
 
-  // A shortcut for performing a ToString operation
-  V8_INLINE Expression* ToString(Expression* expr) {
-    if (expr->IsStringLiteral()) return expr;
-    ScopedPtrList<Expression> args(pointer_buffer());
-    args.Add(expr);
-    return factory()->NewCallRuntime(Runtime::kInlineToString, args,
-                                     expr->position());
-  }
-
   // Returns true if we have a binary expression between two numeric
   // literals. In that case, *x will be changed to an expression which is the
   // computed value.
@@ -707,24 +701,9 @@ class V8_EXPORT_PRIVATE Parser : public NON_EXPORTED_BASE(ParserBase<Parser>) {
     return NewThrowError(Runtime::kNewTypeError, message, arg, pos);
   }
 
-  // Reporting errors.
-  void ReportMessageAt(Scanner::Location source_location,
-                       MessageTemplate message, const char* arg = nullptr) {
-    pending_error_handler()->ReportMessageAt(
-        source_location.beg_pos, source_location.end_pos, message, arg);
-    scanner_.set_parser_error();
-  }
-
   // Dummy implementation. The parser should never have a unidentifiable
   // error.
   V8_INLINE void ReportUnidentifiableError() { UNREACHABLE(); }
-
-  void ReportMessageAt(Scanner::Location source_location,
-                       MessageTemplate message, const AstRawString* arg) {
-    pending_error_handler()->ReportMessageAt(
-        source_location.beg_pos, source_location.end_pos, message, arg);
-    scanner_.set_parser_error();
-  }
 
   const AstRawString* GetRawNameFromIdentifier(const AstRawString* arg) {
     return arg;
@@ -782,7 +761,8 @@ class V8_EXPORT_PRIVATE Parser : public NON_EXPORTED_BASE(ParserBase<Parser>) {
   V8_INLINE const AstRawString* GetNumberAsSymbol() const {
     double double_value = scanner()->DoubleValue();
     char array[100];
-    const char* string = DoubleToCString(double_value, ArrayVector(array));
+    const char* string =
+        DoubleToCString(double_value, base::ArrayVector(array));
     return ast_value_factory()->GetOneByteString(string);
   }
 
@@ -841,6 +821,10 @@ class V8_EXPORT_PRIVATE Parser : public NON_EXPORTED_BASE(ParserBase<Parser>) {
   V8_INLINE ZonePtrList<ClassLiteral::Property>* NewClassPropertyList(
       int size) const {
     return zone()->New<ZonePtrList<ClassLiteral::Property>>(size, zone());
+  }
+  V8_INLINE ZonePtrList<ClassLiteral::StaticElement>* NewClassStaticElementList(
+      int size) const {
+    return zone()->New<ZonePtrList<ClassLiteral::StaticElement>>(size, zone());
   }
   V8_INLINE ZonePtrList<Statement>* NewStatementList(int size) const {
     return zone()->New<ZonePtrList<Statement>>(size, zone());
@@ -1000,6 +984,14 @@ class V8_EXPORT_PRIVATE Parser : public NON_EXPORTED_BASE(ParserBase<Parser>) {
     if (source_range_map_ == nullptr) return;
     source_range_map_->Insert(
         node, zone()->New<IterationStatementSourceRanges>(body_range));
+  }
+
+  // Used to record source ranges of expressions associated with optional chain:
+  V8_INLINE void RecordExpressionSourceRange(Expression* node,
+                                             const SourceRange& right_range) {
+    if (source_range_map_ == nullptr) return;
+    source_range_map_->Insert(node,
+                              zone()->New<ExpressionSourceRanges>(right_range));
   }
 
   V8_INLINE void RecordSuspendSourceRange(Expression* node,

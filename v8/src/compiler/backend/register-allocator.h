@@ -305,7 +305,6 @@ class TopTierRegisterAllocationData final : public RegisterAllocationData {
   TopLevelLiveRange* GetOrCreateLiveRangeFor(int index);
   // Creates a new live range.
   TopLevelLiveRange* NewLiveRange(int index, MachineRepresentation rep);
-  TopLevelLiveRange* NextLiveRange(MachineRepresentation rep);
 
   SpillRange* AssignSpillRangeToLiveRange(TopLevelLiveRange* range,
                                           SpillMode spill_mode);
@@ -351,9 +350,11 @@ class TopTierRegisterAllocationData final : public RegisterAllocationData {
 
   TickCounter* tick_counter() { return tick_counter_; }
 
- private:
-  int GetNextLiveRangeId();
+  ZoneMap<TopLevelLiveRange*, AllocatedOperand*>& slot_for_const_range() {
+    return slot_for_const_range_;
+  }
 
+ private:
   Zone* const allocation_zone_;
   Frame* const frame_;
   InstructionSequence* const code_;
@@ -378,6 +379,7 @@ class TopTierRegisterAllocationData final : public RegisterAllocationData {
   ZoneVector<ZoneVector<LiveRange*>> spill_state_;
   RegisterAllocationFlags flags_;
   TickCounter* const tick_counter_;
+  ZoneMap<TopLevelLiveRange*, AllocatedOperand*> slot_for_const_range_;
 };
 
 // Representation of the non-empty interval [start,end[.
@@ -1475,15 +1477,15 @@ class LinearScanAllocator final : public RegisterAllocator {
   bool TryReuseSpillForPhi(TopLevelLiveRange* range);
   int PickRegisterThatIsAvailableLongest(
       LiveRange* current, int hint_reg,
-      const Vector<LifetimePosition>& free_until_pos);
+      const base::Vector<LifetimePosition>& free_until_pos);
   bool TryAllocateFreeReg(LiveRange* range,
-                          const Vector<LifetimePosition>& free_until_pos);
-  bool TryAllocatePreferredReg(LiveRange* range,
-                               const Vector<LifetimePosition>& free_until_pos);
+                          const base::Vector<LifetimePosition>& free_until_pos);
+  bool TryAllocatePreferredReg(
+      LiveRange* range, const base::Vector<LifetimePosition>& free_until_pos);
   void GetFPRegisterSet(MachineRepresentation rep, int* num_regs,
                         int* num_codes, const int** codes) const;
   void FindFreeRegistersForRange(LiveRange* range,
-                                 Vector<LifetimePosition> free_until_pos);
+                                 base::Vector<LifetimePosition> free_until_pos);
   void ProcessCurrentRange(LiveRange* current, SpillMode spill_mode);
   void AllocateBlockedReg(LiveRange* range, SpillMode spill_mode);
 

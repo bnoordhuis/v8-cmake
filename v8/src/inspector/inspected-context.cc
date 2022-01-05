@@ -4,13 +4,13 @@
 
 #include "src/inspector/inspected-context.h"
 
+#include "include/v8-context.h"
+#include "include/v8-inspector.h"
 #include "src/debug/debug-interface.h"
 #include "src/inspector/injected-script.h"
 #include "src/inspector/string-util.h"
 #include "src/inspector/v8-console.h"
 #include "src/inspector/v8-inspector-impl.h"
-
-#include "include/v8-inspector.h"
 
 namespace v8_inspector {
 
@@ -126,12 +126,15 @@ void InspectedContext::discardInjectedScript(int sessionId) {
 bool InspectedContext::addInternalObject(v8::Local<v8::Object> object,
                                          V8InternalValueType type) {
   if (m_internalObjects.IsEmpty()) {
-    m_internalObjects.Reset(isolate(), v8::debug::WeakMap::New(isolate()));
+    m_internalObjects.Reset(isolate(),
+                            v8::debug::EphemeronTable::New(isolate()));
   }
-  return !m_internalObjects.Get(isolate())
-              ->Set(m_context.Get(isolate()), object,
-                    v8::Integer::New(isolate(), static_cast<int>(type)))
-              .IsEmpty();
+  v8::Local<v8::debug::EphemeronTable> new_map =
+      m_internalObjects.Get(isolate())->Set(
+          isolate(), object,
+          v8::Integer::New(isolate(), static_cast<int>(type)));
+  m_internalObjects.Reset(isolate(), new_map);
+  return true;
 }
 
 V8InternalValueType InspectedContext::getInternalType(
@@ -139,7 +142,7 @@ V8InternalValueType InspectedContext::getInternalType(
   if (m_internalObjects.IsEmpty()) return V8InternalValueType::kNone;
   v8::Local<v8::Value> typeValue;
   if (!m_internalObjects.Get(isolate())
-           ->Get(m_context.Get(isolate()), object)
+           ->Get(isolate(), object)
            .ToLocal(&typeValue) ||
       !typeValue->IsUint32()) {
     return V8InternalValueType::kNone;

@@ -97,6 +97,16 @@ class TrackingPageAllocator : public ::v8::PageAllocator {
     return result;
   }
 
+  bool DecommitPages(void* address, size_t size) override {
+    bool result = page_allocator_->DecommitPages(address, size);
+    if (result) {
+      // Mark pages as non-accessible.
+      UpdatePagePermissions(reinterpret_cast<Address>(address), size,
+                            kNoAccess);
+    }
+    return result;
+  }
+
   bool SetPermissions(void* address, size_t size,
                       PageAllocator::Permission access) override {
     bool result = page_allocator_->SetPermissions(address, size, access);
@@ -223,6 +233,7 @@ class TrackingPageAllocator : public ::v8::PageAllocator {
   PagePermissionsMap page_permissions_;
 };
 
+#if !V8_OS_FUCHSIA
 class SequentialUnmapperTest : public TestWithIsolate {
  public:
   SequentialUnmapperTest() = default;
@@ -239,11 +250,34 @@ class SequentialUnmapperTest : public TestWithIsolate {
              SetPlatformPageAllocatorForTesting(tracking_page_allocator_));
     old_flag_ = i::FLAG_concurrent_sweeping;
     i::FLAG_concurrent_sweeping = false;
+#ifdef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
+    // Reinitialize the process-wide pointer cage so it can pick up the
+    // TrackingPageAllocator.
+    // The pointer cage must be destroyed before the virtual memory cage.
+    IsolateAllocator::FreeProcessWidePtrComprCageForTesting();
+#ifdef V8_VIRTUAL_MEMORY_CAGE
+    // Reinitialze the virtual memory cage so it uses the TrackingPageAllocator.
+    GetProcessWideVirtualMemoryCage()->TearDown();
+    constexpr bool use_guard_regions = false;
+    CHECK(GetProcessWideVirtualMemoryCage()->Initialize(
+        tracking_page_allocator_, kVirtualMemoryCageMinimumSize,
+        use_guard_regions));
+#endif
+    IsolateAllocator::InitializeOncePerProcess();
+#endif
     TestWithIsolate::SetUpTestCase();
   }
 
   static void TearDownTestCase() {
     TestWithIsolate::TearDownTestCase();
+#ifdef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
+    // Free the process-wide cage reservation, otherwise the pages won't be
+    // freed until process teardown.
+    IsolateAllocator::FreeProcessWidePtrComprCageForTesting();
+#endif
+#ifdef V8_VIRTUAL_MEMORY_CAGE
+    GetProcessWideVirtualMemoryCage()->TearDown();
+#endif
     i::FLAG_concurrent_sweeping = old_flag_;
     CHECK(tracking_page_allocator_->IsEmpty());
 
@@ -275,6 +309,7 @@ bool SequentialUnmapperTest::old_flag_;
 
 // See v8:5945.
 TEST_F(SequentialUnmapperTest, UnmapOnTeardownAfterAlreadyFreeingPooled) {
+  if (FLAG_enable_third_party_heap) return;
   Page* page = allocator()->AllocatePage(
       MemoryChunkLayout::AllocatableMemoryInDataPage(),
       static_cast<PagedSpace*>(heap()->old_space()),
@@ -303,6 +338,7 @@ TEST_F(SequentialUnmapperTest, UnmapOnTeardownAfterAlreadyFreeingPooled) {
 
 // See v8:5945.
 TEST_F(SequentialUnmapperTest, UnmapOnTeardown) {
+  if (FLAG_enable_third_party_heap) return;
   Page* page = allocator()->AllocatePage(
       MemoryChunkLayout::AllocatableMemoryInDataPage(),
       static_cast<PagedSpace*>(heap()->old_space()),
@@ -326,6 +362,7 @@ TEST_F(SequentialUnmapperTest, UnmapOnTeardown) {
   tracking_page_allocator()->CheckIsFree(page->address(), page_size);
 #endif  // V8_COMPRESS_POINTERS
 }
+#endif  // !V8_OS_FUCHSIA
 
 }  // namespace internal
 }  // namespace v8

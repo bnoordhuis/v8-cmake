@@ -20,7 +20,7 @@ void ThreadLocalTop::Clear() {
   pending_handler_fp_ = kNullAddress;
   pending_handler_sp_ = kNullAddress;
   last_api_entry_ = kNullAddress;
-  pending_message_obj_ = Object();
+  pending_message_ = Object();
   rethrowing_message_ = false;
   external_caught_exception_ = false;
   c_entry_fp_ = kNullAddress;
@@ -42,8 +42,10 @@ void ThreadLocalTop::Initialize(Isolate* isolate) {
   Clear();
   isolate_ = isolate;
   thread_id_ = ThreadId::Current();
+#if V8_ENABLE_WEBASSEMBLY
   thread_in_wasm_flag_address_ = reinterpret_cast<Address>(
       trap_handler::GetThreadInWasmThreadLocalAddress());
+#endif  // V8_ENABLE_WEBASSEMBLY
 #ifdef USE_SIMULATOR
   simulator_ = Simulator::current(isolate);
 #endif

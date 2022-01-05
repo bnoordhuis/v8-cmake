@@ -8,23 +8,31 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <atomic>
 #include <vector>
 
+#include "include/cppgc/platform.h"
+#include "src/base/logging.h"
 #include "src/base/macros.h"
 #include "src/base/platform/time.h"
 #include "src/heap/cppgc/garbage-collector.h"
-#include "src/heap/cppgc/heap-base.h"
+#include "src/heap/cppgc/metric-recorder.h"
 #include "src/heap/cppgc/trace-event.h"
 
 namespace cppgc {
 namespace internal {
 
+// Histogram scopes contribute to histogram as well as to traces and metrics.
+// Other scopes contribute only to traces and metrics.
+#define CPPGC_FOR_ALL_HISTOGRAM_SCOPES(V) \
+  V(AtomicMark)                           \
+  V(AtomicWeak)                           \
+  V(AtomicCompact)                        \
+  V(AtomicSweep)                          \
+  V(IncrementalMark)                      \
+  V(IncrementalSweep)
+
 #define CPPGC_FOR_ALL_SCOPES(V)             \
-  V(AtomicMark)                             \
-  V(AtomicSweep)                            \
-  V(AtomicCompact)                          \
-  V(IncrementalMark)                        \
-  V(IncrementalSweep)                       \
   V(MarkIncrementalStart)                   \
   V(MarkIncrementalFinalize)                \
   V(MarkAtomicPrologue)                     \
@@ -32,6 +40,7 @@ namespace internal {
   V(MarkTransitiveClosure)                  \
   V(MarkTransitiveClosureWithDeadline)      \
   V(MarkFlushEphemerons)                    \
+  V(MarkOnAllocation)                       \
   V(MarkProcessBailOutObjects)              \
   V(MarkProcessMarkingWorklist)             \
   V(MarkProcessWriteBarrierWorklist)        \
@@ -43,16 +52,17 @@ namespace internal {
   V(MarkVisitCrossThreadPersistents)        \
   V(MarkVisitStack)                         \
   V(MarkVisitRememberedSets)                \
-  V(WeakInvokeCallbacks)                    \
   V(SweepInvokePreFinalizers)               \
   V(SweepIdleStep)                          \
+  V(SweepInTask)                            \
   V(SweepOnAllocation)                      \
   V(SweepFinalize)
 
-#define CPPGC_FOR_ALL_CONCURRENT_SCOPES(V) \
-  V(ConcurrentMarkProcessEphemerons)       \
-  V(ConcurrentMark)                        \
+#define CPPGC_FOR_ALL_HISTOGRAM_CONCURRENT_SCOPES(V) \
+  V(ConcurrentMark)                                  \
   V(ConcurrentSweep)
+
+#define CPPGC_FOR_ALL_CONCURRENT_SCOPES(V) V(ConcurrentMarkProcessEphemerons)
 
 // Sink for various time and memory statistics.
 class V8_EXPORT_PRIVATE StatsCollector final {
@@ -66,6 +76,8 @@ class V8_EXPORT_PRIVATE StatsCollector final {
 
   enum ScopeId {
 #define CPPGC_DECLARE_ENUM(name) k##name,
+    CPPGC_FOR_ALL_HISTOGRAM_SCOPES(CPPGC_DECLARE_ENUM)
+        kNumHistogramScopeIds,
     CPPGC_FOR_ALL_SCOPES(CPPGC_DECLARE_ENUM)
 #undef CPPGC_DECLARE_ENUM
         kNumScopeIds,
@@ -73,6 +85,8 @@ class V8_EXPORT_PRIVATE StatsCollector final {
 
   enum ConcurrentScopeId {
 #define CPPGC_DECLARE_ENUM(name) k##name,
+    CPPGC_FOR_ALL_HISTOGRAM_CONCURRENT_SCOPES(CPPGC_DECLARE_ENUM)
+        kNumHistogramConcurrentScopeIds,
     CPPGC_FOR_ALL_CONCURRENT_SCOPES(CPPGC_DECLARE_ENUM)
 #undef CPPGC_DECLARE_ENUM
         kNumConcurrentScopeIds
@@ -85,14 +99,17 @@ class V8_EXPORT_PRIVATE StatsCollector final {
   struct Event final {
     V8_EXPORT_PRIVATE explicit Event();
 
-    v8::base::TimeDelta scope_data[kNumScopeIds];
-    v8::base::Atomic32 concurrent_scope_data[kNumConcurrentScopeIds]{0};
+    v8::base::TimeDelta scope_data[kNumHistogramScopeIds];
+    v8::base::Atomic32 concurrent_scope_data[kNumHistogramConcurrentScopeIds]{
+        0};
 
     size_t epoch = -1;
     CollectionType collection_type = CollectionType::kMajor;
     IsForcedGC is_forced_gc = IsForcedGC::kNotForced;
     // Marked bytes collected during marking.
     size_t marked_bytes = 0;
+    size_t object_size_before_sweep_bytes = -1;
+    size_t memory_size_before_sweep_bytes = -1;
   };
 
  private:
@@ -106,6 +123,7 @@ class V8_EXPORT_PRIVATE StatsCollector final {
   case k##name:                                            \
     return type == CollectionType::kMajor ? "CppGC." #name \
                                           : "CppGC." #name ".Minor";
+      CPPGC_FOR_ALL_HISTOGRAM_SCOPES(CPPGC_CASE)
       CPPGC_FOR_ALL_SCOPES(CPPGC_CASE)
 #undef CPPGC_CASE
       default:
@@ -120,6 +138,7 @@ class V8_EXPORT_PRIVATE StatsCollector final {
   case k##name:                                            \
     return type == CollectionType::kMajor ? "CppGC." #name \
                                           : "CppGC." #name ".Minor";
+      CPPGC_FOR_ALL_HISTOGRAM_CONCURRENT_SCOPES(CPPGC_CASE)
       CPPGC_FOR_ALL_CONCURRENT_SCOPES(CPPGC_CASE)
 #undef CPPGC_CASE
       default:
@@ -139,9 +158,9 @@ class V8_EXPORT_PRIVATE StatsCollector final {
 
    public:
     template <typename... Args>
-    InternalScope(HeapBase& heap, ScopeIdType scope_id, Args... args)
-        : heap_(heap),
-          stats_collector_(heap_.stats_collector()),
+    InternalScope(StatsCollector* stats_collector, ScopeIdType scope_id,
+                  Args... args)
+        : stats_collector_(stats_collector),
           start_time_(v8::base::TimeTicks::Now()),
           scope_id_(scope_id) {
       DCHECK_LE(0, scope_id_);
@@ -149,6 +168,10 @@ class V8_EXPORT_PRIVATE StatsCollector final {
                 scope_category == kMutatorThread
                     ? static_cast<int>(kNumScopeIds)
                     : static_cast<int>(kNumConcurrentScopeIds));
+      DCHECK_NE(static_cast<int>(scope_id_),
+                scope_category == kMutatorThread
+                    ? static_cast<int>(kNumHistogramScopeIds)
+                    : static_cast<int>(kNumHistogramConcurrentScopeIds));
       StartTrace(args...);
     }
 
@@ -159,6 +182,10 @@ class V8_EXPORT_PRIVATE StatsCollector final {
 
     InternalScope(const InternalScope&) = delete;
     InternalScope& operator=(const InternalScope&) = delete;
+
+    void DecreaseStartTimeForTesting(v8::base::TimeDelta delta) {
+      start_time_ -= delta;
+    }
 
    private:
     void* operator new(size_t, void*) = delete;
@@ -180,9 +207,8 @@ class V8_EXPORT_PRIVATE StatsCollector final {
 
     inline void IncreaseScopeTime();
 
-    HeapBase& heap_;
     StatsCollector* const stats_collector_;
-    const v8::base::TimeTicks start_time_;
+    v8::base::TimeTicks start_time_;
     const ScopeIdType scope_id_;
   };
 
@@ -203,21 +229,28 @@ class V8_EXPORT_PRIVATE StatsCollector final {
     // the deltas is interesting.
     //
     // May trigger GC.
-    virtual void AllocatedObjectSizeIncreased(size_t) = 0;
-    virtual void AllocatedObjectSizeDecreased(size_t) = 0;
+    virtual void AllocatedObjectSizeIncreased(size_t) {}
+    virtual void AllocatedObjectSizeDecreased(size_t) {}
 
     // Called when the exact size of allocated object size is known. In
     // practice, this is after marking when marked bytes == allocated bytes.
     //
     // Must not trigger GC synchronously.
-    virtual void ResetAllocatedObjectSize(size_t) = 0;
+    virtual void ResetAllocatedObjectSize(size_t) {}
+
+    // Called upon allocating/releasing chunks of memory (e.g. pages) that can
+    // contain objects.
+    //
+    // Must not trigger GC.
+    virtual void AllocatedSizeIncreased(size_t) {}
+    virtual void AllocatedSizeDecreased(size_t) {}
   };
 
   // Observers are implemented using virtual calls. Avoid notifications below
   // reasonably interesting sizes.
   static constexpr size_t kAllocationThresholdBytes = 1024;
 
-  StatsCollector() = default;
+  explicit StatsCollector(Platform*);
   StatsCollector(const StatsCollector&) = delete;
   StatsCollector& operator=(const StatsCollector&) = delete;
 
@@ -226,10 +259,12 @@ class V8_EXPORT_PRIVATE StatsCollector final {
 
   void NotifyAllocation(size_t);
   void NotifyExplicitFree(size_t);
-  // Safepoints should only be invoked when garabge collections are possible.
+  // Safepoints should only be invoked when garbage collections are possible.
   // This is necessary as increments and decrements are reported as close to
   // their actual allocation/reclamation as possible.
   void NotifySafePointForConservativeCollection();
+
+  void NotifySafePointForTesting();
 
   // Indicates a new garbage collection cycle.
   void NotifyMarkingStarted(CollectionType, IsForcedGC);
@@ -240,13 +275,36 @@ class V8_EXPORT_PRIVATE StatsCollector final {
   // is finished at this point.
   void NotifySweepingCompleted();
 
+  size_t allocated_memory_size() const;
   // Size of live objects in bytes  on the heap. Based on the most recent marked
   // bytes and the bytes allocated since last marking.
   size_t allocated_object_size() const;
 
+  // Returns the most recent marked bytes count. Should not be called during
+  // marking.
+  size_t marked_bytes() const;
+  // Returns the overall duration of the most recent marking phase. Should not
+  // be called during marking.
+  v8::base::TimeDelta marking_time() const;
+
   double GetRecentAllocationSpeedInBytesPerMs() const;
 
   const Event& GetPreviousEventForTesting() const { return previous_; }
+
+  void NotifyAllocatedMemory(int64_t);
+  void NotifyFreedMemory(int64_t);
+
+  void IncrementDiscardedMemory(size_t);
+  void DecrementDiscardedMemory(size_t);
+  void ResetDiscardedMemory();
+  size_t discarded_memory_size() const;
+  size_t resident_memory_size() const;
+
+  void SetMetricRecorder(std::unique_ptr<MetricRecorder> histogram_recorder) {
+    metric_recorder_ = std::move(histogram_recorder);
+  }
+
+  MetricRecorder* GetMetricRecorder() const { return metric_recorder_.get(); }
 
  private:
   enum class GarbageCollectionState : uint8_t {
@@ -254,6 +312,9 @@ class V8_EXPORT_PRIVATE StatsCollector final {
     kMarking,
     kSweeping
   };
+
+  void RecordHistogramSample(ScopeId, v8::base::TimeDelta);
+  void RecordHistogramSample(ConcurrentScopeId, v8::base::TimeDelta) {}
 
   // Invokes |callback| for all registered observers.
   template <typename Callback>
@@ -273,6 +334,14 @@ class V8_EXPORT_PRIVATE StatsCollector final {
   // arithmetic for simplicity.
   int64_t allocated_bytes_since_safepoint_ = 0;
   int64_t explicitly_freed_bytes_since_safepoint_ = 0;
+#ifdef CPPGC_VERIFY_HEAP
+  // Tracks live bytes for overflows.
+  size_t tracked_live_bytes_ = 0;
+#endif  // CPPGC_VERIFY_HEAP
+
+  int64_t memory_allocated_bytes_ = 0;
+  int64_t memory_freed_bytes_since_end_of_marking_ = 0;
+  std::atomic<size_t> discarded_bytes_{0};
 
   // vector to allow fast iteration of observers. Register/Unregisters only
   // happens on startup/teardown.
@@ -285,6 +354,11 @@ class V8_EXPORT_PRIVATE StatsCollector final {
   Event current_;
   // The previous GC event which is populated at NotifySweepingFinished.
   Event previous_;
+
+  std::unique_ptr<MetricRecorder> metric_recorder_;
+
+  // |platform_| is used by the TRACE_EVENT_* macros.
+  Platform* platform_;
 };
 
 template <typename Callback>
@@ -311,6 +385,12 @@ template <StatsCollector::TraceCategory trace_category,
 template <typename... Args>
 void StatsCollector::InternalScope<trace_category, scope_category>::StartTrace(
     Args... args) {
+  // Top level scopes that contribute to histogram should always be enabled.
+  DCHECK_IMPLIES(static_cast<int>(scope_id_) <
+                     (scope_category == kMutatorThread
+                          ? static_cast<int>(kNumHistogramScopeIds)
+                          : static_cast<int>(kNumHistogramConcurrentScopeIds)),
+                 trace_category == StatsCollector::TraceCategory::kEnabled);
   if (trace_category == StatsCollector::TraceCategory::kEnabled)
     StartTraceImpl(args...);
 }
@@ -371,18 +451,26 @@ template <StatsCollector::TraceCategory trace_category,
 void StatsCollector::InternalScope<trace_category,
                                    scope_category>::IncreaseScopeTime() {
   DCHECK_NE(GarbageCollectionState::kNotRunning, stats_collector_->gc_state_);
+  // Only record top level scopes.
+  if (static_cast<int>(scope_id_) >=
+      (scope_category == kMutatorThread
+           ? static_cast<int>(kNumHistogramScopeIds)
+           : static_cast<int>(kNumHistogramConcurrentScopeIds)))
+    return;
   v8::base::TimeDelta time = v8::base::TimeTicks::Now() - start_time_;
   if (scope_category == StatsCollector::ScopeContext::kMutatorThread) {
     stats_collector_->current_.scope_data[scope_id_] += time;
+    if (stats_collector_->metric_recorder_)
+      stats_collector_->RecordHistogramSample(scope_id_, time);
     return;
   }
   // scope_category == StatsCollector::ScopeContext::kConcurrentThread
   using Atomic32 = v8::base::Atomic32;
-  const int64_t ms = time.InMicroseconds();
-  DCHECK(ms <= std::numeric_limits<Atomic32>::max());
+  const int64_t us = time.InMicroseconds();
+  DCHECK_LE(us, std::numeric_limits<Atomic32>::max());
   v8::base::Relaxed_AtomicIncrement(
       &stats_collector_->current_.concurrent_scope_data[scope_id_],
-      static_cast<Atomic32>(ms));
+      static_cast<Atomic32>(us));
 }
 
 }  // namespace internal

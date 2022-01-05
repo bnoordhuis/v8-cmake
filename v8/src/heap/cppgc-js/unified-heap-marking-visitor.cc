@@ -4,7 +4,6 @@
 
 #include "src/heap/cppgc-js/unified-heap-marking-visitor.h"
 
-#include "include/v8.h"
 #include "src/heap/cppgc-js/unified-heap-marking-state.h"
 #include "src/heap/cppgc/heap.h"
 #include "src/heap/cppgc/marking-state.h"
@@ -34,8 +33,9 @@ void UnifiedHeapMarkingVisitorBase::VisitWeak(const void* object,
 }
 
 void UnifiedHeapMarkingVisitorBase::VisitEphemeron(const void* key,
+                                                   const void* value,
                                                    TraceDescriptor value_desc) {
-  marking_state_.ProcessEphemeron(key, value_desc);
+  marking_state_.ProcessEphemeron(key, value, value_desc, *this);
 }
 
 void UnifiedHeapMarkingVisitorBase::VisitWeakContainer(

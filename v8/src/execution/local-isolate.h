@@ -15,10 +15,16 @@
 #include "src/heap/local-heap.h"
 
 namespace v8 {
+
+namespace bigint {
+class Processor;
+}
+
 namespace internal {
 
 class Isolate;
 class LocalLogger;
+class RuntimeCallStats;
 
 // HiddenLocalFactory parallels Isolate's HiddenFactory
 class V8_EXPORT_PRIVATE HiddenLocalFactory : private LocalFactory {
@@ -37,7 +43,8 @@ class V8_EXPORT_PRIVATE LocalIsolate final : private HiddenLocalFactory {
  public:
   using HandleScopeType = LocalHandleScope;
 
-  explicit LocalIsolate(Isolate* isolate, ThreadKind kind);
+  explicit LocalIsolate(Isolate* isolate, ThreadKind kind,
+                        RuntimeCallStats* runtime_call_stats = nullptr);
   ~LocalIsolate();
 
   // Kinda sketchy.
@@ -46,23 +53,31 @@ class V8_EXPORT_PRIVATE LocalIsolate final : private HiddenLocalFactory {
                                            OFFSET_OF(LocalIsolate, heap_));
   }
 
+  bool is_main_thread() { return heap()->is_main_thread(); }
+
   LocalHeap* heap() { return &heap_; }
 
-  inline Address isolate_root() const;
+  inline Address cage_base() const;
+  inline Address code_cage_base() const;
   inline ReadOnlyHeap* read_only_heap() const;
   inline Object root(RootIndex index) const;
+  inline Handle<Object> root_handle(RootIndex index) const;
 
   StringTable* string_table() const { return isolate_->string_table(); }
-  base::SharedMutex* string_access() { return isolate_->string_access(); }
+  base::SharedMutex* internalized_string_access() {
+    return isolate_->internalized_string_access();
+  }
 
   v8::internal::LocalFactory* factory() {
     // Upcast to the privately inherited base-class using c-style casts to avoid
     // undefined behavior (as static_cast cannot cast across private bases).
-    // NOLINTNEXTLINE (google-readability-casting)
-    return (v8::internal::LocalFactory*)this;  // NOLINT(readability/casting)
+    return (v8::internal::LocalFactory*)this;
   }
 
   bool has_pending_exception() const { return false; }
+
+  void RegisterDeserializerStarted();
+  void RegisterDeserializerFinished();
 
   template <typename T>
   Handle<T> Throw(Handle<Object> exception) {
@@ -82,15 +97,30 @@ class V8_EXPORT_PRIVATE LocalIsolate final : private HiddenLocalFactory {
   LocalLogger* logger() const { return logger_.get(); }
   ThreadId thread_id() const { return thread_id_; }
   Address stack_limit() const { return stack_limit_; }
+  RuntimeCallStats* runtime_call_stats() const { return runtime_call_stats_; }
+  bigint::Processor* bigint_processor() {
+    if (!bigint_processor_) InitializeBigIntProcessor();
+    return bigint_processor_;
+  }
 
   bool is_main_thread() const { return heap_.is_main_thread(); }
 
-  const std::vector<std::string>& supported_import_assertions() const {
-    return supported_import_assertions_;
+  // AsIsolate is only allowed on the main-thread.
+  Isolate* AsIsolate() {
+    DCHECK(is_main_thread());
+    DCHECK_EQ(ThreadId::Current(), isolate_->thread_id());
+    return isolate_;
+  }
+  LocalIsolate* AsLocalIsolate() { return this; }
+
+  Object* pending_message_address() {
+    return isolate_->pending_message_address();
   }
 
  private:
   friend class v8::internal::LocalFactory;
+
+  void InitializeBigIntProcessor();
 
   LocalHeap heap_;
 
@@ -101,7 +131,9 @@ class V8_EXPORT_PRIVATE LocalIsolate final : private HiddenLocalFactory {
   std::unique_ptr<LocalLogger> logger_;
   ThreadId const thread_id_;
   Address const stack_limit_;
-  std::vector<std::string> supported_import_assertions_;
+
+  RuntimeCallStats* runtime_call_stats_;
+  bigint::Processor* bigint_processor_{nullptr};
 };
 
 template <base::MutexSharedType kIsShared>
@@ -110,8 +142,7 @@ class V8_NODISCARD SharedMutexGuardIfOffThread<LocalIsolate, kIsShared> final {
   SharedMutexGuardIfOffThread(base::SharedMutex* mutex, LocalIsolate* isolate) {
     DCHECK_NOT_NULL(mutex);
     DCHECK_NOT_NULL(isolate);
-    DCHECK(!isolate->is_main_thread());
-    mutex_guard_.emplace(mutex);
+    if (!isolate->is_main_thread()) mutex_guard_.emplace(mutex);
   }
 
   SharedMutexGuardIfOffThread(const SharedMutexGuardIfOffThread&) = delete;

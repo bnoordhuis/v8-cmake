@@ -49,8 +49,6 @@ namespace internal {
 
 bool CpuFeatures::SupportsOptimizer() { return true; }
 
-bool CpuFeatures::SupportsWasmSimd128() { return IsSupported(NEON); }
-
 int DoubleRegister::SupportedRegisterCount() {
   return CpuFeatures::IsSupported(VFP32DREGS) ? 32 : 16;
 }
@@ -103,7 +101,7 @@ HeapObject RelocInfo::target_object() {
       Object(Assembler::target_address_at(pc_, constant_pool_)));
 }
 
-HeapObject RelocInfo::target_object_no_host(Isolate* isolate) {
+HeapObject RelocInfo::target_object_no_host(PtrComprCageBase cage_base) {
   return target_object();
 }
 
@@ -208,7 +206,7 @@ Operand::Operand(Smi value) : rmode_(RelocInfo::NONE) {
 Operand::Operand(Register rm) : rm_(rm), shift_op_(LSL), shift_imm_(0) {}
 
 void Assembler::CheckBuffer() {
-  if (buffer_space() <= kGap) {
+  if (V8_UNLIKELY(buffer_space() <= kGap)) {
     GrowBuffer();
   }
   MaybeCheckConstPool();

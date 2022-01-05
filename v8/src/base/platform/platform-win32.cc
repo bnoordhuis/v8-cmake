@@ -15,9 +15,15 @@
 #endif  // MINGW_HAS_SECURE_API
 #endif  // __MINGW32__
 
-#include <limits>
+#include <windows.h>
 
-#include "src/base/win32-headers.h"
+// This has to come after windows.h.
+#include <VersionHelpers.h>
+#include <dbghelp.h>   // For SymLoadModule64 and al.
+#include <mmsystem.h>  // For timeGetTime().
+#include <tlhelp32.h>  // For Module32First and al.
+
+#include <limits>
 
 #include "src/base/bits.h"
 #include "src/base/lazy-instance.h"
@@ -26,12 +32,33 @@
 #include "src/base/platform/time.h"
 #include "src/base/timezone-cache.h"
 #include "src/base/utils/random-number-generator.h"
-
-#include <VersionHelpers.h>
+#include "src/base/win32-headers.h"
 
 #if defined(_MSC_VER)
-#include <crtdbg.h>  // NOLINT
+#include <crtdbg.h>
 #endif               // defined(_MSC_VER)
+
+// Check that type sizes and alignments match.
+STATIC_ASSERT(sizeof(V8_CONDITION_VARIABLE) == sizeof(CONDITION_VARIABLE));
+STATIC_ASSERT(alignof(V8_CONDITION_VARIABLE) == alignof(CONDITION_VARIABLE));
+STATIC_ASSERT(sizeof(V8_SRWLOCK) == sizeof(SRWLOCK));
+STATIC_ASSERT(alignof(V8_SRWLOCK) == alignof(SRWLOCK));
+STATIC_ASSERT(sizeof(V8_CRITICAL_SECTION) == sizeof(CRITICAL_SECTION));
+STATIC_ASSERT(alignof(V8_CRITICAL_SECTION) == alignof(CRITICAL_SECTION));
+
+// Check that CRITICAL_SECTION offsets match.
+STATIC_ASSERT(offsetof(V8_CRITICAL_SECTION, DebugInfo) ==
+              offsetof(CRITICAL_SECTION, DebugInfo));
+STATIC_ASSERT(offsetof(V8_CRITICAL_SECTION, LockCount) ==
+              offsetof(CRITICAL_SECTION, LockCount));
+STATIC_ASSERT(offsetof(V8_CRITICAL_SECTION, RecursionCount) ==
+              offsetof(CRITICAL_SECTION, RecursionCount));
+STATIC_ASSERT(offsetof(V8_CRITICAL_SECTION, OwningThread) ==
+              offsetof(CRITICAL_SECTION, OwningThread));
+STATIC_ASSERT(offsetof(V8_CRITICAL_SECTION, LockSemaphore) ==
+              offsetof(CRITICAL_SECTION, LockSemaphore));
+STATIC_ASSERT(offsetof(V8_CRITICAL_SECTION, SpinCount) ==
+              offsetof(CRITICAL_SECTION, SpinCount));
 
 // Extra functions for MinGW. Most of these are the _s functions which are in
 // the Microsoft Visual Studio C++ CRT.
@@ -908,6 +935,21 @@ bool OS::DiscardSystemPages(void* address, size_t size) {
 }
 
 // static
+bool OS::DecommitPages(void* address, size_t size) {
+  DCHECK_EQ(0, reinterpret_cast<uintptr_t>(address) % CommitPageSize());
+  DCHECK_EQ(0, size % CommitPageSize());
+  // https://docs.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualfree:
+  // "If a page is decommitted but not released, its state changes to reserved.
+  // Subsequently, you can call VirtualAlloc to commit it, or VirtualFree to
+  // release it. Attempts to read from or write to a reserved page results in an
+  // access violation exception."
+  // https://docs.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualalloc
+  // for MEM_COMMIT: "The function also guarantees that when the caller later
+  // initially accesses the memory, the contents will be zero."
+  return VirtualFree(address, size, MEM_DECOMMIT) != 0;
+}
+
+// static
 bool OS::HasLazyCommits() {
   // TODO(alph): implement for the platform.
   return false;
@@ -929,7 +971,7 @@ void OS::Abort() {
   fflush(stderr);
 
   if (g_hard_abort) {
-    V8_IMMEDIATE_CRASH();
+    IMMEDIATE_CRASH();
   }
   // Make the MSVCRT do a silent abort.
   raise(SIGABRT);

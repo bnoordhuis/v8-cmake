@@ -9,7 +9,11 @@
 #include <functional>
 #include <string>
 
-#include "include/v8.h"
+#include "include/v8-exception.h"
+#include "include/v8-isolate.h"
+#include "include/v8-local-handle.h"
+#include "include/v8-primitive.h"
+#include "include/v8-script.h"
 #include "src/heap/factory.h"
 #include "src/objects/objects-inl.h"
 #include "src/regexp/regexp.h"
@@ -243,8 +247,9 @@ std::string GenerateRandomFlags(FuzzerArgs* args) {
   // TODO(mbid,v8:10765): Find a way to generate the kLinear flag sometimes,
   // but only for patterns that are supported by the experimental engine.
   constexpr size_t kFlagCount = JSRegExp::kFlagCount;
-  CHECK_EQ(JSRegExp::kLinear, 1 << (kFlagCount - 1));
-  CHECK_EQ(JSRegExp::kDotAll, 1 << (kFlagCount - 2));
+  CHECK_EQ(JSRegExp::kHasIndices, 1 << (kFlagCount - 1));
+  CHECK_EQ(JSRegExp::kLinear, 1 << (kFlagCount - 2));
+  CHECK_EQ(JSRegExp::kDotAll, 1 << (kFlagCount - 3));
   STATIC_ASSERT((1 << kFlagCount) - 1 <= 0xFF);
 
   const size_t flags = RandomByte(args) & ((1 << kFlagCount) - 1);
@@ -258,6 +263,7 @@ std::string GenerateRandomFlags(FuzzerArgs* args) {
   if (flags & JSRegExp::kSticky) buffer[cursor++] = 'y';
   if (flags & JSRegExp::kUnicode) buffer[cursor++] = 'u';
   if (flags & JSRegExp::kDotAll) buffer[cursor++] = 's';
+  if (flags & JSRegExp::kHasIndices) buffer[cursor++] = 'd';
 
   return std::string(buffer, cursor);
 }

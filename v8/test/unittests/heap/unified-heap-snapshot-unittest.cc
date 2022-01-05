@@ -108,7 +108,7 @@ class GCed final : public BaseWithoutName, public cppgc::NameProvider {
   static constexpr const char kExpectedName[] = "GCed";
 
   void Trace(cppgc::Visitor* v) const final { BaseWithoutName::Trace(v); }
-  const char* GetName() const final { return "GCed"; }
+  const char* GetHumanReadableName() const final { return "GCed"; }
 };
 // static
 constexpr const char GCed::kExpectedName[];
@@ -139,11 +139,8 @@ TEST_F(UnifiedHeapSnapshotTest, RetainedByCppRoot) {
       cppgc::MakeGarbageCollected<GCed>(allocation_handle());
   const v8::HeapSnapshot* snapshot = TakeHeapSnapshot();
   EXPECT_TRUE(IsValidSnapshot(snapshot));
-  EXPECT_TRUE(
-      ContainsRetainingPath(*snapshot, {
-                                           kExpectedCppRootsName,   // NOLINT
-                                           GetExpectedName<GCed>()  // NOLINT
-                                       }));
+  EXPECT_TRUE(ContainsRetainingPath(
+      *snapshot, {kExpectedCppRootsName, GetExpectedName<GCed>()}));
 }
 
 TEST_F(UnifiedHeapSnapshotTest, RetainedByCppCrossThreadRoot) {
@@ -152,10 +149,7 @@ TEST_F(UnifiedHeapSnapshotTest, RetainedByCppCrossThreadRoot) {
   const v8::HeapSnapshot* snapshot = TakeHeapSnapshot();
   EXPECT_TRUE(IsValidSnapshot(snapshot));
   EXPECT_TRUE(ContainsRetainingPath(
-      *snapshot, {
-                     kExpectedCppCrossThreadRootsName,  // NOLINT
-                     GetExpectedName<GCed>()            // NOLINT
-                 }));
+      *snapshot, {kExpectedCppCrossThreadRootsName, GetExpectedName<GCed>()}));
 }
 
 TEST_F(UnifiedHeapSnapshotTest, RetainingUnnamedType) {
@@ -168,10 +162,8 @@ TEST_F(UnifiedHeapSnapshotTest, RetainingUnnamedType) {
         *snapshot, {kExpectedCppRootsName, cppgc::NameProvider::kHiddenName}));
   } else {
     EXPECT_TRUE(ContainsRetainingPath(
-        *snapshot, {
-                       kExpectedCppRootsName,              // NOLINT
-                       GetExpectedName<BaseWithoutName>()  // NOLINT
-                   }));
+        *snapshot,
+        {kExpectedCppRootsName, GetExpectedName<BaseWithoutName>()}));
   }
 }
 
@@ -183,11 +175,8 @@ TEST_F(UnifiedHeapSnapshotTest, RetainingNamedThroughUnnamed) {
   const v8::HeapSnapshot* snapshot = TakeHeapSnapshot();
   EXPECT_TRUE(IsValidSnapshot(snapshot));
   EXPECT_TRUE(ContainsRetainingPath(
-      *snapshot, {
-                     kExpectedCppRootsName,               // NOLINT
-                     GetExpectedName<BaseWithoutName>(),  // NOLINT
-                     GetExpectedName<GCed>()              // NOLINT
-                 }));
+      *snapshot, {kExpectedCppRootsName, GetExpectedName<BaseWithoutName>(),
+                  GetExpectedName<GCed>()}));
 }
 
 TEST_F(UnifiedHeapSnapshotTest, PendingCallStack) {
@@ -212,14 +201,10 @@ TEST_F(UnifiedHeapSnapshotTest, PendingCallStack) {
   cppgc::Persistent<BaseWithoutName> holder(second);
   const v8::HeapSnapshot* snapshot = TakeHeapSnapshot();
   EXPECT_TRUE(IsValidSnapshot(snapshot));
-  EXPECT_TRUE(
-      ContainsRetainingPath(*snapshot,
-                            {
-                                kExpectedCppRootsName,               // NOLINT
-                                GetExpectedName<BaseWithoutName>(),  // NOLINT
-                                GetExpectedName<BaseWithoutName>(),  // NOLINT
-                                GetExpectedName<GCed>()              // NOLINT
-                            }));
+  EXPECT_TRUE(ContainsRetainingPath(
+      *snapshot,
+      {kExpectedCppRootsName, GetExpectedName<BaseWithoutName>(),
+       GetExpectedName<BaseWithoutName>(), GetExpectedName<GCed>()}));
 }
 
 TEST_F(UnifiedHeapSnapshotTest, ReferenceToFinishedSCC) {
@@ -250,21 +235,18 @@ TEST_F(UnifiedHeapSnapshotTest, ReferenceToFinishedSCC) {
   cppgc::Persistent<BaseWithoutName> holder(first);
   const v8::HeapSnapshot* snapshot = TakeHeapSnapshot();
   EXPECT_TRUE(IsValidSnapshot(snapshot));
-  EXPECT_TRUE(
-      ContainsRetainingPath(*snapshot,
-                            {
-                                kExpectedCppRootsName,               // NOLINT
-                                GetExpectedName<BaseWithoutName>(),  // NOLINT
-                                GetExpectedName<BaseWithoutName>(),  // NOLINT
-                                GetExpectedName<BaseWithoutName>(),  // NOLINT
-                                GetExpectedName<GCed>()              // NOLINT
-                            }));
+  EXPECT_TRUE(ContainsRetainingPath(
+      *snapshot,
+      {kExpectedCppRootsName, GetExpectedName<BaseWithoutName>(),
+       GetExpectedName<BaseWithoutName>(), GetExpectedName<BaseWithoutName>(),
+       GetExpectedName<GCed>()}));
 }
 
 namespace {
 
 class GCedWithJSRef : public cppgc::GarbageCollected<GCedWithJSRef> {
  public:
+  static uint16_t kWrappableType;
   static constexpr const char kExpectedName[] =
       "v8::internal::(anonymous namespace)::GCedWithJSRef";
 
@@ -285,7 +267,11 @@ class GCedWithJSRef : public cppgc::GarbageCollected<GCedWithJSRef> {
  private:
   TracedReference<v8::Object> v8_object_;
 };
+
 constexpr const char GCedWithJSRef::kExpectedName[];
+
+// static
+uint16_t GCedWithJSRef::kWrappableType = WrapperHelper::kTracedEmbedderId;
 
 class V8_NODISCARD JsTestingScope {
  public:
@@ -311,7 +297,8 @@ cppgc::Persistent<GCedWithJSRef> SetupWrapperWrappablePair(
   cppgc::Persistent<GCedWithJSRef> gc_w_js_ref =
       cppgc::MakeGarbageCollected<GCedWithJSRef>(allocation_handle);
   v8::Local<v8::Object> wrapper_object = WrapperHelper::CreateWrapper(
-      testing_scope.context(), gc_w_js_ref.Get(), name);
+      testing_scope.context(), &GCedWithJSRef::kWrappableType,
+      gc_w_js_ref.Get(), name);
   gc_w_js_ref->SetV8Object(testing_scope.isolate(), wrapper_object);
   return std::move(gc_w_js_ref);
 }
@@ -338,13 +325,9 @@ TEST_F(UnifiedHeapSnapshotTest, JSReferenceForcesVisibleObject) {
       testing_scope, allocation_handle(), "LeafJSObject");
   const v8::HeapSnapshot* snapshot = TakeHeapSnapshot();
   EXPECT_TRUE(IsValidSnapshot(snapshot));
-  EXPECT_TRUE(
-      ContainsRetainingPath(*snapshot,
-                            {
-                                kExpectedCppRootsName,             // NOLINT
-                                GetExpectedName<GCedWithJSRef>(),  // NOLINT
-                                "LeafJSObject"                     // NOLINT
-                            }));
+  EXPECT_TRUE(ContainsRetainingPath(
+      *snapshot, {kExpectedCppRootsName, GetExpectedName<GCedWithJSRef>(),
+                  "LeafJSObject"}));
 }
 
 TEST_F(UnifiedHeapSnapshotTest, MergedWrapperNode) {
@@ -356,7 +339,7 @@ TEST_F(UnifiedHeapSnapshotTest, MergedWrapperNode) {
       testing_scope, allocation_handle(), "MergedObject");
   gc_w_js_ref->SetWrapperClassId(1);  // Any class id will do.
   v8::Local<v8::Object> next_object = WrapperHelper::CreateWrapper(
-      testing_scope.context(), nullptr, "NextObject");
+      testing_scope.context(), nullptr, nullptr, "NextObject");
   v8::Local<v8::Object> wrapper_object =
       gc_w_js_ref->wrapper().Get(v8_isolate());
   // Chain another object to `wrapper_object`. Since `wrapper_object` should be
@@ -372,20 +355,24 @@ TEST_F(UnifiedHeapSnapshotTest, MergedWrapperNode) {
   EXPECT_TRUE(IsValidSnapshot(snapshot));
   EXPECT_TRUE(ContainsRetainingPath(
       *snapshot,
-      {
-          kExpectedCppRootsName,             // NOLINT
-          GetExpectedName<GCedWithJSRef>(),  // NOLINT
-          // GCedWithJSRef is merged into MergedObject, replacing its name.
-          "NextObject"  // NOLINT
-      }));
-  const size_t cpp_size =
-      cppgc::internal::HeapObjectHeader::FromPayload(gc_w_js_ref.Get())
-          .GetSize();
+      {kExpectedCppRootsName, GetExpectedName<GCedWithJSRef>(),
+       // GCedWithJSRef is merged into MergedObject, replacing its name.
+       "NextObject"}));
   const size_t js_size = Utils::OpenHandle(*wrapper_object)->Size();
+#if CPPGC_SUPPORTS_OBJECT_NAMES
+  const size_t cpp_size =
+      cppgc::internal::HeapObjectHeader::FromObject(gc_w_js_ref.Get())
+          .AllocatedSize();
   ForEachEntryWithName(snapshot, GetExpectedName<GCedWithJSRef>(),
                        [cpp_size, js_size](const HeapEntry& entry) {
                          EXPECT_EQ(cpp_size + js_size, entry.self_size());
                        });
+#else   // !CPPGC_SUPPORTS_OBJECT_NAMES
+  ForEachEntryWithName(snapshot, GetExpectedName<GCedWithJSRef>(),
+                       [js_size](const HeapEntry& entry) {
+                         EXPECT_EQ(js_size, entry.self_size());
+                       });
+#endif  // !CPPGC_SUPPORTS_OBJECT_NAMES
 }
 
 namespace {
@@ -434,11 +421,10 @@ TEST_F(UnifiedHeapSnapshotTest, NoTriggerForClassIdZero) {
   EXPECT_EQ(0u, DetachednessHandler::callback_count);
   EXPECT_TRUE(IsValidSnapshot(snapshot));
   EXPECT_TRUE(
-      ContainsRetainingPath(*snapshot,
-                            {
-                                kExpectedCppRootsName,             // NOLINT
-                                GetExpectedName<GCedWithJSRef>(),  // NOLINT
-                            }));
+      ContainsRetainingPath(*snapshot, {
+                                           kExpectedCppRootsName,
+                                           GetExpectedName<GCedWithJSRef>(),
+                                       }));
   ForEachEntryWithName(
       snapshot, GetExpectedName<GCedWithJSRef>(), [](const HeapEntry& entry) {
         EXPECT_EQ(kExpectedDetachedValueForUnknown, entry.detachedness());
@@ -460,11 +446,10 @@ TEST_F(UnifiedHeapSnapshotTest, TriggerDetachednessCallbackSettingAttached) {
   EXPECT_EQ(1u, DetachednessHandler::callback_count);
   EXPECT_TRUE(IsValidSnapshot(snapshot));
   EXPECT_TRUE(
-      ContainsRetainingPath(*snapshot,
-                            {
-                                kExpectedCppRootsName,             // NOLINT
-                                GetExpectedName<GCedWithJSRef>(),  // NOLINT
-                            }));
+      ContainsRetainingPath(*snapshot, {
+                                           kExpectedCppRootsName,
+                                           GetExpectedName<GCedWithJSRef>(),
+                                       }));
   ForEachEntryWithName(
       snapshot, GetExpectedName<GCedWithJSRef>(), [](const HeapEntry& entry) {
         EXPECT_EQ(kExpectedDetachedValueForAttached, entry.detachedness());
@@ -486,11 +471,10 @@ TEST_F(UnifiedHeapSnapshotTest, TriggerDetachednessCallbackSettingDetached) {
   EXPECT_EQ(1u, DetachednessHandler::callback_count);
   EXPECT_TRUE(IsValidSnapshot(snapshot));
   EXPECT_TRUE(
-      ContainsRetainingPath(*snapshot,
-                            {
-                                kExpectedCppRootsName,             // NOLINT
-                                GetExpectedName<GCedWithJSRef>(),  // NOLINT
-                            }));
+      ContainsRetainingPath(*snapshot, {
+                                           kExpectedCppRootsName,
+                                           GetExpectedName<GCedWithJSRef>(),
+                                       }));
   ForEachEntryWithName(
       snapshot, GetExpectedName<GCedWithJSRef>(), [](const HeapEntry& entry) {
         EXPECT_EQ(kExpectedDetachedValueForDetached, entry.detachedness());

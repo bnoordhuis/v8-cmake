@@ -10,7 +10,6 @@
 #include "src/handles/handles.h"
 #include "src/heap/heap-write-barrier-inl.h"
 #include "src/objects/objects-inl.h"
-#include "src/objects/string-inl.h"
 
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
@@ -37,7 +36,7 @@ Handle<Object> Oddball::ToNumber(Isolate* isolate, Handle<Oddball> input) {
 }
 
 DEF_GETTER(HeapObject, IsBoolean, bool) {
-  return IsOddball(isolate) &&
+  return IsOddball(cage_base) &&
          ((Oddball::cast(*this).kind() & Oddball::kNotBooleanMask) == 0);
 }
 

@@ -219,7 +219,7 @@ void* RegExpUnparser::VisitAssertion(RegExpAssertion* that, void* data) {
 
 void* RegExpUnparser::VisitAtom(RegExpAtom* that, void* data) {
   os_ << "'";
-  Vector<const uc16> chardata = that->data();
+  base::Vector<const base::uc16> chardata = that->data();
   for (int i = 0; i < chardata.length(); i++) {
     os_ << AsUC16(chardata[i]);
   }
@@ -293,13 +293,11 @@ void* RegExpUnparser::VisitEmpty(RegExpEmpty* that, void* data) {
   return nullptr;
 }
 
-
-std::ostream& RegExpTree::Print(std::ostream& os, Zone* zone) {  // NOLINT
+std::ostream& RegExpTree::Print(std::ostream& os, Zone* zone) {
   RegExpUnparser unparser(os, zone);
   Accept(&unparser, nullptr);
   return os;
 }
-
 
 RegExpDisjunction::RegExpDisjunction(ZoneList<RegExpTree*>* alternatives)
     : alternatives_(alternatives) {

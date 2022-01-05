@@ -116,9 +116,6 @@ Handle<Object> LoadHandler::LoadFromPrototype(
     Isolate* isolate, Handle<Map> lookup_start_object_map,
     Handle<JSReceiver> holder, Handle<Smi> smi_handler,
     MaybeObjectHandle maybe_data1, MaybeObjectHandle maybe_data2) {
-  // TODO(v8:11167) remove DCHECK once OrderedNameDictionary supported.
-  DCHECK_IMPLIES(V8_DICT_MODE_PROTOTYPES_BOOL,
-                 GetHandlerKind(*smi_handler) != Kind::kNormal);
   MaybeObjectHandle data1;
   if (maybe_data1.is_null()) {
     data1 = MaybeObjectHandle::Weak(holder);
@@ -175,7 +172,7 @@ KeyedAccessLoadMode LoadHandler::GetKeyedAccessLoadMode(MaybeObject handler) {
   if (handler->IsSmi()) {
     int const raw_handler = handler.ToSmi().value();
     Kind const kind = KindBits::decode(raw_handler);
-    if ((kind == kElement || kind == kIndexedString) &&
+    if ((kind == Kind::kElement || kind == Kind::kIndexedString) &&
         AllowOutOfBoundsBits::decode(raw_handler)) {
       return LOAD_IGNORE_OUT_OF_BOUNDS;
     }
@@ -194,7 +191,7 @@ KeyedAccessStoreMode StoreHandler::GetKeyedAccessStoreMode(
     // KeyedAccessStoreMode, compute it using KeyedAccessStoreModeForBuiltin
     // method. Hence if any other Handler get to this path, just return
     // STANDARD_STORE.
-    if (kind != kSlow) {
+    if (kind != Kind::kSlow) {
       return STANDARD_STORE;
     }
     KeyedAccessStoreMode store_mode =
@@ -208,15 +205,15 @@ KeyedAccessStoreMode StoreHandler::GetKeyedAccessStoreMode(
 Handle<Object> StoreHandler::StoreElementTransition(
     Isolate* isolate, Handle<Map> receiver_map, Handle<Map> transition,
     KeyedAccessStoreMode store_mode, MaybeHandle<Object> prev_validity_cell) {
-  Handle<Code> stub =
-      CodeFactory::ElementsTransitionAndStore(isolate, store_mode).code();
+  Handle<Object> code =
+      MakeCodeHandler(isolate, ElementsTransitionAndStoreBuiltin(store_mode));
   Handle<Object> validity_cell;
   if (!prev_validity_cell.ToHandle(&validity_cell)) {
     validity_cell =
         Map::GetOrCreatePrototypeChainValidityCell(receiver_map, isolate);
   }
   Handle<StoreHandler> handler = isolate->factory()->NewStoreHandler(1);
-  handler->set_smi_handler(*stub);
+  handler->set_smi_handler(*code);
   handler->set_validity_cell(*validity_cell);
   handler->set_data1(HeapObjectReference::Weak(*transition));
   return handler;
@@ -229,7 +226,7 @@ MaybeObjectHandle StoreHandler::StoreTransition(Isolate* isolate,
   if (!is_dictionary_map) {
     InternalIndex descriptor = transition_map->LastAdded();
     Handle<DescriptorArray> descriptors(
-        transition_map->instance_descriptors(kRelaxedLoad), isolate);
+        transition_map->instance_descriptors(isolate), isolate);
     PropertyDetails details = descriptors->GetDetails(descriptor);
     if (descriptors->GetKey(descriptor).IsPrivate()) {
       DCHECK_EQ(DONT_ENUM, details.attributes());
@@ -254,8 +251,8 @@ MaybeObjectHandle StoreHandler::StoreTransition(Isolate* isolate,
     DCHECK(!transition_map->IsJSGlobalObjectMap());
     Handle<StoreHandler> handler = isolate->factory()->NewStoreHandler(0);
     // Store normal with enabled lookup on receiver.
-    int config =
-        KindBits::encode(kNormal) | LookupOnLookupStartObjectBits::encode(true);
+    int config = KindBits::encode(Kind::kNormal) |
+                 LookupOnLookupStartObjectBits::encode(true);
     handler->set_smi_handler(Smi::FromInt(config));
     handler->set_validity_cell(*validity_cell);
     return MaybeObjectHandle(handler);
@@ -274,10 +271,6 @@ Handle<Object> StoreHandler::StoreThroughPrototype(
     Isolate* isolate, Handle<Map> receiver_map, Handle<JSReceiver> holder,
     Handle<Smi> smi_handler, MaybeObjectHandle maybe_data1,
     MaybeObjectHandle maybe_data2) {
-  // TODO(v8:11167) remove DCHECK once OrderedNameDictionary supported.
-  DCHECK_IMPLIES(V8_DICT_MODE_PROTOTYPES_BOOL,
-                 KindBits::decode(smi_handler->value()) != Kind::kNormal);
-
   MaybeObjectHandle data1;
   if (maybe_data1.is_null()) {
     data1 = MaybeObjectHandle::Weak(holder);
@@ -322,14 +315,22 @@ void PrintSmiLoadHandler(int raw_handler, std::ostream& os) {
   os << "kind = ";
   switch (kind) {
     case LoadHandler::Kind::kElement:
-      os << "kElement, allow out of bounds = "
-         << LoadHandler::AllowOutOfBoundsBits::decode(raw_handler)
-         << ", is JSArray = " << LoadHandler::IsJsArrayBits::decode(raw_handler)
-         << ", convert hole = "
-         << LoadHandler::ConvertHoleBits::decode(raw_handler)
-         << ", elements kind = "
-         << ElementsKindToString(
-                LoadHandler::ElementsKindBits::decode(raw_handler));
+      os << "kElement, ";
+      if (LoadHandler::IsWasmArrayBits::decode(raw_handler)) {
+        os << "WasmArray, "
+           << LoadHandler::WasmArrayTypeBits::decode(raw_handler);
+
+      } else {
+        os << "allow out of bounds = "
+           << LoadHandler::AllowOutOfBoundsBits::decode(raw_handler)
+           << ", is JSArray = "
+           << LoadHandler::IsJsArrayBits::decode(raw_handler)
+           << ", convert hole = "
+           << LoadHandler::ConvertHoleBits::decode(raw_handler)
+           << ", elements kind = "
+           << ElementsKindToString(
+                  LoadHandler::ElementsKindBits::decode(raw_handler));
+      }
       break;
     case LoadHandler::Kind::kIndexedString:
       os << "kIndexedString, allow out of bounds = "
@@ -342,11 +343,18 @@ void PrintSmiLoadHandler(int raw_handler, std::ostream& os) {
       os << "kGlobal";
       break;
     case LoadHandler::Kind::kField: {
-      os << "kField, is in object = "
-         << LoadHandler::IsInobjectBits::decode(raw_handler)
-         << ", is double = " << LoadHandler::IsDoubleBits::decode(raw_handler)
-         << ", field index = "
-         << LoadHandler::FieldIndexBits::decode(raw_handler);
+      if (LoadHandler::IsWasmStructBits::decode(raw_handler)) {
+        os << "kField, WasmStruct, type = "
+           << LoadHandler::WasmFieldTypeBits::decode(raw_handler)
+           << ", field offset = "
+           << LoadHandler::WasmFieldOffsetBits::decode(raw_handler);
+      } else {
+        os << "kField, is in object = "
+           << LoadHandler::IsInobjectBits::decode(raw_handler)
+           << ", is double = " << LoadHandler::IsDoubleBits::decode(raw_handler)
+           << ", field index = "
+           << LoadHandler::FieldIndexBits::decode(raw_handler);
+      }
       break;
     }
     case LoadHandler::Kind::kConstantFromPrototype: {
@@ -534,6 +542,11 @@ void StoreHandler::PrintHandler(Object handler, std::ostream& os) {
     os << ")" << std::endl;
   }
 }
+
+std::ostream& operator<<(std::ostream& os, WasmValueType type) {
+  return os << WasmValueType2String(type);
+}
+
 #endif  // defined(OBJECT_PRINT)
 
 }  // namespace internal

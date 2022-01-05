@@ -47,8 +47,6 @@ namespace internal {
 
 bool CpuFeatures::SupportsOptimizer() { return IsSupported(FPU); }
 
-bool CpuFeatures::SupportsWasmSimd128() { return IsSupported(MIPS_SIMD); }
-
 // -----------------------------------------------------------------------------
 // Operand and MemOperand.
 
@@ -147,7 +145,7 @@ HeapObject RelocInfo::target_object() {
       Object(Assembler::target_address_at(pc_, constant_pool_)));
 }
 
-HeapObject RelocInfo::target_object_no_host(Isolate* isolate) {
+HeapObject RelocInfo::target_object_no_host(PtrComprCageBase cage_base) {
   return target_object();
 }
 

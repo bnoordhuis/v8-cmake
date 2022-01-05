@@ -13,6 +13,7 @@
 
 #include "include/v8-profiler.h"
 #include "src/base/platform/time.h"
+#include "src/execution/isolate.h"
 #include "src/objects/fixed-array.h"
 #include "src/objects/hash-table.h"
 #include "src/objects/heap-object.h"
@@ -188,7 +189,8 @@ class HeapEntry {
 // HeapSnapshotGenerator fills in a HeapSnapshot.
 class HeapSnapshot {
  public:
-  explicit HeapSnapshot(HeapProfiler* profiler, bool global_objects_as_roots);
+  explicit HeapSnapshot(HeapProfiler* profiler, bool global_objects_as_roots,
+                        bool capture_numeric_value);
   HeapSnapshot(const HeapSnapshot&) = delete;
   HeapSnapshot& operator=(const HeapSnapshot&) = delete;
   void Delete();
@@ -213,6 +215,7 @@ class HeapSnapshot {
   bool treat_global_objects_as_roots() const {
     return treat_global_objects_as_roots_;
   }
+  bool capture_numeric_value() const { return capture_numeric_value_; }
 
   void AddLocation(HeapEntry* entry, int scriptId, int line, int col);
   HeapEntry* AddEntry(HeapEntry::Type type,
@@ -245,6 +248,7 @@ class HeapSnapshot {
   std::vector<SourceLocation> locations_;
   SnapshotObjectId max_snapshot_js_object_id_ = -1;
   bool treat_global_objects_as_roots_;
+  bool capture_numeric_value_;
 };
 
 
@@ -275,6 +279,10 @@ class HeapObjectsMap {
   bool MoveObject(Address from, Address to, int size);
   void UpdateObjectSize(Address addr, int size);
   SnapshotObjectId last_assigned_id() const {
+    return next_id_ - kObjectIdStep;
+  }
+  SnapshotObjectId get_next_id() {
+    next_id_ += kObjectIdStep;
     return next_id_ - kObjectIdStep;
   }
 
@@ -322,6 +330,7 @@ class HeapEntriesAllocator {
  public:
   virtual ~HeapEntriesAllocator() = default;
   virtual HeapEntry* AllocateEntry(HeapThing ptr) = 0;
+  virtual HeapEntry* AllocateEntry(Smi smi) = 0;
 };
 
 class SnapshottingProgressReportingInterface {
@@ -341,7 +350,10 @@ class V8_EXPORT_PRIVATE V8HeapExplorer : public HeapEntriesAllocator {
   V8HeapExplorer(const V8HeapExplorer&) = delete;
   V8HeapExplorer& operator=(const V8HeapExplorer&) = delete;
 
+  V8_INLINE Isolate* isolate() { return Isolate::FromHeap(heap_); }
+
   HeapEntry* AllocateEntry(HeapThing ptr) override;
+  HeapEntry* AllocateEntry(Smi smi) override;
   int EstimateObjectsCount();
   bool IterateAndExtractReferences(HeapSnapshotGenerator* generator);
   void CollectGlobalObjectsTags();
@@ -397,6 +409,7 @@ class V8_EXPORT_PRIVATE V8HeapExplorer : public HeapEntriesAllocator {
   void ExtractJSGeneratorObjectReferences(HeapEntry* entry,
                                           JSGeneratorObject generator);
   void ExtractFixedArrayReferences(HeapEntry* entry, FixedArray array);
+  void ExtractNumberReference(HeapEntry* entry, Object number);
   void ExtractFeedbackVectorReferences(HeapEntry* entry,
                                        FeedbackVector feedback_vector);
   void ExtractDescriptorArrayReferences(HeapEntry* entry,
@@ -426,7 +439,7 @@ class V8_EXPORT_PRIVATE V8HeapExplorer : public HeapEntriesAllocator {
   void SetWeakReference(HeapEntry* parent_entry, const char* reference_name,
                         Object child_obj, int field_offset);
   void SetWeakReference(HeapEntry* parent_entry, int index, Object child_obj,
-                        int field_offset);
+                        base::Optional<int> field_offset);
   void SetPropertyReference(HeapEntry* parent_entry, Name reference_name,
                             Object child,
                             const char* name_format_string = nullptr,
@@ -501,6 +514,9 @@ class HeapSnapshotGenerator : public SnapshottingProgressReportingInterface {
   // The HeapEntriesMap instance is used to track a mapping between
   // real heap objects and their representations in heap snapshots.
   using HeapEntriesMap = std::unordered_map<HeapThing, HeapEntry*>;
+  // The SmiEntriesMap instance is used to track a mapping between smi and
+  // their representations in heap snapshots.
+  using SmiEntriesMap = std::unordered_map<int, HeapEntry*>;
 
   HeapSnapshotGenerator(HeapSnapshot* snapshot,
                         v8::ActivityControl* control,
@@ -515,14 +531,29 @@ class HeapSnapshotGenerator : public SnapshottingProgressReportingInterface {
     return it != entries_map_.end() ? it->second : nullptr;
   }
 
+  HeapEntry* FindEntry(Smi smi) {
+    auto it = smis_map_.find(smi.value());
+    return it != smis_map_.end() ? it->second : nullptr;
+  }
+
   HeapEntry* AddEntry(HeapThing ptr, HeapEntriesAllocator* allocator) {
     return entries_map_.emplace(ptr, allocator->AllocateEntry(ptr))
+        .first->second;
+  }
+
+  HeapEntry* AddEntry(Smi smi, HeapEntriesAllocator* allocator) {
+    return smis_map_.emplace(smi.value(), allocator->AllocateEntry(smi))
         .first->second;
   }
 
   HeapEntry* FindOrAddEntry(HeapThing ptr, HeapEntriesAllocator* allocator) {
     HeapEntry* entry = FindEntry(ptr);
     return entry != nullptr ? entry : AddEntry(ptr, allocator);
+  }
+
+  HeapEntry* FindOrAddEntry(Smi smi, HeapEntriesAllocator* allocator) {
+    HeapEntry* entry = FindEntry(smi);
+    return entry != nullptr ? entry : AddEntry(smi, allocator);
   }
 
  private:
@@ -537,6 +568,7 @@ class HeapSnapshotGenerator : public SnapshottingProgressReportingInterface {
   NativeObjectsExplorer dom_explorer_;
   // Mapping from HeapThing pointers to HeapEntry indices.
   HeapEntriesMap entries_map_;
+  SmiEntriesMap smis_map_;
   // Used during snapshot generation.
   int progress_counter_;
   int progress_total_;

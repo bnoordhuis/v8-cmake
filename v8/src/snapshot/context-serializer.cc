@@ -175,8 +175,13 @@ void ContextSerializer::SerializeObjectImpl(Handle<HeapObject> obj) {
     // Unconditionally reset the JSFunction to its SFI's code, since we can't
     // serialize optimized code anyway.
     Handle<JSFunction> closure = Handle<JSFunction>::cast(obj);
-    closure->ResetIfBytecodeFlushed();
-    if (closure->is_compiled()) closure->set_code(closure->shared().GetCode());
+    closure->ResetIfCodeFlushed();
+    if (closure->is_compiled()) {
+      if (closure->shared().HasBaselineCode()) {
+        closure->shared().FlushBaselineCode();
+      }
+      closure->set_code(closure->shared().GetCode(), kReleaseStore);
+    }
   }
 
   CheckRehashability(*obj);
@@ -193,6 +198,7 @@ bool ContextSerializer::ShouldBeInTheStartupObjectCache(HeapObject o) {
   // would cause dupes.
   DCHECK(!o.IsScript());
   return o.IsName() || o.IsSharedFunctionInfo() || o.IsHeapNumber() ||
+         (V8_EXTERNAL_CODE_SPACE_BOOL && o.IsCodeDataContainer()) ||
          o.IsCode() || o.IsScopeInfo() || o.IsAccessorInfo() ||
          o.IsTemplateInfo() || o.IsClassPositions() ||
          o.map() == ReadOnlyRoots(isolate()).fixed_cow_array_map();

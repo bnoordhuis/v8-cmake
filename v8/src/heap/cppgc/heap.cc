@@ -4,6 +4,7 @@
 
 #include "src/heap/cppgc/heap.h"
 
+#include "include/cppgc/heap-consistency.h"
 #include "src/heap/base/stack.h"
 #include "src/heap/cppgc/garbage-collector.h"
 #include "src/heap/cppgc/gc-invoker.h"
@@ -13,6 +14,7 @@
 #include "src/heap/cppgc/marking-verifier.h"
 #include "src/heap/cppgc/prefinalizer-handler.h"
 #include "src/heap/cppgc/stats-collector.h"
+#include "src/heap/cppgc/sweeper.h"
 
 namespace cppgc {
 
@@ -44,6 +46,8 @@ void Heap::ForceGarbageCollectionSlow(const char* source, const char* reason,
   internal::Heap::From(this)->CollectGarbage(
       {internal::GarbageCollector::Config::CollectionType::kMajor, stack_state,
        MarkingType::kAtomic, SweepingType::kAtomic,
+       internal::GarbageCollector::Config::FreeMemoryHandling::
+           kDiscardWherePossible,
        internal::GarbageCollector::Config::IsForcedGC::kForced});
 }
 
@@ -61,11 +65,11 @@ class Unmarker final : private HeapVisitor<Unmarker> {
   friend class HeapVisitor<Unmarker>;
 
  public:
-  explicit Unmarker(RawHeap* heap) { Traverse(heap); }
+  explicit Unmarker(RawHeap& heap) { Traverse(heap); }
 
  private:
-  bool VisitHeapObjectHeader(HeapObjectHeader* header) {
-    if (header->IsMarked()) header->Unmark();
+  bool VisitHeapObjectHeader(HeapObjectHeader& header) {
+    if (header.IsMarked()) header.Unmark();
     return true;
   }
 };
@@ -100,12 +104,10 @@ Heap::Heap(std::shared_ptr<cppgc::Platform> platform,
 }
 
 Heap::~Heap() {
-  NoGCScope no_gc(*this);
+  subtle::NoGarbageCollectionScope no_gc(*this);
   // Finish already running GC if any, but don't finalize live objects.
   sweeper_.FinishIfRunning();
 }
-
-bool Heap::IsMarking() const { return marker_.get(); }
 
 void Heap::CollectGarbage(Config config) {
   DCHECK_EQ(Config::MarkingType::kAtomic, config.marking_type);
@@ -115,10 +117,10 @@ void Heap::CollectGarbage(Config config) {
 
   config_ = config;
 
-  if (!IsMarking()) StartGarbageCollection(config);
-
+  if (!IsMarking()) {
+    StartGarbageCollection(config);
+  }
   DCHECK(IsMarking());
-
   FinalizeGarbageCollection(config.stack_state);
 }
 
@@ -149,7 +151,6 @@ void Heap::FinalizeIncrementalGarbageCollectionIfRunning(Config config) {
 
 void Heap::StartGarbageCollection(Config config) {
   DCHECK(!IsMarking());
-
   DCHECK(!in_no_gc_scope());
 
   // Finish sweeping in case it is still running.
@@ -159,7 +160,7 @@ void Heap::StartGarbageCollection(Config config) {
 
 #if defined(CPPGC_YOUNG_GENERATION)
   if (config.collection_type == Config::CollectionType::kMajor)
-    Unmarker unmarker(&raw_heap());
+    Unmarker unmarker(raw_heap());
 #endif
 
   const Marker::MarkingConfig marking_config{
@@ -172,42 +173,66 @@ void Heap::StartGarbageCollection(Config config) {
 void Heap::FinalizeGarbageCollection(Config::StackState stack_state) {
   DCHECK(IsMarking());
   DCHECK(!in_no_gc_scope());
+  CHECK(!in_disallow_gc_scope());
   config_.stack_state = stack_state;
+  if (override_stack_state_) {
+    config_.stack_state = *override_stack_state_;
+  }
+  SetStackEndOfCurrentGC(v8::base::Stack::GetCurrentStackPosition());
+  in_atomic_pause_ = true;
   {
     // This guards atomic pause marking, meaning that no internal method or
     // external callbacks are allowed to allocate new objects.
-    ObjectAllocator::NoAllocationScope no_allocation_scope_(object_allocator_);
-    marker_->FinishMarking(stack_state);
-  }
-  {
-    // Pre finalizers are forbidden from allocating objects.
-    ObjectAllocator::NoAllocationScope no_allocation_scope_(object_allocator_);
-    prefinalizer_handler_->InvokePreFinalizers();
+    cppgc::subtle::DisallowGarbageCollectionScope no_gc_scope(*this);
+    marker_->FinishMarking(config_.stack_state);
   }
   marker_.reset();
-  // TODO(chromium:1056170): replace build flag with dedicated flag.
-#if DEBUG
+  const size_t bytes_allocated_in_prefinalizers = ExecutePreFinalizers();
+#if CPPGC_VERIFY_HEAP
   MarkingVerifier verifier(*this);
-  verifier.Run(stack_state);
+  verifier.Run(
+      config_.stack_state, stack_end_of_current_gc(),
+      stats_collector()->marked_bytes() + bytes_allocated_in_prefinalizers);
+#endif  // CPPGC_VERIFY_HEAP
+#ifndef CPPGC_ALLOW_ALLOCATIONS_IN_PREFINALIZERS
+  DCHECK_EQ(0u, bytes_allocated_in_prefinalizers);
 #endif
+  USE(bytes_allocated_in_prefinalizers);
 
-  NoGCScope no_gc(*this);
+  subtle::NoGarbageCollectionScope no_gc(*this);
   const Sweeper::SweepingConfig sweeping_config{
       config_.sweeping_type,
-      Sweeper::SweepingConfig::CompactableSpaceHandling::kSweep};
+      Sweeper::SweepingConfig::CompactableSpaceHandling::kSweep,
+      config_.free_memory_handling};
   sweeper_.Start(sweeping_config);
+  in_atomic_pause_ = false;
   sweeper_.NotifyDoneIfNeeded();
 }
-
-void Heap::PostGarbageCollection() {}
 
 void Heap::DisableHeapGrowingForTesting() { growing_.DisableForTesting(); }
 
 void Heap::FinalizeIncrementalGarbageCollectionIfNeeded(
     Config::StackState stack_state) {
   StatsCollector::EnabledScope stats_scope(
-      *this, StatsCollector::kMarkIncrementalFinalize);
+      stats_collector(), StatsCollector::kMarkIncrementalFinalize);
   FinalizeGarbageCollection(stack_state);
+}
+
+void Heap::StartIncrementalGarbageCollectionForTesting() {
+  DCHECK(!IsMarking());
+  DCHECK(!in_no_gc_scope());
+  StartGarbageCollection({Config::CollectionType::kMajor,
+                          Config::StackState::kNoHeapPointers,
+                          Config::MarkingType::kIncrementalAndConcurrent,
+                          Config::SweepingType::kIncrementalAndConcurrent});
+}
+
+void Heap::FinalizeIncrementalGarbageCollectionForTesting(
+    EmbedderStackState stack_state) {
+  DCHECK(!in_no_gc_scope());
+  DCHECK(IsMarking());
+  FinalizeGarbageCollection(stack_state);
+  sweeper_.FinishIfRunning();
 }
 
 }  // namespace internal

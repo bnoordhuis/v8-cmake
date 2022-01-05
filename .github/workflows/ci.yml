@@ -1,6 +1,7 @@
 name: v8-cmake
 
 on:
+  push:
   pull_request:
     paths:
       - 'CMakeLists.txt'
@@ -10,6 +11,7 @@ on:
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
         os: [macos-latest, ubuntu-18.04, ubuntu-20.04, windows-latest]
     runs-on: ${{matrix.os}}

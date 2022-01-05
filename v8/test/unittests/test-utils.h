@@ -8,7 +8,10 @@
 #include <memory>
 #include <vector>
 
-#include "include/v8.h"
+#include "include/v8-array-buffer.h"
+#include "include/v8-context.h"
+#include "include/v8-local-handle.h"
+#include "include/v8-primitive.h"
 #include "src/api/api-inl.h"
 #include "src/base/macros.h"
 #include "src/base/utils/random-number-generator.h"
@@ -239,7 +242,7 @@ class V8_NODISCARD SaveFlags {
 
  private:
 #define FLAG_MODE_APPLY(ftype, ctype, nam, def, cmt) ctype SAVED_##nam;
-#include "src/flags/flag-definitions.h"  // NOLINT
+#include "src/flags/flag-definitions.h"
 #undef FLAG_MODE_APPLY
 };
 

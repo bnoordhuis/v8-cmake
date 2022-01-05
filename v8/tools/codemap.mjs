@@ -184,7 +184,7 @@ export class CodeMap {
         result = this.findInTree_(this.libraries_, addr);
         if (!result) return null;
       }
-      return { entry : result.value, offset : addr - result.key };
+      return {entry: result.value, offset: addr - result.key};
     }
     const min = this.dynamics_.findMin();
     const max = this.dynamics_.findMax();
@@ -197,7 +197,7 @@ export class CodeMap {
         entry.name = this.dynamicsNameGen_.getName(entry.name);
         entry.nameUpdated_ = true;
       }
-      return { entry, offset : addr - dynaEntry.key };
+      return {entry, offset: addr - dynaEntry.key};
     }
     return null;
   }
@@ -252,10 +252,17 @@ export class CodeMap {
   }
 
   /**
-   * Returns an array of all libraries entries.
+   * Returns an array of all library entries.
    */
-  getAllLibrariesEntries() {
+  getAllLibraryEntries() {
     return this.libraries_.exportValues();
+  }
+
+  /**
+   * Returns an array of pairs of all library entries and their addresses.
+   */
+  getAllLibraryEntriesWithAddresses() {
+    return this.libraries_.exportKeysAndValues();
   }
 }
 

@@ -6,12 +6,15 @@
 #define V8_OBJECTS_CODE_H_
 
 #include "src/base/bit-field.h"
+#include "src/builtins/builtins.h"
 #include "src/codegen/handler-table.h"
+#include "src/deoptimizer/translation-array.h"
 #include "src/objects/code-kind.h"
 #include "src/objects/contexts.h"
 #include "src/objects/fixed-array.h"
 #include "src/objects/heap-object.h"
 #include "src/objects/objects.h"
+#include "src/objects/shared-function-info.h"
 #include "src/objects/struct.h"
 
 // Has to be the last include (doesn't have include guards):
@@ -29,6 +32,8 @@ namespace interpreter {
 class Register;
 }  // namespace interpreter
 
+#include "torque-generated/src/objects/code-tq.inc"
+
 // CodeDataContainer is a container for all mutable fields associated with its
 // referencing {Code} object. Since {Code} objects reside on write-protected
 // pages within the heap, its header fields need to be immutable. There always
@@ -38,11 +43,32 @@ class CodeDataContainer : public HeapObject {
  public:
   NEVER_READ_ONLY_SPACE
   DECL_ACCESSORS(next_code_link, Object)
-  DECL_INT_ACCESSORS(kind_specific_flags)
+  DECL_RELAXED_INT32_ACCESSORS(kind_specific_flags)
 
   // Clear uninitialized padding space. This ensures that the snapshot content
   // is deterministic.
   inline void clear_padding();
+
+  // Back-reference to the Code object.
+  // Available only when V8_EXTERNAL_CODE_SPACE is defined.
+  DECL_GETTER(code, Code)
+  DECL_RELAXED_GETTER(code, Code)
+
+  // Cached value of code().InstructionStart().
+  // Available only when V8_EXTERNAL_CODE_SPACE is defined.
+  DECL_GETTER(code_entry_point, Address)
+
+  inline void SetCodeAndEntryPoint(
+      Isolate* isolate_for_sandbox, Code code,
+      WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+  // Updates the value of the code entry point. The code must be equal to
+  // the code() value.
+  inline void UpdateCodeEntryPoint(Isolate* isolate_for_sandbox, Code code);
+
+  inline void AllocateExternalPointerEntries(Isolate* isolate);
+
+  // Alias for code_entry_point to make it API compatible with Code.
+  inline Address InstructionStart() const;
 
   DECL_CAST(CodeDataContainer)
 
@@ -51,21 +77,34 @@ class CodeDataContainer : public HeapObject {
   DECL_VERIFIER(CodeDataContainer)
 
 // Layout description.
-#define CODE_DATA_FIELDS(V)                                 \
-  /* Weak pointer fields. */                                \
-  V(kPointerFieldsStrongEndOffset, 0)                       \
-  V(kNextCodeLinkOffset, kTaggedSize)                       \
-  V(kPointerFieldsWeakEndOffset, 0)                         \
-  /* Raw data fields. */                                    \
-  V(kKindSpecificFlagsOffset, kInt32Size)                   \
-  V(kUnalignedSize, OBJECT_POINTER_PADDING(kUnalignedSize)) \
-  /* Total size. */                                         \
+#define CODE_DATA_FIELDS(V)                                     \
+  /* Strong pointer fields. */                                  \
+  V(kPointerFieldsStrongEndOffset, 0)                           \
+  /* Weak pointer fields. */                                    \
+  V(kNextCodeLinkOffset, kTaggedSize)                           \
+  V(kPointerFieldsWeakEndOffset, 0)                             \
+  /* Strong Code pointer fields. */                             \
+  V(kCodeOffset, V8_EXTERNAL_CODE_SPACE_BOOL ? kTaggedSize : 0) \
+  V(kCodePointerFieldsStrongEndOffset, 0)                       \
+  /* Raw data fields. */                                        \
+  V(kCodeEntryPointOffset,                                      \
+    V8_EXTERNAL_CODE_SPACE_BOOL ? kExternalPointerSize : 0)     \
+  V(kKindSpecificFlagsOffset, kInt32Size)                       \
+  V(kUnalignedSize, OBJECT_POINTER_PADDING(kUnalignedSize))     \
+  /* Total size. */                                             \
   V(kSize, 0)
 
   DEFINE_FIELD_OFFSET_CONSTANTS(HeapObject::kHeaderSize, CODE_DATA_FIELDS)
 #undef CODE_DATA_FIELDS
 
   class BodyDescriptor;
+
+ private:
+  DECL_ACCESSORS(raw_code, Object)
+  DECL_RELAXED_ACCESSORS(raw_code, Object)
+  inline void set_code_entry_point(Isolate* isolate, Address value);
+
+  friend Factory;
 
   OBJECT_CONSTRUCTORS(CodeDataContainer, HeapObject);
 };
@@ -148,6 +187,28 @@ class Code : public HeapObject {
   inline Address InstructionEnd() const;
   V8_EXPORT_PRIVATE Address OffHeapInstructionEnd() const;
 
+  // When builtins un-embedding is enabled for the Isolate
+  // (see Isolate::is_short_builtin_calls_enabled()) then both embedded and
+  // un-embedded builtins might be exeuted and thus two kinds of |pc|s might
+  // appear on the stack.
+  // Unlike the paremeterless versions of the functions above the below variants
+  // ensure that the instruction start correspond to the given |pc| value.
+  // Thus for off-heap trampoline Code objects the result might be the
+  // instruction start/end of the embedded code stream or of un-embedded one.
+  // For normal Code objects these functions just return the
+  // raw_instruction_start/end() values.
+  // TODO(11527): remove these versions once the full solution is ready.
+  inline Address InstructionStart(Isolate* isolate, Address pc) const;
+  V8_EXPORT_PRIVATE Address OffHeapInstructionStart(Isolate* isolate,
+                                                    Address pc) const;
+  inline Address InstructionEnd(Isolate* isolate, Address pc) const;
+  V8_EXPORT_PRIVATE Address OffHeapInstructionEnd(Isolate* isolate,
+                                                  Address pc) const;
+
+  // Computes offset of the |pc| from the instruction start. The |pc| must
+  // belong to this code.
+  inline int GetOffsetFromInstructionStart(Isolate* isolate, Address pc) const;
+
   inline int raw_instruction_size() const;
   inline void set_raw_instruction_size(int value);
   inline int InstructionSize() const;
@@ -212,19 +273,29 @@ class Code : public HeapObject {
 
   // [relocation_info]: Code relocation information
   DECL_ACCESSORS(relocation_info, ByteArray)
+  DECL_RELEASE_ACQUIRE_ACCESSORS(relocation_info, ByteArray)
+  DECL_ACCESSORS(relocation_info_or_undefined, HeapObject)
 
   // This function should be called only from GC.
   void ClearEmbeddedObjects(Heap* heap);
 
-  // [deoptimization_data]: Array containing data for deopt.
+  // [deoptimization_data]: Array containing data for deopt for non-baseline
+  // code.
   DECL_ACCESSORS(deoptimization_data, FixedArray)
+  // [bytecode_or_interpreter_data]: BytecodeArray or InterpreterData for
+  // baseline code.
+  DECL_ACCESSORS(bytecode_or_interpreter_data, HeapObject)
 
-  // [source_position_table]: ByteArray for the source positions table.
-  DECL_ACCESSORS(source_position_table, Object)
+  // [source_position_table]: ByteArray for the source positions table for
+  // non-baseline code.
+  DECL_ACCESSORS(source_position_table, ByteArray)
+  // [bytecode_offset_table]: ByteArray for the bytecode offset for baseline
+  // code.
+  DECL_ACCESSORS(bytecode_offset_table, ByteArray)
 
   // If source positions have not been collected or an exception has been thrown
   // this will return empty_byte_array.
-  inline ByteArray SourcePositionTable() const;
+  inline ByteArray SourcePositionTable(SharedFunctionInfo sfi) const;
 
   // [code_data_container]: A container indirection for all mutable fields.
   DECL_RELEASE_ACQUIRE_ACCESSORS(code_data_container, CodeDataContainer)
@@ -236,6 +307,7 @@ class Code : public HeapObject {
 
   // Unchecked accessors to be used during GC.
   inline ByteArray unchecked_relocation_info() const;
+  inline HeapObject synchronized_unchecked_relocation_info_or_undefined() const;
 
   inline int relocation_size() const;
 
@@ -248,12 +320,16 @@ class Code : public HeapObject {
   // Testers for interpreter builtins.
   inline bool is_interpreter_trampoline_builtin() const;
 
+  // Testers for baseline builtins.
+  inline bool is_baseline_trampoline_builtin() const;
+  inline bool is_baseline_leave_frame_builtin() const;
+
   // Tells whether the code checks the optimization marker in the function's
   // feedback vector.
   inline bool checks_optimization_marker() const;
 
   // Tells whether the outgoing parameters of this code are tagged pointers.
-  inline bool has_tagged_params() const;
+  inline bool has_tagged_outgoing_params() const;
 
   // [is_turbofanned]: Tells whether the code object was generated by the
   // TurboFan optimizing compiler.
@@ -264,11 +340,11 @@ class Code : public HeapObject {
   inline bool can_have_weak_objects() const;
   inline void set_can_have_weak_objects(bool value);
 
-  // [builtin_index]: For builtins, tells which builtin index the code object
+  // [builtin]: For builtins, tells which builtin index the code object
   // has. The builtin index is a non-negative integer for builtins, and
-  // Builtins::kNoBuiltinId (-1) otherwise.
-  inline int builtin_index() const;
-  inline void set_builtin_index(int id);
+  // Builtin::kNoBuiltinId (-1) otherwise.
+  inline Builtin builtin_id() const;
+  inline void set_builtin_id(Builtin builtin);
   inline bool is_builtin() const;
 
   inline unsigned inlined_bytecode_size() const;
@@ -321,7 +397,7 @@ class Code : public HeapObject {
   inline bool is_off_heap_trampoline() const;
 
   // Get the safepoint entry for the given pc.
-  SafepointEntry GetSafepointEntry(Address pc);
+  SafepointEntry GetSafepointEntry(Isolate* isolate, Address pc);
 
   // The entire code object including its header is copied verbatim to the
   // snapshot so that it can be written in one, fast, memcpy during
@@ -360,19 +436,41 @@ class Code : public HeapObject {
   inline Address entry() const;
 
   // Returns true if pc is inside this object's instructions.
-  inline bool contains(Address pc);
+  inline bool contains(Isolate* isolate, Address pc);
 
   // Relocate the code by delta bytes. Called to signal that this code
   // object has been moved by delta bytes.
   void Relocate(intptr_t delta);
 
   // Migrate code from desc without flushing the instruction cache.
-  void CopyFromNoFlush(Heap* heap, const CodeDesc& desc);
+  void CopyFromNoFlush(ByteArray reloc_info, Heap* heap, const CodeDesc& desc);
+  void RelocateFromDesc(ByteArray reloc_info, Heap* heap, const CodeDesc& desc);
+
+#ifdef VERIFY_HEAP
+  void VerifyRelocInfo(Isolate* isolate, ByteArray reloc_info);
+#endif
 
   // Copy the RelocInfo portion of |desc| to |dest|. The ByteArray must be
   // exactly the same size as the RelocInfo in |desc|.
   static inline void CopyRelocInfoToByteArray(ByteArray dest,
                                               const CodeDesc& desc);
+
+  inline uintptr_t GetBaselineStartPCForBytecodeOffset(int bytecode_offset,
+                                                       BytecodeArray bytecodes);
+
+  inline uintptr_t GetBaselineEndPCForBytecodeOffset(int bytecode_offset,
+                                                     BytecodeArray bytecodes);
+
+  // Returns the PC of the next bytecode in execution order.
+  // If the bytecode at the given offset is JumpLoop, the PC of the jump target
+  // is returned. Other jumps are not allowed.
+  // For other bytecodes this is equivalent to
+  // GetBaselineEndPCForBytecodeOffset.
+  inline uintptr_t GetBaselinePCForNextExecutedBytecode(
+      int bytecode_offset, BytecodeArray bytecodes);
+
+  inline int GetBytecodeOffsetForBaselinePC(Address baseline_pc,
+                                            BytecodeArray bytecodes);
 
   // Flushes the instruction cache for the executable instructions of this code
   // object. Make sure to call this while the code is still writable.
@@ -391,14 +489,13 @@ class Code : public HeapObject {
   DECL_PRINTER(Code)
   DECL_VERIFIER(Code)
 
-  bool CanDeoptAt(Address pc);
+  bool CanDeoptAt(Isolate* isolate, Address pc);
 
   void SetMarkedForDeoptimization(const char* reason);
 
   inline HandlerTable::CatchPrediction GetBuiltinCatchPrediction();
 
   bool IsIsolateIndependent(Isolate* isolate);
-  bool IsNativeContextIndependent(Isolate* isolate);
 
   inline bool CanContainWeakObjects();
 
@@ -418,8 +515,8 @@ class Code : public HeapObject {
   // Layout description.
 #define CODE_FIELDS(V)                                                        \
   V(kRelocationInfoOffset, kTaggedSize)                                       \
-  V(kDeoptimizationDataOffset, kTaggedSize)                                   \
-  V(kSourcePositionTableOffset, kTaggedSize)                                  \
+  V(kDeoptimizationDataOrInterpreterDataOffset, kTaggedSize)                  \
+  V(kPositionTableOffset, kTaggedSize)                                        \
   V(kCodeDataContainerOffset, kTaggedSize)                                    \
   /* Data or code not directly visited by GC directly starts here. */         \
   /* The serializer needs to copy bytes starting from here verbatim. */       \
@@ -451,8 +548,10 @@ class Code : public HeapObject {
   static constexpr int kHeaderPaddingSize = COMPRESS_POINTERS_BOOL ? 12 : 24;
 #elif V8_TARGET_ARCH_MIPS64
   static constexpr int kHeaderPaddingSize = 24;
+#elif V8_TARGET_ARCH_LOONG64
+  static constexpr int kHeaderPaddingSize = 24;
 #elif V8_TARGET_ARCH_X64
-  static constexpr int kHeaderPaddingSize = COMPRESS_POINTERS_BOOL ? 12 : 24;
+  static constexpr int kHeaderPaddingSize = COMPRESS_POINTERS_BOOL ? 12 : 56;
 #elif V8_TARGET_ARCH_ARM
   static constexpr int kHeaderPaddingSize = 12;
 #elif V8_TARGET_ARCH_IA32
@@ -465,6 +564,8 @@ class Code : public HeapObject {
                                          : (COMPRESS_POINTERS_BOOL ? 12 : 24);
 #elif V8_TARGET_ARCH_S390X
   static constexpr int kHeaderPaddingSize = COMPRESS_POINTERS_BOOL ? 12 : 24;
+#elif V8_TARGET_ARCH_RISCV64
+  static constexpr int kHeaderPaddingSize = (COMPRESS_POINTERS_BOOL ? 12 : 24);
 #else
 #error Unknown architecture.
 #endif
@@ -511,9 +612,23 @@ class Code : public HeapObject {
 
  private:
   friend class RelocIterator;
+  friend class EvacuateVisitorBase;
+
+  inline CodeDataContainer GCSafeCodeDataContainer(AcquireLoadTag) const;
 
   bool is_promise_rejection() const;
   bool is_exception_caught() const;
+
+  enum BytecodeToPCPosition {
+    kPcAtStartOfBytecode,
+    // End of bytecode equals the start of the next bytecode.
+    // We need it when we deoptimize to the next bytecode (lazy deopt or deopt
+    // of non-topmost frame).
+    kPcAtEndOfBytecode
+  };
+  inline uintptr_t GetBaselinePCForBytecodeOffset(int bytecode_offset,
+                                                  BytecodeToPCPosition position,
+                                                  BytecodeArray bytecodes);
 
   OBJECT_CONSTRUCTORS(Code, HeapObject);
 };
@@ -532,6 +647,17 @@ class Code::OptimizedCodeIterator {
 
   DISALLOW_GARBAGE_COLLECTION(no_gc)
 };
+
+// Helper functions for converting Code objects to CodeDataContainer and back
+// when V8_EXTERNAL_CODE_SPACE is enabled.
+inline CodeT ToCodeT(Code code);
+inline Code FromCodeT(CodeT code);
+inline Code FromCodeT(CodeT code, RelaxedLoadTag);
+inline Code FromCodeT(CodeT code, AcquireLoadTag);
+inline Code FromCodeT(CodeT code, PtrComprCageBase);
+inline Code FromCodeT(CodeT code, PtrComprCageBase, RelaxedLoadTag);
+inline Code FromCodeT(CodeT code, PtrComprCageBase, AcquireLoadTag);
+inline CodeDataContainer CodeDataContainerFromCodeT(CodeT code);
 
 class AbstractCode : public HeapObject {
  public:
@@ -566,8 +692,8 @@ class AbstractCode : public HeapObject {
   // at instruction_start.
   inline int InstructionSize();
 
-  // Return the source position table.
-  inline ByteArray source_position_table();
+  // Return the source position table for interpreter code.
+  inline ByteArray SourcePositionTable(SharedFunctionInfo sfi);
 
   void DropStackFrameCache();
 
@@ -589,6 +715,9 @@ class AbstractCode : public HeapObject {
   static const int kMaxLoopNestingMarker = 6;
 
   OBJECT_CONSTRUCTORS(AbstractCode, HeapObject);
+
+ private:
+  inline ByteArray SourcePositionTableInternal();
 };
 
 // Dependent code is a singly linked list of weak fixed arrays. Each array
@@ -619,9 +748,14 @@ class DependentCode : public WeakFixedArray {
     // deoptimized when the transition is replaced by a new version.
     kTransitionGroup,
     // Group of code that omit run-time prototype checks for prototypes
-    // described by this map. The group is deoptimized whenever an object
-    // described by this map changes shape (and transitions to a new map),
-    // possibly invalidating the assumptions embedded in the code.
+    // described by this map. The group is deoptimized whenever the following
+    // conditions hold, possibly invalidating the assumptions embedded in the
+    // code:
+    // a) A fast-mode object described by this map changes shape (and
+    // transitions to a new map), or
+    // b) A dictionary-mode prototype described by this map changes shape, the
+    // const-ness of one of its properties changes, or its [[Prototype]]
+    // changes (only the latter causes a transition).
     kPrototypeCheckGroup,
     // Group of code that depends on global property values in property cells
     // not being changed.
@@ -644,7 +778,7 @@ class DependentCode : public WeakFixedArray {
 
   // Register a dependency of {code} on {object}, of the kind given by {group}.
   V8_EXPORT_PRIVATE static void InstallDependency(Isolate* isolate,
-                                                  const MaybeObjectHandle& code,
+                                                  Handle<Code> code,
                                                   Handle<HeapObject> object,
                                                   DependencyGroup group);
 
@@ -667,14 +801,14 @@ class DependentCode : public WeakFixedArray {
                                Handle<DependentCode> dep);
 
   static Handle<DependentCode> New(Isolate* isolate, DependencyGroup group,
-                                   const MaybeObjectHandle& object,
+                                   Handle<Code> code,
                                    Handle<DependentCode> next);
   static Handle<DependentCode> EnsureSpace(Isolate* isolate,
                                            Handle<DependentCode> entries);
   static Handle<DependentCode> InsertWeakCode(Isolate* isolate,
                                               Handle<DependentCode> entries,
                                               DependencyGroup group,
-                                              const MaybeObjectHandle& code);
+                                              Handle<Code> code);
 
   // Compact by removing cleared weak cells and return true if there was
   // any cleared weak cell.
@@ -706,7 +840,8 @@ class DependentCode : public WeakFixedArray {
 };
 
 // BytecodeArray represents a sequence of interpreter bytecodes.
-class BytecodeArray : public FixedArrayBase {
+class BytecodeArray
+    : public TorqueGeneratedBytecodeArray<BytecodeArray, FixedArrayBase> {
  public:
   enum Age {
     kNoAgeBytecodeAge = 0,
@@ -759,21 +894,6 @@ class BytecodeArray : public FixedArrayBase {
   inline Age bytecode_age() const;
   inline void set_bytecode_age(Age age);
 
-  // Accessors for the constant pool.
-  DECL_ACCESSORS(constant_pool, FixedArray)
-
-  // Accessors for handler table containing offsets of exception handlers.
-  DECL_ACCESSORS(handler_table, ByteArray)
-
-  // Accessors for source position table. Can contain:
-  // * undefined (initial value)
-  // * empty_byte_array (for bytecode generated for functions that will never
-  // have source positions, e.g. native functions).
-  // * ByteArray (when source positions have been collected for the bytecode)
-  // * exception (when an error occurred while explicitly collecting source
-  // positions for pre-existing bytecode).
-  DECL_RELEASE_ACQUIRE_ACCESSORS(source_position_table, Object)
-
   inline bool HasSourcePositionTable() const;
   inline bool DidSourcePositionGenerationFail() const;
 
@@ -786,8 +906,6 @@ class BytecodeArray : public FixedArrayBase {
   // |SourcePositionTable| will return an empty byte array rather than crashing
   // as it would if no attempt was ever made to collect source positions.
   inline void SetSourcePositionsFailedToCollect();
-
-  DECL_CAST(BytecodeArray)
 
   // Dispatched behavior.
   inline int BytecodeArraySize();
@@ -813,14 +931,10 @@ class BytecodeArray : public FixedArrayBase {
   // is deterministic.
   inline void clear_padding();
 
-  // Layout description.
-  DEFINE_FIELD_OFFSET_CONSTANTS(FixedArrayBase::kHeaderSize,
-                                TORQUE_GENERATED_BYTECODE_ARRAY_FIELDS)
-
   // InterpreterEntryTrampoline expects these fields to be next to each other
   // and writes a 16-bit value to reset them.
   STATIC_ASSERT(BytecodeArray::kBytecodeAgeOffset ==
-                kOsrNestingLevelOffset + kCharSize);
+                kOsrLoopNestingLevelOffset + kCharSize);
 
   // Maximal memory consumption for a single BytecodeArray.
   static const int kMaxSize = 512 * MB;
@@ -829,7 +943,11 @@ class BytecodeArray : public FixedArrayBase {
 
   class BodyDescriptor;
 
-  OBJECT_CONSTRUCTORS(BytecodeArray, FixedArrayBase);
+ private:
+  // Hide accessors inherited from generated class. Use parameter_count instead.
+  DECL_INT_ACCESSORS(parameter_size)
+
+  TQ_OBJECT_CONSTRUCTORS(BytecodeArray)
 };
 
 // DeoptimizationData is a fixed array used to hold the deoptimization data for
@@ -858,14 +976,19 @@ class DeoptimizationData : public FixedArray {
   static const int kBytecodeOffsetRawOffset = 0;
   static const int kTranslationIndexOffset = 1;
   static const int kPcOffset = 2;
+#ifdef DEBUG
+  static const int kNodeIdOffset = 3;
+  static const int kDeoptEntrySize = 4;
+#else   // DEBUG
   static const int kDeoptEntrySize = 3;
+#endif  // DEBUG
 
 // Simple element accessors.
 #define DECL_ELEMENT_ACCESSORS(name, type) \
   inline type name() const;                \
   inline void Set##name(type value);
 
-  DECL_ELEMENT_ACCESSORS(TranslationByteArray, ByteArray)
+  DECL_ELEMENT_ACCESSORS(TranslationByteArray, TranslationArray)
   DECL_ELEMENT_ACCESSORS(InlinedFunctionCount, Smi)
   DECL_ELEMENT_ACCESSORS(LiteralArray, FixedArray)
   DECL_ELEMENT_ACCESSORS(OsrBytecodeOffset, Smi)
@@ -887,12 +1010,15 @@ class DeoptimizationData : public FixedArray {
   DECL_ENTRY_ACCESSORS(BytecodeOffsetRaw, Smi)
   DECL_ENTRY_ACCESSORS(TranslationIndex, Smi)
   DECL_ENTRY_ACCESSORS(Pc, Smi)
+#ifdef DEBUG
+  DECL_ENTRY_ACCESSORS(NodeId, Smi)
+#endif  // DEBUG
 
 #undef DECL_ENTRY_ACCESSORS
 
-  inline BailoutId BytecodeOffset(int i);
+  inline BytecodeOffset GetBytecodeOffset(int i);
 
-  inline void SetBytecodeOffset(int i, BailoutId value);
+  inline void SetBytecodeOffset(int i, BytecodeOffset value);
 
   inline int DeoptCount();
 
@@ -912,7 +1038,7 @@ class DeoptimizationData : public FixedArray {
   DECL_CAST(DeoptimizationData)
 
 #ifdef ENABLE_DISASSEMBLER
-  void DeoptimizationDataPrint(std::ostream& os);  // NOLINT
+  void DeoptimizationDataPrint(std::ostream& os);
 #endif
 
  private:

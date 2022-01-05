@@ -4,6 +4,11 @@
 
 #include "src/inspector/v8-console-message.h"
 
+#include "include/v8-container.h"
+#include "include/v8-context.h"
+#include "include/v8-inspector.h"
+#include "include/v8-microtask-queue.h"
+#include "include/v8-primitive-object.h"
 #include "src/debug/debug-interface.h"
 #include "src/inspector/inspected-context.h"
 #include "src/inspector/protocol/Protocol.h"
@@ -13,9 +18,8 @@
 #include "src/inspector/v8-inspector-session-impl.h"
 #include "src/inspector/v8-runtime-agent-impl.h"
 #include "src/inspector/v8-stack-trace-impl.h"
+#include "src/inspector/value-mirror.h"
 #include "src/tracing/trace-event.h"
-
-#include "include/v8-inspector.h"
 
 namespace v8_inspector {
 
@@ -152,7 +156,7 @@ class V8ValueStringBuilder {
 
   bool append(v8::Local<v8::Symbol> symbol) {
     m_builder.append("Symbol(");
-    bool result = append(symbol->Description(), IgnoreUndefined);
+    bool result = append(symbol->Description(m_isolate), IgnoreUndefined);
     m_builder.append(')');
     return result;
   }
@@ -208,7 +212,12 @@ void V8ConsoleMessage::setLocation(const String16& url, unsigned lineNumber,
                                    unsigned columnNumber,
                                    std::unique_ptr<V8StackTraceImpl> stackTrace,
                                    int scriptId) {
-  m_url = url;
+  const char* dataURIPrefix = "data:";
+  if (url.substring(0, strlen(dataURIPrefix)) == dataURIPrefix) {
+    m_url = String16();
+  } else {
+    m_url = url;
+  }
   m_lineNumber = lineNumber;
   m_columnNumber = columnNumber;
   m_stackTrace = std::move(stackTrace);
@@ -327,6 +336,9 @@ void V8ConsoleMessage::reportToFrontend(protocol::Runtime::Frontend* frontend,
     }
     if (m_contextId) exceptionDetails->setExecutionContextId(m_contextId);
     if (exception) exceptionDetails->setException(std::move(exception));
+    std::unique_ptr<protocol::DictionaryValue> data =
+        getAssociatedExceptionData(inspector, session);
+    if (data) exceptionDetails->setExceptionMetaData(std::move(data));
     frontend->exceptionThrown(m_timestamp, std::move(exceptionDetails));
     return;
   }
@@ -374,6 +386,33 @@ void V8ConsoleMessage::reportToFrontend(protocol::Runtime::Frontend* frontend,
     return;
   }
   UNREACHABLE();
+}
+
+std::unique_ptr<protocol::DictionaryValue>
+V8ConsoleMessage::getAssociatedExceptionData(
+    V8InspectorImpl* inspector, V8InspectorSessionImpl* session) const {
+  if (!m_arguments.size() || !m_contextId) return nullptr;
+  DCHECK_EQ(1u, m_arguments.size());
+
+  v8::Isolate* isolate = inspector->isolate();
+  v8::HandleScope handles(isolate);
+  v8::Local<v8::Context> context;
+  if (!inspector->exceptionMetaDataContext().ToLocal(&context)) return nullptr;
+  v8::MaybeLocal<v8::Value> maybe_exception = m_arguments[0]->Get(isolate);
+  v8::Local<v8::Value> exception;
+  if (!maybe_exception.ToLocal(&exception)) return nullptr;
+
+  v8::MaybeLocal<v8::Object> maybe_data =
+      inspector->getAssociatedExceptionData(exception);
+  v8::Local<v8::Object> data;
+  if (!maybe_data.ToLocal(&data)) return nullptr;
+  v8::TryCatch tryCatch(isolate);
+  v8::MicrotasksScope microtasksScope(isolate,
+                                      v8::MicrotasksScope::kDoNotRunMicrotasks);
+  v8::Context::Scope contextScope(context);
+  std::unique_ptr<protocol::DictionaryValue> jsonObject;
+  objectToProtocolValue(context, data, 2, &jsonObject);
+  return jsonObject;
 }
 
 std::unique_ptr<protocol::Runtime::RemoteObject>
@@ -497,7 +536,8 @@ void V8ConsoleMessage::contextDestroyed(int contextId) {
   m_v8Size = 0;
 }
 
-// ------------------------ V8ConsoleMessageStorage ----------------------------
+// ------------------------ V8ConsoleMessageStorage
+// ----------------------------
 
 V8ConsoleMessageStorage::V8ConsoleMessageStorage(V8InspectorImpl* inspector,
                                                  int contextGroupId)

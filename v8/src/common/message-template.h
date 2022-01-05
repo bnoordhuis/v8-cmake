@@ -27,8 +27,9 @@ namespace internal {
   T(ApplyNonFunction,                                                          \
     "Function.prototype.apply was called on %, which is a % and not a "        \
     "function")                                                                \
-  T(ArgumentsDisallowedInInitializer,                                          \
-    "'arguments' is not allowed in class field initializer")                   \
+  T(ArgumentsDisallowedInInitializerAndStaticBlock,                            \
+    "'arguments' is not allowed in class field initializer or static "         \
+    "initialization block")                                                    \
   T(ArrayBufferTooShort,                                                       \
     "Derived ArrayBuffer constructor created a buffer which was too small")    \
   T(ArrayBufferSpeciesThis,                                                    \
@@ -125,10 +126,18 @@ namespace internal {
   T(NonCoercibleWithProperty,                                                  \
     "Cannot destructure property '%' of '%' as it is %.")                      \
   T(NonExtensibleProto, "% is not extensible")                                 \
+  T(NonObjectAssertOption, "The 'assert' option must be an object")            \
   T(NonObjectInInstanceOfCheck,                                                \
     "Right-hand side of 'instanceof' is not an object")                        \
-  T(NonObjectPropertyLoad, "Cannot read property '%' of %")                    \
-  T(NonObjectPropertyStore, "Cannot set property '%' of %")                    \
+  T(NonObjectPropertyLoad, "Cannot read properties of %")                      \
+  T(NonObjectPropertyLoadWithProperty,                                         \
+    "Cannot read properties of % (reading '%')")                               \
+  T(NonObjectPropertyStore, "Cannot set properties of %")                      \
+  T(NonObjectPropertyStoreWithProperty,                                        \
+    "Cannot set properties of % (setting '%')")                                \
+  T(NonObjectImportArgument,                                                   \
+    "The second argument to import() must be an object")                       \
+  T(NonStringImportAssertionValue, "Import assertion value must be a string")  \
   T(NoSetterInCallback, "Cannot set property % of % which has only a getter")  \
   T(NotAnIterator, "% is not an iterator")                                     \
   T(NotAPromise, "% is not a promise")                                         \
@@ -325,6 +334,8 @@ namespace internal {
     "Expected letters optionally connected with underscores or hyphens for "   \
     "a location, got %")                                                       \
   T(InvalidArrayBufferLength, "Invalid array buffer length")                   \
+  T(InvalidArrayBufferMaxLength, "Invalid array buffer max length")            \
+  T(InvalidArrayBufferResizeLength, "%: Invalid length parameter")             \
   T(ArrayBufferAllocationFailed, "Array buffer allocation failed")             \
   T(Invalid, "Invalid % : %")                                                  \
   T(InvalidArrayLength, "Invalid array length")                                \
@@ -349,6 +360,7 @@ namespace internal {
   T(LetInLexicalBinding, "let is disallowed as a lexically bound name")        \
   T(LocaleMatcher, "Illegal value for localeMatcher:%")                        \
   T(NormalizationForm, "The normalization form should be one of %.")           \
+  T(OutOfMemory, "%: Out of memory")                                           \
   T(ParameterOfFunctionOutOfRange,                                             \
     "Paramenter % of function %() is % and out of range")                      \
   T(ZeroDigitNumericSeparator,                                                 \
@@ -368,6 +380,7 @@ namespace internal {
   T(TypedArrayTooLargeToSort,                                                  \
     "Custom comparefn not supported for huge TypedArrays")                     \
   T(ValueOutOfRange, "Value % out of range for % options property %")          \
+  T(CollectionGrowFailed, "% maximum size exceeded")                           \
   /* SyntaxError */                                                            \
   T(AmbiguousExport,                                                           \
     "The requested module '%' contains conflicting star exports for name '%'") \
@@ -387,6 +400,7 @@ namespace internal {
   T(ForInOfLoopInitializer,                                                    \
     "% loop variable declaration may not have an initializer.")                \
   T(ForOfLet, "The left-hand side of a for-of loop may not start with 'let'.") \
+  T(ForOfAsync, "The left-hand side of a for-of loop may not be 'async'.")     \
   T(ForInOfLoopMultiBindings,                                                  \
     "Invalid left-hand side in % loop: Must have a single binding.")           \
   T(GeneratorInSingleStatementContext,                                         \
@@ -426,6 +440,10 @@ namespace internal {
   T(InvalidRegExpFlags, "Invalid flags supplied to RegExp constructor '%'")    \
   T(InvalidOrUnexpectedToken, "Invalid or unexpected token")                   \
   T(InvalidPrivateBrand, "Object must be an instance of class %")              \
+  T(InvalidPrivateBrandReinitialization,                                       \
+    "Cannot initialize private methods of class % twice on the same object")   \
+  T(InvalidPrivateFieldReitialization,                                         \
+    "Cannot initialize % twice on the same object")                            \
   T(InvalidPrivateFieldResolution,                                             \
     "Private field '%' must be declared in an enclosing class")                \
   T(InvalidPrivateMemberRead,                                                  \
@@ -468,7 +486,6 @@ namespace internal {
   T(BadSetterRestParameter,                                                    \
     "Setter function argument must not be a rest parameter")                   \
   T(ParamDupe, "Duplicate parameter name not allowed in this context")         \
-  T(ParenthesisInArgString, "Function arg string contains parenthesis")        \
   T(ArgStringTerminatesParametersEarly,                                        \
     "Arg string terminates parameters early")                                  \
   T(UnexpectedEndOfArgString, "Unexpected end of arg string")                  \
@@ -559,7 +576,7 @@ namespace internal {
   T(WasmTrapRemByZero, "remainder by zero")                                    \
   T(WasmTrapFloatUnrepresentable, "float unrepresentable in integer range")    \
   T(WasmTrapTableOutOfBounds, "table index is out of bounds")                  \
-  T(WasmTrapFuncSigMismatch, "function signature mismatch")                    \
+  T(WasmTrapFuncSigMismatch, "null function or function signature mismatch")   \
   T(WasmTrapMultiReturnLengthMismatch, "multi-return length mismatch")         \
   T(WasmTrapJSTypeError, "type incompatibility when transforming from/to JS")  \
   T(WasmTrapDataSegmentDropped, "data segment has been dropped")               \
@@ -568,6 +585,7 @@ namespace internal {
   T(WasmTrapNullDereference, "dereferencing a null pointer")                   \
   T(WasmTrapIllegalCast, "illegal cast")                                       \
   T(WasmTrapArrayOutOfBounds, "array element access out of bounds")            \
+  T(WasmTrapArrayTooLarge, "requested new array is too large")                 \
   T(WasmExceptionError, "wasm exception")                                      \
   /* Asm.js validation related */                                              \
   T(AsmJsInvalid, "Invalid asm.js: %")                                         \

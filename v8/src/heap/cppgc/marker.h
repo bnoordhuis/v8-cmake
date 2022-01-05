@@ -30,9 +30,9 @@ class MarkerFactory;
 // phase:
 // 1. StartMarking() [Called implicitly when creating a Marker using
 //                    MarkerFactory]
-// 2. AdvanceMarkingWithDeadline() [Optional, depending on environment.]
+// 2. AdvanceMarkingWithLimits() [Optional, depending on environment.]
 // 3. EnterAtomicPause()
-// 4. AdvanceMarkingWithDeadline()
+// 4. AdvanceMarkingWithLimits()
 // 5. LeaveAtomicPause()
 //
 // Alternatively, FinishMarking combines steps 3.-5.
@@ -58,6 +58,11 @@ class V8_EXPORT_PRIVATE MarkerBase {
     IsForcedGC is_forced_gc = IsForcedGC::kNotForced;
   };
 
+  enum class WriteBarrierType {
+    kDijkstra,
+    kSteele,
+  };
+
   virtual ~MarkerBase();
 
   MarkerBase(const MarkerBase&) = delete;
@@ -69,10 +74,14 @@ class V8_EXPORT_PRIVATE MarkerBase {
   // - Updates the MarkingConfig if the stack state has changed;
   void EnterAtomicPause(MarkingConfig::StackState);
 
-  // Makes marking progress.
+  // Makes marking progress.  A `marked_bytes_limit` of 0 means that the limit
+  // is determined by the internal marking scheduler.
+  //
   // TODO(chromium:1056170): Remove TimeDelta argument when unified heap no
   // longer uses it.
-  bool AdvanceMarkingWithMaxDuration(v8::base::TimeDelta);
+  bool AdvanceMarkingWithLimits(
+      v8::base::TimeDelta = kMaximumIncrementalStepDuration,
+      size_t marked_bytes_limit = 0);
 
   // Makes marking progress when allocation a new lab.
   void AdvanceMarkingOnAllocation();
@@ -83,7 +92,7 @@ class V8_EXPORT_PRIVATE MarkerBase {
 
   // Combines:
   // - EnterAtomicPause()
-  // - AdvanceMarkingWithDeadline()
+  // - AdvanceMarkingWithLimits()
   // - ProcessWeakness()
   // - LeaveAtomicPause()
   void FinishMarking(MarkingConfig::StackState);
@@ -91,6 +100,8 @@ class V8_EXPORT_PRIVATE MarkerBase {
   void ProcessWeakness();
 
   inline void WriteBarrierForInConstructionObject(HeapObjectHeader&);
+
+  template <WriteBarrierType type>
   inline void WriteBarrierForObject(HeapObjectHeader&);
 
   HeapBase& heap() { return heap_; }
@@ -121,11 +132,13 @@ class V8_EXPORT_PRIVATE MarkerBase {
     Handle handle_;
   };
 
-  void DisableIncrementalMarkingForTesting();
+  void SetMainThreadMarkingDisabledForTesting(bool);
 
   void WaitForConcurrentMarkingForTesting();
 
   void NotifyCompactionCancelled();
+
+  bool IsMarking() const { return is_marking_; }
 
  protected:
   static constexpr v8::base::TimeDelta kMaximumIncrementalStepDuration =
@@ -147,15 +160,11 @@ class V8_EXPORT_PRIVATE MarkerBase {
   virtual ConservativeTracingVisitor& conservative_visitor() = 0;
   virtual heap::base::StackVisitor& stack_visitor() = 0;
 
-  // Makes marking progress.
-  // TODO(chromium:1056170): Remove TimeDelta argument when unified heap no
-  // longer uses it.
-  bool AdvanceMarkingWithDeadline(
-      v8::base::TimeDelta = kMaximumIncrementalStepDuration);
-
   bool ProcessWorklistsWithDeadline(size_t, v8::base::TimeTicks);
 
   void VisitRoots(MarkingConfig::StackState);
+
+  bool VisitCrossThreadPersistentsIfNeeded();
 
   void MarkNotFullyConstructedObjects();
 
@@ -172,13 +181,14 @@ class V8_EXPORT_PRIVATE MarkerBase {
 
   MarkingWorklists marking_worklists_;
   MutatorMarkingState mutator_marking_state_;
-  bool is_marking_started_{false};
+  bool is_marking_{false};
 
   IncrementalMarkingSchedule schedule_;
 
   std::unique_ptr<ConcurrentMarkerBase> concurrent_marker_{nullptr};
 
-  bool incremental_marking_disabled_for_testing_{false};
+  bool main_marking_disabled_for_testing_{false};
+  bool visited_cross_thread_persistents_in_atomic_pause_{false};
 
   friend class MarkerFactory;
 };
@@ -220,8 +230,16 @@ void MarkerBase::WriteBarrierForInConstructionObject(HeapObjectHeader& header) {
       .Push<AccessMode::kAtomic>(&header);
 }
 
+template <MarkerBase::WriteBarrierType type>
 void MarkerBase::WriteBarrierForObject(HeapObjectHeader& header) {
-  mutator_marking_state_.write_barrier_worklist().Push(&header);
+  switch (type) {
+    case MarkerBase::WriteBarrierType::kDijkstra:
+      mutator_marking_state_.write_barrier_worklist().Push(&header);
+      break;
+    case MarkerBase::WriteBarrierType::kSteele:
+      mutator_marking_state_.retrace_marked_objects_worklist().Push(&header);
+      break;
+  }
 }
 
 }  // namespace internal

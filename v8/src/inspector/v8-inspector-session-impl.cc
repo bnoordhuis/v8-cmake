@@ -155,6 +155,20 @@ V8InspectorSessionImpl::~V8InspectorSessionImpl() {
   m_inspector->disconnect(this);
 }
 
+std::unique_ptr<V8InspectorSession::CommandLineAPIScope>
+V8InspectorSessionImpl::initializeCommandLineAPIScope(int executionContextId) {
+  auto scope =
+      std::make_unique<InjectedScript::ContextScope>(this, executionContextId);
+  auto result = scope->initialize();
+  if (!result.IsSuccess()) {
+    return nullptr;
+  }
+
+  scope->installCommandLineAPI();
+
+  return scope;
+}
+
 protocol::DictionaryValue* V8InspectorSessionImpl::agentState(
     const String16& name) {
   protocol::DictionaryValue* state = m_state->getObject(name);
@@ -482,8 +496,8 @@ V8InspectorSessionImpl::searchInTextByLines(StringView text, StringView query,
 }
 
 void V8InspectorSessionImpl::triggerPreciseCoverageDeltaUpdate(
-    StringView occassion) {
-  m_profilerAgent->triggerPreciseCoverageDeltaUpdate(toString16(occassion));
+    StringView occasion) {
+  m_profilerAgent->triggerPreciseCoverageDeltaUpdate(toString16(occasion));
 }
 
 }  // namespace v8_inspector

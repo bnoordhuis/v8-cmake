@@ -27,8 +27,15 @@
 
 #include "test/cctest/cctest.h"
 
+#include "include/cppgc/platform.h"
 #include "include/libplatform/libplatform.h"
-#include "include/v8.h"
+#include "include/v8-array-buffer.h"
+#include "include/v8-context.h"
+#include "include/v8-function.h"
+#include "include/v8-isolate.h"
+#include "include/v8-local-handle.h"
+#include "include/v8-locker.h"
+#include "src/base/strings.h"
 #include "src/codegen/compiler.h"
 #include "src/codegen/optimized-compilation-info.h"
 #include "src/compiler/pipeline.h"
@@ -45,7 +52,7 @@
 #endif  // V8_USE_PERFETTO
 
 #if V8_OS_WIN
-#include <windows.h>  // NOLINT
+#include <windows.h>
 #if V8_CC_MSVC
 #include <crtdbg.h>
 #endif
@@ -115,7 +122,7 @@ void CcTest::Run() {
   DCHECK_EQ(active_isolates, i::Isolate::non_disposed_isolates());
 #endif  // DEBUG
   if (initialize_) {
-    if (v8::Locker::IsActive()) {
+    if (v8::Locker::WasEverUsed()) {
       v8::Locker locker(isolate_);
       EmptyMessageQueues(isolate_);
     } else {
@@ -169,8 +176,8 @@ i::Handle<i::String> CcTest::MakeString(const char* str) {
 }
 
 i::Handle<i::String> CcTest::MakeName(const char* str, int suffix) {
-  i::EmbeddedVector<char, 128> buffer;
-  SNPrintF(buffer, "%s%d", str, suffix);
+  v8::base::EmbeddedVector<char, 128> buffer;
+  v8::base::SNPrintF(buffer, "%s%d", str, suffix);
   return CcTest::MakeString(buffer.begin());
 }
 
@@ -244,8 +251,8 @@ class V8_NODISCARD InitializedHandleScopeImpl {
   i::HandleScope handle_scope_;
 };
 
-InitializedHandleScope::InitializedHandleScope()
-    : main_isolate_(CcTest::InitIsolateOnce()),
+InitializedHandleScope::InitializedHandleScope(i::Isolate* isolate)
+    : main_isolate_(isolate ? isolate : CcTest::InitIsolateOnce()),
       initialized_handle_scope_impl_(
           new InitializedHandleScopeImpl(main_isolate_)) {}
 
@@ -263,7 +270,7 @@ i::Handle<i::JSFunction> Optimize(
   i::Handle<i::SharedFunctionInfo> shared(function->shared(), isolate);
   i::IsCompiledScope is_compiled_scope(shared->is_compiled_scope(isolate));
   CHECK(is_compiled_scope.is_compiled() ||
-        i::Compiler::Compile(function, i::Compiler::CLEAR_EXCEPTION,
+        i::Compiler::Compile(isolate, function, i::Compiler::CLEAR_EXCEPTION,
                              &is_compiled_scope));
 
   CHECK_NOT_NULL(zone);
@@ -271,6 +278,7 @@ i::Handle<i::JSFunction> Optimize(
   i::OptimizedCompilationInfo info(zone, isolate, shared, function,
                                    i::CodeKind::TURBOFAN);
 
+  if (flags & ~i::OptimizedCompilationInfo::kInlining) UNIMPLEMENTED();
   if (flags & i::OptimizedCompilationInfo::kInlining) {
     info.set_inlining();
   }
@@ -282,7 +290,7 @@ i::Handle<i::JSFunction> Optimize(
       i::compiler::Pipeline::GenerateCodeForTesting(&info, isolate, out_broker)
           .ToHandleChecked();
   info.native_context().AddOptimizedCode(*code);
-  function->set_code(*code);
+  function->set_code(*code, v8::kReleaseStore);
 
   return function;
 }
@@ -333,16 +341,20 @@ int main(int argc, char* argv[]) {
   v8::V8::InitializeICUDefaultLocation(argv[0]);
   std::unique_ptr<v8::Platform> platform(v8::platform::NewDefaultPlatform());
   v8::V8::InitializePlatform(platform.get());
+#ifdef V8_VIRTUAL_MEMORY_CAGE
+  CHECK(v8::V8::InitializeVirtualMemoryCage());
+#endif
+  cppgc::InitializeProcess(platform->GetPageAllocator());
   using HelpOptions = v8::internal::FlagList::HelpOptions;
   v8::internal::FlagList::SetFlagsFromCommandLine(
       &argc, argv, true, HelpOptions(HelpOptions::kExit, usage.c_str()));
   v8::V8::Initialize();
   v8::V8::InitializeExternalStartupData(argv[0]);
 
-  if (V8_TRAP_HANDLER_SUPPORTED && i::FLAG_wasm_trap_handler) {
-    constexpr bool use_default_signal_handler = true;
-    CHECK(v8::V8::EnableWebAssemblyTrapHandler(use_default_signal_handler));
-  }
+#if V8_ENABLE_WEBASSEMBLY && V8_TRAP_HANDLER_SUPPORTED
+  constexpr bool kUseDefaultTrapHandler = true;
+  CHECK(v8::V8::EnableWebAssemblyTrapHandler(kUseDefaultTrapHandler));
+#endif  // V8_ENABLE_WEBASSEMBLY && V8_TRAP_HANDLER_SUPPORTED
 
   CcTest::set_array_buffer_allocator(
       v8::ArrayBuffer::Allocator::NewDefaultAllocator());
@@ -410,7 +422,9 @@ int RegisterThreadedTest::count_ = 0;
 bool IsValidUnwrapObject(v8::Object* object) {
   i::Address addr = *reinterpret_cast<i::Address*>(object);
   auto instance_type = i::Internals::GetInstanceType(addr);
-  return (instance_type == i::Internals::kJSObjectType ||
-          instance_type == i::Internals::kJSApiObjectType ||
+  return (v8::base::IsInRange(instance_type,
+                              i::Internals::kFirstJSApiObjectType,
+                              i::Internals::kLastJSApiObjectType) ||
+          instance_type == i::Internals::kJSObjectType ||
           instance_type == i::Internals::kJSSpecialApiObjectType);
 }

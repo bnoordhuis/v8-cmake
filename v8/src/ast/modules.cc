@@ -6,6 +6,7 @@
 
 #include "src/ast/ast-value-factory.h"
 #include "src/ast/scopes.h"
+#include "src/common/globals.h"
 #include "src/heap/local-factory-inl.h"
 #include "src/objects/module-inl.h"
 #include "src/objects/objects-inl.h"
@@ -116,73 +117,36 @@ void SourceTextModuleDescriptor::AddStarExport(
 }
 
 namespace {
-template <typename LocalIsolate>
-Handle<PrimitiveHeapObject> ToStringOrUndefined(LocalIsolate* isolate,
+template <typename IsolateT>
+Handle<PrimitiveHeapObject> ToStringOrUndefined(IsolateT* isolate,
                                                 const AstRawString* s) {
   if (s == nullptr) return isolate->factory()->undefined_value();
   return s->string();
 }
 }  // namespace
 
-template <typename LocalIsolate>
+template <typename IsolateT>
 Handle<ModuleRequest> SourceTextModuleDescriptor::AstModuleRequest::Serialize(
-    LocalIsolate* isolate) const {
-  // Copy the assertions to a FixedArray, filtering out as we go the import
-  // assertions that are not supported by the embedder.
-  //
-  // This is O(m * n) where m is the number of import assertions in this
-  // request and n is the number of supported assertions.  Both m and n are
-  // expected to be quite small, with m being 0 in the common case and n
-  // currently expected to be at most 1 since "type" is the only import
-  // assertion in use at the time of this writing. So for now we go with
-  // this simple nested loop approach, which should not result in a larger
-  // than necessary performance cost unless more than a few additional
-  // import assertions are standardized.
-  //
-  // The import assertions will be stored in the new array in the form: [key1,
-  // value1, location1, key2, value2, location2, ...].
-  const std::vector<std::string>& supported_assertions =
-      isolate->supported_import_assertions();
+    IsolateT* isolate) const {
+  // The import assertions will be stored in this array in the form:
+  // [key1, value1, location1, key2, value2, location2, ...]
   Handle<FixedArray> import_assertions_array =
-      isolate->factory()->NewFixedArray(static_cast<int>(
-          import_assertions()->size() * ModuleRequest::kAssertionEntrySize));
-  int filtered_assertions_index = 0;
+      isolate->factory()->NewFixedArray(
+          static_cast<int>(import_assertions()->size() *
+                           ModuleRequest::kAssertionEntrySize),
+          AllocationType::kOld);
+
+  int i = 0;
   for (auto iter = import_assertions()->cbegin();
-       iter != import_assertions()->cend(); ++iter) {
-    for (const std::string& supported_assertion : supported_assertions) {
-      Handle<String> assertion_key = iter->first->string();
-      if (assertion_key->IsEqualTo(Vector<const char>(
-              supported_assertion.c_str(), supported_assertion.length()))) {
-        import_assertions_array->set(filtered_assertions_index,
-                                     *iter->first->string());
-        import_assertions_array->set(filtered_assertions_index + 1,
-                                     *iter->second.first->string());
-        import_assertions_array->set(filtered_assertions_index + 2,
-                                     Smi::FromInt(iter->second.second.beg_pos));
-        filtered_assertions_index += ModuleRequest::kAssertionEntrySize;
-        break;
-      }
-    }
+       iter != import_assertions()->cend();
+       ++iter, i += ModuleRequest::kAssertionEntrySize) {
+    import_assertions_array->set(i, *iter->first->string());
+    import_assertions_array->set(i + 1, *iter->second.first->string());
+    import_assertions_array->set(i + 2,
+                                 Smi::FromInt(iter->second.second.beg_pos));
   }
-
-  Handle<FixedArray> shortened_import_assertions_array;
-  if (filtered_assertions_index < import_assertions_array->length()) {
-    // If we did filter out any assertions, create a FixedArray with the correct
-    // length. This should be rare, since it would be unexpected for developers
-    // to commonly use unsupported assertions.  Note, we don't use
-    // FixedArray::ShrinkOrEmpty here since FixedArray::Shrink isn't available
-    // on a LocalIsolate/LocalHeap.
-    shortened_import_assertions_array =
-        isolate->factory()->NewFixedArray(filtered_assertions_index);
-    import_assertions_array->CopyTo(0, *shortened_import_assertions_array, 0,
-                                    filtered_assertions_index);
-  } else {
-    shortened_import_assertions_array = import_assertions_array;
-  }
-
   return v8::internal::ModuleRequest::New(isolate, specifier()->string(),
-                                          shortened_import_assertions_array,
-                                          position());
+                                          import_assertions_array, position());
 }
 template Handle<ModuleRequest>
 SourceTextModuleDescriptor::AstModuleRequest::Serialize(Isolate* isolate) const;
@@ -190,9 +154,9 @@ template Handle<ModuleRequest>
 SourceTextModuleDescriptor::AstModuleRequest::Serialize(
     LocalIsolate* isolate) const;
 
-template <typename LocalIsolate>
+template <typename IsolateT>
 Handle<SourceTextModuleInfoEntry> SourceTextModuleDescriptor::Entry::Serialize(
-    LocalIsolate* isolate) const {
+    IsolateT* isolate) const {
   CHECK(Smi::IsValid(module_request));  // TODO(neis): Check earlier?
   return SourceTextModuleInfoEntry::New(
       isolate, ToStringOrUndefined(isolate, export_name),
@@ -205,9 +169,9 @@ SourceTextModuleDescriptor::Entry::Serialize(Isolate* isolate) const;
 template Handle<SourceTextModuleInfoEntry>
 SourceTextModuleDescriptor::Entry::Serialize(LocalIsolate* isolate) const;
 
-template <typename LocalIsolate>
+template <typename IsolateT>
 Handle<FixedArray> SourceTextModuleDescriptor::SerializeRegularExports(
-    LocalIsolate* isolate, Zone* zone) const {
+    IsolateT* isolate, Zone* zone) const {
   // We serialize regular exports in a way that lets us later iterate over their
   // local names and for each local name immediately access all its export
   // names.  (Regular exports have neither import name nor module request.)
@@ -228,7 +192,8 @@ Handle<FixedArray> SourceTextModuleDescriptor::SerializeRegularExports(
       ++count;
     } while (next != regular_exports_.end() && next->first == it->first);
 
-    Handle<FixedArray> export_names = isolate->factory()->NewFixedArray(count);
+    Handle<FixedArray> export_names =
+        isolate->factory()->NewFixedArray(count, AllocationType::kOld);
     data[index + SourceTextModuleInfo::kRegularExportLocalNameOffset] =
         it->second->local_name->string();
     data[index + SourceTextModuleInfo::kRegularExportCellIndexOffset] =
@@ -252,7 +217,8 @@ Handle<FixedArray> SourceTextModuleDescriptor::SerializeRegularExports(
 
   // We cannot create the FixedArray earlier because we only now know the
   // precise size.
-  Handle<FixedArray> result = isolate->factory()->NewFixedArray(index);
+  Handle<FixedArray> result =
+      isolate->factory()->NewFixedArray(index, AllocationType::kOld);
   for (int i = 0; i < index; ++i) {
     result->set(i, *data[i]);
   }

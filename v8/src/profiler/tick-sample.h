@@ -5,7 +5,7 @@
 #ifndef V8_PROFILER_TICK_SAMPLE_H_
 #define V8_PROFILER_TICK_SAMPLE_H_
 
-#include "include/v8.h"
+#include "include/v8-unwinder.h"
 #include "src/base/platform/time.h"
 #include "src/common/globals.h"
 
@@ -90,6 +90,7 @@ struct V8_EXPORT TickSample {
   static const unsigned kMaxFramesCountLog2 = 8;
   static const unsigned kMaxFramesCount = (1 << kMaxFramesCountLog2) - 1;
   void* stack[kMaxFramesCount];     // Call stack.
+  void* context = nullptr;          // Address of the incumbent native context.
   unsigned frames_count : kMaxFramesCountLog2;  // Number of captured frames.
   bool has_external_callback : 1;
   bool update_stats : 1;  // Whether the sample should update aggregated stats.

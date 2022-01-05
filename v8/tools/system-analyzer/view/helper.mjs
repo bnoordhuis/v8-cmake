@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-class CSSColor {
+export class CSSColor {
   static _cache = new Map();
 
   static get(name) {
@@ -17,6 +17,7 @@ class CSSColor {
     this._cache.set(name, color);
     return color;
   }
+
   static reset() {
     this._cache.clear();
   }
@@ -82,7 +83,7 @@ class CSSColor {
     return this.list[index % this.list.length];
   }
 
-  static darken(hexColorString, amount = -40) {
+  static darken(hexColorString, amount = -50) {
     if (hexColorString[0] !== '#') {
       throw new Error(`Unsupported color: ${hexColorString}`);
     }
@@ -121,14 +122,46 @@ class CSSColor {
   }
 }
 
-class DOM {
-  static element(type, classes) {
+export class DOM {
+  static element(type, options) {
     const node = document.createElement(type);
-    if (classes === undefined) return node;
+    if (options !== undefined) {
+      if (typeof options === 'string') {
+        // Old behaviour: options = class string
+        node.className = options;
+      } else if (Array.isArray(options)) {
+        // Old behaviour: options = class array
+        DOM.addClasses(node, options);
+      } else {
+        // New behaviour: options = attribute dict
+        for (const [key, value] of Object.entries(options)) {
+          if (key == 'className') {
+            node.className = value;
+          } else if (key == 'classList') {
+            node.classList = value;
+          } else if (key == 'textContent') {
+            node.textContent = value;
+          } else if (key == 'children') {
+            for (const child of value) {
+              node.appendChild(child);
+            }
+          } else {
+            node.setAttribute(key, value);
+          }
+        }
+      }
+    }
+    return node;
+  }
+
+  static addClasses(node, classes) {
+    const classList = node.classList;
     if (typeof classes === 'string') {
-      node.className = classes;
+      classList.add(classes);
     } else {
-      classes.forEach(cls => node.classList.add(cls));
+      for (let i = 0; i < classes.length; i++) {
+        classList.add(classes[i]);
+      }
     }
     return node;
   }
@@ -137,20 +170,27 @@ class DOM {
     return document.createTextNode(string);
   }
 
-  static div(classes) {
-    return this.element('div', classes);
+  static button(label, clickHandler) {
+    const button = DOM.element('button');
+    button.innerText = label;
+    button.onclick = clickHandler;
+    return button;
   }
 
-  static span(classes) {
-    return this.element('span', classes);
+  static div(options) {
+    return this.element('div', options);
   }
 
-  static table(classes) {
-    return this.element('table', classes);
+  static span(options) {
+    return this.element('span', options);
   }
 
-  static tbody(classes) {
-    return this.element('tbody', classes);
+  static table(options) {
+    return this.element('table', options);
+  }
+
+  static tbody(options) {
+    return this.element('tbody', options);
   }
 
   static td(textOrNode, className) {
@@ -174,8 +214,17 @@ class DOM {
     range.deleteContents();
   }
 
-  static defineCustomElement(path, generator) {
-    let name = path.substring(path.lastIndexOf('/') + 1, path.length);
+  static defineCustomElement(
+      path, nameOrGenerator, maybeGenerator = undefined) {
+    let generator = nameOrGenerator;
+    let name = nameOrGenerator;
+    if (typeof nameOrGenerator == 'function') {
+      console.assert(maybeGenerator === undefined);
+      name = path.substring(path.lastIndexOf('/') + 1, path.length);
+    } else {
+      console.assert(typeof nameOrGenerator == 'string');
+      generator = maybeGenerator;
+    }
     path = path + '-template.html';
     fetch(path)
         .then(stream => stream.text())
@@ -185,19 +234,39 @@ class DOM {
   }
 }
 
-function $(id) {
+const SVGNamespace = 'http://www.w3.org/2000/svg';
+export class SVG {
+  static element(type, classes) {
+    const node = document.createElementNS(SVGNamespace, type);
+    if (classes !== undefined) DOM.addClasses(node, classes);
+    return node;
+  }
+
+  static svg(classes) {
+    return this.element('svg', classes);
+  }
+
+  static rect(classes) {
+    return this.element('rect', classes);
+  }
+
+  static g(classes) {
+    return this.element('g', classes);
+  }
+}
+
+export function $(id) {
   return document.querySelector(id)
 }
 
-class V8CustomElement extends HTMLElement {
+export class V8CustomElement extends HTMLElement {
   _updateTimeoutId;
-  _updateCallback = this._update.bind(this);
+  _updateCallback = this.forceUpdate.bind(this);
 
   constructor(templateText) {
     super();
     const shadowRoot = this.attachShadow({mode: 'open'});
     shadowRoot.innerHTML = templateText;
-    this._updateCallback = this._update.bind(this);
   }
 
   $(id) {
@@ -208,7 +277,7 @@ class V8CustomElement extends HTMLElement {
     return this.shadowRoot.querySelectorAll(query);
   }
 
-  update(useAnimation = false) {
+  requestUpdate(useAnimation = false) {
     if (useAnimation) {
       window.cancelAnimationFrame(this._updateTimeoutId);
       this._updateTimeoutId =
@@ -221,12 +290,102 @@ class V8CustomElement extends HTMLElement {
     }
   }
 
+  forceUpdate() {
+    this._update();
+  }
+
   _update() {
     throw Error('Subclass responsibility');
   }
 }
 
-class Chunked {
+export class CollapsableElement extends V8CustomElement {
+  constructor(templateText) {
+    super(templateText);
+    this._hasPendingUpdate = false;
+    this._closer.onclick = _ => this._requestUpdateIfVisible();
+  }
+
+  get _closer() {
+    return this.$('#closer');
+  }
+
+  get _contentIsVisible() {
+    return !this._closer.checked;
+  }
+
+  hide() {
+    if (this._contentIsVisible) {
+      this._closer.checked = true;
+      this._requestUpdateIfVisible();
+    }
+    this.scrollIntoView();
+  }
+
+  show() {
+    if (!this._contentIsVisible) {
+      this._closer.checked = false;
+      this._requestUpdateIfVisible();
+    }
+    this.scrollIntoView();
+  }
+
+  requestUpdate(useAnimation = false) {
+    // A pending update will be resolved later, no need to try again.
+    if (this._hasPendingUpdate) return;
+    this._hasPendingUpdate = true;
+    this._requestUpdateIfVisible(useAnimation);
+  }
+
+  _requestUpdateIfVisible(useAnimation = true) {
+    if (!this._contentIsVisible) return;
+    return super.requestUpdate(useAnimation);
+  }
+
+  forceUpdate() {
+    this._hasPendingUpdate = false;
+    super.forceUpdate();
+  }
+}
+
+export class ExpandableText {
+  constructor(node, string, limit = 200) {
+    this._node = node;
+    this._string = string;
+    this._delta = limit / 2;
+    this._start = 0;
+    this._end = string.length;
+    this._button = this._createExpandButton();
+    this.expand();
+  }
+
+  _createExpandButton() {
+    const button = DOM.element('button');
+    button.innerText = '...';
+    button.onclick = (e) => {
+      e.stopImmediatePropagation();
+      this.expand()
+    };
+    return button;
+  }
+
+  expand() {
+    DOM.removeAllChildren(this._node);
+    this._start = this._start + this._delta;
+    this._end = this._end - this._delta;
+    if (this._start >= this._end) {
+      this._node.innerText = this._string;
+      this._button.onclick = undefined;
+      return;
+    }
+    this._node.appendChild(DOM.text(this._string.substring(0, this._start)));
+    this._node.appendChild(this._button);
+    this._node.appendChild(
+        DOM.text(this._string.substring(this._end, this._string.length)));
+  }
+}
+
+export class Chunked {
   constructor(iterable, limit) {
     this._iterator = iterable[Symbol.iterator]();
     this._limit = limit;
@@ -248,7 +407,7 @@ class Chunked {
   }
 }
 
-class LazyTable {
+export class LazyTable {
   constructor(table, rowData, rowElementCreator, limit = 100) {
     this._table = table;
     this._chunkedRowData = new Chunked(rowData, limit);
@@ -258,20 +417,23 @@ class LazyTable {
     } else {
       table.replaceChild(DOM.tbody(), table.tBodies[0]);
     }
-    if (!table.tFoot) {
-      const td = table.appendChild(DOM.element('tfoot'))
-                     .appendChild(DOM.tr())
-                     .appendChild(DOM.td());
-      for (let count of [10, 100]) {
-        const button = DOM.element('button');
-        button.innerText = `+${count}`;
-        button.onclick = (e) => this._addMoreRows(count);
-        td.appendChild(button);
-      }
-      td.setAttribute('colspan', 100);
-    }
+    if (!table.tFoot) this._addFooter();
     table.tFoot.addEventListener('click', this._clickHandler);
     this._addMoreRows();
+  }
+
+  _addFooter() {
+    const td = DOM.td();
+    td.setAttribute('colspan', 100);
+    for (let addCount of [10, 100, 250, 500]) {
+      const button = DOM.element('button');
+      button.innerText = `+${addCount}`;
+      button.onclick = (e) => this._addMoreRows(addCount);
+      td.appendChild(button);
+    }
+    this._table.appendChild(DOM.element('tfoot'))
+        .appendChild(DOM.tr())
+        .appendChild(td);
   }
 
   _addMoreRows(count = undefined) {
@@ -296,8 +458,8 @@ export function gradientStopsFromGroups(
   const stops = [];
   for (let group of groups) {
     const color = colorFn(group.key);
-    increment += group.count;
-    let height = (increment / totalLength * kMaxHeight) | 0;
+    increment += group.length;
+    const height = (increment / totalLength * kMaxHeight) | 0;
     stops.push(`${color} ${lastHeight}${kUnit} ${height}${kUnit}`)
     lastHeight = height;
   }
@@ -305,10 +467,3 @@ export function gradientStopsFromGroups(
 }
 
 export * from '../helper.mjs';
-export {
-  DOM,
-  $,
-  V8CustomElement,
-  CSSColor,
-  LazyTable,
-};

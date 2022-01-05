@@ -744,9 +744,6 @@ TEST_P(DetectNotInstantiatedTest, Used) { }
 // This would make the test failure from the above go away.
 // INSTANTIATE_TEST_SUITE_P(Fix, DetectNotInstantiatedTest, testing::Values(1));
 
-// This #ifdef block tests the output of typed tests.
-#if GTEST_HAS_TYPED_TEST
-
 template <typename T>
 class TypedTest : public testing::Test {
 };
@@ -782,11 +779,6 @@ TYPED_TEST_SUITE(TypedTestWithNames, TypesForTestWithNames, TypedTestNames);
 TYPED_TEST(TypedTestWithNames, Success) {}
 
 TYPED_TEST(TypedTestWithNames, Failure) { FAIL(); }
-
-#endif  // GTEST_HAS_TYPED_TEST
-
-// This #ifdef block tests the output of type-parameterized tests.
-#if GTEST_HAS_TYPED_TEST_P
 
 template <typename T>
 class TypedTestP : public testing::Test {
@@ -838,8 +830,6 @@ REGISTER_TYPED_TEST_SUITE_P(DetectNotInstantiatedTypesTest, Used);
 // typedef ::testing::Types<char, int, unsigned int> MyTypes;
 // INSTANTIATE_TYPED_TEST_SUITE_P(All, DetectNotInstantiatedTypesTest, MyTypes);
 
-#endif  // GTEST_HAS_TYPED_TEST_P
-
 #if GTEST_HAS_DEATH_TEST
 
 // We rely on the golden file to verify that tests whose test case
@@ -847,8 +837,6 @@ REGISTER_TYPED_TEST_SUITE_P(DetectNotInstantiatedTypesTest, Used);
 
 TEST(ADeathTest, ShouldRunFirst) {
 }
-
-# if GTEST_HAS_TYPED_TEST
 
 // We rely on the golden file to verify that typed tests whose test
 // case name ends with DeathTest are run first.
@@ -862,10 +850,6 @@ TYPED_TEST_SUITE(ATypedDeathTest, NumericTypes);
 
 TYPED_TEST(ATypedDeathTest, ShouldRunFirst) {
 }
-
-# endif  // GTEST_HAS_TYPED_TEST
-
-# if GTEST_HAS_TYPED_TEST_P
 
 
 // We rely on the golden file to verify that type-parameterized tests
@@ -883,8 +867,6 @@ TYPED_TEST_P(ATypeParamDeathTest, ShouldRunFirst) {
 REGISTER_TYPED_TEST_SUITE_P(ATypeParamDeathTest, ShouldRunFirst);
 
 INSTANTIATE_TYPED_TEST_SUITE_P(My, ATypeParamDeathTest, NumericTypes);
-
-# endif  // GTEST_HAS_TYPED_TEST_P
 
 #endif  // GTEST_HAS_DEATH_TEST
 
@@ -1047,7 +1029,7 @@ auto dynamic_test = (
         "BadDynamicFixture1", "TestBase", nullptr, nullptr, __FILE__, __LINE__,
         []() -> testing::Test* { return new DynamicTest<true>; }),
 
-    // Register two tests with the same fixture incorrectly by ommiting the
+    // Register two tests with the same fixture incorrectly by omitting the
     // return type.
     testing::RegisterTest(
         "BadDynamicFixture2", "FixtureBase", nullptr, nullptr, __FILE__,
@@ -1078,13 +1060,21 @@ class BarEnvironment : public testing::Environment {
   }
 };
 
+class TestSuiteThatFailsToSetUp : public testing::Test {
+ public:
+  static void SetUpTestSuite() { EXPECT_TRUE(false); }
+};
+TEST_F(TestSuiteThatFailsToSetUp, ShouldNotRun) {
+  std::abort();
+}
+
 // The main function.
 //
 // The idea is to use Google Test to run all the tests we have defined (some
 // of them are intended to fail), and then compare the test results
 // with the "golden" file.
 int main(int argc, char **argv) {
-  testing::GTEST_FLAG(print_time) = false;
+  GTEST_FLAG_SET(print_time, false);
 
   // We just run the tests, knowing some of them are intended to fail.
   // We will use a separate Python script to compare the output of
@@ -1099,7 +1089,7 @@ int main(int argc, char **argv) {
                  std::string("internal_skip_environment_and_ad_hoc_tests")) > 0;
 
 #if GTEST_HAS_DEATH_TEST
-  if (testing::internal::GTEST_FLAG(internal_run_death_test) != "") {
+  if (GTEST_FLAG_GET(internal_run_death_test) != "") {
     // Skip the usual output capturing if we're running as the child
     // process of an threadsafe-style death test.
 # if GTEST_OS_WINDOWS

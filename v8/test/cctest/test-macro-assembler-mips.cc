@@ -26,7 +26,8 @@
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <stdlib.h>
-#include <iostream>  // NOLINT(readability/streams)
+
+#include <iostream>
 
 #include "src/api/api-inl.h"
 #include "src/base/utils/random-number-generator.h"
@@ -1349,14 +1350,14 @@ TEST(DeoptExitSizeIsFixed) {
     Label before_exit;
     masm.bind(&before_exit);
     if (kind == DeoptimizeKind::kEagerWithResume) {
-      Builtins::Name target = Deoptimizer::GetDeoptWithResumeBuiltin(
+      Builtin target = Deoptimizer::GetDeoptWithResumeBuiltin(
           DeoptimizeReason::kDynamicCheckMaps);
       masm.CallForDeoptimization(target, 42, &before_exit, kind, &before_exit,
                                  nullptr);
       CHECK_EQ(masm.SizeOfCodeGeneratedSince(&before_exit),
                Deoptimizer::kEagerWithResumeBeforeArgsSize);
     } else {
-      Builtins::Name target = Deoptimizer::GetDeoptimizationEntry(kind);
+      Builtin target = Deoptimizer::GetDeoptimizationEntry(kind);
       masm.CallForDeoptimization(target, 42, &before_exit, kind, &before_exit,
                                  nullptr);
       CHECK_EQ(masm.SizeOfCodeGeneratedSince(&before_exit),

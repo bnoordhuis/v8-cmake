@@ -34,12 +34,17 @@ class Symbolizer;
   V(CODE_MOVE, CodeMoveEventRecord)              \
   V(CODE_DISABLE_OPT, CodeDisableOptEventRecord) \
   V(CODE_DEOPT, CodeDeoptEventRecord)            \
-  V(REPORT_BUILTIN, ReportBuiltinEventRecord)
+  V(REPORT_BUILTIN, ReportBuiltinEventRecord)    \
+  V(CODE_DELETE, CodeDeleteEventRecord)
+
+#define VM_EVENTS_TYPE_LIST(V) \
+  CODE_EVENTS_TYPE_LIST(V)     \
+  V(NATIVE_CONTEXT_MOVE, NativeContextMoveEventRecord)
 
 class CodeEventRecord {
  public:
 #define DECLARE_TYPE(type, ignore) type,
-  enum Type { NONE = 0, CODE_EVENTS_TYPE_LIST(DECLARE_TYPE) };
+  enum Type { NONE = 0, VM_EVENTS_TYPE_LIST(DECLARE_TYPE) };
 #undef DECLARE_TYPE
 
   Type type;
@@ -93,9 +98,16 @@ class ReportBuiltinEventRecord : public CodeEventRecord {
  public:
   Address instruction_start;
   unsigned instruction_size;
-  Builtins::Name builtin_id;
+  Builtin builtin;
 
   V8_INLINE void UpdateCodeMap(CodeMap* code_map);
+};
+
+// Signals that a native context's address has changed.
+class NativeContextMoveEventRecord : public CodeEventRecord {
+ public:
+  Address from_address;
+  Address to_address;
 };
 
 // A record type for sending samples from the main thread/signal handler to the
@@ -111,6 +123,13 @@ class TickSampleEventRecord {
   TickSample sample;
 };
 
+class CodeDeleteEventRecord : public CodeEventRecord {
+ public:
+  CodeEntry* entry;
+
+  V8_INLINE void UpdateCodeMap(CodeMap* code_map);
+};
+
 // A record type for sending code events (e.g. create, move, delete) to the
 // profiling thread.
 class CodeEventsContainer {
@@ -122,7 +141,7 @@ class CodeEventsContainer {
   union  {
     CodeEventRecord generic;
 #define DECLARE_CLASS(ignore, type) type type##_;
-    CODE_EVENTS_TYPE_LIST(DECLARE_CLASS)
+    VM_EVENTS_TYPE_LIST(DECLARE_CLASS)
 #undef DECLARE_CLASS
   };
 };
@@ -166,7 +185,8 @@ class V8_EXPORT_PRIVATE ProfilerEventsProcessor : public base::Thread,
 
  protected:
   ProfilerEventsProcessor(Isolate* isolate, Symbolizer* symbolizer,
-                          ProfilerCodeObserver* code_observer);
+                          ProfilerCodeObserver* code_observer,
+                          CpuProfilesCollection* profiles);
 
   // Called from events processing thread (Run() method.)
   bool ProcessCodeEvent();
@@ -180,6 +200,7 @@ class V8_EXPORT_PRIVATE ProfilerEventsProcessor : public base::Thread,
 
   Symbolizer* symbolizer_;
   ProfilerCodeObserver* code_observer_;
+  CpuProfilesCollection* profiles_;
   std::atomic_bool running_{true};
   base::ConditionVariable running_cond_;
   base::Mutex running_mutex_;
@@ -230,23 +251,24 @@ class V8_EXPORT_PRIVATE SamplingEventsProcessor
   SamplingCircularQueue<TickSampleEventRecord,
                         kTickSampleQueueLength> ticks_buffer_;
   std::unique_ptr<sampler::Sampler> sampler_;
-  CpuProfilesCollection* profiles_;
   base::TimeDelta period_;           // Samples & code events processing period.
   const bool use_precise_sampling_;  // Whether or not busy-waiting is used for
                                      // low sampling intervals on Windows.
 };
 
-// Builds and maintains a CodeMap tracking code objects on the VM heap, as well
-// as strings owned by them. While alive, logs generated code, callbacks, and
-// builtins from the isolate. Redirects events to the profiler events
-// processor when present.
+// Builds and maintains a CodeMap tracking code objects on the VM heap. While
+// alive, logs generated code, callbacks, and builtins from the isolate.
+// Redirects events to the profiler events processor when present. CodeEntry
+// lifetime is associated with the given CodeEntryStorage.
 class V8_EXPORT_PRIVATE ProfilerCodeObserver : public CodeEventObserver {
  public:
-  explicit ProfilerCodeObserver(Isolate*);
+  explicit ProfilerCodeObserver(Isolate*, CodeEntryStorage&);
 
   void CodeEventHandler(const CodeEventsContainer& evt_rec) override;
+  CodeEntryStorage* code_entries() { return &code_entries_; }
   CodeMap* code_map() { return &code_map_; }
-  StringsStorage* strings() { return &strings_; }
+  WeakCodeRegistry* weak_code_registry() { return &weak_code_registry_; }
+  size_t GetEstimatedMemoryUsage() const;
 
   void ClearCodeMap();
 
@@ -269,8 +291,9 @@ class V8_EXPORT_PRIVATE ProfilerCodeObserver : public CodeEventObserver {
   void clear_processor() { processor_ = nullptr; }
 
   Isolate* const isolate_;
-  StringsStorage strings_;
+  CodeEntryStorage& code_entries_;
   CodeMap code_map_;
+  WeakCodeRegistry weak_code_registry_;
   ProfilerEventsProcessor* processor_;
 };
 
@@ -320,10 +343,12 @@ class V8_EXPORT_PRIVATE CpuProfiler {
   void set_sampling_interval(base::TimeDelta value);
   void set_use_precise_sampling(bool);
   void CollectSample();
-  StartProfilingStatus StartProfiling(const char* title,
-                                      CpuProfilingOptions options = {});
-  StartProfilingStatus StartProfiling(String title,
-                                      CpuProfilingOptions options = {});
+  StartProfilingStatus StartProfiling(
+      const char* title, CpuProfilingOptions options = {},
+      std::unique_ptr<DiscardedSamplesDelegate> delegate = nullptr);
+  StartProfilingStatus StartProfiling(
+      String title, CpuProfilingOptions options = {},
+      std::unique_ptr<DiscardedSamplesDelegate> delegate = nullptr);
 
   CpuProfile* StopProfiling(const char* title);
   CpuProfile* StopProfiling(String title);
@@ -337,6 +362,7 @@ class V8_EXPORT_PRIVATE CpuProfiler {
   Symbolizer* symbolizer() const { return symbolizer_.get(); }
   ProfilerEventsProcessor* processor() const { return processor_.get(); }
   Isolate* isolate() const { return isolate_; }
+  CodeEntryStorage* code_entries() { return &code_entries_; }
 
   ProfilerListener* profiler_listener_for_test() const {
     return profiler_listener_.get();
@@ -345,7 +371,6 @@ class V8_EXPORT_PRIVATE CpuProfiler {
 
  private:
   void StartProcessorIfNotStarted();
-  void StopProcessorIfLastProfile(const char* title);
   void StopProcessor();
   void ResetProfiles();
 
@@ -365,6 +390,11 @@ class V8_EXPORT_PRIVATE CpuProfiler {
   // Sampling interval to which per-profile sampling intervals will be clamped
   // to a multiple of, or used as the default if unspecified.
   base::TimeDelta base_sampling_interval_;
+
+  // Storage for CodeEntry objects allocated by the profiler. May live for
+  // multiple profiling sessions, independent of heap listener state.
+  CodeEntryStorage code_entries_;
+
   std::unique_ptr<ProfilerCodeObserver> code_observer_;
   std::unique_ptr<CpuProfilesCollection> profiles_;
   std::unique_ptr<Symbolizer> symbolizer_;

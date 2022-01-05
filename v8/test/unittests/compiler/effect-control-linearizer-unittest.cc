@@ -86,9 +86,7 @@ TEST_F(EffectControlLinearizerTest, SimpleLoad) {
 
   // Run the state effect introducer.
   LinearizeEffectControl(jsgraph(), &schedule, zone(), source_positions(),
-                         node_origins(),
-                         MaskArrayIndexEnable::kDoNotMaskArrayIndex,
-                         MaintainSchedule::kDiscard, broker());
+                         node_origins(), broker());
 
   EXPECT_THAT(load,
               IsLoadField(AccessBuilder::ForHeapNumberValue(), heap_number,
@@ -149,9 +147,7 @@ TEST_F(EffectControlLinearizerTest, DiamondLoad) {
 
   // Run the state effect introducer.
   LinearizeEffectControl(jsgraph(), &schedule, zone(), source_positions(),
-                         node_origins(),
-                         MaskArrayIndexEnable::kDoNotMaskArrayIndex,
-                         MaintainSchedule::kDiscard, broker());
+                         node_origins(), broker());
 
   // The effect input to the return should be an effect phi with the
   // newly introduced effectful change operators.
@@ -217,9 +213,7 @@ TEST_F(EffectControlLinearizerTest, LoopLoad) {
 
   // Run the state effect introducer.
   LinearizeEffectControl(jsgraph(), &schedule, zone(), source_positions(),
-                         node_origins(),
-                         MaskArrayIndexEnable::kDoNotMaskArrayIndex,
-                         MaintainSchedule::kDiscard, broker());
+                         node_origins(), broker());
 
   ASSERT_THAT(ret, IsReturn(load, load, if_true));
   EXPECT_THAT(load, IsLoadField(AccessBuilder::ForHeapNumberValue(),
@@ -281,9 +275,7 @@ TEST_F(EffectControlLinearizerTest, CloneBranch) {
   schedule.AddNode(mblock, graph()->end());
 
   LinearizeEffectControl(jsgraph(), &schedule, zone(), source_positions(),
-                         node_origins(),
-                         MaskArrayIndexEnable::kDoNotMaskArrayIndex,
-                         MaintainSchedule::kDiscard, broker());
+                         node_origins(), broker());
 
   Capture<Node *> branch1_capture, branch2_capture;
   EXPECT_THAT(
@@ -338,11 +330,10 @@ TEST_F(EffectControlLinearizerTest, UnreachableThenBranch) {
   ASSERT_THAT(end(), IsEnd(IsThrow(), IsThrow()));
   ASSERT_THAT(end()->op()->ControlInputCount(), 2);
 
-  // Run the state effect linearizer, maintaining the schedule.
-  LinearizeEffectControl(jsgraph(), &schedule, zone(), source_positions(),
-                         node_origins(),
-                         MaskArrayIndexEnable::kDoNotMaskArrayIndex,
-                         MaintainSchedule::kMaintain, broker());
+  // Run the state effect linearizer and machine lowering, maintaining the
+  // schedule.
+  LowerToMachineSchedule(jsgraph(), &schedule, zone(), source_positions(),
+                         node_origins(), broker());
 
   ASSERT_THAT(end(), IsEnd(IsThrow()));
 }
@@ -391,11 +382,10 @@ TEST_F(EffectControlLinearizerTest, UnreachableThenDiamond) {
   ASSERT_THAT(end(), IsEnd(IsThrow()));
   ASSERT_THAT(end()->op()->ControlInputCount(), 1);
 
-  // Run the state effect linearizer, maintaining the schedule.
-  LinearizeEffectControl(jsgraph(), &schedule, zone(), source_positions(),
-                         node_origins(),
-                         MaskArrayIndexEnable::kDoNotMaskArrayIndex,
-                         MaintainSchedule::kMaintain, broker());
+  // Run the state effect linearizer and machine lowering, maintaining the
+  // schedule.
+  LowerToMachineSchedule(jsgraph(), &schedule, zone(), source_positions(),
+                         node_origins(), broker());
 
   ASSERT_THAT(end(), IsEnd(IsThrow()));
 }
@@ -449,11 +439,10 @@ TEST_F(EffectControlLinearizerTest, UnreachableThenLoop) {
   ASSERT_THAT(end(), IsEnd(IsThrow()));
   ASSERT_THAT(end()->op()->ControlInputCount(), 1);
 
-  // Run the state effect linearizer, maintaining the schedule.
-  LinearizeEffectControl(jsgraph(), &schedule, zone(), source_positions(),
-                         node_origins(),
-                         MaskArrayIndexEnable::kDoNotMaskArrayIndex,
-                         MaintainSchedule::kMaintain, broker());
+  // Run the state effect linearizer and machine lowering, maintaining the
+  // schedule.
+  LowerToMachineSchedule(jsgraph(), &schedule, zone(), source_positions(),
+                         node_origins(), broker());
 
   ASSERT_THAT(end(), IsEnd(IsThrow()));
 }
@@ -503,11 +492,10 @@ TEST_F(EffectControlLinearizerTest, UnreachableInChangedBlockThenBranch) {
   ASSERT_THAT(end(), IsEnd(IsThrow(), IsThrow()));
   ASSERT_THAT(end()->op()->ControlInputCount(), 2);
 
-  // Run the state effect linearizer, maintaining the schedule.
-  LinearizeEffectControl(jsgraph(), &schedule, zone(), source_positions(),
-                         node_origins(),
-                         MaskArrayIndexEnable::kDoNotMaskArrayIndex,
-                         MaintainSchedule::kMaintain, broker());
+  // Run the state effect linearizer and machine lowering, maintaining the
+  // schedule.
+  LowerToMachineSchedule(jsgraph(), &schedule, zone(), source_positions(),
+                         node_origins(), broker());
 
   ASSERT_THAT(end(), IsEnd(IsThrow()));
 }

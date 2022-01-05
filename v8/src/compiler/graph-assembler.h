@@ -27,6 +27,7 @@ namespace compiler {
 
 class Schedule;
 class BasicBlock;
+class Reducer;
 
 #define PURE_ASSEMBLER_MACH_UNOP_LIST(V) \
   V(BitcastFloat32ToInt32)               \
@@ -34,6 +35,7 @@ class BasicBlock;
   V(BitcastInt32ToFloat32)               \
   V(BitcastWord32ToWord64)               \
   V(BitcastInt64ToFloat64)               \
+  V(ChangeFloat32ToFloat64)              \
   V(ChangeFloat64ToInt32)                \
   V(ChangeFloat64ToInt64)                \
   V(ChangeFloat64ToUint32)               \
@@ -47,6 +49,7 @@ class BasicBlock;
   V(Float64ExtractLowWord32)             \
   V(Float64SilenceNaN)                   \
   V(RoundFloat64ToInt32)                 \
+  V(RoundInt32ToFloat32)                 \
   V(TruncateFloat64ToFloat32)            \
   V(TruncateFloat64ToWord32)             \
   V(TruncateInt64ToInt32)                \
@@ -89,6 +92,9 @@ class BasicBlock;
   V(Word64And)                            \
   V(Word64Equal)                          \
   V(Word64Or)                             \
+  V(Word64Sar)                            \
+  V(Word64SarShiftOutZeros)               \
+  V(Word64Shl)                            \
   V(Word64Shr)                            \
   V(WordAnd)                              \
   V(WordEqual)                            \
@@ -105,8 +111,12 @@ class BasicBlock;
   V(Int32Mod)                                \
   V(Int32MulWithOverflow)                    \
   V(Int32SubWithOverflow)                    \
+  V(Int64Div)                                \
+  V(Int64Mod)                                \
   V(Uint32Div)                               \
-  V(Uint32Mod)
+  V(Uint32Mod)                               \
+  V(Uint64Div)                               \
+  V(Uint64Mod)
 
 #define JSGRAPH_SINGLETON_CONSTANT_LIST(V)      \
   V(AllocateInOldGenerationStub, Code)          \
@@ -261,6 +271,13 @@ class V8_EXPORT_PRIVATE GraphAssembler {
   CHECKED_ASSEMBLER_MACH_BINOP_LIST(BINOP_DECL)
 #undef BINOP_DECL
 
+#ifdef V8_MAP_PACKING
+  Node* PackMapWord(TNode<Map> map);
+  TNode<Map> UnpackMapWord(Node* map_word);
+#endif
+  TNode<Map> LoadMap(Node* object);
+  void StoreMap(Node* object, TNode<Map> map);
+
   Node* DebugBreak();
 
   // Unreachable nodes are similar to Goto in that they reset effect/control to
@@ -313,27 +330,20 @@ class V8_EXPORT_PRIVATE GraphAssembler {
   Node* Retain(Node* buffer);
   Node* UnsafePointerAdd(Node* base, Node* external);
 
-  Node* Word32PoisonOnSpeculation(Node* value);
-
-  Node* DeoptimizeIf(
-      DeoptimizeReason reason, FeedbackSource const& feedback, Node* condition,
-      Node* frame_state,
-      IsSafetyCheck is_safety_check = IsSafetyCheck::kSafetyCheck);
-  Node* DeoptimizeIf(
-      DeoptimizeKind kind, DeoptimizeReason reason,
-      FeedbackSource const& feedback, Node* condition, Node* frame_state,
-      IsSafetyCheck is_safety_check = IsSafetyCheck::kSafetyCheck);
-  Node* DeoptimizeIfNot(
-      DeoptimizeKind kind, DeoptimizeReason reason,
-      FeedbackSource const& feedback, Node* condition, Node* frame_state,
-      IsSafetyCheck is_safety_check = IsSafetyCheck::kSafetyCheck);
-  Node* DeoptimizeIfNot(
-      DeoptimizeReason reason, FeedbackSource const& feedback, Node* condition,
-      Node* frame_state,
-      IsSafetyCheck is_safety_check = IsSafetyCheck::kSafetyCheck);
+  Node* DeoptimizeIf(DeoptimizeReason reason, FeedbackSource const& feedback,
+                     Node* condition, Node* frame_state);
+  Node* DeoptimizeIf(DeoptimizeKind kind, DeoptimizeReason reason,
+                     FeedbackSource const& feedback, Node* condition,
+                     Node* frame_state);
+  Node* DeoptimizeIfNot(DeoptimizeKind kind, DeoptimizeReason reason,
+                        FeedbackSource const& feedback, Node* condition,
+                        Node* frame_state);
+  Node* DeoptimizeIfNot(DeoptimizeReason reason, FeedbackSource const& feedback,
+                        Node* condition, Node* frame_state);
   Node* DynamicCheckMapsWithDeoptUnless(Node* condition, Node* slot_index,
                                         Node* map, Node* handler,
-                                        Node* frame_state);
+                                        Node* feedback_vector,
+                                        FrameState frame_state);
   TNode<Object> Call(const CallDescriptor* call_descriptor, int inputs_size,
                      Node** inputs);
   TNode<Object> Call(const Operator* op, int inputs_size, Node** inputs);
@@ -369,6 +379,22 @@ class V8_EXPORT_PRIVATE GraphAssembler {
                       BranchHint hint, Vars...);
 
   // Control helpers.
+
+  // {GotoIf(c, l, h)} is equivalent to {BranchWithHint(c, l, templ, h);
+  // Bind(templ)}.
+  template <typename... Vars>
+  void GotoIf(Node* condition, GraphAssemblerLabel<sizeof...(Vars)>* label,
+              BranchHint hint, Vars...);
+
+  // {GotoIfNot(c, l, h)} is equivalent to {BranchWithHint(c, templ, l, h);
+  // Bind(templ)}.
+  // The branch hint refers to the expected outcome of the provided condition,
+  // so {GotoIfNot(..., BranchHint::kTrue)} means "optimize for the case where
+  // the branch is *not* taken".
+  template <typename... Vars>
+  void GotoIfNot(Node* condition, GraphAssemblerLabel<sizeof...(Vars)>* label,
+                 BranchHint hint, Vars...);
+
   // {GotoIf(c, l)} is equivalent to {Branch(c, l, templ);Bind(templ)}.
   template <typename... Vars>
   void GotoIf(Node* condition, GraphAssemblerLabel<sizeof...(Vars)>* label,
@@ -410,6 +436,16 @@ class V8_EXPORT_PRIVATE GraphAssembler {
   BasicBlock* FinalizeCurrentBlock(BasicBlock* block);
 
   void ConnectUnreachableToEnd();
+
+  // Add an inline reducers such that nodes added to the graph will be run
+  // through the reducers and possibly further lowered. Each reducer should
+  // operate on independent node types since once a reducer changes a node we
+  // no longer run any other reducers on that node. The reducers should also
+  // only generate new nodes that wouldn't be further reduced, as new nodes
+  // generated by a reducer won't be passed through the reducers again.
+  void AddInlineReducer(Reducer* reducer) {
+    inline_reducers_.push_back(reducer);
+  }
 
   Control control() const { return Control(control_); }
   Effect effect() const { return Effect(effect_); }
@@ -507,11 +543,13 @@ class V8_EXPORT_PRIVATE GraphAssembler {
   };
 
  private:
+  class BlockInlineReduction;
+
   template <typename... Vars>
   void BranchImpl(Node* condition,
                   GraphAssemblerLabel<sizeof...(Vars)>* if_true,
                   GraphAssemblerLabel<sizeof...(Vars)>* if_false,
-                  BranchHint hint, IsSafetyCheck is_safety_check, Vars...);
+                  BranchHint hint, Vars...);
   void RecordBranchInBlockUpdater(Node* branch, Node* if_true_control,
                                   Node* if_false_control,
                                   BasicBlock* if_true_block,
@@ -525,6 +563,11 @@ class V8_EXPORT_PRIVATE GraphAssembler {
   // subgraph created by the graph assembler changes.
   base::Optional<NodeChangedCallback> node_changed_callback_;
   std::unique_ptr<BasicBlockUpdater> block_updater_;
+
+  // Inline reducers enable reductions to be performed to nodes as they are
+  // added to the graph with the graph assembler.
+  ZoneVector<Reducer*> inline_reducers_;
+  bool inline_reductions_blocked_;
 
   // Track loop information in order to properly mark loop exits with
   // {LoopExit,LoopExitEffect,LoopExitValue} nodes. The outermost level has
@@ -691,8 +734,7 @@ void GraphAssembler::Branch(Node* condition,
     hint = if_false->IsDeferred() ? BranchHint::kTrue : BranchHint::kFalse;
   }
 
-  BranchImpl(condition, if_true, if_false, hint, IsSafetyCheck::kNoSafetyCheck,
-             vars...);
+  BranchImpl(condition, if_true, if_false, hint, vars...);
 }
 
 template <typename... Vars>
@@ -700,20 +742,17 @@ void GraphAssembler::BranchWithHint(
     Node* condition, GraphAssemblerLabel<sizeof...(Vars)>* if_true,
     GraphAssemblerLabel<sizeof...(Vars)>* if_false, BranchHint hint,
     Vars... vars) {
-  BranchImpl(condition, if_true, if_false, hint, IsSafetyCheck::kNoSafetyCheck,
-             vars...);
+  BranchImpl(condition, if_true, if_false, hint, vars...);
 }
 
 template <typename... Vars>
 void GraphAssembler::BranchImpl(Node* condition,
                                 GraphAssemblerLabel<sizeof...(Vars)>* if_true,
                                 GraphAssemblerLabel<sizeof...(Vars)>* if_false,
-                                BranchHint hint, IsSafetyCheck is_safety_check,
-                                Vars... vars) {
+                                BranchHint hint, Vars... vars) {
   DCHECK_NOT_NULL(control());
 
-  Node* branch = graph()->NewNode(common()->Branch(hint, is_safety_check),
-                                  condition, control());
+  Node* branch = graph()->NewNode(common()->Branch(hint), condition, control());
 
   Node* if_true_control = control_ =
       graph()->NewNode(common()->IfTrue(), branch);
@@ -747,9 +786,7 @@ void GraphAssembler::Goto(GraphAssemblerLabel<sizeof...(Vars)>* label,
 template <typename... Vars>
 void GraphAssembler::GotoIf(Node* condition,
                             GraphAssemblerLabel<sizeof...(Vars)>* label,
-                            Vars... vars) {
-  BranchHint hint =
-      label->IsDeferred() ? BranchHint::kFalse : BranchHint::kNone;
+                            BranchHint hint, Vars... vars) {
   Node* branch = graph()->NewNode(common()->Branch(hint), condition, control());
 
   control_ = graph()->NewNode(common()->IfTrue(), branch);
@@ -762,8 +799,7 @@ void GraphAssembler::GotoIf(Node* condition,
 template <typename... Vars>
 void GraphAssembler::GotoIfNot(Node* condition,
                                GraphAssemblerLabel<sizeof...(Vars)>* label,
-                               Vars... vars) {
-  BranchHint hint = label->IsDeferred() ? BranchHint::kTrue : BranchHint::kNone;
+                               BranchHint hint, Vars... vars) {
   Node* branch = graph()->NewNode(common()->Branch(hint), condition, control());
 
   control_ = graph()->NewNode(common()->IfFalse(), branch);
@@ -771,6 +807,23 @@ void GraphAssembler::GotoIfNot(Node* condition,
 
   GotoIfBasicBlock(label->basic_block(), branch, IrOpcode::kIfFalse);
   control_ = AddNode(graph()->NewNode(common()->IfTrue(), branch));
+}
+
+template <typename... Vars>
+void GraphAssembler::GotoIf(Node* condition,
+                            GraphAssemblerLabel<sizeof...(Vars)>* label,
+                            Vars... vars) {
+  BranchHint hint =
+      label->IsDeferred() ? BranchHint::kFalse : BranchHint::kNone;
+  return GotoIf(condition, label, hint, vars...);
+}
+
+template <typename... Vars>
+void GraphAssembler::GotoIfNot(Node* condition,
+                               GraphAssemblerLabel<sizeof...(Vars)>* label,
+                               Vars... vars) {
+  BranchHint hint = label->IsDeferred() ? BranchHint::kTrue : BranchHint::kNone;
+  return GotoIfNot(condition, label, hint, vars...);
 }
 
 template <typename... Args>
@@ -845,6 +898,7 @@ class V8_EXPORT_PRIVATE JSGraphAssembler : public GraphAssembler {
   TNode<Number> PlainPrimitiveToNumber(TNode<Object> value);
   TNode<Number> NumberMin(TNode<Number> lhs, TNode<Number> rhs);
   TNode<Number> NumberMax(TNode<Number> lhs, TNode<Number> rhs);
+  TNode<Boolean> NumberEqual(TNode<Number> lhs, TNode<Number> rhs);
   TNode<Boolean> NumberLessThan(TNode<Number> lhs, TNode<Number> rhs);
   TNode<Boolean> NumberLessThanOrEqual(TNode<Number> lhs, TNode<Number> rhs);
   TNode<Number> NumberAdd(TNode<Number> lhs, TNode<Number> rhs);

@@ -15,16 +15,9 @@
 namespace v8 {
 namespace internal {
 
-void EnsureFlagLocalHeapsEnabled() {
-  // Avoid data race in concurrent thread by only setting the flag to true if
-  // not already enabled.
-  if (!FLAG_local_heaps) FLAG_local_heaps = true;
-}
-
 using SafepointTest = TestWithIsolate;
 
 TEST_F(SafepointTest, ReachSafepointWithoutLocalHeaps) {
-  EnsureFlagLocalHeapsEnabled();
   Heap* heap = i_isolate()->heap();
   bool run = false;
   {
@@ -54,7 +47,6 @@ class ParkedThread final : public v8::base::Thread {
 };
 
 TEST_F(SafepointTest, StopParkedThreads) {
-  EnsureFlagLocalHeapsEnabled();
   Heap* heap = i_isolate()->heap();
 
   int safepoints = 0;
@@ -90,7 +82,7 @@ TEST_F(SafepointTest, StopParkedThreads) {
   CHECK_EQ(safepoints, kRuns);
 }
 
-static const int kRuns = 10000;
+static const int kIterations = 10000;
 
 class RunningThread final : public v8::base::Thread {
  public:
@@ -103,7 +95,7 @@ class RunningThread final : public v8::base::Thread {
     LocalHeap local_heap(heap_, ThreadKind::kBackground);
     UnparkedScope unparked_scope(&local_heap);
 
-    for (int i = 0; i < kRuns; i++) {
+    for (int i = 0; i < kIterations; i++) {
       counter_->fetch_add(1);
       if (i % 100 == 0) local_heap.Safepoint();
     }
@@ -114,7 +106,6 @@ class RunningThread final : public v8::base::Thread {
 };
 
 TEST_F(SafepointTest, StopRunningThreads) {
-  EnsureFlagLocalHeapsEnabled();
   Heap* heap = i_isolate()->heap();
 
   const int kThreads = 10;

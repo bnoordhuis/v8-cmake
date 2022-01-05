@@ -7,7 +7,7 @@
 
 #include <memory>
 
-#include "src/deoptimizer/deoptimizer.h"
+#include "src/deoptimizer/deoptimized-frame-info.h"
 #include "src/execution/isolate.h"
 #include "src/execution/v8threads.h"
 #include "src/objects/objects.h"
@@ -36,9 +36,11 @@ class FrameInspector {
   Handle<Object> GetContext();
   Handle<Object> GetReceiver() { return receiver_; }
 
-  Handle<String> GetFunctionName() { return function_name_; }
+  Handle<String> GetFunctionName();
 
+#if V8_ENABLE_WEBASSEMBLY
   bool IsWasm();
+#endif  // V8_ENABLE_WEBASSEMBLY
   bool IsJavaScript();
 
   JavaScriptFrame* javascript_frame();
@@ -56,11 +58,8 @@ class FrameInspector {
   Handle<Script> script_;
   Handle<Object> receiver_;
   Handle<JSFunction> function_;
-  Handle<String> function_name_;
   int source_position_ = -1;
   bool is_optimized_ = false;
-  bool is_interpreted_ = false;
-  bool has_adapted_arguments_ = false;
   bool is_constructor_ = false;
 };
 

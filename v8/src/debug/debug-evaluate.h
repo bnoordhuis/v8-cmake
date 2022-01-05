@@ -27,6 +27,10 @@ class DebugEvaluate : public AllStatic {
                                     debug::EvaluateGlobalMode mode,
                                     REPLMode repl_mode = REPLMode::kNo);
 
+  static V8_EXPORT_PRIVATE MaybeHandle<Object> Global(
+      Isolate* isolate, Handle<JSFunction> function,
+      debug::EvaluateGlobalMode mode, REPLMode repl_mode = REPLMode::kNo);
+
   // Evaluate a piece of JavaScript in the context of a stack frame for
   // debugging.  Things that need special attention are:
   // - Parameters and stack-allocated locals need to be materialized.  Altered
@@ -49,6 +53,7 @@ class DebugEvaluate : public AllStatic {
   static DebugInfo::SideEffectState FunctionGetSideEffectState(
       Isolate* isolate, Handle<SharedFunctionInfo> info);
   static void ApplySideEffectChecks(Handle<BytecodeArray> bytecode_array);
+  static bool IsSideEffectFreeIntrinsic(Runtime::FunctionId id);
 
 #ifdef DEBUG
   static void VerifyTransitiveBuiltins(Isolate* isolate);

@@ -625,18 +625,18 @@ struct BasicTypeExpression : TypeExpression {
   DEFINE_AST_NODE_LEAF_BOILERPLATE(BasicTypeExpression)
   BasicTypeExpression(SourcePosition pos,
                       std::vector<std::string> namespace_qualification,
-                      std::string name,
+                      Identifier* name,
                       std::vector<TypeExpression*> generic_arguments)
       : TypeExpression(kKind, pos),
         namespace_qualification(std::move(namespace_qualification)),
-        is_constexpr(IsConstexprName(name)),
-        name(std::move(name)),
+        is_constexpr(IsConstexprName(name->value)),
+        name(name),
         generic_arguments(std::move(generic_arguments)) {}
-  BasicTypeExpression(SourcePosition pos, std::string name)
-      : BasicTypeExpression(pos, {}, std::move(name), {}) {}
+  BasicTypeExpression(SourcePosition pos, Identifier* name)
+      : BasicTypeExpression(pos, {}, name, {}) {}
   std::vector<std::string> namespace_qualification;
   bool is_constexpr;
-  std::string name;
+  Identifier* name;
   std::vector<TypeExpression*> generic_arguments;
 };
 
@@ -721,7 +721,7 @@ struct DebugStatement : Statement {
 
 struct AssertStatement : Statement {
   DEFINE_AST_NODE_LEAF_BOILERPLATE(AssertStatement)
-  enum class AssertKind { kAssert, kCheck, kStaticAssert };
+  enum class AssertKind { kDcheck, kCheck, kStaticAssert };
   AssertStatement(SourcePosition pos, AssertKind kind, Expression* expression,
                   std::string source)
       : Statement(kKind, pos),
@@ -924,14 +924,23 @@ struct Annotation {
   base::Optional<AnnotationParameter> param;
 };
 
+struct ClassFieldIndexInfo {
+  // The expression that can compute how many items are in the indexed field.
+  Expression* expr;
+
+  // Whether the field was declared as optional, meaning it can only hold zero
+  // or one values, and thus should not require an index expression to access.
+  bool optional;
+};
+
 struct ClassFieldExpression {
   NameAndTypeExpression name_and_type;
-  base::Optional<Expression*> index;
+  base::Optional<ClassFieldIndexInfo> index;
   std::vector<ConditionalAnnotation> conditions;
   bool weak;
   bool const_qualified;
-  bool generate_verify;
-  bool relaxed_write;
+  FieldSynchronization read_synchronization;
+  FieldSynchronization write_synchronization;
 };
 
 struct LabelAndTypes {
@@ -1296,10 +1305,9 @@ inline VarDeclarationStatement* MakeConstDeclarationStatement(
 }
 
 inline BasicTypeExpression* MakeBasicTypeExpression(
-    std::vector<std::string> namespace_qualification, std::string name,
+    std::vector<std::string> namespace_qualification, Identifier* name,
     std::vector<TypeExpression*> generic_arguments = {}) {
-  return MakeNode<BasicTypeExpression>(std::move(namespace_qualification),
-                                       std::move(name),
+  return MakeNode<BasicTypeExpression>(std::move(namespace_qualification), name,
                                        std::move(generic_arguments));
 }
 

@@ -34,7 +34,11 @@
 #include <unordered_set>
 
 #include "../../third_party/inspector_protocol/crdtp/json.h"
+#include "include/v8-container.h"
+#include "include/v8-context.h"
+#include "include/v8-function.h"
 #include "include/v8-inspector.h"
+#include "include/v8-microtask-queue.h"
 #include "src/debug/debug-interface.h"
 #include "src/inspector/custom-preview.h"
 #include "src/inspector/inspected-context.h"
@@ -302,7 +306,8 @@ class InjectedScript::ProtocolPromiseHandler {
       exceptionDetails->setStackTrace(
           stack->buildInspectorObjectImpl(m_inspector->debugger()));
     if (stack && !stack->isEmpty())
-      exceptionDetails->setScriptId(toString16(stack->topScriptId()));
+      exceptionDetails->setScriptId(
+          String16::fromInteger(stack->topScriptId()));
     callback->sendSuccess(std::move(wrappedValue), std::move(exceptionDetails));
   }
 
@@ -353,8 +358,8 @@ class PropertyAccumulator : public ValueMirror::PropertyAccumulator {
 
 Response InjectedScript::getProperties(
     v8::Local<v8::Object> object, const String16& groupName, bool ownProperties,
-    bool accessorPropertiesOnly, WrapMode wrapMode,
-    std::unique_ptr<Array<PropertyDescriptor>>* properties,
+    bool accessorPropertiesOnly, bool nonIndexedPropertiesOnly,
+    WrapMode wrapMode, std::unique_ptr<Array<PropertyDescriptor>>* properties,
     Maybe<protocol::Runtime::ExceptionDetails>* exceptionDetails) {
   v8::HandleScope handles(m_context->isolate());
   v8::Local<v8::Context> context = m_context->context();
@@ -366,7 +371,8 @@ Response InjectedScript::getProperties(
   std::vector<PropertyMirror> mirrors;
   PropertyAccumulator accumulator(&mirrors);
   if (!ValueMirror::getProperties(context, object, ownProperties,
-                                  accessorPropertiesOnly, &accumulator)) {
+                                  accessorPropertiesOnly,
+                                  nonIndexedPropertiesOnly, &accumulator)) {
     return createExceptionDetails(tryCatch, groupName, exceptionDetails);
   }
   for (const PropertyMirror& mirror : mirrors) {
@@ -603,9 +609,9 @@ std::unique_ptr<protocol::Runtime::RemoteObject> InjectedScript::wrapTable(
     }
   }
   if (!selectedColumns.empty()) {
-    for (const std::unique_ptr<PropertyPreview>& column :
+    for (const std::unique_ptr<PropertyPreview>& prop :
          *preview->getProperties()) {
-      ObjectPreview* columnPreview = column->getValuePreview(nullptr);
+      ObjectPreview* columnPreview = prop->getValuePreview(nullptr);
       if (!columnPreview) continue;
       // Use raw pointer here since the lifetime of each PropertyPreview is
       // ensured by columnPreview. This saves an additional clone.

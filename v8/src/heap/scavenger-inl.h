@@ -119,10 +119,11 @@ void Scavenger::PageMemoryFence(MaybeObject object) {
 bool Scavenger::MigrateObject(Map map, HeapObject source, HeapObject target,
                               int size) {
   // Copy the content of source to target.
-  target.set_map_word(MapWord::FromMap(map));
+  target.set_map_word(MapWord::FromMap(map), kRelaxedStore);
   heap()->CopyBlock(target.address() + kTaggedSize,
                     source.address() + kTaggedSize, size - kTaggedSize);
 
+  // This release CAS is paired with the load acquire in ScavengeObject.
   if (!source.release_compare_and_swap_map_word(
           MapWord::FromMap(map), MapWord::FromForwardingAddress(target))) {
     // Other task migrated the object.
@@ -159,7 +160,7 @@ CopyAndForwardResult Scavenger::SemiSpaceCopyObject(
     const bool self_success = MigrateObject(map, object, target, object_size);
     if (!self_success) {
       allocator_.FreeLast(NEW_SPACE, target, object_size);
-      MapWord map_word = object.synchronized_map_word();
+      MapWord map_word = object.map_word(kAcquireLoad);
       HeapObjectReference::Update(slot, map_word.ToForwardingAddress());
       DCHECK(!Heap::InFromPage(*slot));
       return Heap::InToPage(*slot)
@@ -184,6 +185,7 @@ CopyAndForwardResult Scavenger::PromoteObject(Map map, THeapObjectSlot slot,
   static_assert(std::is_same<THeapObjectSlot, FullHeapObjectSlot>::value ||
                     std::is_same<THeapObjectSlot, HeapObjectSlot>::value,
                 "Only FullHeapObjectSlot and HeapObjectSlot are expected here");
+  DCHECK_GE(object_size, Heap::kMinObjectSizeInTaggedWords * kTaggedSize);
   AllocationAlignment alignment = HeapObject::RequiredAlignment(map);
   AllocationResult allocation = allocator_.Allocate(
       OLD_SPACE, object_size, AllocationOrigin::kGC, alignment);
@@ -195,7 +197,7 @@ CopyAndForwardResult Scavenger::PromoteObject(Map map, THeapObjectSlot slot,
     const bool self_success = MigrateObject(map, object, target, object_size);
     if (!self_success) {
       allocator_.FreeLast(OLD_SPACE, target, object_size);
-      MapWord map_word = object.synchronized_map_word();
+      MapWord map_word = object.map_word(kAcquireLoad);
       HeapObjectReference::Update(slot, map_word.ToForwardingAddress());
       DCHECK(!Heap::InFromPage(*slot));
       return Heap::InToPage(*slot)
@@ -326,24 +328,25 @@ SlotCallbackResult Scavenger::EvacuateShortcutCandidate(Map map,
     HeapObjectReference::Update(slot, first);
 
     if (!Heap::InYoungGeneration(first)) {
-      object.synchronized_set_map_word(MapWord::FromForwardingAddress(first));
+      object.set_map_word(MapWord::FromForwardingAddress(first), kReleaseStore);
       return REMOVE_SLOT;
     }
 
-    MapWord first_word = first.synchronized_map_word();
+    MapWord first_word = first.map_word(kAcquireLoad);
     if (first_word.IsForwardingAddress()) {
       HeapObject target = first_word.ToForwardingAddress();
 
       HeapObjectReference::Update(slot, target);
-      object.synchronized_set_map_word(MapWord::FromForwardingAddress(target));
+      object.set_map_word(MapWord::FromForwardingAddress(target),
+                          kReleaseStore);
       return Heap::InYoungGeneration(target) ? KEEP_SLOT : REMOVE_SLOT;
     }
-    Map map = first_word.ToMap();
-    SlotCallbackResult result =
-        EvacuateObjectDefault(map, slot, first, first.SizeFromMap(map),
-                              Map::ObjectFieldsFrom(map.visitor_id()));
-    object.synchronized_set_map_word(
-        MapWord::FromForwardingAddress(slot.ToHeapObject()));
+    Map first_map = first_word.ToMap();
+    SlotCallbackResult result = EvacuateObjectDefault(
+        first_map, slot, first, first.SizeFromMap(first_map),
+        Map::ObjectFieldsFrom(first_map.visitor_id()));
+    object.set_map_word(MapWord::FromForwardingAddress(slot.ToHeapObject()),
+                        kReleaseStore);
     return result;
   }
   DCHECK_EQ(ObjectFields::kMaybePointers,
@@ -389,8 +392,10 @@ SlotCallbackResult Scavenger::ScavengeObject(THeapObjectSlot p,
                 "Only FullHeapObjectSlot and HeapObjectSlot are expected here");
   DCHECK(Heap::InFromPage(object));
 
-  // Synchronized load that consumes the publishing CAS of MigrateObject.
-  MapWord first_word = object.synchronized_map_word();
+  // Synchronized load that consumes the publishing CAS of MigrateObject. We
+  // need memory ordering in order to read the page header of the forwarded
+  // object (using Heap::InYoungGeneration).
+  MapWord first_word = object.map_word(kAcquireLoad);
 
   // If the first word is a forwarding address, the object has already been
   // copied.
@@ -400,6 +405,8 @@ SlotCallbackResult Scavenger::ScavengeObject(THeapObjectSlot p,
     DCHECK_IMPLIES(Heap::InYoungGeneration(dest),
                    Heap::InToPage(dest) || Heap::IsLargeObject(dest));
 
+    // This load forces us to have memory ordering for the map load above. We
+    // need to have the page header properly initialized.
     return Heap::InYoungGeneration(dest) ? KEEP_SLOT : REMOVE_SLOT;
   }
 
@@ -444,6 +451,14 @@ void ScavengeVisitor::VisitPointers(HeapObject host, ObjectSlot start,
 void ScavengeVisitor::VisitPointers(HeapObject host, MaybeObjectSlot start,
                                     MaybeObjectSlot end) {
   return VisitPointersImpl(host, start, end);
+}
+
+void ScavengeVisitor::VisitCodePointer(HeapObject host, CodeObjectSlot slot) {
+  CHECK(V8_EXTERNAL_CODE_SPACE_BOOL);
+  // Code slots never appear in new space because CodeDataContainers, the
+  // only object that can contain code pointers, are always allocated in
+  // the old space.
+  UNREACHABLE();
 }
 
 void ScavengeVisitor::VisitCodeTarget(Code host, RelocInfo* rinfo) {

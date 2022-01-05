@@ -142,6 +142,7 @@ class V8_EXPORT_PRIVATE Type : public TypeBase {
   base::Optional<const AggregateType*> AggregateSupertype() const;
   virtual std::vector<TypeChecker> GetTypeCheckers() const { return {}; }
   virtual std::string GetRuntimeType() const;
+  virtual std::string GetDebugType() const;
   static const Type* CommonSupertype(const Type* a, const Type* b);
   void AddAlias(std::string alias) const { aliases_.insert(std::move(alias)); }
   size_t id() const { return id_; }
@@ -214,7 +215,7 @@ struct Field {
 
   SourcePosition pos;
   const AggregateType* aggregate;
-  base::Optional<Expression*> index;
+  base::Optional<ClassFieldIndexInfo> index;
   NameAndType name_and_type;
 
   // The byte offset of this field from the beginning of the containing class or
@@ -227,8 +228,8 @@ struct Field {
 
   bool is_weak;
   bool const_qualified;
-  bool generate_verify;
-  bool relaxed_write;
+  FieldSynchronization read_synchronization;
+  FieldSynchronization write_synchronization;
 };
 
 std::ostream& operator<<(std::ostream& os, const Field& name_and_type);
@@ -266,12 +267,7 @@ class AbstractType final : public Type {
   DECLARE_TYPE_BOILERPLATE(AbstractType)
   const std::string& name() const { return name_; }
   std::string ToExplicitString() const override { return name(); }
-  std::string GetGeneratedTypeNameImpl() const override {
-    if (generated_type_.empty()) {
-      return parent()->GetGeneratedTypeName();
-    }
-    return IsConstexpr() ? generated_type_ : "TNode<" + generated_type_ + ">";
-  }
+  std::string GetGeneratedTypeNameImpl() const override;
   std::string GetGeneratedTNodeTypeNameImpl() const override;
   bool IsConstexpr() const final {
     const bool is_constexpr = flags_ & AbstractTypeFlag::kConstexpr;
@@ -398,6 +394,7 @@ class V8_EXPORT_PRIVATE UnionType final : public Type {
   std::string GetRuntimeType() const override {
     return parent()->GetRuntimeType();
   }
+  std::string GetDebugType() const override { return parent()->GetDebugType(); }
 
   friend size_t hash_value(const UnionType& p) {
     size_t result = 0;
@@ -574,6 +571,16 @@ class AggregateType : public Type {
     return {{name_, ""}};
   }
 
+  const Field& LastField() const {
+    for (base::Optional<const AggregateType*> current = this;
+         current.has_value();
+         current = (*current)->parent()->AggregateSupertype()) {
+      const std::vector<Field>& fields = (*current)->fields_;
+      if (!fields.empty()) return fields[fields.size() - 1];
+    }
+    ReportError("Can't get last field of empty aggregate type");
+  }
+
  protected:
   AggregateType(Kind kind, const Type* parent, Namespace* nspace,
                 const std::string& name,
@@ -662,12 +669,12 @@ class ClassType final : public AggregateType {
   std::string GetGeneratedTNodeTypeNameImpl() const override;
   bool IsExtern() const { return flags_ & ClassFlag::kExtern; }
   bool ShouldGeneratePrint() const {
-    return !IsExtern() ||
-           ((flags_ & ClassFlag::kGeneratePrint) && !HasUndefinedLayout());
+    return !IsExtern() || (ShouldGenerateCppClassDefinitions() &&
+                           !IsAbstract() && !HasUndefinedLayout());
   }
   bool ShouldGenerateVerify() const {
-    return !IsExtern() || ((flags_ & ClassFlag::kGenerateVerify) &&
-                           (!HasUndefinedLayout() && !IsShape()));
+    return !IsExtern() || (ShouldGenerateCppClassDefinitions() &&
+                           !HasUndefinedLayout() && !IsShape());
   }
   bool ShouldGenerateBodyDescriptor() const {
     return flags_ & ClassFlag::kGenerateBodyDescriptor ||
@@ -681,9 +688,8 @@ class ClassType final : public AggregateType {
   bool HasSameInstanceTypeAsParent() const {
     return flags_ & ClassFlag::kHasSameInstanceTypeAsParent;
   }
-  bool GenerateCppClassDefinitions() const {
-    return flags_ & ClassFlag::kGenerateCppClassDefinitions || !IsExtern() ||
-           ShouldGenerateBodyDescriptor();
+  bool ShouldGenerateCppClassDefinitions() const {
+    return (flags_ & ClassFlag::kGenerateCppClassDefinitions) || !IsExtern();
   }
   bool ShouldGenerateFullClassDefinition() const {
     return !IsExtern() && !(flags_ & ClassFlag::kCustomCppClass);
@@ -745,7 +751,7 @@ class ClassType final : public AggregateType {
   SourcePosition GetPosition() const { return decl_->pos; }
   SourceId AttributedToFile() const;
 
-  // TODO(tebbi): We should no longer pass around types as const pointers, so
+  // TODO(turbofan): We should no longer pass around types as const pointers, so
   // that we can avoid mutable fields and const initializers for
   // late-initialized portions of types like this one.
   void InitializeInstanceTypes(base::Optional<int> own,
@@ -775,6 +781,20 @@ class ClassType final : public AggregateType {
 inline std::ostream& operator<<(std::ostream& os, const Type& t) {
   os << t.ToString();
   return os;
+}
+
+template <bool success = false>
+std::ostream& operator<<(std::ostream& os, const Type* t) {
+  static_assert(success,
+                "Using Type* with an ostream is usually a mistake. Did you "
+                "mean to use Type& instead? If you actually intended to print "
+                "a pointer, use static_cast<const void*>.");
+  return os;
+}
+
+// Don't emit an error if a Type* is printed due to CHECK macros.
+inline std::ostream& operator<<(base::CheckMessageStream& os, const Type* t) {
+  return os << static_cast<const void*>(t);
 }
 
 class VisitResult {

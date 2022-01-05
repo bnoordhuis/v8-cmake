@@ -4,6 +4,7 @@
 
 #include "src/heap/new-spaces.h"
 
+#include "src/common/globals.h"
 #include "src/heap/array-buffer-sweeper.h"
 #include "src/heap/heap-inl.h"
 #include "src/heap/incremental-marking.h"
@@ -56,7 +57,7 @@ bool SemiSpace::EnsureCurrentCapacity() {
       memory_chunk_list_.Remove(current_page);
       // Clear new space flags to avoid this page being treated as a new
       // space page that is potentially being swept.
-      current_page->SetFlags(0, Page::kIsInYoungGenerationMask);
+      current_page->ClearFlags(Page::kIsInYoungGenerationMask);
       heap()->memory_allocator()->Free<MemoryAllocator::kPooledAndQueue>(
           current_page);
       current_page = next_current;
@@ -75,8 +76,7 @@ bool SemiSpace::EnsureCurrentCapacity() {
       DCHECK_NOT_NULL(current_page);
       memory_chunk_list_.PushBack(current_page);
       marking_state->ClearLiveness(current_page);
-      current_page->SetFlags(first_page()->GetFlags(),
-                             static_cast<uintptr_t>(Page::kCopyAllFlags));
+      current_page->SetFlags(first_page()->GetFlags(), Page::kAllFlagsMask);
       heap()->CreateFillerObjectAt(current_page->area_start(),
                                    static_cast<int>(current_page->area_size()),
                                    ClearRecordedSlots::kNo);
@@ -213,7 +213,8 @@ void SemiSpace::ShrinkTo(size_t new_capacity) {
   target_capacity_ = new_capacity;
 }
 
-void SemiSpace::FixPagesFlags(intptr_t flags, intptr_t mask) {
+void SemiSpace::FixPagesFlags(Page::MainThreadFlags flags,
+                              Page::MainThreadFlags mask) {
   for (Page* page : *this) {
     page->set_owner(this);
     page->SetFlags(flags, mask);
@@ -252,8 +253,7 @@ void SemiSpace::RemovePage(Page* page) {
 }
 
 void SemiSpace::PrependPage(Page* page) {
-  page->SetFlags(current_page()->GetFlags(),
-                 static_cast<uintptr_t>(Page::kCopyAllFlags));
+  page->SetFlags(current_page()->GetFlags(), Page::kAllFlagsMask);
   page->set_owner(this);
   memory_chunk_list_.PushFront(page);
   current_capacity_ += Page::kPageSize;
@@ -275,7 +275,7 @@ void SemiSpace::Swap(SemiSpace* from, SemiSpace* to) {
   DCHECK(from->first_page());
   DCHECK(to->first_page());
 
-  intptr_t saved_to_space_flags = to->current_page()->GetFlags();
+  auto saved_to_space_flags = to->current_page()->GetFlags();
 
   // We swap all properties but id_.
   std::swap(from->target_capacity_, to->target_capacity_);
@@ -288,7 +288,7 @@ void SemiSpace::Swap(SemiSpace* from, SemiSpace* to) {
             to->external_backing_store_bytes_);
 
   to->FixPagesFlags(saved_to_space_flags, Page::kCopyOnFlipFlagsMask);
-  from->FixPagesFlags(0, 0);
+  from->FixPagesFlags(Page::NO_FLAGS, Page::NO_FLAGS);
 }
 
 void SemiSpace::set_age_mark(Address mark) {
@@ -429,7 +429,7 @@ void NewSpace::ResetParkedAllocationBuffers() {
 void NewSpace::Flip() { SemiSpace::Swap(&from_space_, &to_space_); }
 
 void NewSpace::Grow() {
-  DCHECK_IMPLIES(FLAG_local_heaps, heap()->safepoint()->IsActive());
+  DCHECK(heap()->safepoint()->IsActive());
   // Double the semispace size but only up to maximum capacity.
   DCHECK(TotalCapacity() < MaximumCapacity());
   size_t new_capacity = std::min(
@@ -472,8 +472,11 @@ void NewSpace::UpdateLinearAllocationArea(Address known_top) {
   allocation_info_.Reset(new_top, to_space_.page_high());
   // The order of the following two stores is important.
   // See the corresponding loads in ConcurrentMarking::Run.
-  original_limit_.store(limit(), std::memory_order_relaxed);
-  original_top_.store(top(), std::memory_order_release);
+  {
+    base::SharedMutexGuard<base::kExclusive> guard(&pending_allocation_mutex_);
+    original_limit_.store(limit(), std::memory_order_relaxed);
+    original_top_.store(top(), std::memory_order_release);
+  }
   DCHECK_SEMISPACE_ALLOCATION_INFO(allocation_info_, to_space_);
 
   UpdateInlineAllocationLimit(0);
@@ -496,7 +499,7 @@ void NewSpace::UpdateInlineAllocationLimit(size_t min_size) {
   Address new_limit = ComputeLimit(top(), to_space_.page_high(), min_size);
   DCHECK_LE(top(), new_limit);
   DCHECK_LE(new_limit, to_space_.page_high());
-  allocation_info_.set_limit(new_limit);
+  allocation_info_.SetLimit(new_limit);
   DCHECK_SEMISPACE_ALLOCATION_INFO(allocation_info_, to_space_);
 
 #if DEBUG
@@ -592,11 +595,8 @@ bool NewSpace::EnsureAllocation(int size_in_bytes,
 }
 
 void NewSpace::MaybeFreeUnusedLab(LinearAllocationArea info) {
-  if (info.limit() != kNullAddress && info.limit() == top()) {
-    DCHECK_NE(info.top(), kNullAddress);
-    allocation_info_.set_top(info.top());
-    allocation_info_.MoveStartToTop();
-    original_top_.store(info.top(), std::memory_order_release);
+  if (allocation_info_.MergeIfAdjacent(info)) {
+    original_top_.store(allocation_info_.top(), std::memory_order_release);
   }
 
 #if DEBUG
@@ -628,8 +628,9 @@ AllocationResult NewSpace::AllocateRawSlow(int size_in_bytes,
 
 AllocationResult NewSpace::AllocateRawUnaligned(int size_in_bytes,
                                                 AllocationOrigin origin) {
+  DCHECK(!FLAG_enable_third_party_heap);
   if (!EnsureAllocation(size_in_bytes, kWordAligned)) {
-    return AllocationResult::Retry();
+    return AllocationResult::Retry(NEW_SPACE);
   }
 
   DCHECK_EQ(allocation_info_.start(), allocation_info_.top());
@@ -646,8 +647,9 @@ AllocationResult NewSpace::AllocateRawUnaligned(int size_in_bytes,
 AllocationResult NewSpace::AllocateRawAligned(int size_in_bytes,
                                               AllocationAlignment alignment,
                                               AllocationOrigin origin) {
+  DCHECK(!FLAG_enable_third_party_heap);
   if (!EnsureAllocation(size_in_bytes, alignment)) {
-    return AllocationResult::Retry();
+    return AllocationResult::Retry(NEW_SPACE);
   }
 
   DCHECK_EQ(allocation_info_.start(), allocation_info_.top());
@@ -669,8 +671,9 @@ void NewSpace::VerifyTop() {
   DCHECK_LE(allocation_info_.start(), allocation_info_.top());
   DCHECK_LE(allocation_info_.top(), allocation_info_.limit());
 
-  // Ensure that original_top_ always equals LAB start.
-  DCHECK_EQ(original_top_, allocation_info_.start());
+  // Ensure that original_top_ always >= LAB start. The delta between start_
+  // and top_ is still to be processed by allocation observers.
+  DCHECK_GE(original_top_, allocation_info_.start());
 
   // Ensure that limit() is <= original_limit_, original_limit_ always needs
   // to be end of curent to space page.
@@ -741,9 +744,11 @@ void NewSpace::Verify(Isolate* isolate) {
     CHECK_EQ(external_space_bytes[t], ExternalBackingStoreBytes(t));
   }
 
+  if (!FLAG_concurrent_array_buffer_sweeping) {
     size_t bytes = heap()->array_buffer_sweeper()->young().BytesSlow();
     CHECK_EQ(bytes,
              ExternalBackingStoreBytes(ExternalBackingStoreType::kArrayBuffer));
+  }
 
   // Check semi-spaces.
   CHECK_EQ(from_space_.id(), kFromSpace);

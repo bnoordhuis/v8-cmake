@@ -133,7 +133,7 @@ class VariableTracker {
     Maybe<Node*> Get(Variable var) {
       Node* node = current_state_.Get(var);
       if (node && node->opcode() == IrOpcode::kDead) {
-        // TODO(tebbi): We use {Dead} as a sentinel for uninitialized memory.
+        // TODO(turbofan): We use {Dead} as a sentinel for uninitialized memory.
         // Reading uninitialized memory can only happen in unreachable code. In
         // this case, we have to mark the object as escaping to avoid dead nodes
         // in the graph. This is a workaround that should be removed once we can
@@ -479,8 +479,8 @@ VariableTracker::State VariableTracker::MergeInputs(Node* effect_phi) {
             Node* phi = graph_->graph()->NewNode(
                 graph_->common()->Phi(MachineRepresentation::kTagged, arity),
                 arity + 1, &buffer_.front());
-            // TODO(tebbi): Computing precise types here is tricky, because of
-            // the necessary revisitations. If we really need this, we should
+            // TODO(turbofan): Computing precise types here is tricky, because
+            // of the necessary revisitations. If we really need this, we should
             // probably do it afterwards.
             NodeProperties::SetType(phi, Type::Any());
             reducer_->AddRoot(phi);
@@ -510,12 +510,15 @@ int OffsetOfFieldAccess(const Operator* op) {
   return access.offset;
 }
 
-int OffsetOfElementAt(ElementAccess const& access, int index) {
+Maybe<int> OffsetOfElementAt(ElementAccess const& access, int index) {
+  MachineRepresentation representation = access.machine_type.representation();
+  // Double elements accesses are not yet supported. See chromium:1237821.
+  if (representation == MachineRepresentation::kFloat64) return Nothing<int>();
+
   DCHECK_GE(index, 0);
-  DCHECK_GE(ElementSizeLog2Of(access.machine_type.representation()),
-            kTaggedSizeLog2);
-  return access.header_size +
-         (index << ElementSizeLog2Of(access.machine_type.representation()));
+  DCHECK_GE(ElementSizeLog2Of(representation), kTaggedSizeLog2);
+  return Just(access.header_size +
+              (index << ElementSizeLog2Of(representation)));
 }
 
 Maybe<int> OffsetOfElementsAccess(const Operator* op, Node* index_node) {
@@ -527,7 +530,7 @@ Maybe<int> OffsetOfElementsAccess(const Operator* op, Node* index_node) {
   double min = index_type.Min();
   int index = static_cast<int>(min);
   if (index < 0 || index != min || index != max) return Nothing<int>();
-  return Just(OffsetOfElementAt(ElementAccessOf(op), index));
+  return OffsetOfElementAt(ElementAccessOf(op), index);
 }
 
 Node* LowerCompareMapsWithoutLoad(Node* checked_map,
@@ -711,7 +714,7 @@ void ReduceNode(const Operator* op, EscapeAnalysisTracker::Scope* current,
       } else if (right_object && !right_object->HasEscaped()) {
         replacement = jsgraph->FalseConstant();
       }
-      // TODO(tebbi) This is a workaround for uninhabited types. If we
+      // TODO(turbofan) This is a workaround for uninhabited types. If we
       // replaced a value of uninhabited type with a constant, we would
       // widen the type of the node. This could produce inconsistent
       // types (which might confuse representation selection). We get
