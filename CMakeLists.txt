@@ -84,7 +84,7 @@ option(V8_ENABLE_I18N "Enable Internationalization support")
 set(
   v8_defines
   $<${is-darwin}:V8_HAVE_TARGET_OS>
-  $<${is-darwin}:V8_TARGET_OS_MACOSX>
+  $<${is-darwin}:V8_TARGET_OS_MACOS>
   $<${is-linux}:V8_HAVE_TARGET_OS>
   $<${is-linux}:V8_TARGET_OS_LINUX>
   $<${is-win}:V8_HAVE_TARGET_OS>
