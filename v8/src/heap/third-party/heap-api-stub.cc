@@ -62,7 +62,7 @@ bool Heap::IsImmovable(HeapObject) { return false; }
 // static
 bool Heap::IsValidCodeObject(HeapObject) { return false; }
 
-void Heap::ResetIterator() { }
+void Heap::ResetIterator() {}
 
 HeapObject Heap::NextObject() { return HeapObject(); }
 
