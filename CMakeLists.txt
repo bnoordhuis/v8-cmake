@@ -360,6 +360,7 @@ add_library(v8_base_without_compiler STATIC
   v8/src/trap-handler/handler-inside.cc
   v8/src/trap-handler/handler-outside.cc
   v8/src/trap-handler/handler-shared.cc
+  v8/src/temporal/temporal-parser.cc
   ${utils-sources}
   ${wasm-sources}
   ${zone-sources}
@@ -636,6 +637,7 @@ add_custom_command(
     Python::Interpreter
     v8/third_party/inspector_protocol/code_generator.py
     --config v8/src/inspector/inspector_protocol_config.json
+    --config_value 'protocol.path=v8/include/js_protocol.pdl'
     --jinja_dir v8/third_party
     --output_base ${PROJECT_BINARY_DIR}/inspector/src/inspector
     --inspector_protocol_dir third_party/inspector_protocol
@@ -725,6 +727,7 @@ add_library(v8_libbase STATIC
   v8/src/base/strings.cc
   v8/src/base/utils/random-number-generator.cc
   v8/src/base/vlq-base64.cc
+  v8/src/base/virtual-address-space.cc
   $<$<NOT:$<OR:${is-win},${is-aix}>>:v8/src/base/platform/platform-posix-time.cc>
   $<${is-win}:v8/src/base/platform/platform-win32.cc>
   $<${is-win}:v8/src/base/debug/stack_trace_win.cc>
@@ -732,6 +735,7 @@ add_library(v8_libbase STATIC
   $<${is-aix}:v8/src/base/platform/platform-aix.cc>
   $<${is-darwin}:v8/src/base/debug/stack_trace_posix.cc>
   $<${is-darwin}:v8/src/base/platform/platform-macos.cc>
+  $<${is-darwin}:v8/src/base/platform/platform-darwin.cc>
   $<${is-linux}:v8/src/base/debug/stack_trace_posix.cc>
   $<${is-linux}:v8/src/base/platform/platform-linux.cc>
   $<${is-posix}:v8/src/base/platform/platform-posix.cc>
