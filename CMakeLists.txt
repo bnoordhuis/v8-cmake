@@ -21,6 +21,7 @@ if(WIN32)
   add_definitions("-DNOMINMAX -DV8_ENABLE_SYSTEM_INSTRUMENTATION")
   # todo: for zlib, need to extract zlib when refactor
   add_definitions("-DX86_WINDOWS")
+  add_definitions("-D_WIN32_WINNT=0x0602")
 endif()
 
 list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
