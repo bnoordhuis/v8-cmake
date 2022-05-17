@@ -638,7 +638,7 @@ add_custom_command(
     Python::Interpreter
     v8/third_party/inspector_protocol/code_generator.py
     --config v8/src/inspector/inspector_protocol_config.json
-    --config_value 'protocol.path=v8/include/js_protocol.pdl'
+    --config_value protocol.path=v8/include/js_protocol.pdl
     --jinja_dir v8/third_party
     --output_base ${PROJECT_BINARY_DIR}/inspector/src/inspector
     --inspector_protocol_dir third_party/inspector_protocol
