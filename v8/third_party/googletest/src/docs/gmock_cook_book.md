@@ -1084,7 +1084,7 @@ using ::testing::Lt;
 ```
 
 says that `Blah` will be called with arguments `x`, `y`, and `z` where `x < y <
-z`. Note that in this example, it wasn't necessary specify the positional
+z`. Note that in this example, it wasn't necessary to specify the positional
 matchers.
 
 As a convenience and example, gMock provides some matchers for 2-tuples,
@@ -1980,6 +1980,7 @@ If the mock method also needs to return a value as well, you can chain
 
 ```cpp
 using ::testing::_;
+using ::testing::DoAll;
 using ::testing::Return;
 using ::testing::SetArgPointee;
 
