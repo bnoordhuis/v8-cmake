@@ -148,6 +148,47 @@ target_link_libraries(d8
     v8_libplatform
 )
 
+# add shell and hello-world
+add_executable(
+        shell
+        v8/samples/shell.cc
+)
+target_include_directories(shell
+        PUBLIC
+        $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/v8/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+        PRIVATE
+        $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/v8>
+        )
+target_link_libraries(shell
+        PRIVATE
+        v8_base_without_compiler
+        v8_compiler
+        v8_snapshot
+        v8_inspector
+        v8_libplatform
+        )
+
+add_executable(
+        hello-world
+        v8/samples/hello-world.cc
+)
+target_include_directories(hello-world
+        PUBLIC
+        $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/v8/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+        PRIVATE
+        $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/v8>
+        )
+target_link_libraries(hello-world
+        PRIVATE
+        v8_base_without_compiler
+        v8_compiler
+        v8_snapshot
+        v8_inspector
+        v8_libplatform
+        )
+
 # more granular library support
 add_library(v8-i18n-support OBJECT)
 set_property(TARGET v8-i18n-support PROPERTY EXCLUDE_FROM_ALL ON)
