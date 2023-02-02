@@ -16,7 +16,7 @@ if(MSVC)
 
 endif()
 
-add_definitions("-DV8_ENABLE_WEBASSEMBLY -DV8_ADVANCED_BIGINT_ALGORITHMS")
+add_definitions("-DV8_ENABLE_WEBASSEMBLY -DV8_ADVANCED_BIGINT_ALGORITHMS -DV8_ENABLE_WASM_SIMD256_REVEC")
 if(WIN32)
   add_definitions("-DNOMINMAX -DV8_ENABLE_SYSTEM_INSTRUMENTATION")
   # todo: for zlib, need to extract zlib when refactor
@@ -199,6 +199,7 @@ list(APPEND i18n-sources
   v8/src/objects/js-break-iterator.cc
   v8/src/objects/js-collator.cc
   v8/src/objects/js-date-time-format.cc
+  v8/src/objects/js-duration-format.cc
   v8/src/objects/js-display-names.cc
   v8/src/objects/js-list-format.cc
   v8/src/objects/js-locale.cc
@@ -295,6 +296,7 @@ list(REMOVE_ITEM builtin-sources
 
 list(REMOVE_ITEM diagnostic-sources v8/src/diagnostics/unwinding-info-win64.cc)
 list(REMOVE_ITEM diagnostic-sources v8/src/diagnostics/system-jit-win.cc)
+list(REMOVE_ITEM diagnostic-sources v8/src/diagnostics/etw-jit-win.cc)
 list(REMOVE_ITEM object-sources ${i18n-sources})
 list(REMOVE_ITEM regexp-sources v8/src/regexp/gen-regexp-special-case.cc)
 list(REMOVE_ITEM runtime-sources v8/src/runtime/runtime-intl.cc)
@@ -354,6 +356,7 @@ add_library(v8_base_without_compiler STATIC
   ${bigint-sources}
   ${codegen-sources}
   v8/src/common/assert-scope.cc
+  v8/src/common/code-memory-access.cc
   v8/src/compiler-dispatcher/lazy-compile-dispatcher.cc
   v8/src/compiler-dispatcher/optimizing-compile-dispatcher.cc
   v8/src/date/date.cc
@@ -854,6 +857,7 @@ if(NOT V8_ENABLE_I18N)
     src/objects/js-break-iterator.tq
     src/objects/js-collator.tq
     src/objects/js-date-time-format.tq
+    src/objects/js-duration-format.tq
     src/objects/js-display-names.tq
     src/objects/js-list-format.tq
     src/objects/js-locale.tq
