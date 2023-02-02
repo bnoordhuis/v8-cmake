@@ -63,7 +63,7 @@ TEST(MIPS0) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
   auto f = GeneratedCode<F2>::FromCode(*code);
   int64_t res = reinterpret_cast<int64_t>(f.Call(0xAB0, 0xC, 0, 0, 0));
@@ -98,7 +98,7 @@ TEST(MIPS1) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
   auto f = GeneratedCode<F1>::FromCode(*code);
   int64_t res = reinterpret_cast<int64_t>(f.Call(50, 0, 0, 0, 0));
@@ -243,7 +243,7 @@ TEST(MIPS2) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
   auto f = GeneratedCode<F2>::FromCode(*code);
   int64_t res = reinterpret_cast<int64_t>(f.Call(0xAB0, 0xC, 0, 0, 0));
@@ -344,7 +344,7 @@ TEST(MIPS3) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
   auto f = GeneratedCode<F3>::FromCode(*code);
   // Double test values.
@@ -436,7 +436,7 @@ TEST(MIPS4) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
   auto f = GeneratedCode<F3>::FromCode(*code);
   t.a = 1.5e22;
@@ -500,7 +500,7 @@ TEST(MIPS5) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
   auto f = GeneratedCode<F3>::FromCode(*code);
   t.a = 1.5e4;
@@ -568,7 +568,7 @@ TEST(MIPS6) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
   auto f = GeneratedCode<F3>::FromCode(*code);
   t.ui = 0x11223344;
@@ -654,7 +654,7 @@ TEST(MIPS7) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
   auto f = GeneratedCode<F3>::FromCode(*code);
   t.a = 1.5e14;
@@ -750,7 +750,7 @@ TEST(MIPS8) {
 
     CodeDesc desc;
     assm.GetCode(isolate, &desc);
-    Handle<Code> code =
+    Handle<InstructionStream> code =
         Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
     auto f = GeneratedCode<F3>::FromCode(*code);
     t.input = 0x12345678;
@@ -795,7 +795,7 @@ TEST(MIPS9) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
   USE(code);
 }
@@ -871,7 +871,7 @@ TEST(MIPS10) {
 
     CodeDesc desc;
     assm.GetCode(isolate, &desc);
-    Handle<Code> code =
+    Handle<InstructionStream> code =
         Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
     auto f = GeneratedCode<F3>::FromCode(*code);
     t.a = 2.147483647e9;       // 0x7FFFFFFF -> 0x41DFFFFFFFC00000 as double.
@@ -1005,7 +1005,7 @@ TEST(MIPS11) {
 
     CodeDesc desc;
     assm.GetCode(isolate, &desc);
-    Handle<Code> code =
+    Handle<InstructionStream> code =
         Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
     auto f = GeneratedCode<F3>::FromCode(*code);
     t.reg_init = 0xAABBCCDD;
@@ -1129,7 +1129,7 @@ TEST(MIPS12) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
   auto f = GeneratedCode<F3>::FromCode(*code);
   t.x = 1;
@@ -1182,7 +1182,7 @@ TEST(MIPS13) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
   auto f = GeneratedCode<F3>::FromCode(*code);
 
@@ -1302,7 +1302,7 @@ TEST(MIPS14) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
   auto f = GeneratedCode<F3>::FromCode(*code);
 
@@ -1430,7 +1430,7 @@ TEST(MIPS16) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
   auto f = GeneratedCode<F3>::FromCode(*code);
   t.ui = 0x44332211;
@@ -1557,7 +1557,7 @@ TEST(seleqz_selnez) {
     __ nop();
     CodeDesc desc;
     assm.GetCode(isolate, &desc);
-    Handle<Code> code =
+    Handle<InstructionStream> code =
         Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
     auto f = GeneratedCode<F3>::FromCode(*code);
 
@@ -1672,7 +1672,7 @@ TEST(min_max) {
 
     CodeDesc desc;
     assm.GetCode(isolate, &desc);
-    Handle<Code> code =
+    Handle<InstructionStream> code =
         Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
     auto f = GeneratedCode<F3>::FromCode(*code);
     for (int i = 4; i < kTableLength; i++) {
@@ -1780,7 +1780,7 @@ TEST(rint_d)  {
 
     CodeDesc desc;
     assm.GetCode(isolate, &desc);
-    Handle<Code> code =
+    Handle<InstructionStream> code =
         Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
     auto f = GeneratedCode<F3>::FromCode(*code);
 
@@ -1827,7 +1827,7 @@ TEST(sel) {
     __ nop();
     CodeDesc desc;
     assm.GetCode(isolate, &desc);
-    Handle<Code> code =
+    Handle<InstructionStream> code =
         Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
     auto f = GeneratedCode<F3>::FromCode(*code);
 
@@ -1959,7 +1959,7 @@ TEST(rint_s)  {
 
     CodeDesc desc;
     assm.GetCode(isolate, &desc);
-    Handle<Code> code =
+    Handle<InstructionStream> code =
         Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
     auto f = GeneratedCode<F3>::FromCode(*code);
 
@@ -2044,7 +2044,7 @@ TEST(mina_maxa) {
 
     CodeDesc desc;
     assm.GetCode(isolate, &desc);
-    Handle<Code> code =
+    Handle<InstructionStream> code =
         Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
     auto f = GeneratedCode<F3>::FromCode(*code);
     for (int i = 0; i < kTableLength; i++) {
@@ -2125,7 +2125,7 @@ TEST(trunc_l) {
     Test test;
     CodeDesc desc;
     assm.GetCode(isolate, &desc);
-    Handle<Code> code =
+    Handle<InstructionStream> code =
         Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
     auto f = GeneratedCode<F3>::FromCode(*code);
     for (int i = 0; i < kTableLength; i++) {
@@ -2205,7 +2205,7 @@ TEST(movz_movn) {
 
     CodeDesc desc;
     assm.GetCode(isolate, &desc);
-    Handle<Code> code =
+    Handle<InstructionStream> code =
         Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
     auto f = GeneratedCode<F3>::FromCode(*code);
     for (int i = 0; i < kTableLength; i++) {
@@ -2305,7 +2305,7 @@ TEST(movt_movd) {
 
         CodeDesc desc;
         assm.GetCode(isolate, &desc);
-        Handle<Code> code =
+        Handle<InstructionStream> code =
             Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
         auto f = GeneratedCode<F3>::FromCode(*code);
 
@@ -2391,7 +2391,7 @@ TEST(cvt_w_d) {
   Test test;
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
   auto f = GeneratedCode<F3>::FromCode(*code);
   for (int j = 0; j < 4; j++) {
@@ -2458,7 +2458,7 @@ TEST(trunc_w) {
   Test test;
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
   auto f = GeneratedCode<F3>::FromCode(*code);
   for (int i = 0; i < kTableLength; i++) {
@@ -2527,7 +2527,7 @@ TEST(round_w) {
   Test test;
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
   auto f = GeneratedCode<F3>::FromCode(*code);
   for (int i = 0; i < kTableLength; i++) {
@@ -2597,7 +2597,7 @@ TEST(round_l) {
     Test test;
     CodeDesc desc;
     assm.GetCode(isolate, &desc);
-    Handle<Code> code =
+    Handle<InstructionStream> code =
         Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
     auto f = GeneratedCode<F3>::FromCode(*code);
     for (int i = 0; i < kTableLength; i++) {
@@ -2669,7 +2669,7 @@ TEST(sub) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
   auto f = GeneratedCode<F3>::FromCode(*code);
   for (int i = 0; i < kTableLength; i++) {
@@ -2741,7 +2741,7 @@ TEST(sqrt_rsqrt_recip) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
   auto f = GeneratedCode<F3>::FromCode(*code);
 
@@ -2819,7 +2819,7 @@ TEST(neg) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
   auto f = GeneratedCode<F3>::FromCode(*code);
   for (int i = 0; i < kTableLength; i++) {
@@ -2877,7 +2877,7 @@ TEST(mul) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
   auto f = GeneratedCode<F3>::FromCode(*code);
   for (int i = 0; i < kTableLength; i++) {
@@ -2932,7 +2932,7 @@ TEST(mov) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
   auto f = GeneratedCode<F3>::FromCode(*code);
   for (int i = 0; i < kTableLength; i++) {
@@ -2999,7 +2999,7 @@ TEST(floor_w) {
   Test test;
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
   auto f = GeneratedCode<F3>::FromCode(*code);
   for (int i = 0; i < kTableLength; i++) {
@@ -3069,7 +3069,7 @@ TEST(floor_l) {
     Test test;
     CodeDesc desc;
     assm.GetCode(isolate, &desc);
-    Handle<Code> code =
+    Handle<InstructionStream> code =
         Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
     auto f = GeneratedCode<F3>::FromCode(*code);
     for (int i = 0; i < kTableLength; i++) {
@@ -3140,7 +3140,7 @@ TEST(ceil_w) {
   Test test;
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
   auto f = GeneratedCode<F3>::FromCode(*code);
   for (int i = 0; i < kTableLength; i++) {
@@ -3210,7 +3210,7 @@ TEST(ceil_l) {
     Test test;
     CodeDesc desc;
     assm.GetCode(isolate, &desc);
-    Handle<Code> code =
+    Handle<InstructionStream> code =
         Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
     auto f = GeneratedCode<F3>::FromCode(*code);
     for (int i = 0; i < kTableLength; i++) {
@@ -3277,7 +3277,7 @@ TEST(jump_tables1) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 #ifdef OBJECT_PRINT
   code->Print(std::cout);
@@ -3342,7 +3342,7 @@ TEST(jump_tables2) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 #ifdef OBJECT_PRINT
   code->Print(std::cout);
@@ -3417,7 +3417,7 @@ TEST(jump_tables3) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 #ifdef OBJECT_PRINT
   code->Print(std::cout);
@@ -3490,7 +3490,7 @@ TEST(BITSWAP) {
 
     CodeDesc desc;
     assm.GetCode(isolate, &desc);
-    Handle<Code> code =
+    Handle<InstructionStream> code =
         Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
     auto f = GeneratedCode<F3>::FromCode(*code);
     t.r1 = 0x00102100781A15C3;
@@ -3632,7 +3632,7 @@ TEST(class_fmt) {
 
     CodeDesc desc;
     assm.GetCode(isolate, &desc);
-    Handle<Code> code =
+    Handle<InstructionStream> code =
         Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
     auto f = GeneratedCode<F3>::FromCode(*code);
 
@@ -3662,28 +3662,28 @@ TEST(class_fmt) {
 
     f.Call(&t, 0, 0, 0, 0);
     // Expected double results.
-    CHECK_EQ(bit_cast<int64_t>(t.dSignalingNan), 0x001);
-    CHECK_EQ(bit_cast<int64_t>(t.dQuietNan),     0x002);
-    CHECK_EQ(bit_cast<int64_t>(t.dNegInf),       0x004);
-    CHECK_EQ(bit_cast<int64_t>(t.dNegNorm),      0x008);
-    CHECK_EQ(bit_cast<int64_t>(t.dNegSubnorm),   0x010);
-    CHECK_EQ(bit_cast<int64_t>(t.dNegZero),      0x020);
-    CHECK_EQ(bit_cast<int64_t>(t.dPosInf),       0x040);
-    CHECK_EQ(bit_cast<int64_t>(t.dPosNorm),      0x080);
-    CHECK_EQ(bit_cast<int64_t>(t.dPosSubnorm),   0x100);
-    CHECK_EQ(bit_cast<int64_t>(t.dPosZero),      0x200);
+    CHECK_EQ(base::bit_cast<int64_t>(t.dSignalingNan), 0x001);
+    CHECK_EQ(base::bit_cast<int64_t>(t.dQuietNan), 0x002);
+    CHECK_EQ(base::bit_cast<int64_t>(t.dNegInf), 0x004);
+    CHECK_EQ(base::bit_cast<int64_t>(t.dNegNorm), 0x008);
+    CHECK_EQ(base::bit_cast<int64_t>(t.dNegSubnorm), 0x010);
+    CHECK_EQ(base::bit_cast<int64_t>(t.dNegZero), 0x020);
+    CHECK_EQ(base::bit_cast<int64_t>(t.dPosInf), 0x040);
+    CHECK_EQ(base::bit_cast<int64_t>(t.dPosNorm), 0x080);
+    CHECK_EQ(base::bit_cast<int64_t>(t.dPosSubnorm), 0x100);
+    CHECK_EQ(base::bit_cast<int64_t>(t.dPosZero), 0x200);
 
     // Expected float results.
-    CHECK_EQ(bit_cast<int32_t>(t.fSignalingNan), 0x001);
-    CHECK_EQ(bit_cast<int32_t>(t.fQuietNan),     0x002);
-    CHECK_EQ(bit_cast<int32_t>(t.fNegInf),       0x004);
-    CHECK_EQ(bit_cast<int32_t>(t.fNegNorm),      0x008);
-    CHECK_EQ(bit_cast<int32_t>(t.fNegSubnorm),   0x010);
-    CHECK_EQ(bit_cast<int32_t>(t.fNegZero),      0x020);
-    CHECK_EQ(bit_cast<int32_t>(t.fPosInf),       0x040);
-    CHECK_EQ(bit_cast<int32_t>(t.fPosNorm),      0x080);
-    CHECK_EQ(bit_cast<int32_t>(t.fPosSubnorm),   0x100);
-    CHECK_EQ(bit_cast<int32_t>(t.fPosZero),      0x200);
+    CHECK_EQ(base::bit_cast<int32_t>(t.fSignalingNan), 0x001);
+    CHECK_EQ(base::bit_cast<int32_t>(t.fQuietNan), 0x002);
+    CHECK_EQ(base::bit_cast<int32_t>(t.fNegInf), 0x004);
+    CHECK_EQ(base::bit_cast<int32_t>(t.fNegNorm), 0x008);
+    CHECK_EQ(base::bit_cast<int32_t>(t.fNegSubnorm), 0x010);
+    CHECK_EQ(base::bit_cast<int32_t>(t.fNegZero), 0x020);
+    CHECK_EQ(base::bit_cast<int32_t>(t.fPosInf), 0x040);
+    CHECK_EQ(base::bit_cast<int32_t>(t.fPosNorm), 0x080);
+    CHECK_EQ(base::bit_cast<int32_t>(t.fPosSubnorm), 0x100);
+    CHECK_EQ(base::bit_cast<int32_t>(t.fPosZero), 0x200);
   }
 }
 
@@ -3725,7 +3725,7 @@ TEST(ABS) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
   auto f = GeneratedCode<F3>::FromCode(*code);
   test.a = -2.0;
@@ -3818,7 +3818,7 @@ TEST(ADD_FMT) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
   auto f = GeneratedCode<F3>::FromCode(*code);
   test.a = 2.0;
@@ -3972,7 +3972,7 @@ TEST(C_COND_FMT) {
 
     CodeDesc desc;
     assm.GetCode(isolate, &desc);
-    Handle<Code> code =
+    Handle<InstructionStream> code =
         Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
     auto f = GeneratedCode<F3>::FromCode(*code);
     test.dOp1 = 2.0;
@@ -4172,7 +4172,7 @@ TEST(CMP_COND_FMT) {
 
     CodeDesc desc;
     assm.GetCode(isolate, &desc);
-    Handle<Code> code =
+    Handle<InstructionStream> code =
         Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
     auto f = GeneratedCode<F3>::FromCode(*code);
     uint64_t dTrue  = 0xFFFFFFFFFFFFFFFF;
@@ -4185,100 +4185,100 @@ TEST(CMP_COND_FMT) {
     test.fOp1 = 2.0;
     test.fOp2 = 3.0;
     f.Call(&test, 0, 0, 0, 0);
-    CHECK_EQ(bit_cast<uint64_t>(test.dF), dFalse);
-    CHECK_EQ(bit_cast<uint64_t>(test.dUn), dFalse);
-    CHECK_EQ(bit_cast<uint64_t>(test.dEq), dFalse);
-    CHECK_EQ(bit_cast<uint64_t>(test.dUeq), dFalse);
-    CHECK_EQ(bit_cast<uint64_t>(test.dOlt), dTrue);
-    CHECK_EQ(bit_cast<uint64_t>(test.dUlt), dTrue);
-    CHECK_EQ(bit_cast<uint64_t>(test.dOle), dTrue);
-    CHECK_EQ(bit_cast<uint64_t>(test.dUle), dTrue);
-    CHECK_EQ(bit_cast<uint64_t>(test.dOr), dTrue);
-    CHECK_EQ(bit_cast<uint64_t>(test.dUne), dTrue);
-    CHECK_EQ(bit_cast<uint64_t>(test.dNe), dTrue);
-    CHECK_EQ(bit_cast<uint32_t>(test.fF), fFalse);
-    CHECK_EQ(bit_cast<uint32_t>(test.fUn), fFalse);
-    CHECK_EQ(bit_cast<uint32_t>(test.fEq), fFalse);
-    CHECK_EQ(bit_cast<uint32_t>(test.fUeq), fFalse);
-    CHECK_EQ(bit_cast<uint32_t>(test.fOlt), fTrue);
-    CHECK_EQ(bit_cast<uint32_t>(test.fUlt), fTrue);
-    CHECK_EQ(bit_cast<uint32_t>(test.fOle), fTrue);
-    CHECK_EQ(bit_cast<uint32_t>(test.fUle), fTrue);
+    CHECK_EQ(base::bit_cast<uint64_t>(test.dF), dFalse);
+    CHECK_EQ(base::bit_cast<uint64_t>(test.dUn), dFalse);
+    CHECK_EQ(base::bit_cast<uint64_t>(test.dEq), dFalse);
+    CHECK_EQ(base::bit_cast<uint64_t>(test.dUeq), dFalse);
+    CHECK_EQ(base::bit_cast<uint64_t>(test.dOlt), dTrue);
+    CHECK_EQ(base::bit_cast<uint64_t>(test.dUlt), dTrue);
+    CHECK_EQ(base::bit_cast<uint64_t>(test.dOle), dTrue);
+    CHECK_EQ(base::bit_cast<uint64_t>(test.dUle), dTrue);
+    CHECK_EQ(base::bit_cast<uint64_t>(test.dOr), dTrue);
+    CHECK_EQ(base::bit_cast<uint64_t>(test.dUne), dTrue);
+    CHECK_EQ(base::bit_cast<uint64_t>(test.dNe), dTrue);
+    CHECK_EQ(base::bit_cast<uint32_t>(test.fF), fFalse);
+    CHECK_EQ(base::bit_cast<uint32_t>(test.fUn), fFalse);
+    CHECK_EQ(base::bit_cast<uint32_t>(test.fEq), fFalse);
+    CHECK_EQ(base::bit_cast<uint32_t>(test.fUeq), fFalse);
+    CHECK_EQ(base::bit_cast<uint32_t>(test.fOlt), fTrue);
+    CHECK_EQ(base::bit_cast<uint32_t>(test.fUlt), fTrue);
+    CHECK_EQ(base::bit_cast<uint32_t>(test.fOle), fTrue);
+    CHECK_EQ(base::bit_cast<uint32_t>(test.fUle), fTrue);
 
     test.dOp1 = std::numeric_limits<double>::max();
     test.dOp2 = std::numeric_limits<double>::min();
     test.fOp1 = std::numeric_limits<float>::min();
     test.fOp2 = -std::numeric_limits<float>::max();  // lowest()
     f.Call(&test, 0, 0, 0, 0);
-    CHECK_EQ(bit_cast<uint64_t>(test.dF), dFalse);
-    CHECK_EQ(bit_cast<uint64_t>(test.dUn), dFalse);
-    CHECK_EQ(bit_cast<uint64_t>(test.dEq), dFalse);
-    CHECK_EQ(bit_cast<uint64_t>(test.dUeq), dFalse);
-    CHECK_EQ(bit_cast<uint64_t>(test.dOlt), dFalse);
-    CHECK_EQ(bit_cast<uint64_t>(test.dUlt), dFalse);
-    CHECK_EQ(bit_cast<uint64_t>(test.dOle), dFalse);
-    CHECK_EQ(bit_cast<uint64_t>(test.dUle), dFalse);
-    CHECK_EQ(bit_cast<uint64_t>(test.dOr), dTrue);
-    CHECK_EQ(bit_cast<uint64_t>(test.dUne), dTrue);
-    CHECK_EQ(bit_cast<uint64_t>(test.dNe), dTrue);
-    CHECK_EQ(bit_cast<uint32_t>(test.fF), fFalse);
-    CHECK_EQ(bit_cast<uint32_t>(test.fUn), fFalse);
-    CHECK_EQ(bit_cast<uint32_t>(test.fEq), fFalse);
-    CHECK_EQ(bit_cast<uint32_t>(test.fUeq), fFalse);
-    CHECK_EQ(bit_cast<uint32_t>(test.fOlt), fFalse);
-    CHECK_EQ(bit_cast<uint32_t>(test.fUlt), fFalse);
-    CHECK_EQ(bit_cast<uint32_t>(test.fOle), fFalse);
-    CHECK_EQ(bit_cast<uint32_t>(test.fUle), fFalse);
+    CHECK_EQ(base::bit_cast<uint64_t>(test.dF), dFalse);
+    CHECK_EQ(base::bit_cast<uint64_t>(test.dUn), dFalse);
+    CHECK_EQ(base::bit_cast<uint64_t>(test.dEq), dFalse);
+    CHECK_EQ(base::bit_cast<uint64_t>(test.dUeq), dFalse);
+    CHECK_EQ(base::bit_cast<uint64_t>(test.dOlt), dFalse);
+    CHECK_EQ(base::bit_cast<uint64_t>(test.dUlt), dFalse);
+    CHECK_EQ(base::bit_cast<uint64_t>(test.dOle), dFalse);
+    CHECK_EQ(base::bit_cast<uint64_t>(test.dUle), dFalse);
+    CHECK_EQ(base::bit_cast<uint64_t>(test.dOr), dTrue);
+    CHECK_EQ(base::bit_cast<uint64_t>(test.dUne), dTrue);
+    CHECK_EQ(base::bit_cast<uint64_t>(test.dNe), dTrue);
+    CHECK_EQ(base::bit_cast<uint32_t>(test.fF), fFalse);
+    CHECK_EQ(base::bit_cast<uint32_t>(test.fUn), fFalse);
+    CHECK_EQ(base::bit_cast<uint32_t>(test.fEq), fFalse);
+    CHECK_EQ(base::bit_cast<uint32_t>(test.fUeq), fFalse);
+    CHECK_EQ(base::bit_cast<uint32_t>(test.fOlt), fFalse);
+    CHECK_EQ(base::bit_cast<uint32_t>(test.fUlt), fFalse);
+    CHECK_EQ(base::bit_cast<uint32_t>(test.fOle), fFalse);
+    CHECK_EQ(base::bit_cast<uint32_t>(test.fUle), fFalse);
 
     test.dOp1 = -std::numeric_limits<double>::max();  // lowest()
     test.dOp2 = -std::numeric_limits<double>::max();  // lowest()
     test.fOp1 = std::numeric_limits<float>::max();
     test.fOp2 = std::numeric_limits<float>::max();
     f.Call(&test, 0, 0, 0, 0);
-    CHECK_EQ(bit_cast<uint64_t>(test.dF), dFalse);
-    CHECK_EQ(bit_cast<uint64_t>(test.dUn), dFalse);
-    CHECK_EQ(bit_cast<uint64_t>(test.dEq), dTrue);
-    CHECK_EQ(bit_cast<uint64_t>(test.dUeq), dTrue);
-    CHECK_EQ(bit_cast<uint64_t>(test.dOlt), dFalse);
-    CHECK_EQ(bit_cast<uint64_t>(test.dUlt), dFalse);
-    CHECK_EQ(bit_cast<uint64_t>(test.dOle), dTrue);
-    CHECK_EQ(bit_cast<uint64_t>(test.dUle), dTrue);
-    CHECK_EQ(bit_cast<uint64_t>(test.dOr), dTrue);
-    CHECK_EQ(bit_cast<uint64_t>(test.dUne), dFalse);
-    CHECK_EQ(bit_cast<uint64_t>(test.dNe), dFalse);
-    CHECK_EQ(bit_cast<uint32_t>(test.fF), fFalse);
-    CHECK_EQ(bit_cast<uint32_t>(test.fUn), fFalse);
-    CHECK_EQ(bit_cast<uint32_t>(test.fEq), fTrue);
-    CHECK_EQ(bit_cast<uint32_t>(test.fUeq), fTrue);
-    CHECK_EQ(bit_cast<uint32_t>(test.fOlt), fFalse);
-    CHECK_EQ(bit_cast<uint32_t>(test.fUlt), fFalse);
-    CHECK_EQ(bit_cast<uint32_t>(test.fOle), fTrue);
-    CHECK_EQ(bit_cast<uint32_t>(test.fUle), fTrue);
+    CHECK_EQ(base::bit_cast<uint64_t>(test.dF), dFalse);
+    CHECK_EQ(base::bit_cast<uint64_t>(test.dUn), dFalse);
+    CHECK_EQ(base::bit_cast<uint64_t>(test.dEq), dTrue);
+    CHECK_EQ(base::bit_cast<uint64_t>(test.dUeq), dTrue);
+    CHECK_EQ(base::bit_cast<uint64_t>(test.dOlt), dFalse);
+    CHECK_EQ(base::bit_cast<uint64_t>(test.dUlt), dFalse);
+    CHECK_EQ(base::bit_cast<uint64_t>(test.dOle), dTrue);
+    CHECK_EQ(base::bit_cast<uint64_t>(test.dUle), dTrue);
+    CHECK_EQ(base::bit_cast<uint64_t>(test.dOr), dTrue);
+    CHECK_EQ(base::bit_cast<uint64_t>(test.dUne), dFalse);
+    CHECK_EQ(base::bit_cast<uint64_t>(test.dNe), dFalse);
+    CHECK_EQ(base::bit_cast<uint32_t>(test.fF), fFalse);
+    CHECK_EQ(base::bit_cast<uint32_t>(test.fUn), fFalse);
+    CHECK_EQ(base::bit_cast<uint32_t>(test.fEq), fTrue);
+    CHECK_EQ(base::bit_cast<uint32_t>(test.fUeq), fTrue);
+    CHECK_EQ(base::bit_cast<uint32_t>(test.fOlt), fFalse);
+    CHECK_EQ(base::bit_cast<uint32_t>(test.fUlt), fFalse);
+    CHECK_EQ(base::bit_cast<uint32_t>(test.fOle), fTrue);
+    CHECK_EQ(base::bit_cast<uint32_t>(test.fUle), fTrue);
 
     test.dOp1 = std::numeric_limits<double>::quiet_NaN();
     test.dOp2 = 0.0;
     test.fOp1 = std::numeric_limits<float>::quiet_NaN();
     test.fOp2 = 0.0;
     f.Call(&test, 0, 0, 0, 0);
-    CHECK_EQ(bit_cast<uint64_t>(test.dF), dFalse);
-    CHECK_EQ(bit_cast<uint64_t>(test.dUn), dTrue);
-    CHECK_EQ(bit_cast<uint64_t>(test.dEq), dFalse);
-    CHECK_EQ(bit_cast<uint64_t>(test.dUeq), dTrue);
-    CHECK_EQ(bit_cast<uint64_t>(test.dOlt), dFalse);
-    CHECK_EQ(bit_cast<uint64_t>(test.dUlt), dTrue);
-    CHECK_EQ(bit_cast<uint64_t>(test.dOle), dFalse);
-    CHECK_EQ(bit_cast<uint64_t>(test.dUle), dTrue);
-    CHECK_EQ(bit_cast<uint64_t>(test.dOr), dFalse);
-    CHECK_EQ(bit_cast<uint64_t>(test.dUne), dTrue);
-    CHECK_EQ(bit_cast<uint64_t>(test.dNe), dFalse);
-    CHECK_EQ(bit_cast<uint32_t>(test.fF), fFalse);
-    CHECK_EQ(bit_cast<uint32_t>(test.fUn), fTrue);
-    CHECK_EQ(bit_cast<uint32_t>(test.fEq), fFalse);
-    CHECK_EQ(bit_cast<uint32_t>(test.fUeq), fTrue);
-    CHECK_EQ(bit_cast<uint32_t>(test.fOlt), fFalse);
-    CHECK_EQ(bit_cast<uint32_t>(test.fUlt), fTrue);
-    CHECK_EQ(bit_cast<uint32_t>(test.fOle), fFalse);
-    CHECK_EQ(bit_cast<uint32_t>(test.fUle), fTrue);
+    CHECK_EQ(base::bit_cast<uint64_t>(test.dF), dFalse);
+    CHECK_EQ(base::bit_cast<uint64_t>(test.dUn), dTrue);
+    CHECK_EQ(base::bit_cast<uint64_t>(test.dEq), dFalse);
+    CHECK_EQ(base::bit_cast<uint64_t>(test.dUeq), dTrue);
+    CHECK_EQ(base::bit_cast<uint64_t>(test.dOlt), dFalse);
+    CHECK_EQ(base::bit_cast<uint64_t>(test.dUlt), dTrue);
+    CHECK_EQ(base::bit_cast<uint64_t>(test.dOle), dFalse);
+    CHECK_EQ(base::bit_cast<uint64_t>(test.dUle), dTrue);
+    CHECK_EQ(base::bit_cast<uint64_t>(test.dOr), dFalse);
+    CHECK_EQ(base::bit_cast<uint64_t>(test.dUne), dTrue);
+    CHECK_EQ(base::bit_cast<uint64_t>(test.dNe), dFalse);
+    CHECK_EQ(base::bit_cast<uint32_t>(test.fF), fFalse);
+    CHECK_EQ(base::bit_cast<uint32_t>(test.fUn), fTrue);
+    CHECK_EQ(base::bit_cast<uint32_t>(test.fEq), fFalse);
+    CHECK_EQ(base::bit_cast<uint32_t>(test.fUeq), fTrue);
+    CHECK_EQ(base::bit_cast<uint32_t>(test.fOlt), fFalse);
+    CHECK_EQ(base::bit_cast<uint32_t>(test.fUlt), fTrue);
+    CHECK_EQ(base::bit_cast<uint32_t>(test.fOle), fFalse);
+    CHECK_EQ(base::bit_cast<uint32_t>(test.fUle), fTrue);
   }
 }
 
@@ -4350,7 +4350,7 @@ TEST(CVT) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
   auto f = GeneratedCode<F3>::FromCode(*code);
 
@@ -4521,7 +4521,7 @@ TEST(DIV_FMT) {
   __ nop();
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
   auto f = GeneratedCode<F3>::FromCode(*code);
 
@@ -4612,7 +4612,7 @@ uint64_t run_align(uint64_t rs_value, uint64_t rt_value, uint8_t bp) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 
   auto f = GeneratedCode<F4>::FromCode(*code);
@@ -4667,7 +4667,7 @@ uint64_t run_dalign(uint64_t rs_value, uint64_t rt_value, uint8_t bp) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 
   auto f = GeneratedCode<F4>::FromCode(*code);
@@ -4727,7 +4727,7 @@ uint64_t run_aluipc(int16_t offset) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 
   auto f = GeneratedCode<F2>::FromCode(*code);
@@ -4780,7 +4780,7 @@ uint64_t run_auipc(int16_t offset) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 
   auto f = GeneratedCode<F2>::FromCode(*code);
@@ -4834,7 +4834,7 @@ uint64_t run_aui(uint64_t rs, uint16_t offset) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 
   auto f = GeneratedCode<F2>::FromCode(*code);
@@ -4858,7 +4858,7 @@ uint64_t run_daui(uint64_t rs, uint16_t offset) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 
   auto f = GeneratedCode<F2>::FromCode(*code);
@@ -4882,7 +4882,7 @@ uint64_t run_dahi(uint64_t rs, uint16_t offset) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 
   auto f = GeneratedCode<F2>::FromCode(*code);
@@ -4906,7 +4906,7 @@ uint64_t run_dati(uint64_t rs, uint16_t offset) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 
   auto f = GeneratedCode<F2>::FromCode(*code);
@@ -5009,7 +5009,7 @@ uint64_t run_li_macro(uint64_t imm, LiFlags mode, int32_t num_instr = 0) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 #ifdef OBJECT_PRINT
   code->Print(std::cout);
@@ -5221,7 +5221,7 @@ uint64_t run_lwpc(int offset) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 
   auto f = GeneratedCode<F2>::FromCode(*code);
@@ -5298,7 +5298,7 @@ uint64_t run_lwupc(int offset) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 
   auto f = GeneratedCode<F2>::FromCode(*code);
@@ -5378,7 +5378,7 @@ uint64_t run_jic(int16_t offset) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 
   auto f = GeneratedCode<F2>::FromCode(*code);
@@ -5449,7 +5449,7 @@ uint64_t run_beqzc(int32_t value, int32_t offset) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 
   auto f = GeneratedCode<F2>::FromCode(*code);
@@ -5555,7 +5555,7 @@ void run_bz_bnz(TestCaseMsaBranch* input, Branch GenerateBranch,
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 #ifdef OBJECT_PRINT
   code->Print(std::cout);
@@ -5725,7 +5725,7 @@ uint64_t run_jialc(int16_t offset) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 
   auto f = GeneratedCode<F2>::FromCode(*code);
@@ -5776,7 +5776,7 @@ uint64_t run_addiupc(int32_t imm19) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 
   auto f = GeneratedCode<F2>::FromCode(*code);
@@ -5851,7 +5851,7 @@ uint64_t run_ldpc(int offset) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 
   auto f = GeneratedCode<F2>::FromCode(*code);
@@ -5939,7 +5939,7 @@ int64_t run_bc(int32_t offset) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 
   auto f = GeneratedCode<F2>::FromCode(*code);
@@ -6020,7 +6020,7 @@ int64_t run_balc(int32_t offset) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 
   auto f = GeneratedCode<F2>::FromCode(*code);
@@ -6069,7 +6069,7 @@ uint64_t run_dsll(uint64_t rt_value, uint16_t sa_value) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 
   auto f = GeneratedCode<F4>::FromCode(*code);
@@ -6126,7 +6126,7 @@ uint64_t run_bal(int16_t offset) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 
   auto f = GeneratedCode<F2>::FromCode(*code);
@@ -6180,7 +6180,7 @@ TEST(Trampoline) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
   auto f = GeneratedCode<F2>::FromCode(*code);
 
@@ -6216,7 +6216,7 @@ TEST(Call_with_trampoline) {
   HandleScope scope(isolate);
   MacroAssembler assm(isolate, v8::internal::CodeObjectRequired::kYes);
 
-  int next_buffer_check_ = FLAG_force_long_branches
+  int next_buffer_check_ = v8_flags.force_long_branches
                                ? kMaxInt
                                : TurboAssembler::kMaxBranchOffset -
                                      TurboAssembler::kTrampolineSlotsSize * 16;
@@ -6233,7 +6233,7 @@ TEST(Call_with_trampoline) {
   int pc_offset_before = __ pc_offset();
   {
     // There should be a trampoline after this Call
-    __ Call(FUNCTION_ADDR(DummyFunction), RelocInfo::RUNTIME_ENTRY);
+    __ Call(FUNCTION_ADDR(DummyFunction), RelocInfo::EXTERNAL_REFERENCE);
   }
   int pc_offset_after = __ pc_offset();
   int safepoint_pc_offset = __ pc_offset_for_safepoint();
@@ -6307,7 +6307,7 @@ void helper_madd_msub_maddf_msubf(F func) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
   auto f = GeneratedCode<F3>::FromCode(*code);
 
@@ -6390,7 +6390,7 @@ uint64_t run_Subu(uint64_t imm, int32_t num_instr) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 #ifdef OBJECT_PRINT
   code->Print(std::cout);
@@ -6473,7 +6473,7 @@ uint64_t run_Dsubu(uint64_t imm, int32_t num_instr) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 #ifdef OBJECT_PRINT
   code->Print(std::cout);
@@ -6569,7 +6569,7 @@ uint64_t run_Dins(uint64_t imm, uint64_t source, uint16_t pos, uint16_t size) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
   auto f = GeneratedCode<F2>::FromCode(*code);
 
@@ -6629,7 +6629,7 @@ uint64_t run_Ins(uint64_t imm, uint64_t source, uint16_t pos, uint16_t size) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
   auto f = GeneratedCode<F2>::FromCode(*code);
 
@@ -6697,7 +6697,7 @@ uint64_t run_Ext(uint64_t source, uint16_t pos, uint16_t size) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
   auto f = GeneratedCode<F2>::FromCode(*code);
 
@@ -6780,7 +6780,7 @@ TEST(MSA_fill_copy) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 #ifdef OBJECT_PRINT
   code->Print(std::cout);
@@ -6843,7 +6843,7 @@ TEST(MSA_fill_copy_2) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 #ifdef OBJECT_PRINT
   code->Print(std::cout);
@@ -6896,7 +6896,7 @@ TEST(MSA_fill_copy_3) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 #ifdef OBJECT_PRINT
   code->Print(std::cout);
@@ -6945,7 +6945,7 @@ void run_msa_insert(int64_t rs_value, int n, msa_reg_t* w) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 #ifdef OBJECT_PRINT
   code->Print(std::cout);
@@ -7055,7 +7055,7 @@ void run_msa_ctc_cfc(uint64_t value) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 #ifdef OBJECT_PRINT
   code->Print(std::cout);
@@ -7065,9 +7065,10 @@ void run_msa_ctc_cfc(uint64_t value) {
   uint64_t res;
   f.Call(&res, 0, 0, 0, 0);
 
-  CHECK_EQ(bit_cast<uint64_t>(static_cast<int64_t>(
-               bit_cast<int32_t>(static_cast<uint32_t>(value & 0x0167FFFF)))),
-           res);
+  CHECK_EQ(
+      base::bit_cast<uint64_t>(static_cast<int64_t>(
+          base::bit_cast<int32_t>(static_cast<uint32_t>(value & 0x0167FFFF)))),
+      res);
 }
 
 TEST(MSA_move_v) {
@@ -7104,7 +7105,7 @@ TEST(MSA_move_v) {
 
     CodeDesc desc;
     assm.GetCode(isolate, &desc);
-    Handle<Code> code =
+    Handle<InstructionStream> code =
         Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 #ifdef OBJECT_PRINT
     code->Print(std::cout);
@@ -7149,7 +7150,7 @@ void run_msa_sldi(OperFunc GenerateOperation,
 
     CodeDesc desc;
     assm.GetCode(isolate, &desc);
-    Handle<Code> code =
+    Handle<InstructionStream> code =
         Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 #ifdef OBJECT_PRINT
     code->Print(std::cout);
@@ -7309,7 +7310,7 @@ void run_msa_i8(SecondaryField opcode, uint64_t ws_lo, uint64_t ws_hi,
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 #ifdef OBJECT_PRINT
   code->Print(std::cout);
@@ -7513,7 +7514,7 @@ void run_msa_i5(struct TestCaseMsaI5* input, bool i5_sign_ext,
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 #ifdef OBJECT_PRINT
   code->Print(std::cout);
@@ -7939,7 +7940,7 @@ void run_msa_2r(const struct TestCaseMsa2R* input,
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 #ifdef OBJECT_PRINT
   code->Print(std::cout);
@@ -8989,7 +8990,7 @@ void run_msa_vector(struct TestCaseMsaVector* input,
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 #ifdef OBJECT_PRINT
   code->Print(std::cout);
@@ -9077,7 +9078,7 @@ void run_msa_bit(struct TestCaseMsaBit* input, InstFunc GenerateInstructionFunc,
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 #ifdef OBJECT_PRINT
   code->Print(std::cout);
@@ -9550,7 +9551,7 @@ void run_msa_i10(int32_t input, InstFunc GenerateVectorInstructionFunc,
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 #ifdef OBJECT_PRINT
   code->Print(std::cout);
@@ -9615,7 +9616,7 @@ void run_msa_mi10(InstFunc GenerateVectorInstructionFunc) {
   T* in_array_middle = in_test_vector + arraysize(in_test_vector) / 2;
   T* out_array_middle = out_test_vector + arraysize(out_test_vector) / 2;
 
-  v8::base::RandomNumberGenerator rand_gen(FLAG_random_seed);
+  v8::base::RandomNumberGenerator rand_gen(v8_flags.random_seed);
   for (unsigned int i = 0; i < arraysize(in_test_vector); i++) {
     in_test_vector[i] = static_cast<T>(rand_gen.NextInt());
     out_test_vector[i] = 0;
@@ -9628,7 +9629,7 @@ void run_msa_mi10(InstFunc GenerateVectorInstructionFunc) {
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 #ifdef OBJECT_PRINT
   code->Print(std::cout);
@@ -9707,7 +9708,7 @@ void run_msa_3r(struct TestCaseMsa3R* input, InstFunc GenerateI5InstructionFunc,
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 #ifdef OBJECT_PRINT
   code->Print(std::cout);
@@ -10714,7 +10715,7 @@ void run_msa_3rf(const struct TestCaseMsa3RF* input,
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 #ifdef OBJECT_PRINT
   code->Print(std::cout);
@@ -11240,18 +11241,24 @@ TEST(MSA_fexdo) {
        static_cast<int16_t>(0xFC00), static_cast<int16_t>(0x0000)}};
 
   const struct ExpRes_32I exp_res_fexdo_d[] = {
-      {bit_cast<int32_t>(0x7F800000), bit_cast<int32_t>(0x7F7FC99E),
-       bit_cast<int32_t>(0x7F800000), bit_cast<int32_t>(0xC49A4000)},
-      {bit_cast<int32_t>(0xC21BAE14), bit_cast<int32_t>(0xFF800000),
-       bit_cast<int32_t>(0x0082AB1E), bit_cast<int32_t>(0x000BFA5A)},
-      {bit_cast<int32_t>(0x7673B164), bit_cast<int32_t>(0xFB13653D),
-       bit_cast<int32_t>(0x80000000), bit_cast<int32_t>(0x00000000)},
-      {bit_cast<int32_t>(0x000002CA), bit_cast<int32_t>(0x80000000),
-       bit_cast<int32_t>(0x80000001), bit_cast<int32_t>(0x00000001)},
-      {bit_cast<int32_t>(0xFF800000), bit_cast<int32_t>(0x56B5E621),
-       bit_cast<int32_t>(0x00000000), bit_cast<int32_t>(0x7F800000)},
-      {bit_cast<int32_t>(0xF673B164), bit_cast<int32_t>(0x7B13653D),
-       bit_cast<int32_t>(0x0000042E), bit_cast<int32_t>(0x00000000)}};
+      {base::bit_cast<int32_t>(0x7F800000), base::bit_cast<int32_t>(0x7F7FC99E),
+       base::bit_cast<int32_t>(0x7F800000),
+       base::bit_cast<int32_t>(0xC49A4000)},
+      {base::bit_cast<int32_t>(0xC21BAE14), base::bit_cast<int32_t>(0xFF800000),
+       base::bit_cast<int32_t>(0x0082AB1E),
+       base::bit_cast<int32_t>(0x000BFA5A)},
+      {base::bit_cast<int32_t>(0x7673B164), base::bit_cast<int32_t>(0xFB13653D),
+       base::bit_cast<int32_t>(0x80000000),
+       base::bit_cast<int32_t>(0x00000000)},
+      {base::bit_cast<int32_t>(0x000002CA), base::bit_cast<int32_t>(0x80000000),
+       base::bit_cast<int32_t>(0x80000001),
+       base::bit_cast<int32_t>(0x00000001)},
+      {base::bit_cast<int32_t>(0xFF800000), base::bit_cast<int32_t>(0x56B5E621),
+       base::bit_cast<int32_t>(0x00000000),
+       base::bit_cast<int32_t>(0x7F800000)},
+      {base::bit_cast<int32_t>(0xF673B164), base::bit_cast<int32_t>(0x7B13653D),
+       base::bit_cast<int32_t>(0x0000042E),
+       base::bit_cast<int32_t>(0x00000000)}};
 
 #define TEST_FEXDO_H(instruction, src, exp_res)                               \
   run_msa_3rf(reinterpret_cast<const struct TestCaseMsa3RF*>(src),            \
@@ -11315,18 +11322,24 @@ TEST(MSA_ftq) {
        static_cast<int16_t>(0x8000), static_cast<int16_t>(0x0000)}};
 
   const struct ExpRes_32I exp_res_ftq_d[] = {
-      {bit_cast<int32_t>(0x7FFFFFFF), bit_cast<int32_t>(0xFFFEFBF4),
-       bit_cast<int32_t>(0x7FFFFFFF), bit_cast<int32_t>(0x8020C49C)},
-      {bit_cast<int32_t>(0x004B5DCC), bit_cast<int32_t>(0x00000000),
-       bit_cast<int32_t>(0x000000D7), bit_cast<int32_t>(0xB374BC6A)},
-      {bit_cast<int32_t>(0x80000000), bit_cast<int32_t>(0x7FFFFFFF),
-       bit_cast<int32_t>(0x7FFFFFFF), bit_cast<int32_t>(0x80000000)},
-      {bit_cast<int32_t>(0x7FFCB900), bit_cast<int32_t>(0xFFF572DE),
-       bit_cast<int32_t>(0x00000000), bit_cast<int32_t>(0x80000000)},
-      {bit_cast<int32_t>(0x80000000), bit_cast<int32_t>(0x00000000),
-       bit_cast<int32_t>(0x00000000), bit_cast<int32_t>(0x7FFFFFFF)},
-      {bit_cast<int32_t>(0x7FFFFFFF), bit_cast<int32_t>(0x00000000),
-       bit_cast<int32_t>(0x80000000), bit_cast<int32_t>(0x00000000)}};
+      {base::bit_cast<int32_t>(0x7FFFFFFF), base::bit_cast<int32_t>(0xFFFEFBF4),
+       base::bit_cast<int32_t>(0x7FFFFFFF),
+       base::bit_cast<int32_t>(0x8020C49C)},
+      {base::bit_cast<int32_t>(0x004B5DCC), base::bit_cast<int32_t>(0x00000000),
+       base::bit_cast<int32_t>(0x000000D7),
+       base::bit_cast<int32_t>(0xB374BC6A)},
+      {base::bit_cast<int32_t>(0x80000000), base::bit_cast<int32_t>(0x7FFFFFFF),
+       base::bit_cast<int32_t>(0x7FFFFFFF),
+       base::bit_cast<int32_t>(0x80000000)},
+      {base::bit_cast<int32_t>(0x7FFCB900), base::bit_cast<int32_t>(0xFFF572DE),
+       base::bit_cast<int32_t>(0x00000000),
+       base::bit_cast<int32_t>(0x80000000)},
+      {base::bit_cast<int32_t>(0x80000000), base::bit_cast<int32_t>(0x00000000),
+       base::bit_cast<int32_t>(0x00000000),
+       base::bit_cast<int32_t>(0x7FFFFFFF)},
+      {base::bit_cast<int32_t>(0x7FFFFFFF), base::bit_cast<int32_t>(0x00000000),
+       base::bit_cast<int32_t>(0x80000000),
+       base::bit_cast<int32_t>(0x00000000)}};
 
 #define TEST_FTQ_H(instruction, src, exp_res)                                 \
   run_msa_3rf(reinterpret_cast<const struct TestCaseMsa3RF*>(src),            \

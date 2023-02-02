@@ -5,14 +5,16 @@
 #ifndef V8_HEAP_MARKING_VISITOR_INL_H_
 #define V8_HEAP_MARKING_VISITOR_INL_H_
 
+#include "src/heap/marking-state-inl.h"
 #include "src/heap/marking-visitor.h"
-#include "src/heap/marking-worklist.h"
+#include "src/heap/marking-worklist-inl.h"
 #include "src/heap/objects-visiting-inl.h"
 #include "src/heap/objects-visiting.h"
 #include "src/heap/progress-bar.h"
 #include "src/heap/spaces.h"
 #include "src/objects/objects.h"
 #include "src/objects/smi.h"
+#include "src/sandbox/external-pointer-inl.h"
 
 namespace v8 {
 namespace internal {
@@ -25,7 +27,7 @@ template <typename ConcreteVisitor, typename MarkingState>
 void MarkingVisitorBase<ConcreteVisitor, MarkingState>::MarkObject(
     HeapObject host, HeapObject object) {
   DCHECK(ReadOnlyHeap::Contains(object) || heap_->Contains(object));
-  concrete_visitor()->SynchronizePageAccess(object);
+  SynchronizePageAccess(object);
   AddStrongReferenceForReferenceSummarizer(host, object);
   if (concrete_visitor()->marking_state()->WhiteToGrey(object)) {
     local_marking_worklists_->Push(object);
@@ -42,8 +44,8 @@ template <typename ConcreteVisitor, typename MarkingState>
 template <typename THeapObjectSlot>
 void MarkingVisitorBase<ConcreteVisitor, MarkingState>::ProcessStrongHeapObject(
     HeapObject host, THeapObjectSlot slot, HeapObject heap_object) {
-  concrete_visitor()->SynchronizePageAccess(heap_object);
-  if (!is_shared_heap_ && heap_object.InSharedHeap()) return;
+  SynchronizePageAccess(heap_object);
+  if (!ShouldMarkObject(heap_object)) return;
   MarkObject(host, heap_object);
   concrete_visitor()->RecordSlot(host, slot, heap_object);
 }
@@ -54,8 +56,8 @@ template <typename ConcreteVisitor, typename MarkingState>
 template <typename THeapObjectSlot>
 void MarkingVisitorBase<ConcreteVisitor, MarkingState>::ProcessWeakHeapObject(
     HeapObject host, THeapObjectSlot slot, HeapObject heap_object) {
-  concrete_visitor()->SynchronizePageAccess(heap_object);
-  if (!is_shared_heap_ && heap_object.InSharedHeap()) return;
+  SynchronizePageAccess(heap_object);
+  if (!ShouldMarkObject(heap_object)) return;
   if (concrete_visitor()->marking_state()->IsBlackOrGrey(heap_object)) {
     // Weak references with live values are directly processed here to
     // reduce the processing time of weak cells during the main GC
@@ -97,7 +99,6 @@ template <typename ConcreteVisitor, typename MarkingState>
 V8_INLINE void
 MarkingVisitorBase<ConcreteVisitor, MarkingState>::VisitCodePointerImpl(
     HeapObject host, CodeObjectSlot slot) {
-  CHECK(V8_EXTERNAL_CODE_SPACE_BOOL);
   Object object =
       slot.Relaxed_Load(ObjectVisitorWithCageBases::code_cage_base());
   HeapObject heap_object;
@@ -111,11 +112,11 @@ MarkingVisitorBase<ConcreteVisitor, MarkingState>::VisitCodePointerImpl(
 
 template <typename ConcreteVisitor, typename MarkingState>
 void MarkingVisitorBase<ConcreteVisitor, MarkingState>::VisitEmbeddedPointer(
-    Code host, RelocInfo* rinfo) {
+    InstructionStream host, RelocInfo* rinfo) {
   DCHECK(RelocInfo::IsEmbeddedObjectMode(rinfo->rmode()));
   HeapObject object =
       rinfo->target_object(ObjectVisitorWithCageBases::cage_base());
-  if (!is_shared_heap_ && object.InSharedHeap()) return;
+  if (!ShouldMarkObject(object)) return;
 
   if (!concrete_visitor()->marking_state()->IsBlackOrGrey(object)) {
     if (host.IsWeakObject(object)) {
@@ -131,13 +132,27 @@ void MarkingVisitorBase<ConcreteVisitor, MarkingState>::VisitEmbeddedPointer(
 
 template <typename ConcreteVisitor, typename MarkingState>
 void MarkingVisitorBase<ConcreteVisitor, MarkingState>::VisitCodeTarget(
-    Code host, RelocInfo* rinfo) {
+    InstructionStream host, RelocInfo* rinfo) {
   DCHECK(RelocInfo::IsCodeTargetMode(rinfo->rmode()));
-  Code target = Code::GetCodeFromTargetAddress(rinfo->target_address());
+  InstructionStream target =
+      InstructionStream::GetCodeFromTargetAddress(rinfo->target_address());
 
-  if (!is_shared_heap_ && target.InSharedHeap()) return;
+  if (!ShouldMarkObject(target)) return;
   MarkObject(host, target);
   concrete_visitor()->RecordRelocSlot(host, rinfo, target);
+}
+
+template <typename ConcreteVisitor, typename MarkingState>
+void MarkingVisitorBase<ConcreteVisitor, MarkingState>::VisitExternalPointer(
+    HeapObject host, ExternalPointerSlot slot, ExternalPointerTag tag) {
+#ifdef V8_ENABLE_SANDBOX
+  DCHECK_NE(tag, kExternalPointerNullTag);
+  ExternalPointerHandle handle = slot.Relaxed_LoadHandle();
+  ExternalPointerTable* table = IsSharedExternalPointerType(tag)
+                                    ? shared_external_pointer_table_
+                                    : external_pointer_table_;
+  table->Mark(handle, slot.address());
+#endif  // V8_ENABLE_SANDBOX
 }
 
 // ===========================================================================
@@ -195,13 +210,17 @@ int MarkingVisitorBase<ConcreteVisitor, MarkingState>::VisitSharedFunctionInfo(
     // If bytecode flushing is disabled but baseline code flushing is enabled
     // then we have to visit the bytecode but not the baseline code.
     DCHECK(IsBaselineCodeFlushingEnabled(code_flush_mode_));
-    CodeT baseline_codet = CodeT::cast(shared_info.function_data(kAcquireLoad));
-    // Safe to do a relaxed load here since the CodeT was acquire-loaded.
-    Code baseline_code = FromCodeT(baseline_codet, kRelaxedLoad);
+    Code baseline_code = Code::cast(shared_info.function_data(kAcquireLoad));
+    // Safe to do a relaxed load here since the Code was
+    // acquire-loaded.
+    InstructionStream baseline_istream =
+        FromCode(baseline_code, ObjectVisitorWithCageBases::code_cage_base(),
+                 kRelaxedLoad);
     // Visit the bytecode hanging off baseline code.
-    VisitPointer(baseline_code,
-                 baseline_code.RawField(
-                     Code::kDeoptimizationDataOrInterpreterDataOffset));
+    VisitPointer(
+        baseline_istream,
+        baseline_istream.RawField(
+            InstructionStream::kDeoptimizationDataOrInterpreterDataOffset));
     local_weak_objects_->code_flushing_candidates_local.Push(shared_info);
   } else {
     // In other cases, record as a flushing candidate since we have old
@@ -220,7 +239,7 @@ int MarkingVisitorBase<ConcreteVisitor, MarkingState>::
     VisitFixedArrayWithProgressBar(Map map, FixedArray object,
                                    ProgressBar& progress_bar) {
   const int kProgressBarScanningChunk = kMaxRegularHeapObjectSize;
-  STATIC_ASSERT(kMaxRegularHeapObjectSize % kTaggedSize == 0);
+  static_assert(kMaxRegularHeapObjectSize % kTaggedSize == 0);
   DCHECK(concrete_visitor()->marking_state()->IsBlackOrGrey(object));
   concrete_visitor()->marking_state()->GreyToBlack(object);
   int size = FixedArray::BodyDescriptor::SizeOf(map, object);
@@ -284,15 +303,8 @@ inline int MarkingVisitorBase<ConcreteVisitor, MarkingState>::
       requires_snapshot &&
       local_marking_worklists_->ExtractWrapper(map, object, wrapper_snapshot);
   const int size = concrete_visitor()->VisitJSObjectSubclass(map, object);
-  if (size) {
-    if (valid_snapshot) {
-      // Success: The object needs to be processed for embedder references.
-      local_marking_worklists_->PushExtractedWrapper(wrapper_snapshot);
-    } else if (!requires_snapshot) {
-      // Snapshot not supported. Just fall back to pushing the wrapper itself
-      // instead which will be processed on the main thread.
-      local_marking_worklists_->PushWrapper(object);
-    }
+  if (size && valid_snapshot) {
+    local_marking_worklists_->PushExtractedWrapper(wrapper_snapshot);
   }
   return size;
 }
@@ -303,7 +315,7 @@ int MarkingVisitorBase<ConcreteVisitor,
                        MarkingState>::VisitEmbedderTracingSubclass(Map map,
                                                                    T object) {
   DCHECK(object.MayHaveEmbedderFields());
-  if (V8_LIKELY(is_embedder_tracing_enabled_)) {
+  if (V8_LIKELY(trace_embedder_fields_)) {
     return VisitEmbedderTracingSubClassWithEmbedderTracing(map, object);
   }
   return VisitEmbedderTracingSubClassNoEmbedderTracing(map, object);
@@ -349,26 +361,29 @@ int MarkingVisitorBase<ConcreteVisitor, MarkingState>::VisitEphemeronHashTable(
         table.RawFieldOfElementAt(EphemeronHashTable::EntryToIndex(i));
     HeapObject key = HeapObject::cast(table.KeyAt(i));
 
-    concrete_visitor()->SynchronizePageAccess(key);
+    SynchronizePageAccess(key);
     concrete_visitor()->RecordSlot(table, key_slot, key);
     AddWeakReferenceForReferenceSummarizer(table, key);
 
     ObjectSlot value_slot =
         table.RawFieldOfElementAt(EphemeronHashTable::EntryToValueIndex(i));
 
-    if ((!is_shared_heap_ && key.InSharedHeap()) ||
-        concrete_visitor()->marking_state()->IsBlackOrGrey(key)) {
+    // Objects in the shared heap are prohibited from being used as keys in
+    // WeakMaps and WeakSets and therefore cannot be ephemeron keys. See also
+    // MarkCompactCollector::ProcessEphemeron.
+    DCHECK(!key.InSharedWritableHeap());
+    if (concrete_visitor()->marking_state()->IsBlackOrGrey(key)) {
       VisitPointer(table, value_slot);
     } else {
       Object value_obj = table.ValueAt(i);
 
       if (value_obj.IsHeapObject()) {
         HeapObject value = HeapObject::cast(value_obj);
-        concrete_visitor()->SynchronizePageAccess(value);
+        SynchronizePageAccess(value);
         concrete_visitor()->RecordSlot(table, value_slot, value);
         AddWeakReferenceForReferenceSummarizer(table, value);
 
-        if (!is_shared_heap_ && value.InSharedHeap()) continue;
+        if (!ShouldMarkObject(value)) continue;
 
         // Revisit ephemerons with both key and value unreachable at end
         // of concurrent marking cycle.
@@ -389,7 +404,7 @@ int MarkingVisitorBase<ConcreteVisitor, MarkingState>::VisitJSWeakRef(
   if (size == 0) return 0;
   if (weak_ref.target().IsHeapObject()) {
     HeapObject target = HeapObject::cast(weak_ref.target());
-    concrete_visitor()->SynchronizePageAccess(target);
+    SynchronizePageAccess(target);
     if (concrete_visitor()->marking_state()->IsBlackOrGrey(target)) {
       // Record the slot inside the JSWeakRef, since the
       // VisitJSObjectSubclass above didn't visit it.
@@ -415,8 +430,8 @@ int MarkingVisitorBase<ConcreteVisitor, MarkingState>::VisitWeakCell(
   WeakCell::BodyDescriptor::IterateBody(map, weak_cell, size, this);
   HeapObject target = weak_cell.relaxed_target();
   HeapObject unregister_token = weak_cell.relaxed_unregister_token();
-  concrete_visitor()->SynchronizePageAccess(target);
-  concrete_visitor()->SynchronizePageAccess(unregister_token);
+  SynchronizePageAccess(target);
+  SynchronizePageAccess(unregister_token);
   if (concrete_visitor()->marking_state()->IsBlackOrGrey(target) &&
       concrete_visitor()->marking_state()->IsBlackOrGrey(unregister_token)) {
     // Record the slots inside the WeakCell, since the IterateBody above
@@ -513,7 +528,7 @@ int MarkingVisitorBase<ConcreteVisitor, MarkingState>::VisitDescriptorsForMap(
   if (descriptors.IsStrongDescriptorArray()) {
     return 0;
   }
-  concrete_visitor()->SynchronizePageAccess(descriptors);
+  SynchronizePageAccess(descriptors);
   int size = MarkDescriptorArrayBlack(descriptors);
   int number_of_own_descriptors = map.NumberOfOwnDescriptors();
   if (number_of_own_descriptors) {
@@ -554,6 +569,80 @@ int MarkingVisitorBase<ConcreteVisitor, MarkingState>::VisitTransitionArray(
   TransitionArray::BodyDescriptor::IterateBody(map, array, size, this);
   local_weak_objects_->transition_arrays_local.Push(array);
   return size;
+}
+
+template <typename ConcreteVisitor, typename MarkingState>
+YoungGenerationMarkingVisitorBase<ConcreteVisitor, MarkingState>::
+    YoungGenerationMarkingVisitorBase(Isolate* isolate,
+                                      MarkingWorklists::Local* worklists_local)
+    : NewSpaceVisitor<ConcreteVisitor>(isolate),
+      worklists_local_(worklists_local) {}
+
+template <typename ConcreteVisitor, typename MarkingState>
+template <typename T>
+int YoungGenerationMarkingVisitorBase<ConcreteVisitor, MarkingState>::
+    VisitEmbedderTracingSubClassWithEmbedderTracing(Map map, T object) {
+  const bool requires_snapshot = worklists_local_->SupportsExtractWrapper();
+  MarkingWorklists::Local::WrapperSnapshot wrapper_snapshot;
+  const bool valid_snapshot =
+      requires_snapshot &&
+      worklists_local_->ExtractWrapper(map, object, wrapper_snapshot);
+  const int size = concrete_visitor()->VisitJSObjectSubclass(map, object);
+  if (size && valid_snapshot) {
+    // Success: The object needs to be processed for embedder references.
+    worklists_local_->PushExtractedWrapper(wrapper_snapshot);
+  }
+  return size;
+}
+
+template <typename ConcreteVisitor, typename MarkingState>
+int YoungGenerationMarkingVisitorBase<
+    ConcreteVisitor, MarkingState>::VisitJSArrayBuffer(Map map,
+                                                       JSArrayBuffer object) {
+  object.YoungMarkExtension();
+  return VisitEmbedderTracingSubClassWithEmbedderTracing(map, object);
+}
+
+template <typename ConcreteVisitor, typename MarkingState>
+int YoungGenerationMarkingVisitorBase<
+    ConcreteVisitor, MarkingState>::VisitJSApiObject(Map map, JSObject object) {
+  return VisitEmbedderTracingSubClassWithEmbedderTracing(map, object);
+}
+
+template <typename ConcreteVisitor, typename MarkingState>
+int YoungGenerationMarkingVisitorBase<
+    ConcreteVisitor, MarkingState>::VisitJSDataView(Map map,
+                                                    JSDataView object) {
+  return VisitEmbedderTracingSubClassWithEmbedderTracing(map, object);
+}
+
+template <typename ConcreteVisitor, typename MarkingState>
+int YoungGenerationMarkingVisitorBase<
+    ConcreteVisitor, MarkingState>::VisitJSTypedArray(Map map,
+                                                      JSTypedArray object) {
+  return VisitEmbedderTracingSubClassWithEmbedderTracing(map, object);
+}
+
+template <typename ConcreteVisitor, typename MarkingState>
+void YoungGenerationMarkingVisitorBase<ConcreteVisitor, MarkingState>::
+    MarkObjectViaMarkingWorklist(HeapObject object) {
+  if (concrete_visitor()->marking_state()->WhiteToGrey(object)) {
+    worklists_local_->Push(object);
+  }
+}
+
+template <typename ConcreteVisitor, typename MarkingState>
+template <typename TSlot>
+void YoungGenerationMarkingVisitorBase<
+    ConcreteVisitor, MarkingState>::VisitPointerImpl(HeapObject host,
+                                                     TSlot slot) {
+  typename TSlot::TObject target =
+      slot.Relaxed_Load(ObjectVisitorWithCageBases::cage_base());
+  if (Heap::InYoungGeneration(target)) {
+    // Treat weak references as strong.
+    HeapObject target_object = target.GetHeapObject();
+    MarkObjectViaMarkingWorklist(target_object);
+  }
 }
 
 }  // namespace internal

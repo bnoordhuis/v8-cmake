@@ -41,7 +41,6 @@ class Operand {
       : rm_(no_reg), rmode_(RelocInfo::EXTERNAL_REFERENCE) {
     value_.immediate = static_cast<int64_t>(f.address());
   }
-  V8_INLINE explicit Operand(const char* s);
   explicit Operand(Handle<HeapObject> handle);
   V8_INLINE explicit Operand(Smi value)
       : rm_(no_reg), rmode_(RelocInfo::NO_INFO) {
@@ -49,7 +48,6 @@ class Operand {
   }
 
   static Operand EmbeddedNumber(double number);  // Smi or HeapNumber.
-  static Operand EmbeddedStringConstant(const StringConstantBase* str);
 
   // Register.
   V8_INLINE explicit Operand(Register rm) : rm_(rm) {}
@@ -61,17 +59,17 @@ class Operand {
 
   bool IsImmediate() const { return !rm_.is_valid(); }
 
-  HeapObjectRequest heap_object_request() const {
-    DCHECK(IsHeapObjectRequest());
-    return value_.heap_object_request;
+  HeapNumberRequest heap_number_request() const {
+    DCHECK(IsHeapNumberRequest());
+    return value_.heap_number_request;
   }
 
-  bool IsHeapObjectRequest() const {
-    DCHECK_IMPLIES(is_heap_object_request_, IsImmediate());
-    DCHECK_IMPLIES(is_heap_object_request_,
+  bool IsHeapNumberRequest() const {
+    DCHECK_IMPLIES(is_heap_number_request_, IsImmediate());
+    DCHECK_IMPLIES(is_heap_number_request_,
                    rmode_ == RelocInfo::FULL_EMBEDDED_OBJECT ||
                        rmode_ == RelocInfo::CODE_TARGET);
-    return is_heap_object_request_;
+    return is_heap_number_request_;
   }
 
   Register rm() const { return rm_; }
@@ -82,10 +80,10 @@ class Operand {
   Register rm_;
   union Value {
     Value() {}
-    HeapObjectRequest heap_object_request;  // if is_heap_object_request_
+    HeapNumberRequest heap_number_request;  // if is_heap_number_request_
     int64_t immediate;                      // otherwise
   } value_;                                 // valid if rm_ == no_reg
-  bool is_heap_object_request_ = false;
+  bool is_heap_number_request_ = false;
   RelocInfo::Mode rmode_;
 
   friend class Assembler;
@@ -239,7 +237,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   // This is for calls and branches within generated code.  The serializer
   // has already deserialized the lui/ori instructions etc.
   inline static void deserialization_set_special_target_at(
-      Address instruction_payload, Code code, Address target);
+      Address instruction_payload, InstructionStream code, Address target);
 
   // Get the size of the special target encoded at 'instruction_payload'.
   inline static int deserialization_special_target_size(
@@ -252,10 +250,10 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
 
   // Here we are patching the address in the LUI/ORI instruction pair.
   // These values are used in the serialization process and must be zero for
-  // LOONG platform, as Code, Embedded Object or External-reference pointers
-  // are split across two consecutive instructions and don't exist separately
-  // in the code, so the serializer should not step forwards in memory after
-  // a target is resolved and written.
+  // LOONG platform, as InstructionStream, Embedded Object or External-reference
+  // pointers are split across two consecutive instructions and don't exist
+  // separately in the code, so the serializer should not step forwards in
+  // memory after a target is resolved and written.
   static constexpr int kSpecialTargetSize = 0;
 
   // Number of consecutive instructions used to store 32bit/64bit constant.
@@ -278,8 +276,12 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
 
   RegList* GetScratchRegisterList() { return &scratch_register_list_; }
 
+  DoubleRegList* GetScratchFPRegisterList() {
+    return &scratch_fpregister_list_;
+  }
+
   // ---------------------------------------------------------------------------
-  // Code generation.
+  // InstructionStream generation.
 
   // Insert the smallest number of nop instructions
   // possible to align the pc offset to a multiple
@@ -900,13 +902,13 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   // intervals of kBufferCheckInterval emitted bytes.
   static constexpr int kBufferCheckInterval = 1 * KB / 2;
 
-  // Code generation.
+  // InstructionStream generation.
   // The relocation writer's position is at least kGap bytes below the end of
   // the generated instructions. This is so that multi-instruction sequences do
   // not have to check for overflow. The same is true for writes of large
   // relocation info entries.
   static constexpr int kGap = 64;
-  STATIC_ASSERT(AssemblerBase::kMinimalBufferSize >= 2 * kGap);
+  static_assert(AssemblerBase::kMinimalBufferSize >= 2 * kGap);
 
   // Repeated checking whether the trampoline pool should be emitted is rather
   // expensive. By default we only check again once a number of instructions
@@ -935,7 +937,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   // The bound position, before this we cannot do instruction elimination.
   int last_bound_pos_;
 
-  // Code emission.
+  // InstructionStream emission.
   inline void CheckBuffer();
   void GrowBuffer();
   inline void emit(Instr x);
@@ -1066,8 +1068,10 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
 
   RegList scratch_register_list_;
 
+  DoubleRegList scratch_fpregister_list_;
+
  private:
-  void AllocateAndInstallRequestedHeapObjects(Isolate* isolate);
+  void AllocateAndInstallRequestedHeapNumbers(Isolate* isolate);
 
   int WriteCodeComments();
 
@@ -1088,22 +1092,38 @@ class V8_EXPORT_PRIVATE V8_NODISCARD UseScratchRegisterScope {
   ~UseScratchRegisterScope();
 
   Register Acquire();
+  DoubleRegister AcquireFp();
   bool hasAvailable() const;
+  bool hasAvailableFp() const;
 
   void Include(const RegList& list) { *available_ |= list; }
+  void IncludeFp(const DoubleRegList& list) { *availablefp_ |= list; }
   void Exclude(const RegList& list) { available_->clear(list); }
+  void ExcludeFp(const DoubleRegList& list) { availablefp_->clear(list); }
   void Include(const Register& reg1, const Register& reg2 = no_reg) {
     RegList list({reg1, reg2});
     Include(list);
+  }
+  void IncludeFp(const DoubleRegister& reg1,
+                 const DoubleRegister& reg2 = no_dreg) {
+    DoubleRegList list({reg1, reg2});
+    IncludeFp(list);
   }
   void Exclude(const Register& reg1, const Register& reg2 = no_reg) {
     RegList list({reg1, reg2});
     Exclude(list);
   }
+  void ExcludeFp(const DoubleRegister& reg1,
+                 const DoubleRegister& reg2 = no_dreg) {
+    DoubleRegList list({reg1, reg2});
+    ExcludeFp(list);
+  }
 
  private:
   RegList* available_;
+  DoubleRegList* availablefp_;
   RegList old_available_;
+  DoubleRegList old_availablefp_;
 };
 
 }  // namespace internal

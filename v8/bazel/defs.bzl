@@ -152,6 +152,14 @@ def _default_args():
             ],
             "//conditions:default": [],
         }),
+        cxxopts = select({
+            "//third_party/v8/HEAD/google3/config:is_opt": [
+                "-fvisibility=hidden",
+                "-fvisibility-inlines-hidden",
+            ],
+            "//conditions:default": [
+            ],
+        }),
         includes = ["include"],
         linkopts = select({
             "@v8//bazel/config:is_windows": [
@@ -407,15 +415,19 @@ v8_target_cpu_transition = transition(
 )
 
 def _mksnapshot(ctx):
+    prefix = ctx.attr.prefix
+    suffix = ctx.attr.suffix
     outs = [
-        ctx.actions.declare_file(ctx.attr.prefix + "/snapshot.cc"),
-        ctx.actions.declare_file(ctx.attr.prefix + "/embedded.S"),
+        ctx.actions.declare_file(prefix + "/snapshot" + suffix + ".cc"),
+        ctx.actions.declare_file(prefix + "/embedded" + suffix + ".S"),
     ]
     ctx.actions.run(
         outputs = outs,
         inputs = [],
         arguments = [
             "--embedded_variant=Default",
+            "--target_os",
+            ctx.attr.target_os,
             "--startup_src",
             outs[0].path,
             "--embedded_src",
@@ -436,26 +448,38 @@ _v8_mksnapshot = rule(
             executable = True,
             cfg = "exec",
         ),
+        "target_os": attr.string(mandatory = True),
         "_allowlist_function_transition": attr.label(
             default = "@bazel_tools//tools/allowlists/function_transition_allowlist",
         ),
         "prefix": attr.string(mandatory = True),
+        "suffix": attr.string(mandatory = True),
     },
     cfg = v8_target_cpu_transition,
 )
 
-def v8_mksnapshot(name, args):
+def v8_mksnapshot(name, args, suffix = ""):
     _v8_mksnapshot(
         name = "noicu/" + name,
         args = args,
         prefix = "noicu",
-        tool = ":noicu/mksnapshot",
+        tool = ":noicu/mksnapshot" + suffix,
+        suffix = suffix,
+        target_os = select({
+            "@v8//bazel/config:is_macos": "mac",
+            "//conditions:default": "",
+        }),
     )
     _v8_mksnapshot(
         name = "icu/" + name,
         args = args,
         prefix = "icu",
-        tool = ":icu/mksnapshot",
+        tool = ":icu/mksnapshot" + suffix,
+        suffix = suffix,
+        target_os = select({
+            "@v8//bazel/config:is_macos": "mac",
+            "//conditions:default": "",
+        }),
     )
 
 def _quote(val):
@@ -493,8 +517,8 @@ def build_config_content(cpu, icu):
         ("target_cpu", cpu),
         ("v8_current_cpu", cpu),
         ("v8_dict_property_const_tracking", "false"),
-        ("v8_enable_atomic_marking_state", "false"),
         ("v8_enable_atomic_object_field_writes", "false"),
+        ("v8_enable_conservative_stack_scanning", "false"),
         ("v8_enable_concurrent_marking", "false"),
         ("v8_enable_i18n_support", icu),
         ("v8_enable_verify_predictable", "false"),
@@ -509,7 +533,17 @@ def build_config_content(cpu, icu):
         ("v8_enable_single_generation", "false"),
         ("v8_enable_sandbox", "false"),
         ("v8_enable_shared_ro_heap", "false"),
+        ("v8_disable_write_barriers", "false"),
         ("v8_target_cpu", cpu),
+        ("v8_code_comments", "false"),
+        ("v8_enable_debug_code", "false"),
+        ("v8_enable_verify_heap", "false"),
+        ("v8_enable_slow_dchecks", "false"),
+        ("v8_enable_maglev", "false"),
+        ("v8_enable_turbofan", "true"),
+        ("v8_enable_disassembler", "false"),
+        ("is_DEBUG_defined", "false"),
+        ("v8_enable_gdbjit", "false"),
     ])
 
 # TODO(victorgomes): Create a rule (instead of a macro), that can

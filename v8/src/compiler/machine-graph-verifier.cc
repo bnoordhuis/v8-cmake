@@ -4,6 +4,7 @@
 
 #include "src/compiler/machine-graph-verifier.h"
 
+#include "src/base/v8-fallthrough.h"
 #include "src/compiler/common-operator.h"
 #include "src/compiler/graph.h"
 #include "src/compiler/linkage.h"
@@ -39,46 +40,6 @@ class MachineRepresentationInferrer {
   }
 
  private:
-  MachineRepresentation GetProjectionType(Node const* projection) {
-    size_t index = ProjectionIndexOf(projection->op());
-    Node* input = projection->InputAt(0);
-    switch (input->opcode()) {
-      case IrOpcode::kInt32AddWithOverflow:
-      case IrOpcode::kInt32SubWithOverflow:
-      case IrOpcode::kInt32MulWithOverflow:
-        CHECK_LE(index, static_cast<size_t>(1));
-        return index == 0 ? MachineRepresentation::kWord32
-                          : MachineRepresentation::kBit;
-      case IrOpcode::kInt64AddWithOverflow:
-      case IrOpcode::kInt64SubWithOverflow:
-        CHECK_LE(index, static_cast<size_t>(1));
-        return index == 0 ? MachineRepresentation::kWord64
-                          : MachineRepresentation::kBit;
-      case IrOpcode::kTryTruncateFloat32ToInt64:
-      case IrOpcode::kTryTruncateFloat64ToInt64:
-      case IrOpcode::kTryTruncateFloat32ToUint64:
-        CHECK_LE(index, static_cast<size_t>(1));
-        return index == 0 ? MachineRepresentation::kWord64
-                          : MachineRepresentation::kBit;
-      case IrOpcode::kCall: {
-        auto call_descriptor = CallDescriptorOf(input->op());
-        return call_descriptor->GetReturnType(index).representation();
-      }
-      case IrOpcode::kWord32AtomicPairLoad:
-      case IrOpcode::kWord32AtomicPairAdd:
-      case IrOpcode::kWord32AtomicPairSub:
-      case IrOpcode::kWord32AtomicPairAnd:
-      case IrOpcode::kWord32AtomicPairOr:
-      case IrOpcode::kWord32AtomicPairXor:
-      case IrOpcode::kWord32AtomicPairExchange:
-      case IrOpcode::kWord32AtomicPairCompareExchange:
-        CHECK_LE(index, static_cast<size_t>(1));
-        return MachineRepresentation::kWord32;
-      default:
-        return MachineRepresentation::kNone;
-    }
-  }
-
   MachineRepresentation PromoteRepresentation(MachineRepresentation rep) {
     switch (rep) {
       case MachineRepresentation::kWord8:
@@ -118,7 +79,8 @@ class MachineRepresentationInferrer {
             break;
           }
           case IrOpcode::kProjection: {
-            representation_vector_[node->id()] = GetProjectionType(node);
+            representation_vector_[node->id()] =
+                NodeProperties::GetProjectionType(node);
           } break;
           case IrOpcode::kTypedStateValues:
             representation_vector_[node->id()] = MachineRepresentation::kNone;
@@ -207,7 +169,6 @@ class MachineRepresentationInferrer {
                 MachineRepresentation::kTaggedPointer;
             break;
           case IrOpcode::kNumberConstant:
-          case IrOpcode::kDelayedStringConstant:
           case IrOpcode::kChangeBitToTagged:
           case IrOpcode::kIfException:
           case IrOpcode::kOsrValue:
@@ -413,6 +374,8 @@ class MachineRepresentationChecker {
           case IrOpcode::kFloat64ExtractHighWord32:
           case IrOpcode::kBitcastFloat64ToInt64:
           case IrOpcode::kTryTruncateFloat64ToInt64:
+          case IrOpcode::kTryTruncateFloat64ToInt32:
+          case IrOpcode::kTryTruncateFloat64ToUint32:
             CheckValueInputForFloat64Op(node, 0);
             break;
           case IrOpcode::kWord64Equal:
@@ -817,7 +780,8 @@ class MachineRepresentationChecker {
 
   void CheckValueInputIsTaggedOrPointer(Node const* node, int index) {
     Node const* input = node->InputAt(index);
-    switch (inferrer_->GetRepresentation(input)) {
+    MachineRepresentation rep = inferrer_->GetRepresentation(input);
+    switch (rep) {
       case MachineRepresentation::kTagged:
       case MachineRepresentation::kTaggedPointer:
       case MachineRepresentation::kTaggedSigned:
@@ -833,6 +797,21 @@ class MachineRepresentationChecker {
       case MachineRepresentation::kWord64:
         if (Is64()) {
           return;
+        }
+        break;
+      default:
+        break;
+    }
+    switch (node->opcode()) {
+      case IrOpcode::kLoad:
+      case IrOpcode::kProtectedLoad:
+      case IrOpcode::kUnalignedLoad:
+      case IrOpcode::kLoadImmutable:
+        if (rep == MachineRepresentation::kCompressed ||
+            rep == MachineRepresentation::kCompressedPointer) {
+          if (DECOMPRESS_POINTER_BY_ADDRESSING_MODE && index == 0) {
+            return;
+          }
         }
         break;
       default:
@@ -1004,6 +983,7 @@ class MachineRepresentationChecker {
       case MachineRepresentation::kFloat32:
       case MachineRepresentation::kFloat64:
       case MachineRepresentation::kSimd128:
+      case MachineRepresentation::kSimd256:
       case MachineRepresentation::kBit:
       case MachineRepresentation::kWord8:
       case MachineRepresentation::kWord16:

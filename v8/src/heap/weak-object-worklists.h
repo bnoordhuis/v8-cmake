@@ -19,7 +19,7 @@ struct Ephemeron {
 };
 
 using HeapObjectAndSlot = std::pair<HeapObject, HeapObjectSlot>;
-using HeapObjectAndCode = std::pair<HeapObject, Code>;
+using HeapObjectAndCode = std::pair<HeapObject, InstructionStream>;
 class EphemeronHashTable;
 class JSFunction;
 class SharedFunctionInfo;
@@ -42,7 +42,7 @@ class TransitionArray;
   /* Keep track of all ephemerons for concurrent marking tasks. Only store   \
      ephemerons in these worklists if both (key, value) are unreachable at   \
      the moment.                                                             \
-     MarkCompactCollector::ProcessEphemeronsUntilFixpoint drains/fills       \
+     MarkCompactCollector::MarkTransitiveClosureUntilFixpoint drains/fills   \
      these worklists. current_ephemerons is used as draining worklist in     \
      the current fixpoint iteration. */                                      \
   F(Ephemeron, current_ephemerons, CurrentEphemerons)                        \

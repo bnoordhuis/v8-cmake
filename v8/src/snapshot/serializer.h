@@ -11,7 +11,6 @@
 #include "src/handles/global-handles.h"
 #include "src/logging/log.h"
 #include "src/objects/objects.h"
-#include "src/snapshot/embedded/embedded-data.h"
 #include "src/snapshot/serializer-deserializer.h"
 #include "src/snapshot/snapshot-source-sink.h"
 #include "src/snapshot/snapshot.h"
@@ -23,14 +22,17 @@ namespace internal {
 class CodeAddressMap : public CodeEventLogger {
  public:
   explicit CodeAddressMap(Isolate* isolate) : CodeEventLogger(isolate) {
-    isolate->logger()->AddCodeEventListener(this);
+    isolate->v8_file_logger()->AddLogEventListener(this);
   }
 
   ~CodeAddressMap() override {
-    isolate_->logger()->RemoveCodeEventListener(this);
+    isolate_->v8_file_logger()->RemoveLogEventListener(this);
   }
 
-  void CodeMoveEvent(AbstractCode from, AbstractCode to) override {
+  void CodeMoveEvent(InstructionStream from, InstructionStream to) override {
+    address_to_name_map_.Move(from.address(), to.address());
+  }
+  void BytecodeMoveEvent(BytecodeArray from, BytecodeArray to) override {
     address_to_name_map_.Move(from.address(), to.address());
   }
 
@@ -187,7 +189,7 @@ class Serializer : public SerializerDeserializer {
   Isolate* isolate() const { return isolate_; }
 
   // The pointer compression cage base value used for decompression of all
-  // tagged values except references to Code objects.
+  // tagged values except references to InstructionStream objects.
   PtrComprCageBase cage_base() const {
 #if V8_COMPRESS_POINTERS
     return cage_base_;
@@ -267,6 +269,8 @@ class Serializer : public SerializerDeserializer {
     return external_reference_encoder_.TryEncode(addr);
   }
 
+  bool SerializeReadOnlyObjectReference(HeapObject obj, SnapshotByteSink* sink);
+
   // GetInt reads 4 bytes at once, requiring padding at the end.
   // Use padding_offset to specify the space you want to use after padding.
   void Pad(int padding_offset = 0);
@@ -275,7 +279,7 @@ class Serializer : public SerializerDeserializer {
   // of the serializer.  Initialize it on demand.
   void InitializeCodeAddressMap();
 
-  Code CopyCode(Code code);
+  InstructionStream CopyCode(InstructionStream code);
 
   void QueueDeferredObject(HeapObject obj) {
     DCHECK_NULL(reference_map_.LookupReference(obj));
@@ -318,6 +322,8 @@ class Serializer : public SerializerDeserializer {
             Snapshot::kReconstructReadOnlyAndSharedObjectCachesForTesting) != 0;
   }
 
+  bool deferred_objects_empty() { return deferred_objects_.size() == 0; }
+
  private:
   // A circular queue of hot objects. This is added to in the same order as in
   // Deserializer::HotObjectsList, but this stores the objects as an array of
@@ -354,7 +360,7 @@ class Serializer : public SerializerDeserializer {
    private:
     static const int kSize = kHotObjectCount;
     static const int kSizeMask = kSize - 1;
-    STATIC_ASSERT(base::bits::IsPowerOfTwo(kSize));
+    static_assert(base::bits::IsPowerOfTwo(kSize));
     Heap* heap_;
     StrongRootsEntry* strong_roots_entry_;
     Address circular_queue_[kSize] = {kNullAddress};
@@ -418,8 +424,6 @@ class Serializer : public SerializerDeserializer {
 #endif  // DEBUG
 };
 
-class RelocInfoIterator;
-
 class Serializer::ObjectSerializer : public ObjectVisitor {
  public:
   ObjectSerializer(Serializer* serializer, Handle<HeapObject> obj,
@@ -446,14 +450,16 @@ class Serializer::ObjectSerializer : public ObjectVisitor {
   void VisitPointers(HeapObject host, MaybeObjectSlot start,
                      MaybeObjectSlot end) override;
   void VisitCodePointer(HeapObject host, CodeObjectSlot slot) override;
-  void VisitEmbeddedPointer(Code host, RelocInfo* target) override;
-  void VisitExternalReference(Foreign host, Address* p) override;
-  void VisitExternalReference(Code host, RelocInfo* rinfo) override;
-  void VisitExternalPointer(HeapObject host, ExternalPointer_t ptr) override;
-  void VisitInternalReference(Code host, RelocInfo* rinfo) override;
-  void VisitCodeTarget(Code host, RelocInfo* target) override;
-  void VisitRuntimeEntry(Code host, RelocInfo* reloc) override;
-  void VisitOffHeapTarget(Code host, RelocInfo* target) override;
+  void VisitEmbeddedPointer(InstructionStream host, RelocInfo* target) override;
+  void VisitExternalReference(InstructionStream host,
+                              RelocInfo* rinfo) override;
+  void VisitInternalReference(InstructionStream host,
+                              RelocInfo* rinfo) override;
+  void VisitCodeTarget(InstructionStream host, RelocInfo* target) override;
+  void VisitOffHeapTarget(InstructionStream host, RelocInfo* target) override;
+
+  void VisitExternalPointer(HeapObject host, ExternalPointerSlot slot,
+                            ExternalPointerTag tag) override;
 
   Isolate* isolate() { return isolate_; }
 

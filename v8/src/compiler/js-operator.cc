@@ -726,7 +726,7 @@ Type JSWasmCallNode::TypeForWasmReturnType(const wasm::ValueType& type) {
     case wasm::kI32:
       return Type::Signed32();
     case wasm::kI64:
-      return Type::BigInt();
+      return Type::SignedBigInt64();
     case wasm::kF32:
     case wasm::kF64:
       return Type::Number();
@@ -741,6 +741,8 @@ Type JSWasmCallNode::TypeForWasmReturnType(const wasm::ValueType& type) {
   V(ToName, Operator::kNoProperties, 1, 1)                               \
   V(ToNumber, Operator::kNoProperties, 1, 1)                             \
   V(ToNumberConvertBigInt, Operator::kNoProperties, 1, 1)                \
+  V(ToBigInt, Operator::kNoProperties, 1, 1)                             \
+  V(ToBigIntConvertNumber, Operator::kNoProperties, 1, 1)                \
   V(ToNumeric, Operator::kNoProperties, 1, 1)                            \
   V(ToObject, Operator::kFoldable, 1, 1)                                 \
   V(ToString, Operator::kNoProperties, 1, 1)                             \
@@ -770,6 +772,7 @@ Type JSWasmCallNode::TypeForWasmReturnType(const wasm::ValueType& type) {
   V(RejectPromise, Operator::kNoDeopt | Operator::kNoThrow, 3, 1)        \
   V(ResolvePromise, Operator::kNoDeopt | Operator::kNoThrow, 2, 1)       \
   V(GetSuperConstructor, Operator::kNoWrite | Operator::kNoThrow, 1, 1)  \
+  V(FindNonDefaultConstructorOrConstruct, Operator::kNoProperties, 2, 2) \
   V(ParseInt, Operator::kNoProperties, 2, 1)                             \
   V(RegExpTest, Operator::kNoProperties, 2, 1)
 
@@ -915,23 +918,21 @@ const Operator* JSOperatorBuilder::CallRuntime(Runtime::FunctionId id) {
   return CallRuntime(f, f->nargs);
 }
 
-
-const Operator* JSOperatorBuilder::CallRuntime(Runtime::FunctionId id,
-                                               size_t arity) {
+const Operator* JSOperatorBuilder::CallRuntime(
+    Runtime::FunctionId id, size_t arity, Operator::Properties properties) {
   const Runtime::Function* f = Runtime::FunctionForId(id);
-  return CallRuntime(f, arity);
+  return CallRuntime(f, arity, properties);
 }
 
-
-const Operator* JSOperatorBuilder::CallRuntime(const Runtime::Function* f,
-                                               size_t arity) {
+const Operator* JSOperatorBuilder::CallRuntime(
+    const Runtime::Function* f, size_t arity, Operator::Properties properties) {
   CallRuntimeParameters parameters(f->function_id, arity);
   DCHECK(f->nargs == -1 || f->nargs == static_cast<int>(parameters.arity()));
-  return zone()->New<Operator1<CallRuntimeParameters>>(   // --
-      IrOpcode::kJSCallRuntime, Operator::kNoProperties,  // opcode
-      "JSCallRuntime",                                    // name
-      parameters.arity(), 1, 1, f->result_size, 1, 2,     // inputs/outputs
-      parameters);                                        // parameter
+  return zone()->New<Operator1<CallRuntimeParameters>>(  // --
+      IrOpcode::kJSCallRuntime, properties,              // opcode
+      "JSCallRuntime",                                   // name
+      parameters.arity(), 1, 1, f->result_size, 1, 2,    // inputs/outputs
+      parameters);                                       // parameter
 }
 
 #if V8_ENABLE_WEBASSEMBLY
@@ -1132,7 +1133,7 @@ const Operator* JSOperatorBuilder::DefineKeyedOwnProperty(
   return zone()->New<Operator1<PropertyAccess>>(                     // --
       IrOpcode::kJSDefineKeyedOwnProperty, Operator::kNoProperties,  // opcode
       "JSDefineKeyedOwnProperty",                                    // name
-      4, 1, 1, 0, 1, 2,                                              // counts
+      5, 1, 1, 0, 1, 2,                                              // counts
       access);  // parameter
 }
 
@@ -1309,7 +1310,7 @@ const Operator* JSOperatorBuilder::CreateBoundFunction(size_t arity,
 }
 
 const Operator* JSOperatorBuilder::CreateClosure(
-    const SharedFunctionInfoRef& shared_info, const CodeTRef& code,
+    const SharedFunctionInfoRef& shared_info, const CodeRef& code,
     AllocationType allocation) {
   static constexpr int kFeedbackCell = 1;
   static constexpr int kArity = kFeedbackCell;

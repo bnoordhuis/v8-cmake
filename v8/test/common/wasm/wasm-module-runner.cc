@@ -25,7 +25,7 @@ namespace testing {
 
 MaybeHandle<WasmModuleObject> CompileForTesting(Isolate* isolate,
                                                 ErrorThrower* thrower,
-                                                const ModuleWireBytes& bytes) {
+                                                ModuleWireBytes bytes) {
   auto enabled_features = WasmFeatures::FromIsolate(isolate);
   MaybeHandle<WasmModuleObject> module =
       GetWasmEngine()->SyncCompile(isolate, enabled_features, thrower, bytes);
@@ -34,7 +34,7 @@ MaybeHandle<WasmModuleObject> CompileForTesting(Isolate* isolate,
 }
 
 MaybeHandle<WasmInstanceObject> CompileAndInstantiateForTesting(
-    Isolate* isolate, ErrorThrower* thrower, const ModuleWireBytes& bytes) {
+    Isolate* isolate, ErrorThrower* thrower, ModuleWireBytes bytes) {
   MaybeHandle<WasmModuleObject> module =
       CompileForTesting(isolate, thrower, bytes);
   if (module.is_null()) return {};
@@ -66,7 +66,7 @@ base::OwnedVector<WasmValue> MakeDefaultInterpreterArguments(
         arguments[i] = WasmValue(Simd128{s128_bytes});
         break;
       }
-      case kOptRef:
+      case kRefNull:
         arguments[i] =
             WasmValue(Handle<Object>::cast(isolate->factory()->null_value()),
                       sig->GetParam(i));
@@ -102,10 +102,12 @@ base::OwnedVector<Handle<Object>> MakeDefaultArguments(Isolate* isolate,
       case kI64:
         arguments[i] = BigInt::FromInt64(isolate, static_cast<int64_t>(i));
         break;
-      case kOptRef:
+      case kRefNull:
         arguments[i] = isolate->factory()->null_value();
         break;
       case kRef:
+        arguments[i] = isolate->factory()->undefined_value();
+        break;
       case kRtt:
       case kI8:
       case kI16:
@@ -143,8 +145,7 @@ WasmInterpretationResult InterpretWasmModule(
 
   CHECK(func->exported);
   // This would normally be handled by export wrappers.
-  if (!IsJSCompatibleSignature(func->sig, instance->module(),
-                               WasmFeatures::FromIsolate(isolate))) {
+  if (!IsJSCompatibleSignature(func->sig)) {
     return WasmInterpretationResult::Trapped(false);
   }
 

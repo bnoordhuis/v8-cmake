@@ -29,8 +29,7 @@ TurboAssemblerBase::TurboAssemblerBase(Isolate* isolate,
 Address TurboAssemblerBase::BuiltinEntry(Builtin builtin) {
   DCHECK(Builtins::IsBuiltinId(builtin));
   if (isolate_ != nullptr) {
-    Address entry =
-        isolate_->builtin_entry_table()[static_cast<int32_t>(builtin)];
+    Address entry = isolate_->builtin_entry_table()[Builtins::ToInt(builtin)];
     DCHECK_EQ(entry, EmbeddedData::FromBlob(isolate_).InstructionStartOfBuiltin(
                          builtin));
     return entry;
@@ -125,6 +124,13 @@ bool TurboAssemblerBase::IsAddressableThroughRootRegister(
     Isolate* isolate, const ExternalReference& reference) {
   Address address = reference.address();
   return isolate->root_register_addressable_region().contains(address);
+}
+
+Tagged_t TurboAssemblerBase::ReadOnlyRootPtr(RootIndex index) {
+  DCHECK(RootsTable::IsReadOnly(index));
+  CHECK(V8_STATIC_ROOTS_BOOL);
+  CHECK(isolate_->root(index).IsHeapObject());
+  return V8HeapCompressionScheme::CompressTagged(isolate_->root(index).ptr());
 }
 
 }  // namespace internal

@@ -109,7 +109,6 @@ ArrayBufferSweeper::~ArrayBufferSweeper() {
 void ArrayBufferSweeper::EnsureFinished() {
   if (!sweeping_in_progress()) return;
 
-  TRACE_GC(heap_->tracer(), GCTracer::Scope::MC_COMPLETE_SWEEP_ARRAY_BUFFERS);
   TryAbortResult abort_result =
       heap_->isolate()->cancelable_task_manager()->TryAbort(job_->id_);
 
@@ -155,13 +154,14 @@ void ArrayBufferSweeper::RequestSweep(SweepingType type) {
 
   Prepare(type);
   if (!heap_->IsTearingDown() && !heap_->ShouldReduceMemory() &&
-      FLAG_concurrent_array_buffer_sweeping) {
+      v8_flags.concurrent_array_buffer_sweeping) {
     auto task = MakeCancelableTask(heap_->isolate(), [this, type] {
       GCTracer::Scope::ScopeId scope_id =
           type == SweepingType::kYoung
               ? GCTracer::Scope::BACKGROUND_YOUNG_ARRAY_BUFFER_SWEEP
               : GCTracer::Scope::BACKGROUND_FULL_ARRAY_BUFFER_SWEEP;
       TRACE_GC_EPOCH(heap_->tracer(), scope_id, ThreadKind::kBackground);
+      heap_->sweeper()->WaitForPromotedPagesIteration();
       base::MutexGuard guard(&sweeping_mutex_);
       job_->Sweep();
       job_finished_.NotifyAll();
@@ -169,6 +169,7 @@ void ArrayBufferSweeper::RequestSweep(SweepingType type) {
     job_->id_ = task->id();
     V8::GetCurrentPlatform()->CallOnWorkerThread(std::move(task));
   } else {
+    heap_->sweeper()->WaitForPromotedPagesIteration();
     job_->Sweep();
     Finalize();
   }

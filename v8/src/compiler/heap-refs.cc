@@ -4,15 +4,14 @@
 
 #include "src/compiler/heap-refs.h"
 
+#include "src/objects/elements-kind.h"
+
 #ifdef ENABLE_SLOW_DCHECKS
 #include <algorithm>
 #endif
 
 #include "src/api/api-inl.h"
-#include "src/ast/modules.h"
 #include "src/base/optional.h"
-#include "src/base/platform/platform.h"
-#include "src/codegen/code-factory.h"
 #include "src/compiler/compilation-dependencies.h"
 #include "src/compiler/js-heap-broker.h"
 #include "src/execution/protectors-inl.h"
@@ -66,15 +65,7 @@ enum ObjectDataKind {
 
 namespace {
 
-bool IsReadOnlyHeapObjectForCompiler(PtrComprCageBase cage_base,
-                                     HeapObject object) {
-  DisallowGarbageCollection no_gc;
-  // TODO(jgruber): Remove this compiler-specific predicate and use the plain
-  // heap predicate instead. This would involve removing the special cases for
-  // builtins.
-  return (object.IsCode(cage_base) && Code::cast(object).is_builtin()) ||
-         ReadOnlyHeap::Contains(object);
-}
+bool Is64() { return kSystemPointerSize == 8; }
 
 }  // namespace
 
@@ -111,10 +102,9 @@ class ObjectData : public ZoneObject {
                   kind == kUnserializedReadOnlyHeapObject || kind == kSmi ||
                       kind == kNeverSerializedHeapObject ||
                       kind == kBackgroundSerializedHeapObject);
-    CHECK_IMPLIES(
-        kind == kUnserializedReadOnlyHeapObject,
-        object->IsHeapObject() && IsReadOnlyHeapObjectForCompiler(
-                                      isolate, HeapObject::cast(*object)));
+    CHECK_IMPLIES(kind == kUnserializedReadOnlyHeapObject,
+                  object->IsHeapObject() &&
+                      ReadOnlyHeap::Contains(HeapObject::cast(*object)));
   }
 
 #define DECLARE_IS(Name) bool Is##Name() const;
@@ -504,12 +494,19 @@ class BigIntData : public HeapObjectData {
   BigIntData(JSHeapBroker* broker, ObjectData** storage, Handle<BigInt> object,
              ObjectDataKind kind)
       : HeapObjectData(broker, storage, object, kind),
-        as_uint64_(object->AsUint64(nullptr)) {}
+        as_uint64_(object->AsUint64(nullptr)),
+        as_int64_(object->AsInt64(&lossless_)) {}
 
   uint64_t AsUint64() const { return as_uint64_; }
+  int64_t AsInt64(bool* lossless) const {
+    *lossless = lossless_;
+    return as_int64_;
+  }
 
  private:
   const uint64_t as_uint64_;
+  const int64_t as_int64_;
+  bool lossless_;
 };
 
 struct PropertyDescriptor {
@@ -1006,7 +1003,7 @@ ObjectData* JSHeapBroker::TryGetOrCreateData(Handle<Object> object,
     return nullptr;
   }
 
-  if (IsReadOnlyHeapObjectForCompiler(isolate(), HeapObject::cast(*object))) {
+  if (ReadOnlyHeap::Contains(HeapObject::cast(*object))) {
     entry = refs_->LookupOrInsert(object.address());
     return zone()->New<ObjectData>(this, &entry->value, object,
                                    kUnserializedReadOnlyHeapObject);
@@ -1061,8 +1058,13 @@ bool MapRef::CanInlineElementAccess() const {
   if (has_indexed_interceptor()) return false;
   ElementsKind kind = elements_kind();
   if (IsFastElementsKind(kind)) return true;
-  if (IsTypedArrayElementsKind(kind) && kind != BIGUINT64_ELEMENTS &&
-      kind != BIGINT64_ELEMENTS) {
+  if (IsTypedArrayElementsKind(kind) &&
+      (Is64() || (kind != BIGINT64_ELEMENTS && kind != BIGUINT64_ELEMENTS))) {
+    return true;
+  }
+  if (v8_flags.turbo_rab_gsab && IsRabGsabTypedArrayElementsKind(kind) &&
+      kind != RAB_GSAB_BIGUINT64_ELEMENTS &&
+      kind != RAB_GSAB_BIGINT64_ELEMENTS) {
     return true;
   }
   return false;
@@ -1278,8 +1280,12 @@ bool StringRef::SupportedStringKind() const {
   return IsInternalizedString() || object()->IsThinString();
 }
 
+bool StringRef::IsContentAccessible() const {
+  return data_->kind() != kNeverSerializedHeapObject || SupportedStringKind();
+}
+
 base::Optional<Handle<String>> StringRef::ObjectIfContentAccessible() {
-  if (data_->kind() == kNeverSerializedHeapObject && !SupportedStringKind()) {
+  if (!IsContentAccessible()) {
     TRACE_BROKER_MISSING(
         broker(),
         "content for kNeverSerialized unsupported string kind " << *this);
@@ -1289,21 +1295,12 @@ base::Optional<Handle<String>> StringRef::ObjectIfContentAccessible() {
   }
 }
 
-base::Optional<int> StringRef::length() const {
-  if (data_->kind() == kNeverSerializedHeapObject && !SupportedStringKind()) {
-    TRACE_BROKER_MISSING(
-        broker(),
-        "length for kNeverSerialized unsupported string kind " << *this);
-    return base::nullopt;
-  } else {
-    return object()->length(kAcquireLoad);
-  }
-}
+int StringRef::length() const { return object()->length(kAcquireLoad); }
 
 base::Optional<uint16_t> StringRef::GetFirstChar() const { return GetChar(0); }
 
 base::Optional<uint16_t> StringRef::GetChar(int index) const {
-  if (data_->kind() == kNeverSerializedHeapObject && !SupportedStringKind()) {
+  if (!IsContentAccessible()) {
     TRACE_BROKER_MISSING(
         broker(),
         "get char for kNeverSerialized unsupported string kind " << *this);
@@ -1320,7 +1317,7 @@ base::Optional<uint16_t> StringRef::GetChar(int index) const {
 }
 
 base::Optional<double> StringRef::ToNumber() {
-  if (data_->kind() == kNeverSerializedHeapObject && !SupportedStringKind()) {
+  if (!IsContentAccessible()) {
     TRACE_BROKER_MISSING(
         broker(),
         "number for kNeverSerialized unsupported string kind " << *this);
@@ -1328,6 +1325,17 @@ base::Optional<double> StringRef::ToNumber() {
   }
 
   return TryStringToDouble(broker()->local_isolate(), object());
+}
+
+base::Optional<double> StringRef::ToInt(int radix) {
+  if (!IsContentAccessible()) {
+    TRACE_BROKER_MISSING(
+        broker(),
+        "toInt for kNeverSerialized unsupported string kind " << *this);
+    return base::nullopt;
+  }
+
+  return TryStringToInt(broker()->local_isolate(), object(), radix);
 }
 
 int ArrayBoilerplateDescriptionRef::constants_elements_length() const {
@@ -1350,7 +1358,7 @@ base::Optional<ObjectRef> FixedArrayRef::TryGet(int i) const {
 }
 
 Float64 FixedDoubleArrayRef::GetFromImmutableFixedDoubleArray(int i) const {
-  STATIC_ASSERT(ref_traits<FixedDoubleArray>::ref_serialization_kind ==
+  static_assert(ref_traits<FixedDoubleArray>::ref_serialization_kind ==
                 RefSerializationKind::kNeverSerialized);
   CHECK(data_->should_access_heap());
   return Float64::FromBits(object()->get_representation(i));
@@ -1419,6 +1427,12 @@ HEAP_ACCESSOR_C(AllocationSite, ElementsKind, GetElementsKind)
 HEAP_ACCESSOR_C(AllocationSite, AllocationType, GetAllocationType)
 
 BIMODAL_ACCESSOR_C(BigInt, uint64_t, AsUint64)
+int64_t BigIntRef::AsInt64(bool* lossless) const {
+  if (data_->should_access_heap()) {
+    return object()->AsInt64(lossless);
+  }
+  return ObjectRef::data()->AsBigInt()->AsInt64(lossless);
+}
 
 int BytecodeArrayRef::register_count() const {
   return object()->register_count();
@@ -1508,6 +1522,10 @@ bool FunctionTemplateInfoRef::is_signature_undefined() const {
 }
 
 HEAP_ACCESSOR_C(FunctionTemplateInfo, bool, accept_any_receiver)
+HEAP_ACCESSOR_C(FunctionTemplateInfo, int16_t,
+                allowed_receiver_instance_type_range_start)
+HEAP_ACCESSOR_C(FunctionTemplateInfo, int16_t,
+                allowed_receiver_instance_type_range_end)
 
 HolderLookupResult FunctionTemplateInfoRef::LookupHolderOfExpectedType(
     MapRef receiver_map) {
@@ -1548,6 +1566,7 @@ ObjectRef CallHandlerInfoRef::data() const {
 HEAP_ACCESSOR_C(ScopeInfo, int, ContextLength)
 HEAP_ACCESSOR_C(ScopeInfo, bool, HasContextExtensionSlot)
 HEAP_ACCESSOR_C(ScopeInfo, bool, HasOuterScopeInfo)
+HEAP_ACCESSOR_C(ScopeInfo, bool, ClassScopeHasPrivateBrand)
 
 ScopeInfoRef ScopeInfoRef::OuterScopeInfo() const {
   return MakeRefAssumeMemoryFence(broker(), object()->OuterScopeInfo());
@@ -1640,7 +1659,7 @@ void* JSTypedArrayRef::data_ptr() const {
   // is_on_heap release/acquire semantics (external_pointer store happens-before
   // base_pointer store, and this external_pointer load happens-after
   // base_pointer load).
-  STATIC_ASSERT(JSTypedArray::kOffHeapDataPtrEqualsExternalPointer);
+  static_assert(JSTypedArray::kOffHeapDataPtrEqualsExternalPointer);
   return object()->DataPtr();
 }
 
@@ -1674,9 +1693,7 @@ bool StringRef::IsExternalString() const {
   return object()->IsExternalString();
 }
 
-Address CallHandlerInfoRef::callback() const {
-  return v8::ToCData<Address>(object()->callback());
-}
+Address CallHandlerInfoRef::callback() const { return object()->callback(); }
 
 ZoneVector<Address> FunctionTemplateInfoRef::c_functions() const {
   return GetCFunctions(FixedArray::cast(object()->GetCFunctionOverloads()),
@@ -1690,7 +1707,7 @@ ZoneVector<const CFunctionInfo*> FunctionTemplateInfoRef::c_signatures() const {
 
 bool StringRef::IsSeqString() const { return object()->IsSeqString(); }
 
-ScopeInfoRef NativeContextRef::scope_info() const {
+ScopeInfoRef ContextRef::scope_info() const {
   // The scope_info is immutable after initialization.
   return MakeRefAssumeMemoryFence(broker(), object()->scope_info());
 }
@@ -1821,17 +1838,23 @@ base::Optional<Object> JSObjectRef::GetOwnConstantElementFromHeap(
   // This block is carefully constructed to avoid Ref creation and access since
   // this method may be called after the broker has retired.
   // The relaxed `length` read is safe to use in this case since:
-  // - GetOwnConstantElement only detects a constant for JSArray holders if
-  //   the array is frozen/sealed.
-  // - Frozen/sealed arrays can't change length.
-  // - We've already seen a map with frozen/sealed elements_kinds (above);
+  // - TryGetOwnConstantElement (below) only detects a constant for JSArray
+  //   holders if the array is frozen.
+  // - Frozen arrays can't change length.
+  // - We've already seen the corresponding map (when this JSObjectRef was
+  //   created);
   // - The release-load of that map ensures we read the newest value
   //   of `length` below.
   if (holder->IsJSArray()) {
+    Object array_length_obj =
+        JSArray::cast(*holder).length(broker()->isolate(), kRelaxedLoad);
+    if (!array_length_obj.IsSmi()) {
+      // Can't safely read into HeapNumber objects without atomic semantics
+      // (relaxed would be sufficient due to the guarantees above).
+      return {};
+    }
     uint32_t array_length;
-    if (!JSArray::cast(*holder)
-             .length(broker()->isolate(), kRelaxedLoad)
-             .ToArrayLength(&array_length)) {
+    if (!array_length_obj.ToArrayLength(&array_length)) {
       return {};
     }
     // See also ElementsAccessorBase::GetMaxIndex.
@@ -2106,7 +2129,7 @@ Handle<T> TinyRef<T>::object() const {
 #define V(Name)                                  \
   template class TinyRef<Name>;                  \
   /* TinyRef should contain only one pointer. */ \
-  STATIC_ASSERT(sizeof(TinyRef<Name>) == kSystemPointerSize);
+  static_assert(sizeof(TinyRef<Name>) == kSystemPointerSize);
 HEAP_BROKER_OBJECT_LIST(V)
 #undef V
 
@@ -2167,10 +2190,8 @@ BIMODAL_ACCESSOR(JSFunction, SharedFunctionInfo, shared)
 #undef JSFUNCTION_BIMODAL_ACCESSOR_WITH_DEP_C
 
 CodeRef JSFunctionRef::code() const {
-  CodeT code = object()->code(kAcquireLoad);
-  // Safe to do a relaxed conversion to Code here since CodeT::code field is
-  // modified only by GC and the CodeT was acquire-loaded.
-  return MakeRefAssumeMemoryFence(broker(), FromCodeT(code, kRelaxedLoad));
+  Code code = object()->code(kAcquireLoad);
+  return MakeRefAssumeMemoryFence(broker(), code);
 }
 
 NativeContextRef JSFunctionRef::native_context() const {
@@ -2241,7 +2262,7 @@ base::Optional<PropertyCellRef> JSGlobalObjectRef::GetPropertyCell(
 }
 
 std::ostream& operator<<(std::ostream& os, const ObjectRef& ref) {
-  if (!FLAG_concurrent_recompilation) {
+  if (!v8_flags.concurrent_recompilation) {
     // We cannot be in a background thread so it's safe to read the heap.
     AllowHandleDereference allow_handle_dereference;
     return os << ref.data() << " {" << ref.object() << "}";
@@ -2252,14 +2273,34 @@ std::ostream& operator<<(std::ostream& os, const ObjectRef& ref) {
   }
 }
 
-unsigned CodeRef::GetInlinedBytecodeSize() const {
-  unsigned value = object()->inlined_bytecode_size();
+namespace {
+
+unsigned GetInlinedBytecodeSizeImpl(InstructionStream code) {
+  unsigned value = code.inlined_bytecode_size();
   if (value > 0) {
     // Don't report inlined bytecode size if the code object was already
     // deoptimized.
-    value = object()->marked_for_deoptimization() ? 0 : value;
+    value = code.marked_for_deoptimization() ? 0 : value;
   }
   return value;
+}
+
+}  // namespace
+
+unsigned InstructionStreamRef::GetInlinedBytecodeSize() const {
+  return GetInlinedBytecodeSizeImpl(*object());
+}
+
+unsigned CodeRef::GetInlinedBytecodeSize() const {
+  Code code = *object();
+  if (code.is_off_heap_trampoline()) {
+    return 0;
+  }
+
+  // Safe to do a relaxed conversion to InstructionStream here since
+  // Code::instruction_stream field is modified only by GC and the
+  // Code was acquire-loaded.
+  return GetInlinedBytecodeSizeImpl(code.instruction_stream(kRelaxedLoad));
 }
 
 #undef BIMODAL_ACCESSOR

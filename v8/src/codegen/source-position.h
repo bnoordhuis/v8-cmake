@@ -15,7 +15,7 @@
 namespace v8 {
 namespace internal {
 
-class Code;
+class InstructionStream;
 class OptimizedCompilationInfo;
 class Script;
 class SharedFunctionInfo;
@@ -44,7 +44,8 @@ struct SourcePositionInfo;
 // DeoptimizationData::InliningPositions, depending on the compilation stage.
 class SourcePosition final {
  public:
-  explicit SourcePosition(int script_offset, int inlining_id = kNotInlined)
+  explicit SourcePosition(int script_offset = kNoSourcePosition,
+                          int inlining_id = kNotInlined)
       : value_(0) {
     SetIsExternal(false);
     SetScriptOffset(script_offset);
@@ -57,11 +58,8 @@ class SourcePosition final {
     return SourcePosition(line, file_id, kNotInlined);
   }
 
-  static SourcePosition Unknown() { return SourcePosition(kNoSourcePosition); }
-  bool IsKnown() const {
-    if (IsExternal()) return true;
-    return ScriptOffset() != kNoSourcePosition || InliningId() != kNotInlined;
-  }
+  static SourcePosition Unknown() { return SourcePosition(); }
+  bool IsKnown() const { return raw() != SourcePosition::Unknown().raw(); }
   bool isInlined() const {
     if (IsExternal()) return false;
     return InliningId() != kNotInlined;
@@ -80,13 +78,14 @@ class SourcePosition final {
     return ExternalFileIdField::decode(value_);
   }
 
-  // Assumes that the code object is optimized
-  std::vector<SourcePositionInfo> InliningStack(Handle<Code> code) const;
+  // Assumes that the code object is optimized.
+  std::vector<SourcePositionInfo> InliningStack(Isolate* isolate,
+                                                Code code) const;
   std::vector<SourcePositionInfo> InliningStack(
       OptimizedCompilationInfo* cinfo) const;
-  SourcePositionInfo FirstInfo(Handle<Code> code) const;
+  SourcePositionInfo FirstInfo(Isolate* isolate, Handle<Code> code) const;
 
-  void Print(std::ostream& out, Code code) const;
+  void Print(std::ostream& out, InstructionStream code) const;
   void PrintJson(std::ostream& out) const;
 
   int ScriptOffset() const {
@@ -122,7 +121,7 @@ class SourcePosition final {
   }
 
   static const int kNotInlined = -1;
-  STATIC_ASSERT(kNoSourcePosition == -1);
+  static_assert(kNoSourcePosition == -1);
 
   int64_t raw() const { return static_cast<int64_t>(value_); }
   static SourcePosition FromRaw(int64_t raw) {

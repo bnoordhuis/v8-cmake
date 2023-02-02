@@ -154,7 +154,8 @@ void RegExpMacroAssemblerIA32::Backtrack() {
 
     __ bind(&next);
   }
-  // Pop Code offset from backtrack stack, add Code and jump to location.
+  // Pop InstructionStream offset from backtrack stack, add InstructionStream
+  // and jump to location.
   Pop(ebx);
   __ add(ebx, Immediate(masm_->CodeObject()));
   __ jmp(ebx);
@@ -201,13 +202,13 @@ void RegExpMacroAssemblerIA32::CheckGreedyLoop(Label* on_equal) {
   __ cmp(edi, Operand(backtrack_stackpointer(), 0));
   __ j(not_equal, &fallthrough);
   __ add(backtrack_stackpointer(), Immediate(kSystemPointerSize));  // Pop.
-  BranchOrBacktrack(no_condition, on_equal);
+  BranchOrBacktrack(on_equal);
   __ bind(&fallthrough);
 }
 
 void RegExpMacroAssemblerIA32::PushCallerSavedRegisters() {
-  STATIC_ASSERT(backtrack_stackpointer() == ecx);
-  STATIC_ASSERT(current_character() == edx);
+  static_assert(backtrack_stackpointer() == ecx);
+  static_assert(current_character() == edx);
   __ push(ecx);
   __ push(edx);
 }
@@ -296,7 +297,7 @@ void RegExpMacroAssemblerIA32::CheckNotBackReferenceIgnoreCase(
     // Restore original values before failing.
     __ pop(backtrack_stackpointer());
     __ pop(edi);
-    BranchOrBacktrack(no_condition, on_no_match);
+    BranchOrBacktrack(on_no_match);
 
     __ bind(&success);
     // Restore original value before continuing.
@@ -434,7 +435,7 @@ void RegExpMacroAssemblerIA32::CheckNotBackReference(int start_reg,
   __ bind(&fail);
   // Restore backtrack stackpointer.
   __ pop(backtrack_stackpointer());
-  BranchOrBacktrack(no_condition, on_no_match);
+  BranchOrBacktrack(on_no_match);
 
   __ bind(&success);
   // Move current character position to position after match.
@@ -567,7 +568,7 @@ void RegExpMacroAssemblerIA32::CheckBitInTable(
   BranchOrBacktrack(not_equal, on_bit_set);
 }
 
-bool RegExpMacroAssemblerIA32::CheckSpecialCharacterClass(
+bool RegExpMacroAssemblerIA32::CheckSpecialClassRanges(
     StandardCharacterSet type, Label* on_no_match) {
   // Range checks (c in min..max) are generally implemented by an unsigned
   // (c - min) <= (max - min) check
@@ -689,7 +690,7 @@ bool RegExpMacroAssemblerIA32::CheckSpecialCharacterClass(
 }
 
 void RegExpMacroAssemblerIA32::Fail() {
-  STATIC_ASSERT(FAILURE == 0);  // Return value for failure is zero.
+  static_assert(FAILURE == 0);  // Return value for failure is zero.
   if (!global()) {
     __ Move(eax, Immediate(FAILURE));
   }
@@ -749,23 +750,23 @@ Handle<HeapObject> RegExpMacroAssemblerIA32::GetCode(Handle<String> source) {
   __ push(esi);
   __ push(edi);
   __ push(ebx);  // Callee-save on MacOS.
-  STATIC_ASSERT(kLastCalleeSaveRegister == kBackup_ebx);
+  static_assert(kLastCalleeSaveRegister == kBackup_ebx);
 
-  STATIC_ASSERT(kSuccessfulCaptures ==
+  static_assert(kSuccessfulCaptures ==
                 kLastCalleeSaveRegister - kSystemPointerSize);
   __ push(Immediate(0));  // Number of successful matches in a global regexp.
-  STATIC_ASSERT(kStringStartMinusOne ==
+  static_assert(kStringStartMinusOne ==
                 kSuccessfulCaptures - kSystemPointerSize);
   __ push(Immediate(0));  // Make room for "string start - 1" constant.
-  STATIC_ASSERT(kBacktrackCount == kStringStartMinusOne - kSystemPointerSize);
+  static_assert(kBacktrackCount == kStringStartMinusOne - kSystemPointerSize);
   __ push(Immediate(0));  // The backtrack counter.
-  STATIC_ASSERT(kRegExpStackBasePointer ==
+  static_assert(kRegExpStackBasePointer ==
                 kBacktrackCount - kSystemPointerSize);
   __ push(Immediate(0));  // The regexp stack base ptr.
 
   // Initialize backtrack stack pointer. It must not be clobbered from here on.
   // Note the backtrack_stackpointer is *not* callee-saved.
-  STATIC_ASSERT(backtrack_stackpointer() == ecx);
+  static_assert(backtrack_stackpointer() == ecx);
   LoadRegExpStackPointerFromMemory(backtrack_stackpointer());
 
   // Store the regexp base pointer - we'll later restore it / write it to
@@ -1048,16 +1049,13 @@ Handle<HeapObject> RegExpMacroAssemblerIA32::GetCode(Handle<String> source) {
       Factory::CodeBuilder(isolate(), code_desc, CodeKind::REGEXP)
           .set_self_reference(masm_->CodeObject())
           .Build();
+  Handle<InstructionStream> istream(code->instruction_stream(), isolate());
   PROFILE(masm_->isolate(),
           RegExpCodeCreateEvent(Handle<AbstractCode>::cast(code), source));
-  return Handle<HeapObject>::cast(code);
+  return Handle<HeapObject>::cast(istream);
 }
 
-
-void RegExpMacroAssemblerIA32::GoTo(Label* to) {
-  BranchOrBacktrack(no_condition, to);
-}
-
+void RegExpMacroAssemblerIA32::GoTo(Label* to) { BranchOrBacktrack(to); }
 
 void RegExpMacroAssemblerIA32::IfRegisterGE(int reg,
                                             int comparand,
@@ -1190,7 +1188,7 @@ void RegExpMacroAssemblerIA32::CallCheckStackGuardState(Register scratch) {
   __ PrepareCallCFunction(num_arguments, scratch);
   // RegExp code frame pointer.
   __ mov(Operand(esp, 2 * kSystemPointerSize), ebp);
-  // Code of self.
+  // InstructionStream of self.
   __ mov(Operand(esp, 1 * kSystemPointerSize), Immediate(masm_->CodeObject()));
   // Next address on the stack (will be address of return address).
   __ lea(eax, Operand(esp, -kSystemPointerSize));
@@ -1219,7 +1217,7 @@ static T* frame_entry_address(Address re_frame, int frame_offset) {
 int RegExpMacroAssemblerIA32::CheckStackGuardState(Address* return_address,
                                                    Address raw_code,
                                                    Address re_frame) {
-  Code re_code = Code::cast(Object(raw_code));
+  InstructionStream re_code = InstructionStream::cast(Object(raw_code));
   return NativeRegExpMacroAssembler::CheckStackGuardState(
       frame_entry<Isolate*>(re_frame, kIsolate),
       frame_entry<int>(re_frame, kStartIndex),
@@ -1252,24 +1250,18 @@ void RegExpMacroAssemblerIA32::CheckPosition(int cp_offset,
   }
 }
 
+void RegExpMacroAssemblerIA32::BranchOrBacktrack(Label* to) {
+  if (to == nullptr) {
+    Backtrack();
+    return;
+  }
+  __ jmp(to);
+}
 
 void RegExpMacroAssemblerIA32::BranchOrBacktrack(Condition condition,
                                                  Label* to) {
-  if (condition < 0) {  // No condition
-    if (to == nullptr) {
-      Backtrack();
-      return;
-    }
-    __ jmp(to);
-    return;
-  }
-  if (to == nullptr) {
-    __ j(condition, &backtrack_label_);
-    return;
-  }
-  __ j(condition, to);
+  __ j(condition, to ? to : &backtrack_label_);
 }
-
 
 void RegExpMacroAssemblerIA32::SafeCall(Label* to) {
   Label return_to;

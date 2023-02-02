@@ -11,7 +11,6 @@
 #include "src/common/globals.h"
 #include "src/compiler/access-info.h"
 #include "src/compiler/feedback-source.h"
-#include "src/compiler/globals.h"
 #include "src/compiler/heap-refs.h"
 #include "src/compiler/processed-feedback.h"
 #include "src/compiler/refs-map.h"
@@ -20,10 +19,8 @@
 #include "src/handles/persistent-handles.h"
 #include "src/heap/local-heap.h"
 #include "src/heap/parked-scope.h"
-#include "src/interpreter/bytecode-array-iterator.h"
 #include "src/objects/code-kind.h"
 #include "src/objects/feedback-vector.h"
-#include "src/objects/function-kind.h"
 #include "src/objects/objects.h"
 #include "src/utils/address-map.h"
 #include "src/utils/identity-map.h"
@@ -43,16 +40,16 @@ class ObjectRef;
 
 std::ostream& operator<<(std::ostream& os, const ObjectRef& ref);
 
-#define TRACE_BROKER(broker, x)                                      \
-  do {                                                               \
-    if (broker->tracing_enabled() && FLAG_trace_heap_broker_verbose) \
-      StdoutStream{} << broker->Trace() << x << '\n';                \
+#define TRACE_BROKER(broker, x)                                          \
+  do {                                                                   \
+    if (broker->tracing_enabled() && v8_flags.trace_heap_broker_verbose) \
+      StdoutStream{} << broker->Trace() << x << '\n';                    \
   } while (false)
 
-#define TRACE_BROKER_MEMORY(broker, x)                              \
-  do {                                                              \
-    if (broker->tracing_enabled() && FLAG_trace_heap_broker_memory) \
-      StdoutStream{} << broker->Trace() << x << std::endl;          \
+#define TRACE_BROKER_MEMORY(broker, x)                                  \
+  do {                                                                  \
+    if (broker->tracing_enabled() && v8_flags.trace_heap_broker_memory) \
+      StdoutStream{} << broker->Trace() << x << std::endl;              \
   } while (false)
 
 #define TRACE_BROKER_MISSING(broker, x)                                        \
@@ -104,7 +101,7 @@ class V8_EXPORT_PRIVATE JSHeapBroker {
   // For use only in tests, sets default values for some arguments. Avoids
   // churn when new flags are added.
   JSHeapBroker(Isolate* isolate, Zone* broker_zone)
-      : JSHeapBroker(isolate, broker_zone, FLAG_trace_heap_broker,
+      : JSHeapBroker(isolate, broker_zone, v8_flags.trace_heap_broker,
                      CodeKind::TURBOFAN) {}
 
   ~JSHeapBroker();
@@ -121,7 +118,7 @@ class V8_EXPORT_PRIVATE JSHeapBroker {
   Isolate* isolate() const { return isolate_; }
 
   // The pointer compression cage base value used for decompression of all
-  // tagged values except references to Code objects.
+  // tagged values except references to InstructionStream objects.
   PtrComprCageBase cage_base() const {
 #if V8_COMPRESS_POINTERS
     return cage_base_;
@@ -248,6 +245,17 @@ class V8_EXPORT_PRIVATE JSHeapBroker {
   LocalIsolate* local_isolate_or_isolate() const {
     return local_isolate() != nullptr ? local_isolate()
                                       : isolate()->AsLocalIsolate();
+  }
+
+  base::Optional<RootIndex> FindRootIndex(const HeapObjectRef& object) {
+    // No root constant is a JSReceiver.
+    if (object.IsJSReceiver()) return {};
+    Address address = object.object()->ptr();
+    RootIndex root_index;
+    if (root_index_map_.Lookup(address, &root_index)) {
+      return root_index;
+    }
+    return {};
   }
 
   // Return the corresponding canonical persistent handle for {object}. Create
@@ -466,9 +474,9 @@ class V8_EXPORT_PRIVATE JSHeapBroker {
   int boilerplate_migration_mutex_depth_ = 0;
 
   static constexpr uint32_t kMinimalRefsBucketCount = 8;
-  STATIC_ASSERT(base::bits::IsPowerOfTwo(kMinimalRefsBucketCount));
+  static_assert(base::bits::IsPowerOfTwo(kMinimalRefsBucketCount));
   static constexpr uint32_t kInitialRefsBucketCount = 1024;
-  STATIC_ASSERT(base::bits::IsPowerOfTwo(kInitialRefsBucketCount));
+  static_assert(base::bits::IsPowerOfTwo(kInitialRefsBucketCount));
 };
 
 class V8_NODISCARD TraceScope {

@@ -1,9 +1,9 @@
 [
   {
     "url": "https://chromium.googlesource.com/v8/v8.git",
-    "commit": "87c27db79e6a35a6bdedcbfe732f978812bf6ced",
+    "commit": "09464881ae235f5218b5f6f30b3adac0107008d4",
     "/* comment */": "Dependency v8 must be first.",
-    "branch": "branch-heads/10.2",
+    "branch": "branch-heads/11.1",
     "path": ""
   },
   {
@@ -14,25 +14,25 @@
   },
   {
     "url": "https://chromium.googlesource.com/chromium/src/third_party/jinja2.git",
-    "commit": "ee69aa00ee8536f61db6a451f3858745cf587de6",
+    "commit": "264c07d7e64f2874434a3b8039e101ddf1b01e7e",
     "branch": "master",
     "path": "third_party/jinja2"
   },
   {
     "url": "https://chromium.googlesource.com/chromium/src/base/trace_event/common.git",
-    "commit": "d115b033c4e53666b535cbd1985ffe60badad082",
+    "commit": "68e6038b5350cba18c341cc7c572170af5c5b20c",
     "branch": "master",
     "path": "base/trace_event/common"
   },
   {
     "url": "https://chromium.googlesource.com/chromium/src/third_party/zlib.git",
-    "commit": "a6d209ab932df0f1c9d5b7dc67cfa74e8a3272c0",
+    "commit": "dca2b915e29ee8d0bb25cd44a84b32e67c8cabd0",
     "branch": "master",
     "path": "third_party/zlib"
   },
   {
     "url": "https://chromium.googlesource.com/chromium/src/third_party/markupsafe.git",
-    "commit": "1b882ef6372b58bfd55a3285f37ed801be9137cd",
+    "commit": "13f4e8c9e206567eeb13bf585406ddc574005748",
     "branch": "master",
     "path": "third_party/markupsafe"
   },
