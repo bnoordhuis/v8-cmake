@@ -755,7 +755,6 @@ add_library(v8_libbase STATIC
   v8/src/base/debug/stack_trace.cc
   v8/src/base/division-by-constant.cc
   v8/src/base/file-utils.cc
-  v8/src/base/functional.cc
   v8/src/base/ieee754.cc
   v8/src/base/logging.cc
   v8/src/base/once.cc
