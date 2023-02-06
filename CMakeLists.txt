@@ -9,9 +9,9 @@ if(MSVC)
   enable_language(ASM_MASM)
   set_property(
     SOURCE ${PROJECT_BINARY_DIR}/embedded.S
-           v8/src/heap/base/asm/arm64/push_registers_masm.S
-           v8/src/heap/base/asm/ia32/push_registers_masm.S
-           v8/src/heap/base/asm/x64/push_registers_masm.S
+           v8/src/heap/base/asm/arm64/push_registers_masm.asm
+           v8/src/heap/base/asm/ia32/push_registers_masm.asm
+           v8/src/heap/base/asm/x64/push_registers_masm.asm
     PROPERTY LANGUAGE ASM_MASM)
 
 endif()
@@ -272,9 +272,9 @@ list(REMOVE_ITEM heap-sources
 
 if(WIN32)
   list(APPEND heap-sources
-    $<${is-arm64}:v8/src/heap/base/asm/arm64/push_registers_masm.S>
-    $<${is-ia32}:v8/src/heap/base/asm/ia32/push_registers_masm.S>
-    $<${is-x64}:v8/src/heap/base/asm/x64/push_registers_masm.S>
+    $<${is-arm64}:v8/src/heap/base/asm/arm64/push_registers_masm.asm>
+    $<${is-ia32}:v8/src/heap/base/asm/ia32/push_registers_masm.asm>
+    $<${is-x64}:v8/src/heap/base/asm/x64/push_registers_masm.asm>
   )
 else()
   list(APPEND heap-sources
@@ -296,7 +296,6 @@ list(REMOVE_ITEM builtin-sources
 
 if (NOT WIN32)
   list(REMOVE_ITEM diagnostic-sources v8/src/diagnostics/unwinding-info-win64.cc)
-  list(REMOVE_ITEM diagnostic-sources v8/src/diagnostics/system-jit-win.cc)
   list(REMOVE_ITEM diagnostic-sources v8/src/diagnostics/etw-jit-win.cc)
 endif()
 
@@ -317,7 +316,6 @@ add_library(v8_base_without_compiler STATIC
   $<${is-posix}:v8/src/trap-handler/handler-inside-posix.cc>
   $<${is-posix}:v8/src/trap-handler/handler-outside-posix.cc>
   $<$<AND:${is-x64},${is-win}>:v8/src/diagnostics/unwinding-info-win64.cc>
-  $<$<AND:${is-x64},${is-win}>:v8/src/diagnostics/system-jit-win.cc>
   $<$<AND:${is-x64},${is-win}>:v8/src/trap-handler/handler-inside-win.cc>
   $<$<AND:${is-x64},${is-win}>:v8/src/trap-handler/handler-outside-win.cc>
   $<${is-x64}:v8/src/codegen/x64/assembler-x64.cc>
