@@ -402,7 +402,7 @@ path. Add it with -I<path> to the command line
 // always_inline is available in gcc 4.0 but not very reliable until 4.4.
 // Works around "sorry, unimplemented: inlining failed" build errors with
 // older compilers.
-# define V8_HAS_ATTRIBUTE_ALWAYS_INLINE 1
+# define V8_HAS_ATTRIBUTE_ALWAYS_INLINE 0
 # define V8_HAS_ATTRIBUTE_NOINLINE 1
 # define V8_HAS_ATTRIBUTE_UNUSED 1
 # define V8_HAS_ATTRIBUTE_VISIBILITY 1
