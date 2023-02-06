@@ -296,8 +296,8 @@ list(REMOVE_ITEM builtin-sources
 
 if (NOT WIN32)
   list(REMOVE_ITEM diagnostic-sources v8/src/diagnostics/unwinding-info-win64.cc)
-  list(REMOVE_ITEM diagnostic-sources v8/src/diagnostics/etw-jit-win.cc)
 endif()
+list(REMOVE_ITEM diagnostic-sources v8/src/diagnostics/etw-jit-win.cc)
 
 list(REMOVE_ITEM object-sources ${i18n-sources})
 list(REMOVE_ITEM regexp-sources v8/src/regexp/gen-regexp-special-case.cc)
