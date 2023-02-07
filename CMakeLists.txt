@@ -766,6 +766,7 @@ add_library(v8_libbase STATIC
   v8/src/base/platform/condition-variable.cc
   v8/src/base/platform/mutex.cc
   v8/src/base/platform/semaphore.cc
+  v8/src/base/platform/memory-protection-key.cc
   v8/src/base/platform/time.cc
   v8/src/base/region-allocator.cc
   v8/src/base/sys-info.cc
