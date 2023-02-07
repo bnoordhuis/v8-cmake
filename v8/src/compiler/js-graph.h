@@ -10,7 +10,6 @@
 #include "src/compiler/graph.h"
 #include "src/compiler/js-operator.h"
 #include "src/compiler/machine-graph.h"
-#include "src/compiler/node-properties.h"
 #include "src/execution/isolate.h"
 
 namespace v8 {
@@ -38,9 +37,9 @@ class V8_EXPORT_PRIVATE JSGraph : public MachineGraph {
   JSGraph& operator=(const JSGraph&) = delete;
 
   // CEntryStubs are cached depending on the result size and other flags.
-  Node* CEntryStubConstant(
-      int result_size, SaveFPRegsMode save_doubles = SaveFPRegsMode::kIgnore,
-      ArgvMode argv_mode = ArgvMode::kStack, bool builtin_exit_frame = false);
+  Node* CEntryStubConstant(int result_size,
+                           ArgvMode argv_mode = ArgvMode::kStack,
+                           bool builtin_exit_frame = false);
 
   // Used for padding frames. (alias: the hole)
   Node* PaddingConstant() { return TheHoleConstant(); }
@@ -108,12 +107,13 @@ class V8_EXPORT_PRIVATE JSGraph : public MachineGraph {
   V(MinusOneConstant)                             \
   V(NaNConstant)                                  \
   V(EmptyStateValues)                             \
-  V(SingleDeadTypedStateValues)
+  V(SingleDeadTypedStateValues)                   \
+  V(ExternalObjectMapConstant)
 
 // Cached global node accessor methods.
 #define DECLARE_GETTER(name) Node* name();
   CACHED_GLOBAL_LIST(DECLARE_GETTER)
-#undef DECLARE_FIELD
+#undef DECLARE_GETTER
 
  private:
   Isolate* isolate_;

@@ -57,8 +57,8 @@ class V8_EXPORT_PRIVATE RegExpMacroAssemblerX64
   // Checks whether the given offset from the current position is before
   // the end of the string.
   void CheckPosition(int cp_offset, Label* on_outside_input) override;
-  bool CheckSpecialCharacterClass(StandardCharacterSet type,
-                                  Label* on_no_match) override;
+  bool CheckSpecialClassRanges(StandardCharacterSet type,
+                               Label* on_no_match) override;
   void Fail() override;
   Handle<HeapObject> GetCode(Handle<String> source) override;
   void GoTo(Label* label) override;
@@ -189,11 +189,16 @@ class V8_EXPORT_PRIVATE RegExpMacroAssemblerX64
   // name to the register.
   static constexpr Register backtrack_stackpointer() { return rcx; }
 
-  // The registers containing a self pointer to this code's Code object.
+  // The registers containing a self pointer to this code's InstructionStream
+  // object.
   static constexpr Register code_object_pointer() { return r8; }
 
   // Byte size of chars in the string to match (decided by the Mode argument)
   inline int char_size() { return static_cast<int>(mode_); }
+
+  // Equivalent to an unconditional branch to the label, unless the label
+  // is nullptr, in which case it is a Backtrack.
+  void BranchOrBacktrack(Label* to);
 
   // Equivalent to a conditional branch to the label, unless the label
   // is nullptr, in which case it is a conditional Backtrack.
@@ -219,9 +224,9 @@ class V8_EXPORT_PRIVATE RegExpMacroAssemblerX64
   // by a word size and stores the value there.
   inline void Push(Immediate value);
 
-  // Pushes the Code object relative offset of a label on the backtrack stack
-  // (i.e., a backtrack target). Decrements the stack pointer (rcx)
-  // by a word size and stores the value there.
+  // Pushes the InstructionStream object relative offset of a label on the
+  // backtrack stack (i.e., a backtrack target). Decrements the stack pointer
+  // (rcx) by a word size and stores the value there.
   inline void Push(Label* label);
 
   // Pops a value from the backtrack stack. Reads the word at the stack pointer

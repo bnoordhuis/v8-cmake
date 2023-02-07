@@ -7,7 +7,6 @@
 
 #include "src/snapshot/deserializer.h"
 #include "src/snapshot/snapshot-data.h"
-#include "src/snapshot/snapshot.h"
 
 namespace v8 {
 namespace internal {
@@ -23,6 +22,8 @@ class ReadOnlyDeserializer final : public Deserializer<Isolate> {
 
   // Deserialize the snapshot into an empty heap.
   void DeserializeIntoIsolate();
+
+  void RehashReadOnly();
 };
 
 }  // namespace internal

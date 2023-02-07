@@ -21,7 +21,7 @@ namespace internal {
  *
  * This assembler uses the following register assignment convention
  * - s0 : Unused.
- * - s1 : Pointer to current Code object including heap object tag.
+ * - s1 : Pointer to current InstructionStream object including heap object tag.
  * - s2 : Current position in input, as negative offset from end of string.
  *        Please notice that this is the byte offset, not the character offset!
  * - s5 : Currently loaded character. Must be loaded using
@@ -545,7 +545,7 @@ void RegExpMacroAssemblerMIPS::CheckBitInTable(
   BranchOrBacktrack(on_bit_set, ne, a0, Operand(zero_reg));
 }
 
-bool RegExpMacroAssemblerMIPS::CheckSpecialCharacterClass(
+bool RegExpMacroAssemblerMIPS::CheckSpecialClassRanges(
     StandardCharacterSet type, Label* on_no_match) {
   // Range checks (c in min..max) are generally implemented by an unsigned
   // (c - min) <= (max - min) check.
@@ -725,21 +725,21 @@ Handle<HeapObject> RegExpMacroAssemblerMIPS::GetCode(Handle<String> source) {
     // from generated code.
     // TODO(plind): this 8 is the # of argument regs, should have definition.
     __ Daddu(frame_pointer(), sp, Operand(8 * kPointerSize));
-    STATIC_ASSERT(kSuccessfulCaptures == kInputString - kSystemPointerSize);
+    static_assert(kSuccessfulCaptures == kInputString - kSystemPointerSize);
     __ mov(a0, zero_reg);
     __ push(a0);  // Make room for success counter and initialize it to 0.
-    STATIC_ASSERT(kStringStartMinusOne ==
+    static_assert(kStringStartMinusOne ==
                   kSuccessfulCaptures - kSystemPointerSize);
     __ push(a0);  // Make room for "string start - 1" constant.
-    STATIC_ASSERT(kBacktrackCount == kStringStartMinusOne - kSystemPointerSize);
+    static_assert(kBacktrackCount == kStringStartMinusOne - kSystemPointerSize);
     __ push(a0);  // The backtrack counter
-    STATIC_ASSERT(kRegExpStackBasePointer ==
+    static_assert(kRegExpStackBasePointer ==
                   kBacktrackCount - kSystemPointerSize);
     __ push(a0);  // The regexp stack base ptr.
 
     // Initialize backtrack stack pointer. It must not be clobbered from here
     // on. Note the backtrack_stackpointer is callee-saved.
-    STATIC_ASSERT(backtrack_stackpointer() == s7);
+    static_assert(backtrack_stackpointer() == s7);
     LoadRegExpStackPointerFromMemory(backtrack_stackpointer());
 
     // Store the regexp base pointer - we'll later restore it / write it to
@@ -1006,7 +1006,7 @@ Handle<HeapObject> RegExpMacroAssemblerMIPS::GetCode(Handle<String> source) {
 
   CodeDesc code_desc;
   masm_->GetCode(isolate(), &code_desc);
-  Handle<Code> code =
+  Handle<InstructionStream> code =
       Factory::CodeBuilder(isolate(), code_desc, CodeKind::REGEXP)
           .set_self_reference(masm_->CodeObject())
           .Build();
@@ -1069,13 +1069,14 @@ void RegExpMacroAssemblerMIPS::PopRegister(int register_index) {
 void RegExpMacroAssemblerMIPS::PushBacktrack(Label* label) {
   if (label->is_bound()) {
     int target = label->pos();
-    __ li(a0, Operand(target + Code::kHeaderSize - kHeapObjectTag));
+    __ li(a0,
+          Operand(target + InstructionStream::kHeaderSize - kHeapObjectTag));
   } else {
     Assembler::BlockTrampolinePoolScope block_trampoline_pool(masm_.get());
     Label after_constant;
     __ Branch(&after_constant);
     int offset = masm_->pc_offset();
-    int cp_offset = offset + Code::kHeaderSize - kHeapObjectTag;
+    int cp_offset = offset + InstructionStream::kHeaderSize - kHeapObjectTag;
     __ emit(0);
     masm_->label_at_put(label, offset);
     __ bind(&after_constant);
@@ -1191,7 +1192,7 @@ void RegExpMacroAssemblerMIPS::CallCheckStackGuardState(Register scratch) {
   __ Sd(scratch, MemOperand(sp));
 
   __ mov(a2, frame_pointer());
-  // Code of self.
+  // InstructionStream of self.
   __ li(a1, Operand(masm_->CodeObject()), CONSTANT_SIZE);
 
   // We need to make room for the return address on the stack.
@@ -1253,7 +1254,7 @@ static T* frame_entry_address(Address re_frame, int frame_offset) {
 int64_t RegExpMacroAssemblerMIPS::CheckStackGuardState(Address* return_address,
                                                        Address raw_code,
                                                        Address re_frame) {
-  Code re_code = Code::cast(Object(raw_code));
+  InstructionStream re_code = InstructionStream::cast(Object(raw_code));
   return NativeRegExpMacroAssembler::CheckStackGuardState(
       frame_entry<Isolate*>(re_frame, kIsolate),
       static_cast<int>(frame_entry<int64_t>(re_frame, kStartIndex)),

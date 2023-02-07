@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the Chromium source repository LICENSE file.
 
@@ -66,6 +66,10 @@ TEST(ZlibTest, InflateCover) {
   // TODO(cavalcantii): enable this last test.
   // cover_trees();
   cover_fast();
+}
+
+TEST(ZlibTest, InflateCVE) {
+  cover_CVE_2022_37434();
 }
 
 TEST(ZlibTest, DeflateStored) {

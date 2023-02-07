@@ -9,7 +9,7 @@
 #include "src/codegen/code-factory.h"
 #include "src/codegen/interface-descriptors-inl.h"
 #include "src/compiler/access-builder.h"
-#include "src/compiler/allocation-builder.h"
+#include "src/compiler/common-operator.h"
 #include "src/compiler/compilation-dependencies.h"
 #include "src/compiler/graph-assembler.h"
 #include "src/compiler/js-graph.h"
@@ -58,12 +58,38 @@ class JSBinopReduction final {
       case CompareOperationHint::kString:
       case CompareOperationHint::kSymbol:
       case CompareOperationHint::kBigInt:
+      case CompareOperationHint::kBigInt64:
       case CompareOperationHint::kReceiver:
       case CompareOperationHint::kReceiverOrNullOrUndefined:
       case CompareOperationHint::kInternalizedString:
         break;
     }
     return false;
+  }
+
+  bool GetCompareBigIntOperationHint(BigIntOperationHint* hint) {
+    DCHECK_EQ(1, node_->op()->EffectOutputCount());
+    switch (GetCompareOperationHint(node_)) {
+      case CompareOperationHint::kSignedSmall:
+      case CompareOperationHint::kNumber:
+      case CompareOperationHint::kNumberOrBoolean:
+      case CompareOperationHint::kNumberOrOddball:
+      case CompareOperationHint::kAny:
+      case CompareOperationHint::kNone:
+      case CompareOperationHint::kString:
+      case CompareOperationHint::kSymbol:
+      case CompareOperationHint::kReceiver:
+      case CompareOperationHint::kReceiverOrNullOrUndefined:
+      case CompareOperationHint::kInternalizedString:
+        return false;
+      case CompareOperationHint::kBigInt:
+        *hint = BigIntOperationHint::kBigInt;
+        return true;
+      case CompareOperationHint::kBigInt64:
+        *hint = BigIntOperationHint::kBigInt64;
+        return true;
+    }
+    UNREACHABLE();
   }
 
   bool IsInternalizedStringCompareOperation() {
@@ -111,14 +137,11 @@ class JSBinopReduction final {
       JSHeapBroker* broker = lowering_->broker();
       if (m.right().HasResolvedValue() && m.right().Ref(broker).IsString()) {
         StringRef right_string = m.right().Ref(broker).AsString();
-        if (right_string.length().has_value() &&
-            right_string.length().value() >= ConsString::kMinLength)
-          return true;
+        if (right_string.length() >= ConsString::kMinLength) return true;
       }
       if (m.left().HasResolvedValue() && m.left().Ref(broker).IsString()) {
         StringRef left_string = m.left().Ref(broker).AsString();
-        if (left_string.length().has_value() &&
-            left_string.length().value() >= ConsString::kMinLength) {
+        if (left_string.length() >= ConsString::kMinLength) {
           // The invariant for ConsString requires the left hand side to be
           // a sequential or external string if the right hand side is the
           // empty string. Since we don't know anything about the right hand
@@ -845,7 +868,7 @@ Reduction JSTypedLowering::ReduceJSEqual(Node* node) {
     //    then ObjectIsUndetectable(left)
     // else ReferenceEqual(left, right)
 #define __ gasm.
-    JSGraphAssembler gasm(jsgraph(), jsgraph()->zone());
+    JSGraphAssembler gasm(jsgraph(), jsgraph()->zone(), BranchSemantics::kJS);
     gasm.InitializeEffectControl(r.effect(), r.control());
 
     auto lhs = TNode<Object>::UncheckedCast(r.left());
@@ -914,6 +937,7 @@ Reduction JSTypedLowering::ReduceJSStrictEqual(Node* node) {
   }
 
   NumberOperationHint hint;
+  BigIntOperationHint hint_bigint;
   if (r.BothInputsAre(Type::Signed32()) ||
       r.BothInputsAre(Type::Unsigned32())) {
     return r.ChangeToPureOperator(simplified()->NumberEqual());
@@ -929,6 +953,11 @@ Reduction JSTypedLowering::ReduceJSStrictEqual(Node* node) {
         simplified()->SpeculativeNumberEqual(hint), Type::Boolean());
   } else if (r.BothInputsAre(Type::Number())) {
     return r.ChangeToPureOperator(simplified()->NumberEqual());
+  } else if (r.GetCompareBigIntOperationHint(&hint_bigint)) {
+    DCHECK(hint_bigint == BigIntOperationHint::kBigInt ||
+           hint_bigint == BigIntOperationHint::kBigInt64);
+    return r.ChangeToSpeculativeOperator(
+        simplified()->SpeculativeBigIntEqual(hint_bigint), Type::Boolean());
   } else if (r.IsReceiverCompareOperation()) {
     // For strict equality, it's enough to know that one input is a Receiver,
     // as a strict equality comparison with a Receiver can only yield true if
@@ -1042,6 +1071,38 @@ Reduction JSTypedLowering::ReduceJSToNumber(Node* node) {
     NodeProperties::SetType(
         node, Type::Intersect(node_type, Type::Number(), graph()->zone()));
     NodeProperties::ChangeOp(node, simplified()->PlainPrimitiveToNumber());
+    return Changed(node);
+  }
+  return NoChange();
+}
+
+Reduction JSTypedLowering::ReduceJSToBigInt(Node* node) {
+  // TODO(panq): Reduce constant inputs.
+  Node* const input = node->InputAt(0);
+  Type const input_type = NodeProperties::GetType(input);
+  if (input_type.Is(Type::BigInt())) {
+    ReplaceWithValue(node, input);
+    return Changed(input);
+  }
+  return NoChange();
+}
+
+Reduction JSTypedLowering::ReduceJSToBigIntConvertNumber(Node* node) {
+  // TODO(panq): Reduce constant inputs.
+  Node* const input = node->InputAt(0);
+  Type const input_type = NodeProperties::GetType(input);
+  if (input_type.Is(Type::BigInt())) {
+    ReplaceWithValue(node, input);
+    return Changed(input);
+  } else if (input_type.Is(Type::Signed32OrMinusZero()) ||
+             input_type.Is(Type::Unsigned32OrMinusZero())) {
+    RelaxEffectsAndControls(node);
+    node->TrimInputCount(1);
+    Type node_type = NodeProperties::GetType(node);
+    NodeProperties::SetType(
+        node, Type::Intersect(node_type, Type::BigInt(), graph()->zone()));
+    NodeProperties::ChangeOp(node,
+                             simplified()->Integral32OrMinusZeroToBigInt());
     return Changed(node);
   }
   return NoChange();
@@ -1527,7 +1588,7 @@ void ReduceBuiltin(JSGraph* jsgraph, Node* node, Builtin builtin, int arity,
   Node* new_target;
   Zone* zone = jsgraph->zone();
   if (node->opcode() == IrOpcode::kJSConstruct) {
-    STATIC_ASSERT(JSCallNode::ReceiverIndex() ==
+    static_assert(JSCallNode::ReceiverIndex() ==
                   JSConstructNode::NewTargetIndex());
     new_target = JSConstructNode{node}.new_target();
     node->ReplaceInput(JSConstructNode::NewTargetIndex(),
@@ -1543,8 +1604,8 @@ void ReduceBuiltin(JSGraph* jsgraph, Node* node, Builtin builtin, int arity,
   DCHECK(Builtins::IsCpp(builtin));
   const bool has_builtin_exit_frame = true;
 
-  Node* stub = jsgraph->CEntryStubConstant(
-      1, SaveFPRegsMode::kIgnore, ArgvMode::kStack, has_builtin_exit_frame);
+  Node* stub =
+      jsgraph->CEntryStubConstant(1, ArgvMode::kStack, has_builtin_exit_frame);
   node->ReplaceInput(0, stub);
 
   const int argc = arity + BuiltinArguments::kNumExtraArgsWithReceiver;
@@ -1625,22 +1686,21 @@ Reduction JSTypedLowering::ReduceJSConstruct(Node* node) {
     if (!function.map().is_constructor()) return NoChange();
 
     // Patch {node} to an indirect call via the {function}s construct stub.
-    bool use_builtin_construct_stub = function.shared().construct_as_builtin();
-    CodeTRef code = MakeRef(
-        broker(), use_builtin_construct_stub
-                      ? BUILTIN_CODE(isolate(), JSBuiltinsConstructStub)
-                      : BUILTIN_CODE(isolate(), JSConstructStubGeneric));
-    STATIC_ASSERT(JSConstructNode::TargetIndex() == 0);
-    STATIC_ASSERT(JSConstructNode::NewTargetIndex() == 1);
+    Callable callable = Builtins::CallableFor(
+        isolate(), function.shared().construct_as_builtin()
+                       ? Builtin::kJSBuiltinsConstructStub
+                       : Builtin::kJSConstructStubGeneric);
+    static_assert(JSConstructNode::TargetIndex() == 0);
+    static_assert(JSConstructNode::NewTargetIndex() == 1);
     node->RemoveInput(n.FeedbackVectorIndex());
-    node->InsertInput(graph()->zone(), 0, jsgraph()->Constant(code));
+    node->InsertInput(graph()->zone(), 0,
+                      jsgraph()->HeapConstant(callable.code()));
     node->InsertInput(graph()->zone(), 3,
                       jsgraph()->Constant(JSParameterCount(arity)));
     node->InsertInput(graph()->zone(), 4, jsgraph()->UndefinedConstant());
-    node->InsertInput(graph()->zone(), 5, jsgraph()->UndefinedConstant());
     NodeProperties::ChangeOp(
         node, common()->Call(Linkage::GetStubCallDescriptor(
-                  graph()->zone(), ConstructStubDescriptor{}, 1 + arity,
+                  graph()->zone(), callable.descriptor(), 1 + arity,
                   CallDescriptor::kNeedsFrameState)));
     return Changed(node);
   }
@@ -1874,16 +1934,17 @@ Reduction JSTypedLowering::ReduceJSForInNext(Node* node) {
       node->ReplaceInput(2, effect);
       node->ReplaceInput(3, control);
       node->TrimInputCount(4);
-      NodeProperties::ChangeOp(
-          node,
-          simplified()->LoadElement(AccessBuilder::ForFixedArrayElement()));
-      NodeProperties::SetType(node, Type::InternalizedString());
+      ElementAccess access =
+          AccessBuilder::ForJSForInCacheArrayElement(n.Parameters().mode());
+      NodeProperties::ChangeOp(node, simplified()->LoadElement(access));
+      NodeProperties::SetType(node, access.type);
       break;
     }
     case ForInMode::kGeneric: {
       // Load the next {key} from the {cache_array}.
       Node* key = effect = graph()->NewNode(
-          simplified()->LoadElement(AccessBuilder::ForFixedArrayElement()),
+          simplified()->LoadElement(AccessBuilder::ForJSForInCacheArrayElement(
+              n.Parameters().mode())),
           cache_array, index, effect, control);
 
       // Check if the expected map still matches that of the {receiver}.
@@ -1983,7 +2044,7 @@ Reduction JSTypedLowering::ReduceJSForInPrepare(Node* node) {
       Node* bit_field3 = effect = graph()->NewNode(
           simplified()->LoadField(AccessBuilder::ForMapBitField3()), enumerator,
           effect, control);
-      STATIC_ASSERT(Map::Bits3::EnumLengthBits::kShift == 0);
+      static_assert(Map::Bits3::EnumLengthBits::kShift == 0);
       cache_length = graph()->NewNode(
           simplified()->NumberBitwiseAnd(), bit_field3,
           jsgraph()->Constant(Map::Bits3::EnumLengthBits::kMask));
@@ -2018,7 +2079,7 @@ Reduction JSTypedLowering::ReduceJSForInPrepare(Node* node) {
         Node* bit_field3 = etrue = graph()->NewNode(
             simplified()->LoadField(AccessBuilder::ForMapBitField3()),
             enumerator, etrue, if_true);
-        STATIC_ASSERT(Map::Bits3::EnumLengthBits::kShift == 0);
+        static_assert(Map::Bits3::EnumLengthBits::kShift == 0);
         cache_length_true = graph()->NewNode(
             simplified()->NumberBitwiseAnd(), bit_field3,
             jsgraph()->Constant(Map::Bits3::EnumLengthBits::kMask));
@@ -2398,6 +2459,10 @@ Reduction JSTypedLowering::Reduce(Node* node) {
     case IrOpcode::kJSToNumber:
     case IrOpcode::kJSToNumberConvertBigInt:
       return ReduceJSToNumber(node);
+    case IrOpcode::kJSToBigInt:
+      return ReduceJSToBigInt(node);
+    case IrOpcode::kJSToBigIntConvertNumber:
+      return ReduceJSToBigIntConvertNumber(node);
     case IrOpcode::kJSToNumeric:
       return ReduceJSToNumeric(node);
     case IrOpcode::kJSToString:

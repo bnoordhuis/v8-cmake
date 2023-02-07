@@ -40,17 +40,6 @@ TEST_F(MarkingWorklistTest, PushPopOnHold) {
   EXPECT_EQ(popped_object, pushed_object);
 }
 
-TEST_F(MarkingWorklistTest, PushPopEmbedder) {
-  MarkingWorklists holder;
-  MarkingWorklists::Local worklists(&holder);
-  HeapObject pushed_object =
-      ReadOnlyRoots(i_isolate()->heap()).undefined_value();
-  worklists.PushWrapper(pushed_object);
-  HeapObject popped_object;
-  EXPECT_TRUE(worklists.PopWrapper(&popped_object));
-  EXPECT_EQ(popped_object, pushed_object);
-}
-
 TEST_F(MarkingWorklistTest, MergeOnHold) {
   MarkingWorklists holder;
   MarkingWorklists::Local main_worklists(&holder);
@@ -87,7 +76,7 @@ TEST_F(MarkingWorklistTest, ContextWorklistsPushPop) {
       ReadOnlyRoots(i_isolate()->heap()).undefined_value();
   worklists.SwitchToContext(context);
   worklists.Push(pushed_object);
-  worklists.SwitchToShared();
+  worklists.SwitchToSharedForTesting();
   HeapObject popped_object;
   EXPECT_TRUE(worklists.Pop(&popped_object));
   EXPECT_EQ(popped_object, pushed_object);
@@ -104,7 +93,7 @@ TEST_F(MarkingWorklistTest, ContextWorklistsEmpty) {
   worklists.SwitchToContext(context);
   worklists.Push(pushed_object);
   EXPECT_FALSE(worklists.IsEmpty());
-  worklists.SwitchToShared();
+  worklists.SwitchToSharedForTesting();
   EXPECT_FALSE(worklists.IsEmpty());
   HeapObject popped_object;
   EXPECT_TRUE(worklists.Pop(&popped_object));

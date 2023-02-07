@@ -2,9 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "src/builtins/builtins-object-gen.h"
+
 #include "src/builtins/builtins-utils-gen.h"
 #include "src/builtins/builtins.h"
-#include "src/codegen/code-stub-assembler.h"
 #include "src/common/globals.h"
 #include "src/heap/factory-inl.h"
 #include "src/ic/accessor-assembler.h"
@@ -17,43 +18,6 @@
 
 namespace v8 {
 namespace internal {
-
-// -----------------------------------------------------------------------------
-// ES6 section 19.1 Object Objects
-
-class ObjectBuiltinsAssembler : public CodeStubAssembler {
- public:
-  explicit ObjectBuiltinsAssembler(compiler::CodeAssemblerState* state)
-      : CodeStubAssembler(state) {}
-
- protected:
-  void ReturnToStringFormat(TNode<Context> context, TNode<String> string);
-
-  // TODO(v8:11167) remove |context| and |object| once OrderedNameDictionary
-  // supported.
-  void AddToDictionaryIf(TNode<BoolT> condition, TNode<Context> context,
-                         TNode<Object> object,
-                         TNode<HeapObject> name_dictionary, Handle<Name> name,
-                         TNode<Object> value, Label* bailout);
-  TNode<JSObject> FromPropertyDescriptor(TNode<Context> context,
-                                         TNode<PropertyDescriptorObject> desc);
-  TNode<JSObject> FromPropertyDetails(TNode<Context> context,
-                                      TNode<Object> raw_value,
-                                      TNode<Word32T> details,
-                                      Label* if_bailout);
-  TNode<JSObject> ConstructAccessorDescriptor(TNode<Context> context,
-                                              TNode<Object> getter,
-                                              TNode<Object> setter,
-                                              TNode<BoolT> enumerable,
-                                              TNode<BoolT> configurable);
-  TNode<JSObject> ConstructDataDescriptor(TNode<Context> context,
-                                          TNode<Object> value,
-                                          TNode<BoolT> writable,
-                                          TNode<BoolT> enumerable,
-                                          TNode<BoolT> configurable);
-  TNode<HeapObject> GetAccessorOrUndefined(TNode<HeapObject> accessor,
-                                           Label* if_bailout);
-};
 
 class ObjectEntriesValuesBuiltinsAssembler : public ObjectBuiltinsAssembler {
  public:
@@ -756,7 +720,7 @@ TF_BUILTIN(ObjectToString, ObjectBuiltinsAssembler) {
       if_number(this, Label::kDeferred), if_object(this), if_primitive(this),
       if_proxy(this, Label::kDeferred), if_regexp(this), if_string(this),
       if_symbol(this, Label::kDeferred), if_value(this),
-      if_bigint(this, Label::kDeferred);
+      if_bigint(this, Label::kDeferred), if_wasm(this);
 
   auto receiver = Parameter<Object>(Descriptor::kReceiver);
   auto context = Parameter<Context>(Descriptor::kContext);
@@ -776,16 +740,22 @@ TF_BUILTIN(ObjectToString, ObjectBuiltinsAssembler) {
   const struct {
     InstanceType value;
     Label* label;
-  } kJumpTable[] = {{JS_OBJECT_TYPE, &if_object},
-                    {JS_ARRAY_TYPE, &if_array},
-                    {JS_REG_EXP_TYPE, &if_regexp},
-                    {JS_ARGUMENTS_OBJECT_TYPE, &if_arguments},
-                    {JS_DATE_TYPE, &if_date},
-                    {JS_API_OBJECT_TYPE, &if_object},
-                    {JS_SPECIAL_API_OBJECT_TYPE, &if_object},
-                    {JS_PROXY_TYPE, &if_proxy},
-                    {JS_ERROR_TYPE, &if_error},
-                    {JS_PRIMITIVE_WRAPPER_TYPE, &if_value}};
+  } kJumpTable[] = {
+    {JS_OBJECT_TYPE, &if_object},
+    {JS_ARRAY_TYPE, &if_array},
+    {JS_REG_EXP_TYPE, &if_regexp},
+    {JS_ARGUMENTS_OBJECT_TYPE, &if_arguments},
+    {JS_DATE_TYPE, &if_date},
+    {JS_API_OBJECT_TYPE, &if_object},
+    {JS_SPECIAL_API_OBJECT_TYPE, &if_object},
+    {JS_PROXY_TYPE, &if_proxy},
+    {JS_ERROR_TYPE, &if_error},
+    {JS_PRIMITIVE_WRAPPER_TYPE, &if_value},
+#if V8_ENABLE_WEBASSEMBLY
+    {WASM_STRUCT_TYPE, &if_wasm},
+    {WASM_ARRAY_TYPE, &if_wasm},
+#endif
+  };
   size_t const kNumCases = arraysize(kJumpTable);
   Label* case_labels[kNumCases];
   int32_t case_values[kNumCases];
@@ -880,6 +850,13 @@ TF_BUILTIN(ObjectToString, ObjectBuiltinsAssembler) {
 
   BIND(&if_proxy);
   {
+    // Check if the proxy has been revoked.
+    Label throw_proxy_handler_revoked(this, Label::kDeferred);
+    TNode<HeapObject> handler = CAST(LoadObjectField(
+        TNode<JSProxy>::UncheckedCast(receiver), JSProxy::kHandlerOffset));
+    CSA_DCHECK(this, IsNullOrJSReceiver(handler));
+    GotoIfNot(IsJSReceiver(handler), &throw_proxy_handler_revoked);
+
     // If {receiver} is a proxy for a JSArray, we default to "[object Array]",
     // otherwise we default to "[object Object]" or "[object Function]" here,
     // depending on whether the {receiver} is callable. The order matters here,
@@ -911,6 +888,12 @@ TF_BUILTIN(ObjectToString, ObjectBuiltinsAssembler) {
     }
     BIND(&if_tagisstring);
     ReturnToStringFormat(context, CAST(var_tag.value()));
+
+    BIND(&throw_proxy_handler_revoked);
+    {
+      ThrowTypeError(context, MessageTemplate::kProxyRevoked,
+                     "Object.prototype.toString");
+    }
   }
 
   BIND(&if_regexp);
@@ -1037,6 +1020,11 @@ TF_BUILTIN(ObjectToString, ObjectBuiltinsAssembler) {
       var_holder = LoadMapPrototype(holder_map);
       Goto(&loop);
     }
+
+#if V8_ENABLE_WEBASSEMBLY
+    BIND(&if_wasm);
+    ThrowTypeError(context, MessageTemplate::kWasmObjectsAreOpaque);
+#endif
 
     BIND(&return_generic);
     {
@@ -1295,6 +1283,67 @@ TF_BUILTIN(CreateGeneratorObject, ObjectBuiltinsAssembler) {
   }
 }
 
+TF_BUILTIN(OrdinaryGetOwnPropertyDescriptor, ObjectBuiltinsAssembler) {
+  auto context = Parameter<Context>(Descriptor::kContext);
+  auto object = Parameter<JSReceiver>(Descriptor::kReceiver);
+  auto name = Parameter<Name>(Descriptor::kKey);
+  CSA_DCHECK(this, Word32BinaryNot(IsSpecialReceiverInstanceType(
+                       LoadMapInstanceType(LoadMap(object)))));
+
+  Label if_notunique_name(this), if_iskeyunique(this), done(this),
+      if_keyisindex(this), call_runtime(this);
+
+  TVARIABLE(IntPtrT, var_index, IntPtrConstant(0));
+  TVARIABLE(Name, var_name, name);
+  TVARIABLE(HeapObject, result, UndefinedConstant());
+
+  TryToName(name, &if_keyisindex, &var_index, &if_iskeyunique, &var_name,
+            &call_runtime, &if_notunique_name);
+
+  BIND(&if_notunique_name);
+  {
+    Label not_in_string_table(this);
+    // If the string was not found in the string table, then no regular
+    // object can have a property with that name, so return |undefined|.
+    TryInternalizeString(CAST(name), &if_keyisindex, &var_index,
+                         &if_iskeyunique, &var_name, &done, &call_runtime);
+  }
+
+  BIND(&if_iskeyunique);
+  {
+    Label if_found_value(this), if_not_found(this);
+
+    TVARIABLE(Object, var_value);
+    TVARIABLE(Uint32T, var_details);
+    TVARIABLE(Object, var_raw_value);
+    TNode<Map> map = LoadMap(object);
+    TNode<Int32T> instance_type = LoadMapInstanceType(map);
+
+    TryGetOwnProperty(context, object, object, map, instance_type,
+                      var_name.value(), &if_found_value, &var_value,
+                      &var_details, &var_raw_value, &done, &call_runtime,
+                      kReturnAccessorPair);
+
+    BIND(&if_found_value);
+
+    // 4. Return FromPropertyDetails(desc).
+    result = AllocatePropertyDescriptorObject(context);
+    InitializePropertyDescriptorObject(CAST(result.value()), var_value.value(),
+                                       var_details.value(), &call_runtime);
+    Goto(&done);
+  }
+
+  BIND(&done);
+  Return(result.value());
+
+  BIND(&if_keyisindex);
+  Goto(&call_runtime);
+
+  BIND(&call_runtime);
+  TailCallRuntime(Runtime::kGetOwnPropertyDescriptorObject, context, object,
+                  var_name.value());
+}
+
 // ES6 section 19.1.2.7 Object.getOwnPropertyDescriptor ( O, P )
 TF_BUILTIN(ObjectGetOwnPropertyDescriptor, ObjectBuiltinsAssembler) {
   auto argc = UncheckedParameter<Int32T>(Descriptor::kJSActualArgumentsCount);
@@ -1312,81 +1361,13 @@ TF_BUILTIN(ObjectGetOwnPropertyDescriptor, ObjectBuiltinsAssembler) {
   key = CallBuiltin(Builtin::kToName, context, key);
 
   // 3. Let desc be ? obj.[[GetOwnProperty]](key).
-  Label if_keyisindex(this), if_iskeyunique(this),
-      call_runtime(this, Label::kDeferred),
-      return_undefined(this, Label::kDeferred), if_notunique_name(this);
+  TNode<Object> desc =
+      CallBuiltin(Builtin::kGetOwnPropertyDescriptor, context, object, key);
 
-  TNode<Map> map = LoadMap(object);
-  TNode<Uint16T> instance_type = LoadMapInstanceType(map);
-  GotoIf(IsSpecialReceiverInstanceType(instance_type), &call_runtime);
-  {
-    TVARIABLE(IntPtrT, var_index, IntPtrConstant(0));
-    TVARIABLE(Name, var_name);
+  // 4. Return FromPropertyDescriptor(desc).
+  TNode<HeapObject> result = FromPropertyDescriptor(context, desc);
 
-    TryToName(key, &if_keyisindex, &var_index, &if_iskeyunique, &var_name,
-              &call_runtime, &if_notunique_name);
-
-    BIND(&if_notunique_name);
-    {
-      Label not_in_string_table(this);
-      TryInternalizeString(CAST(key), &if_keyisindex, &var_index,
-                           &if_iskeyunique, &var_name, &not_in_string_table,
-                           &call_runtime);
-
-      BIND(&not_in_string_table);
-      {
-        // If the string was not found in the string table, then no regular
-        // object can have a property with that name, so return |undefined|.
-        Goto(&return_undefined);
-      }
-    }
-
-    BIND(&if_iskeyunique);
-    {
-      Label if_found_value(this), return_empty(this), if_not_found(this);
-
-      TVARIABLE(Object, var_value);
-      TVARIABLE(Uint32T, var_details);
-      TVARIABLE(Object, var_raw_value);
-
-      TryGetOwnProperty(context, object, object, map, instance_type,
-                        var_name.value(), &if_found_value, &var_value,
-                        &var_details, &var_raw_value, &return_empty,
-                        &if_not_found, kReturnAccessorPair);
-
-      BIND(&if_found_value);
-      // 4. Return FromPropertyDetails(desc).
-      TNode<JSObject> js_desc = FromPropertyDetails(
-          context, var_value.value(), var_details.value(), &call_runtime);
-      args.PopAndReturn(js_desc);
-
-      BIND(&return_empty);
-      var_value = UndefinedConstant();
-      args.PopAndReturn(UndefinedConstant());
-
-      BIND(&if_not_found);
-      Goto(&call_runtime);
-    }
-  }
-
-  BIND(&if_keyisindex);
-  Goto(&call_runtime);
-
-  BIND(&call_runtime);
-  {
-    TNode<Object> desc =
-        CallRuntime(Runtime::kGetOwnPropertyDescriptor, context, object, key);
-
-    GotoIf(IsUndefined(desc), &return_undefined);
-
-    TNode<PropertyDescriptorObject> desc_object = CAST(desc);
-
-    // 4. Return FromPropertyDescriptor(desc).
-    TNode<JSObject> js_desc = FromPropertyDescriptor(context, desc_object);
-    args.PopAndReturn(js_desc);
-  }
-  BIND(&return_undefined);
-  args.PopAndReturn(UndefinedConstant());
+  args.PopAndReturn(result);
 }
 
 // TODO(v8:11167) remove remove |context| and |object| parameters once
@@ -1507,6 +1488,24 @@ TNode<JSObject> ObjectBuiltinsAssembler::FromPropertyDescriptor(
 
   BIND(&return_desc);
   return js_descriptor.value();
+}
+
+TNode<HeapObject> ObjectBuiltinsAssembler::FromPropertyDescriptor(
+    TNode<Context> context, TNode<Object> desc) {
+  CSA_DCHECK(this, TaggedIsNotSmi(desc));
+
+  if (IsUndefinedConstant(desc)) return UndefinedConstant();
+
+  Label done(this);
+  TVARIABLE(HeapObject, result, UndefinedConstant());
+  GotoIf(IsUndefined(desc), &done);
+
+  TNode<PropertyDescriptorObject> property_descriptor = CAST(desc);
+  result = FromPropertyDescriptor(context, property_descriptor);
+  Goto(&done);
+
+  BIND(&done);
+  return result.value();
 }
 
 TNode<JSObject> ObjectBuiltinsAssembler::FromPropertyDetails(

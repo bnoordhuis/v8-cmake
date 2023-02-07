@@ -13,8 +13,8 @@
 #include "src/compiler/node-properties.h"
 #include "src/compiler/node.h"
 #include "src/compiler/opcodes.h"
-#include "src/handles/maybe-handles.h"
-#include "src/objects/type-hints.h"
+#include "src/compiler/operator-properties.h"
+#include "src/objects/feedback-cell.h"
 #include "src/runtime/runtime.h"
 
 namespace v8 {
@@ -61,7 +61,6 @@ class JSOperator final : public AllStatic {
         return false;
     }
 #undef CASE
-    return false;
   }
 
   static constexpr bool IsBinaryWithFeedback(Operator::Opcode opcode) {
@@ -74,7 +73,6 @@ class JSOperator final : public AllStatic {
         return false;
     }
 #undef CASE
-    return false;
   }
 };
 
@@ -95,12 +93,13 @@ class CallFrequency final {
   }
 
   bool operator==(CallFrequency const& that) const {
-    return bit_cast<uint32_t>(this->value_) == bit_cast<uint32_t>(that.value_);
+    return base::bit_cast<uint32_t>(this->value_) ==
+           base::bit_cast<uint32_t>(that.value_);
   }
   bool operator!=(CallFrequency const& that) const { return !(*this == that); }
 
   friend size_t hash_value(CallFrequency const& f) {
-    return bit_cast<uint32_t>(f.value_);
+    return base::bit_cast<uint32_t>(f.value_);
   }
 
   static constexpr float kNoFeedbackCallFrequency = -1;
@@ -677,18 +676,18 @@ const CreateBoundFunctionParameters& CreateBoundFunctionParametersOf(
 class CreateClosureParameters final {
  public:
   CreateClosureParameters(const SharedFunctionInfoRef& shared_info,
-                          const CodeTRef& code, AllocationType allocation)
+                          const CodeRef& code, AllocationType allocation)
       : shared_info_(shared_info), code_(code), allocation_(allocation) {}
 
   SharedFunctionInfoRef shared_info(JSHeapBroker* broker) const {
     return shared_info_.AsRef(broker);
   }
-  CodeTRef code(JSHeapBroker* broker) const { return code_.AsRef(broker); }
+  CodeRef code(JSHeapBroker* broker) const { return code_.AsRef(broker); }
   AllocationType allocation() const { return allocation_; }
 
  private:
   const SharedFunctionInfoTinyRef shared_info_;
-  const CodeTTinyRef code_;
+  const CodeTinyRef code_;
   AllocationType const allocation_;
 
   friend bool operator==(CreateClosureParameters const&,
@@ -936,6 +935,8 @@ class V8_EXPORT_PRIVATE JSOperatorBuilder final
   const Operator* ToName();
   const Operator* ToNumber();
   const Operator* ToNumberConvertBigInt();
+  const Operator* ToBigInt();
+  const Operator* ToBigIntConvertNumber();
   const Operator* ToNumeric();
   const Operator* ToObject();
   const Operator* ToString();
@@ -949,7 +950,7 @@ class V8_EXPORT_PRIVATE JSOperatorBuilder final
   const Operator* CreateCollectionIterator(CollectionKind, IterationKind);
   const Operator* CreateBoundFunction(size_t arity, const MapRef& map);
   const Operator* CreateClosure(
-      const SharedFunctionInfoRef& shared_info, const CodeTRef& code,
+      const SharedFunctionInfoRef& shared_info, const CodeRef& code,
       AllocationType allocation = AllocationType::kYoung);
   const Operator* CreateIterResultObject();
   const Operator* CreateStringIterator();
@@ -997,8 +998,12 @@ class V8_EXPORT_PRIVATE JSOperatorBuilder final
       SpeculationMode speculation_mode = SpeculationMode::kDisallowSpeculation,
       CallFeedbackRelation feedback_relation = CallFeedbackRelation::kTarget);
   const Operator* CallRuntime(Runtime::FunctionId id);
-  const Operator* CallRuntime(Runtime::FunctionId id, size_t arity);
-  const Operator* CallRuntime(const Runtime::Function* function, size_t arity);
+  const Operator* CallRuntime(
+      Runtime::FunctionId id, size_t arity,
+      Operator::Properties properties = Operator::kNoProperties);
+  const Operator* CallRuntime(
+      const Runtime::Function* function, size_t arity,
+      Operator::Properties properties = Operator::kNoProperties);
 
 #if V8_ENABLE_WEBASSEMBLY
   const Operator* CallWasm(const wasm::WasmModule* wasm_module,
@@ -1041,6 +1046,8 @@ class V8_EXPORT_PRIVATE JSOperatorBuilder final
   const Operator* HasProperty(FeedbackSource const& feedback);
 
   const Operator* GetSuperConstructor();
+
+  const Operator* FindNonDefaultConstructorOrConstruct();
 
   const Operator* CreateGeneratorObject();
 
@@ -1334,7 +1341,8 @@ class JSDefineKeyedOwnPropertyNode final : public JSNodeWrapperBase {
   V(Object, object, 0, Object) \
   V(Key, key, 1, Object)       \
   V(Value, value, 2, Object)   \
-  V(FeedbackVector, feedback_vector, 3, HeapObject)
+  V(Flags, flags, 3, Object)   \
+  V(FeedbackVector, feedback_vector, 4, HeapObject)
   INPUTS(DEFINE_INPUT_ACCESSORS)
 #undef INPUTS
 };
@@ -1368,8 +1376,8 @@ class JSCallOrConstructNode : public JSNodeWrapperBase {
   static constexpr int kExtraInputCount = kTargetInputCount +
                                           kReceiverOrNewTargetInputCount +
                                           kFeedbackVectorInputCount;
-  STATIC_ASSERT(kExtraInputCount == CallParameters::kExtraCallInputCount);
-  STATIC_ASSERT(kExtraInputCount ==
+  static_assert(kExtraInputCount == CallParameters::kExtraCallInputCount);
+  static_assert(kExtraInputCount ==
                 ConstructParameters::kExtraConstructInputCount);
 
   // Just for static asserts for spots that rely on node layout.
@@ -1412,7 +1420,7 @@ class JSCallOrConstructNode : public JSNodeWrapperBase {
   virtual int ArgumentCount() const = 0;
 
   static constexpr int FeedbackVectorIndexForArgc(int argc) {
-    STATIC_ASSERT(kFeedbackVectorIsLastInput);
+    static_assert(kFeedbackVectorIsLastInput);
     return ArgumentIndex(argc - 1) + 1;
   }
   int FeedbackVectorIndex() const {
@@ -1466,7 +1474,7 @@ class JSCallNodeBase final : public JSCallOrConstructNode {
 #undef INPUTS
 
   static constexpr int kReceiverInputCount = 1;
-  STATIC_ASSERT(kReceiverInputCount ==
+  static_assert(kReceiverInputCount ==
                 JSCallOrConstructNode::kReceiverOrNewTargetInputCount);
 
   int ArgumentCount() const override {
@@ -1500,7 +1508,7 @@ class JSWasmCallNode final : public JSCallOrConstructNode {
 #undef INPUTS
 
   static constexpr int kReceiverInputCount = 1;
-  STATIC_ASSERT(kReceiverInputCount ==
+  static_assert(kReceiverInputCount ==
                 JSCallOrConstructNode::kReceiverOrNewTargetInputCount);
 
   int ArgumentCount() const override {
@@ -1532,7 +1540,7 @@ class JSConstructNodeBase final : public JSCallOrConstructNode {
 #undef INPUTS
 
   static constexpr int kNewTargetInputCount = 1;
-  STATIC_ASSERT(kNewTargetInputCount ==
+  static_assert(kNewTargetInputCount ==
                 JSCallOrConstructNode::kReceiverOrNewTargetInputCount);
 
   int ArgumentCount() const {
@@ -1755,6 +1763,22 @@ class JSForInNextNode final : public JSNodeWrapperBase {
   V(CacheType, cache_type, 2, Object)   \
   V(Index, index, 3, Smi)               \
   V(FeedbackVector, feedback_vector, 4, HeapObject)
+  INPUTS(DEFINE_INPUT_ACCESSORS)
+#undef INPUTS
+};
+
+class JSFindNonDefaultConstructorOrConstructNode final
+    : public JSNodeWrapperBase {
+ public:
+  explicit constexpr JSFindNonDefaultConstructorOrConstructNode(Node* node)
+      : JSNodeWrapperBase(node) {
+    DCHECK_EQ(IrOpcode::kJSFindNonDefaultConstructorOrConstruct,
+              node->opcode());
+  }
+
+#define INPUTS(V)                           \
+  V(ThisFunction, this_function, 0, Object) \
+  V(NewTarget, new_target, 1, Object)
   INPUTS(DEFINE_INPUT_ACCESSORS)
 #undef INPUTS
 };

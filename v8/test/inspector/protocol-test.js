@@ -36,7 +36,8 @@ InspectorTest.logMessage = function(originalMessage) {
   const nonStableFields = new Set([
     'objectId', 'scriptId', 'exceptionId', 'timestamp', 'executionContextId',
     'callFrameId', 'breakpointId', 'bindRemoteObjectFunctionId',
-    'formatterObjectId', 'debuggerId', 'bodyGetterId', 'uniqueId'
+    'formatterObjectId', 'debuggerId', 'bodyGetterId', 'uniqueId',
+    'executionContextUniqueId'
   ]);
   const message = JSON.parse(JSON.stringify(originalMessage, replacer.bind(null, Symbol(), nonStableFields)));
   if (message.id)
@@ -140,6 +141,12 @@ InspectorTest.trimErrorMessage = function(message) {
 InspectorTest.ContextGroup = class {
   constructor() {
     this.id = utils.createContextGroup();
+  }
+
+  waitForDebugger() {
+    return new Promise(resolve => {
+      utils.waitForDebugger(this.id, resolve);
+    });
   }
 
   createContext(name) {
@@ -258,6 +265,10 @@ InspectorTest.Session = class {
     utils.sendMessageToBackend(this.id, command);
   }
 
+  stop() {
+    utils.stop(this.id);
+  }
+
   setupScriptMap() {
     if (this._scriptMap)
       return;
@@ -267,6 +278,16 @@ InspectorTest.Session = class {
   getCallFrameUrl(frame) {
     const {scriptId} = frame.location ? frame.location : frame;
     return (this._scriptMap.get(scriptId) ?? frame).url;
+  }
+
+  getPausedUrl(msg) {
+    const reason = msg.params.reason;
+    if (reason === 'instrumentation') {
+      return msg.params.data.url;
+    } else {
+      const top_frame = msg.params.callFrames[0];
+      return this.getCallFrameUrl(top_frame);
+    }
   }
 
   logCallFrames(callFrames) {
@@ -479,7 +500,7 @@ InspectorTest.runAsyncTestSuite = async function(testSuite) {
     try {
       await test();
     } catch (e) {
-      utils.print(e.stack);
+      utils.print(e.stack || "Caught error without stack trace!");
     }
   }
   InspectorTest.completeTest();
@@ -495,3 +516,49 @@ InspectorTest.start = function(description) {
     utils.print(e.stack);
   }
 }
+
+/**
+ * Two helper functions for the tests in `debugger/restart-frame/*`.
+ */
+
+InspectorTest.evaluateAndWaitForPause = async (expression) => {
+  const pausedPromise = Protocol.Debugger.oncePaused();
+  const evaluatePromise = Protocol.Runtime.evaluate({ expression });
+
+  const { params: { callFrames } } = await pausedPromise;
+  InspectorTest.log('Paused at (after evaluation):');
+  await session.logSourceLocation(callFrames[0].location);
+
+  // Ignore the last frame, it's always an anonymous empty frame for the
+  // Runtime#evaluate call.
+  InspectorTest.log('Pause stack:');
+  for (const frame of callFrames.slice(0, -1)) {
+    InspectorTest.log(`  ${frame.functionName}:${frame.location.lineNumber} (canBeRestarted = ${frame.canBeRestarted ?? false})`);
+  }
+  InspectorTest.log('');
+
+  return { callFrames, evaluatePromise };
+};
+
+// TODO(crbug.com/1303521): Remove `quitOnFailure` once no longer needed.
+InspectorTest.restartFrameAndWaitForPause = async (callFrames, index, quitOnFailure = true) => {
+  const pausedPromise = Protocol.Debugger.oncePaused();
+  const frame = callFrames[index];
+
+  InspectorTest.log(`Restarting function "${frame.functionName}" ...`);
+  const response = await Protocol.Debugger.restartFrame({ callFrameId: frame.callFrameId, mode: 'StepInto' });
+  if (response.error) {
+    InspectorTest.log(`Failed to restart function "${frame.functionName}":`);
+    InspectorTest.logMessage(response.error);
+    if (quitOnFailure) {
+      InspectorTest.completeTest();
+    }
+    return;
+  }
+
+  const { params: { callFrames: pausedCallFrames } } = await pausedPromise;
+  InspectorTest.log('Paused at (after restart):');
+  await session.logSourceLocation(pausedCallFrames[0].location);
+
+  return callFrames;
+};

@@ -50,6 +50,10 @@ class V8_EXPORT_PRIVATE SharedTurboAssembler : public TurboAssemblerBase {
   void Movhps(XMMRegister dst, XMMRegister src1, Operand src2);
   void Movlps(XMMRegister dst, XMMRegister src1, Operand src2);
 
+  void Blendvps(XMMRegister dst, XMMRegister src1, XMMRegister src2,
+                XMMRegister mask);
+  void Blendvpd(XMMRegister dst, XMMRegister src1, XMMRegister src2,
+                XMMRegister mask);
   void Pblendvb(XMMRegister dst, XMMRegister src1, XMMRegister src2,
                 XMMRegister mask);
 
@@ -384,6 +388,7 @@ class V8_EXPORT_PRIVATE SharedTurboAssembler : public TurboAssemblerBase {
   AVX_OP_SSE4_1(Pmovsxdq, pmovsxdq)
   AVX_OP_SSE4_1(Pmovsxwd, pmovsxwd)
   AVX_OP_SSE4_1(Pmovzxbw, pmovzxbw)
+  AVX_OP_SSE4_1(Pmovzxbd, pmovzxbd)
   AVX_OP_SSE4_1(Pmovzxdq, pmovzxdq)
   AVX_OP_SSE4_1(Pmovzxwd, pmovzxwd)
   AVX_OP_SSE4_1(Pmulld, pmulld)
@@ -441,6 +446,10 @@ class V8_EXPORT_PRIVATE SharedTurboAssembler : public TurboAssemblerBase {
   // Will move src1 to dst if AVX is not supported.
   void I16x8Q15MulRSatS(XMMRegister dst, XMMRegister src1, XMMRegister src2,
                         XMMRegister scratch);
+  void I16x8DotI8x16I7x16S(XMMRegister dst, XMMRegister src1, XMMRegister src2);
+  void I32x4DotI8x16I7x16AddS(XMMRegister dst, XMMRegister src1,
+                              XMMRegister src2, XMMRegister src3,
+                              XMMRegister scratch, XMMRegister splat_reg);
   void I32x4ExtAddPairwiseI16x8U(XMMRegister dst, XMMRegister src,
                                  XMMRegister tmp);
   // Requires that dst == src1 if AVX is not supported.

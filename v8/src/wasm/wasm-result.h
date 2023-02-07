@@ -50,6 +50,8 @@ class V8_EXPORT_PRIVATE WasmError {
   bool empty() const { return message_.empty(); }
   bool has_error() const { return !message_.empty(); }
 
+  operator bool() const { return has_error(); }
+
   uint32_t offset() const { return offset_; }
   const std::string& message() const& { return message_; }
   std::string&& message() && { return std::move(message_); }
@@ -66,24 +68,32 @@ class V8_EXPORT_PRIVATE WasmError {
 template <typename T>
 class Result {
  public:
+  static_assert(!std::is_same<T, WasmError>::value);
+  static_assert(!std::is_reference<T>::value,
+                "Holding a reference in a Result looks like a mistake; remove "
+                "this assertion if you know what you are doing");
+
   Result() = default;
+  // Allow moving.
+  Result(Result<T>&&) = default;
+  Result& operator=(Result<T>&&) = default;
+  // Disallow copying.
+  Result& operator=(const Result<T>&) = delete;
   Result(const Result&) = delete;
-  Result& operator=(const Result&) = delete;
 
-  template <typename S>
-  explicit Result(S&& value) : value_(std::forward<S>(value)) {}
-
-  template <typename S>
-  Result(Result<S>&& other) V8_NOEXCEPT : value_(std::move(other.value_)),
-                                          error_(std::move(other.error_)) {}
+  // Construct a Result from anything that can be used to construct a T value.
+  template <typename U>
+  explicit Result(U&& value) : value_(std::forward<U>(value)) {}
 
   explicit Result(WasmError error) : error_(std::move(error)) {}
 
-  template <typename S>
-  Result& operator=(Result<S>&& other) V8_NOEXCEPT {
-    value_ = std::move(other.value_);
-    error_ = std::move(other.error_);
-    return *this;
+  // Implicitly convert a Result<T> to Result<U> if T implicitly converts to U.
+  // Only provide that for r-value references (i.e. temporary objects) though,
+  // to be used if passing or returning a result by value.
+  template <typename U,
+            typename = std::enable_if_t<std::is_assignable_v<U, T&&>>>
+  operator Result<U>() const&& {
+    return ok() ? Result<U>{std::move(value_)} : Result<U>{error_};
   }
 
   bool ok() const { return error_.empty(); }
@@ -105,9 +115,6 @@ class Result {
   }
 
  private:
-  template <typename S>
-  friend class Result;
-
   T value_ = T{};
   WasmError error_;
 };

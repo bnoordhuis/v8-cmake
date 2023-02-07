@@ -9,14 +9,14 @@ if(MSVC)
   enable_language(ASM_MASM)
   set_property(
     SOURCE ${PROJECT_BINARY_DIR}/embedded.S
-           v8/src/heap/base/asm/arm64/push_registers_masm.S
-           v8/src/heap/base/asm/ia32/push_registers_masm.S
-           v8/src/heap/base/asm/x64/push_registers_masm.S
+           v8/src/heap/base/asm/arm64/push_registers_masm.asm
+           v8/src/heap/base/asm/ia32/push_registers_masm.asm
+           v8/src/heap/base/asm/x64/push_registers_masm.asm
     PROPERTY LANGUAGE ASM_MASM)
 
 endif()
 
-add_definitions("-DV8_ENABLE_WEBASSEMBLY -DV8_ADVANCED_BIGINT_ALGORITHMS")
+add_definitions("-DV8_ENABLE_WEBASSEMBLY -DV8_ADVANCED_BIGINT_ALGORITHMS -DV8_ENABLE_WASM_SIMD256_REVEC")
 if(WIN32)
   add_definitions("-DNOMINMAX -DV8_ENABLE_SYSTEM_INSTRUMENTATION")
   # todo: for zlib, need to extract zlib when refactor
@@ -199,6 +199,7 @@ list(APPEND i18n-sources
   v8/src/objects/js-break-iterator.cc
   v8/src/objects/js-collator.cc
   v8/src/objects/js-date-time-format.cc
+  v8/src/objects/js-duration-format.cc
   v8/src/objects/js-display-names.cc
   v8/src/objects/js-list-format.cc
   v8/src/objects/js-locale.cc
@@ -271,9 +272,9 @@ list(REMOVE_ITEM heap-sources
 
 if(WIN32)
   list(APPEND heap-sources
-    $<${is-arm64}:v8/src/heap/base/asm/arm64/push_registers_masm.S>
-    $<${is-ia32}:v8/src/heap/base/asm/ia32/push_registers_masm.S>
-    $<${is-x64}:v8/src/heap/base/asm/x64/push_registers_masm.S>
+    $<${is-arm64}:v8/src/heap/base/asm/arm64/push_registers_masm.asm>
+    $<${is-ia32}:v8/src/heap/base/asm/ia32/push_registers_masm.asm>
+    $<${is-x64}:v8/src/heap/base/asm/x64/push_registers_masm.asm>
   )
 else()
   list(APPEND heap-sources
@@ -293,8 +294,11 @@ list(REMOVE_ITEM builtin-sources
   v8/src/builtins/builtins-intl.cc
 )
 
-list(REMOVE_ITEM diagnostic-sources v8/src/diagnostics/unwinding-info-win64.cc)
-list(REMOVE_ITEM diagnostic-sources v8/src/diagnostics/system-jit-win.cc)
+if (NOT WIN32)
+  list(REMOVE_ITEM diagnostic-sources v8/src/diagnostics/unwinding-info-win64.cc)
+endif()
+list(REMOVE_ITEM diagnostic-sources v8/src/diagnostics/etw-jit-win.cc)
+
 list(REMOVE_ITEM object-sources ${i18n-sources})
 list(REMOVE_ITEM regexp-sources v8/src/regexp/gen-regexp-special-case.cc)
 list(REMOVE_ITEM runtime-sources v8/src/runtime/runtime-intl.cc)
@@ -312,7 +316,6 @@ add_library(v8_base_without_compiler STATIC
   $<${is-posix}:v8/src/trap-handler/handler-inside-posix.cc>
   $<${is-posix}:v8/src/trap-handler/handler-outside-posix.cc>
   $<$<AND:${is-x64},${is-win}>:v8/src/diagnostics/unwinding-info-win64.cc>
-  $<$<AND:${is-x64},${is-win}>:v8/src/diagnostics/system-jit-win.cc>
   $<$<AND:${is-x64},${is-win}>:v8/src/trap-handler/handler-inside-win.cc>
   $<$<AND:${is-x64},${is-win}>:v8/src/trap-handler/handler-outside-win.cc>
   $<${is-x64}:v8/src/codegen/x64/assembler-x64.cc>
@@ -354,6 +357,7 @@ add_library(v8_base_without_compiler STATIC
   ${bigint-sources}
   ${codegen-sources}
   v8/src/common/assert-scope.cc
+  v8/src/common/code-memory-access.cc
   v8/src/compiler-dispatcher/lazy-compile-dispatcher.cc
   v8/src/compiler-dispatcher/optimizing-compile-dispatcher.cc
   v8/src/date/date.cc
@@ -755,7 +759,6 @@ add_library(v8_libbase STATIC
   v8/src/base/debug/stack_trace.cc
   v8/src/base/division-by-constant.cc
   v8/src/base/file-utils.cc
-  v8/src/base/functional.cc
   v8/src/base/ieee754.cc
   v8/src/base/logging.cc
   v8/src/base/once.cc
@@ -763,6 +766,7 @@ add_library(v8_libbase STATIC
   v8/src/base/platform/condition-variable.cc
   v8/src/base/platform/mutex.cc
   v8/src/base/platform/semaphore.cc
+  v8/src/base/platform/memory-protection-key.cc
   v8/src/base/platform/time.cc
   v8/src/base/region-allocator.cc
   v8/src/base/sys-info.cc
@@ -855,6 +859,7 @@ if(NOT V8_ENABLE_I18N)
     src/objects/js-break-iterator.tq
     src/objects/js-collator.tq
     src/objects/js-date-time-format.tq
+    src/objects/js-duration-format.tq
     src/objects/js-display-names.tq
     src/objects/js-list-format.tq
     src/objects/js-locale.tq

@@ -30,13 +30,13 @@ macro IsCell(o: HeapObject): bool {
 }
 
 @export
-macro IsCode(o: HeapObject): bool {
-  return Is<Code>(o);
+macro IsInstructionStream(o: HeapObject): bool {
+  return Is<InstructionStream>(o);
 }
 
 @export
-macro IsCodeDataContainer(o: HeapObject): bool {
-  return Is<CodeDataContainer>(o);
+macro IsCode(o: HeapObject): bool {
+  return Is<Code>(o);
 }
 
 @export
@@ -692,6 +692,21 @@ Cast<JSReceiver|Null>(o: HeapObject): JSReceiver|Null
       return o;
     }
     case (HeapObject): {
+      goto CastError;
+    }
+  }
+}
+
+Cast<JSReceiver|Symbol>(implicit context: Context)(o: Object): JSReceiver|Symbol
+    labels CastError {
+  typeswitch (o) {
+    case (o: JSReceiver): {
+      return o;
+    }
+    case (o: Symbol): {
+      return o;
+    }
+    case (Object): {
       goto CastError;
     }
   }
