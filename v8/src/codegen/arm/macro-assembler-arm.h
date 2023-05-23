@@ -43,9 +43,9 @@ enum TargetAddressStorageMode {
   NEVER_INLINE_TARGET_ADDRESS
 };
 
-class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
  public:
-  using TurboAssemblerBase::TurboAssemblerBase;
+  using MacroAssemblerBase::MacroAssemblerBase;
 
   // Activation support.
   void EnterFrame(StackFrame::Type type,
@@ -250,12 +250,23 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
   // garbage collection, since that might move the code and invalidate the
   // return address (unless this is somehow accounted for by the called
   // function).
-  void CallCFunction(ExternalReference function, int num_arguments);
-  void CallCFunction(Register function, int num_arguments);
-  void CallCFunction(ExternalReference function, int num_reg_arguments,
-                     int num_double_arguments);
-  void CallCFunction(Register function, int num_reg_arguments,
-                     int num_double_arguments);
+  enum class SetIsolateDataSlots {
+    kNo,
+    kYes,
+  };
+  void CallCFunction(
+      ExternalReference function, int num_arguments,
+      SetIsolateDataSlots set_isolate_data_slots = SetIsolateDataSlots::kYes);
+  void CallCFunction(
+      Register function, int num_arguments,
+      SetIsolateDataSlots set_isolate_data_slots = SetIsolateDataSlots::kYes);
+  void CallCFunction(
+      ExternalReference function, int num_reg_arguments,
+      int num_double_arguments,
+      SetIsolateDataSlots set_isolate_data_slots = SetIsolateDataSlots::kYes);
+  void CallCFunction(
+      Register function, int num_reg_arguments, int num_double_arguments,
+      SetIsolateDataSlots set_isolate_data_slots = SetIsolateDataSlots::kYes);
 
   void MovFromFloatParameter(DwVfpRegister dst);
   void MovFromFloatResult(DwVfpRegister dst);
@@ -316,21 +327,14 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
 
   MemOperand EntryFromBuiltinAsOperand(Builtin builtin);
   void LoadEntryFromBuiltin(Builtin builtin, Register destination);
-  // Load the builtin given by the Smi in |builtin| into the same
-  // register.
-  void LoadEntryFromBuiltinIndex(Register builtin_index);
-  void CallBuiltinByIndex(Register builtin_index);
+  // Load the builtin given by the Smi in |builtin| into |target|.
+  void LoadEntryFromBuiltinIndex(Register builtin_index, Register target);
+  void CallBuiltinByIndex(Register builtin_index, Register target);
   void CallBuiltin(Builtin builtin, Condition cond = al);
   void TailCallBuiltin(Builtin builtin, Condition cond = al);
 
   // Load the code entry point from the Code object.
-  void LoadCodeEntry(Register destination, Register code_object);
-  // Load code entry point from the Code object and compute
-  // InstructionStream object pointer out of it. Must not be used for
-  // Codes corresponding to builtins, because their entry points
-  // values point to the embedded instruction stream in .text section.
-  void LoadCodeInstructionStreamNonBuiltin(Register destination,
-                                           Register code_object);
+  void LoadCodeInstructionStart(Register destination, Register code_object);
   void CallCodeObject(Register code_object);
   void JumpCodeObject(Register code_object,
                       JumpMode jump_mode = JumpMode::kJump);
@@ -596,49 +600,6 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
   void F64x2ConvertLowI32x4U(QwNeonRegister dst, QwNeonRegister src);
   void F64x2PromoteLowF32x4(QwNeonRegister dst, QwNeonRegister src);
 
- private:
-  // Compare single values and then load the fpscr flags to a register.
-  void VFPCompareAndLoadFlags(const SwVfpRegister src1,
-                              const SwVfpRegister src2,
-                              const Register fpscr_flags,
-                              const Condition cond = al);
-  void VFPCompareAndLoadFlags(const SwVfpRegister src1, const float src2,
-                              const Register fpscr_flags,
-                              const Condition cond = al);
-
-  // Compare double values and then load the fpscr flags to a register.
-  void VFPCompareAndLoadFlags(const DwVfpRegister src1,
-                              const DwVfpRegister src2,
-                              const Register fpscr_flags,
-                              const Condition cond = al);
-  void VFPCompareAndLoadFlags(const DwVfpRegister src1, const double src2,
-                              const Register fpscr_flags,
-                              const Condition cond = al);
-
-  void Jump(intptr_t target, RelocInfo::Mode rmode, Condition cond = al);
-
-  // Implementation helpers for FloatMin and FloatMax.
-  template <typename T>
-  void FloatMaxHelper(T result, T left, T right, Label* out_of_line);
-  template <typename T>
-  void FloatMinHelper(T result, T left, T right, Label* out_of_line);
-  template <typename T>
-  void FloatMaxOutOfLineHelper(T result, T left, T right);
-  template <typename T>
-  void FloatMinOutOfLineHelper(T result, T left, T right);
-
-  int CalculateStackPassedWords(int num_reg_arguments,
-                                int num_double_arguments);
-
-  void CallCFunctionHelper(Register function, int num_reg_arguments,
-                           int num_double_arguments);
-};
-
-// MacroAssembler implements a collection of frequently used macros.
-class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
- public:
-  using TurboAssembler::TurboAssembler;
-
   void Mls(Register dst, Register src1, Register src2, Register srcA,
            Condition cond = al);
   void And(Register dst, Register src1, const Operand& src2,
@@ -811,9 +772,6 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
   void JumpToExternalReference(const ExternalReference& builtin,
                                bool builtin_exit_frame = false);
 
-  // Generates a trampoline to jump to the off-heap instruction stream.
-  void JumpToOffHeapInstructionStream(Address entry);
-
   // ---------------------------------------------------------------------------
   // In-place weak references.
   void LoadWeakValue(Register out, Register in, Label* target_if_cleared);
@@ -880,6 +838,9 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
   void AssertUndefinedOrAllocationSite(Register object,
                                        Register scratch) NOOP_UNLESS_DEBUG_CODE;
 
+  void AssertJSAny(Register object, Register map_tmp, Register tmp,
+                   AbortReason abort_reason) NOOP_UNLESS_DEBUG_CODE;
+
   template <typename Field>
   void DecodeField(Register dst, Register src) {
     Ubfx(dst, src, Field::kShift, Field::kSize);
@@ -898,6 +859,43 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
   void InvokePrologue(Register expected_parameter_count,
                       Register actual_parameter_count, Label* done,
                       InvokeType type);
+
+  // Compare single values and then load the fpscr flags to a register.
+  void VFPCompareAndLoadFlags(const SwVfpRegister src1,
+                              const SwVfpRegister src2,
+                              const Register fpscr_flags,
+                              const Condition cond = al);
+  void VFPCompareAndLoadFlags(const SwVfpRegister src1, const float src2,
+                              const Register fpscr_flags,
+                              const Condition cond = al);
+
+  // Compare double values and then load the fpscr flags to a register.
+  void VFPCompareAndLoadFlags(const DwVfpRegister src1,
+                              const DwVfpRegister src2,
+                              const Register fpscr_flags,
+                              const Condition cond = al);
+  void VFPCompareAndLoadFlags(const DwVfpRegister src1, const double src2,
+                              const Register fpscr_flags,
+                              const Condition cond = al);
+
+  void Jump(intptr_t target, RelocInfo::Mode rmode, Condition cond = al);
+
+  // Implementation helpers for FloatMin and FloatMax.
+  template <typename T>
+  void FloatMaxHelper(T result, T left, T right, Label* out_of_line);
+  template <typename T>
+  void FloatMinHelper(T result, T left, T right, Label* out_of_line);
+  template <typename T>
+  void FloatMaxOutOfLineHelper(T result, T left, T right);
+  template <typename T>
+  void FloatMinOutOfLineHelper(T result, T left, T right);
+
+  int CalculateStackPassedWords(int num_reg_arguments,
+                                int num_double_arguments);
+
+  void CallCFunctionHelper(Register function, int num_reg_arguments,
+                           int num_double_arguments,
+                           SetIsolateDataSlots set_isolate_data_slots);
 
   DISALLOW_IMPLICIT_CONSTRUCTORS(MacroAssembler);
 };

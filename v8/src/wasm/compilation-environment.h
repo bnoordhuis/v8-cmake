@@ -50,6 +50,18 @@ enum DynamicTiering : bool {
   kNoDynamicTiering = false
 };
 
+// The Arm architecture does not specify the results in memory of
+// partially-in-bound writes, which does not align with the wasm spec. This
+// affects when trap handlers can be used for OOB detection; however, Mac
+// systems with Apple silicon currently do provide trapping beahviour for
+// partially-out-of-bound writes, so we assume we can rely on that on MacOS,
+// since doing so provides better performance for writes.
+#if V8_TARGET_ARCH_ARM64 && !V8_OS_MACOS
+constexpr bool kPartialOOBWritesAreNoops = false;
+#else
+constexpr bool kPartialOOBWritesAreNoops = true;
+#endif
+
 // The {CompilationEnv} encapsulates the module data that is used during
 // compilation. CompilationEnvs are shareable across multiple compilations.
 struct CompilationEnv {
@@ -148,6 +160,12 @@ class V8_EXPORT_PRIVATE CompilationState {
   void SetHighPriority();
 
   void TierUpAllFunctions();
+
+  // By default, only one top-tier compilation task will be executed for each
+  // function. These functions allow resetting that counter, to be used when
+  // optimized code is intentionally thrown away and should be re-created.
+  void AllowAnotherTopTierJob(uint32_t func_index);
+  void AllowAnotherTopTierJobForAllFunctions();
 
   bool failed() const;
   bool baseline_compilation_finished() const;

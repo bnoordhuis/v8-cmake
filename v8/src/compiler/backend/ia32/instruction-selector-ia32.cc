@@ -18,7 +18,7 @@
 #include "src/codegen/ia32/assembler-ia32.h"
 #include "src/codegen/ia32/register-ia32.h"
 #include "src/codegen/machine-type.h"
-#include "src/codegen/turbo-assembler.h"
+#include "src/codegen/macro-assembler-base.h"
 #include "src/common/globals.h"
 #include "src/compiler/backend/instruction-codes.h"
 #include "src/compiler/backend/instruction-selector-impl.h"
@@ -208,7 +208,7 @@ class IA32OperandGenerator final : public OperandGenerator {
               m.object().ResolvedValue())) {
         ptrdiff_t const delta =
             m.index().ResolvedValue() +
-            TurboAssemblerBase::RootRegisterOffsetForExternalReference(
+            MacroAssemblerBase::RootRegisterOffsetForExternalReference(
                 selector()->isolate(), m.object().ResolvedValue());
         if (is_int32(delta)) {
           inputs[(*input_count)++] = TempImmediate(static_cast<int32_t>(delta));
@@ -219,7 +219,14 @@ class IA32OperandGenerator final : public OperandGenerator {
 
     BaseWithIndexAndDisplacement32Matcher m(node, AddressOption::kAllowAll);
     DCHECK(m.matches());
-    if ((m.displacement() == nullptr || CanBeImmediate(m.displacement()))) {
+    if (m.base() != nullptr &&
+        m.base()->opcode() == IrOpcode::kLoadRootRegister) {
+      DCHECK_EQ(m.index(), nullptr);
+      DCHECK_EQ(m.scale(), 0);
+      inputs[(*input_count)++] = UseImmediate(m.displacement());
+      return kMode_Root;
+    } else if ((m.displacement() == nullptr ||
+                CanBeImmediate(m.displacement()))) {
       return GenerateMemoryOperandInputs(
           m.index(), m.scale(), m.base(), m.displacement(),
           m.displacement_mode(), inputs, input_count, register_mode);
@@ -714,7 +721,7 @@ void VisitStoreCommon(InstructionSelector* selector, Node* node,
     InstructionCode code = is_seqcst ? kArchAtomicStoreWithWriteBarrier
                                      : kArchStoreWithWriteBarrier;
     code |= AddressingModeField::encode(addressing_mode);
-    code |= MiscField::encode(static_cast<int>(record_write_mode));
+    code |= RecordWriteModeField::encode(record_write_mode);
     selector->Emit(code, 0, nullptr, arraysize(inputs), inputs, temp_count,
                    temps);
   } else if (is_seqcst) {
@@ -746,6 +753,8 @@ void VisitStoreCommon(InstructionSelector* selector, Node* node,
 }
 
 }  // namespace
+
+void InstructionSelector::VisitStorePair(Node* node) { UNREACHABLE(); }
 
 void InstructionSelector::VisitStore(Node* node) {
   VisitStoreCommon(this, node, StoreRepresentationOf(node->op()),

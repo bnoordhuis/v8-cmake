@@ -444,8 +444,8 @@ void OS::Free(void* address, size_t size) {
   CHECK_EQ(0, munmap(address, size));
 }
 
-// macOS specific implementation in platform-macos.cc.
-#if !defined(V8_OS_MACOS)
+// Darwin specific implementation in platform-darwin.cc.
+#if !defined(V8_OS_DARWIN)
 // static
 void* OS::AllocateShared(void* hint, size_t size, MemoryPermission access,
                          PlatformSharedMemoryHandle handle, uint64_t offset) {
@@ -456,7 +456,7 @@ void* OS::AllocateShared(void* hint, size_t size, MemoryPermission access,
   if (result == MAP_FAILED) return nullptr;
   return result;
 }
-#endif  // !defined(V8_OS_MACOS)
+#endif  // !defined(V8_OS_DARWIN)
 
 // static
 void OS::FreeShared(void* address, size_t size) {
@@ -479,6 +479,7 @@ bool OS::SetPermissions(void* address, size_t size, MemoryPermission access) {
   int prot = GetProtectionFromMemoryPermission(access);
   int ret = mprotect(address, size, prot);
 
+  // Setting permissions can fail if the limit of VMAs is exceeded.
   // Any failure that's not OOM likely indicates a bug in the caller (e.g.
   // using an invalid mapping) so attempt to catch that here to facilitate
   // debugging of these failures.
@@ -515,10 +516,13 @@ bool OS::SetPermissions(void* address, size_t size, MemoryPermission access) {
 
 // static
 void OS::SetDataReadOnly(void* address, size_t size) {
-  DCHECK_EQ(0, reinterpret_cast<uintptr_t>(address) % CommitPageSize());
-  DCHECK_EQ(0, size % CommitPageSize());
+  CHECK_EQ(0, reinterpret_cast<uintptr_t>(address) % CommitPageSize());
+  CHECK_EQ(0, size % CommitPageSize());
 
-  CHECK_EQ(0, mprotect(address, size, PROT_READ));
+  if (mprotect(address, size, PROT_READ) != 0) {
+    FATAL("Failed to protect data memory at %p +%zu; error %d\n", address, size,
+          errno);
+  }
 }
 
 // static
@@ -585,6 +589,7 @@ bool OS::DecommitPages(void* address, size_t size) {
   void* ret = mmap(address, size, PROT_NONE,
                    MAP_FIXED | MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
   if (V8_UNLIKELY(ret == MAP_FAILED)) {
+    // Decommitting pages can fail if the limit of VMAs is exceeded.
     CHECK_EQ(ENOMEM, errno);
     return false;
   }
@@ -623,8 +628,8 @@ void OS::FreeAddressSpaceReservation(AddressSpaceReservation reservation) {
   Free(reservation.base(), reservation.size());
 }
 
-// macOS specific implementation in platform-macos.cc.
-#if !defined(V8_OS_MACOS)
+// Darwin specific implementation in platform-darwin.cc.
+#if !defined(V8_OS_DARWIN)
 // static
 // Need to disable CFI_ICALL due to the indirect call to memfd_create.
 DISABLE_CFI_ICALL
@@ -657,7 +662,7 @@ void OS::DestroySharedMemoryHandle(PlatformSharedMemoryHandle handle) {
   int fd = FileDescriptorFromSharedMemoryHandle(handle);
   CHECK_EQ(0, close(fd));
 }
-#endif  // !defined(V8_OS_MACOS)
+#endif  // !defined(V8_OS_DARWIN)
 
 // static
 bool OS::HasLazyCommits() {
@@ -1015,8 +1020,8 @@ bool AddressSpaceReservation::Free(void* address, size_t size) {
   return OS::DecommitPages(address, size);
 }
 
-// macOS specific implementation in platform-macos.cc.
-#if !defined(V8_OS_MACOS)
+// Darwin specific implementation in platform-darwin.cc.
+#if !defined(V8_OS_DARWIN)
 bool AddressSpaceReservation::AllocateShared(void* address, size_t size,
                                              OS::MemoryPermission access,
                                              PlatformSharedMemoryHandle handle,
@@ -1027,7 +1032,7 @@ bool AddressSpaceReservation::AllocateShared(void* address, size_t size,
   return mmap(address, size, prot, MAP_SHARED | MAP_FIXED, fd, offset) !=
          MAP_FAILED;
 }
-#endif  // !defined(V8_OS_MACOS)
+#endif  // !defined(V8_OS_DARWIN)
 
 bool AddressSpaceReservation::FreeShared(void* address, size_t size) {
   DCHECK(Contains(address, size));
@@ -1241,7 +1246,7 @@ void Thread::SetThreadLocal(LocalStorageKey key, void* value) {
     !defined(V8_OS_SOLARIS)
 
 // static
-Stack::StackSlot Stack::GetStackStart() {
+Stack::StackSlot Stack::ObtainCurrentThreadStackStart() {
   pthread_attr_t attr;
   int error = pthread_getattr_np(pthread_self(), &attr);
   if (!error) {

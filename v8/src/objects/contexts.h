@@ -94,7 +94,6 @@ enum ContextLookupFlags {
   V(ASYNC_FUNCTION_OBJECT_MAP_INDEX, Map, async_function_object_map)           \
   V(ASYNC_GENERATOR_FUNCTION_FUNCTION_INDEX, JSFunction,                       \
     async_generator_function_function)                                         \
-  V(ATOMICS_OBJECT, JSObject, atomics_object)                                  \
   V(BIGINT_FUNCTION_INDEX, JSFunction, bigint_function)                        \
   V(BOOLEAN_FUNCTION_INDEX, JSFunction, boolean_function)                      \
   V(BOUND_FUNCTION_WITH_CONSTRUCTOR_MAP_INDEX, Map,                            \
@@ -169,6 +168,13 @@ enum ContextLookupFlags {
   V(INTL_SEGMENTER_FUNCTION_INDEX, JSFunction, intl_segmenter_function)        \
   V(INTL_SEGMENTS_MAP_INDEX, Map, intl_segments_map)                           \
   V(INTL_SEGMENT_ITERATOR_MAP_INDEX, Map, intl_segment_iterator_map)           \
+  V(ITERATOR_FILTER_HELPER_MAP_INDEX, Map, iterator_filter_helper_map)         \
+  V(ITERATOR_MAP_HELPER_MAP_INDEX, Map, iterator_map_helper_map)               \
+  V(ITERATOR_TAKE_HELPER_MAP_INDEX, Map, iterator_take_helper_map)             \
+  V(ITERATOR_DROP_HELPER_MAP_INDEX, Map, iterator_drop_helper_map)             \
+  V(ITERATOR_FLAT_MAP_HELPER_MAP_INDEX, Map, iterator_flatMap_helper_map)      \
+  V(ITERATOR_FUNCTION_INDEX, JSFunction, iterator_function)                    \
+  V(VALID_ITERATOR_WRAPPER_MAP_INDEX, Map, valid_iterator_wrapper_map)         \
   V(ITERATOR_RESULT_MAP_INDEX, Map, iterator_result_map)                       \
   V(JS_ARRAY_PACKED_SMI_ELEMENTS_MAP_INDEX, Map,                               \
     js_array_packed_smi_elements_map)                                          \
@@ -230,6 +236,7 @@ enum ContextLookupFlags {
   V(CATCH_CONTEXT_MAP_INDEX, Map, catch_context_map)                           \
   V(WITH_CONTEXT_MAP_INDEX, Map, with_context_map)                             \
   V(DEBUG_EVALUATE_CONTEXT_MAP_INDEX, Map, debug_evaluate_context_map)         \
+  V(JS_RAB_GSAB_DATA_VIEW_MAP_INDEX, Map, js_rab_gsab_data_view_map)           \
   V(MAP_CACHE_INDEX, Object, map_cache)                                        \
   V(MAP_KEY_ITERATOR_MAP_INDEX, Map, map_key_iterator_map)                     \
   V(MAP_KEY_VALUE_ITERATOR_MAP_INDEX, Map, map_key_value_iterator_map)         \
@@ -322,6 +329,7 @@ enum ContextLookupFlags {
   V(WASM_EXCEPTION_CONSTRUCTOR_INDEX, JSFunction, wasm_exception_constructor)  \
   V(WASM_GLOBAL_CONSTRUCTOR_INDEX, JSFunction, wasm_global_constructor)        \
   V(WASM_INSTANCE_CONSTRUCTOR_INDEX, JSFunction, wasm_instance_constructor)    \
+  V(WASM_JS_TAG_INDEX, JSObject, wasm_js_tag)                                  \
   V(WASM_MEMORY_CONSTRUCTOR_INDEX, JSFunction, wasm_memory_constructor)        \
   V(WASM_MODULE_CONSTRUCTOR_INDEX, JSFunction, wasm_module_constructor)        \
   V(WASM_TABLE_CONSTRUCTOR_INDEX, JSFunction, wasm_table_constructor)          \
@@ -375,7 +383,9 @@ enum ContextLookupFlags {
   V(WEAKMAP_DELETE_INDEX, JSFunction, weakmap_delete)                          \
   V(WEAKSET_ADD_INDEX, JSFunction, weakset_add)                                \
   V(WRAPPED_FUNCTION_MAP_INDEX, Map, wrapped_function_map)                     \
-  V(RETAINED_MAPS, Object, retained_maps)
+  V(RETAINED_MAPS, Object, retained_maps)                                      \
+  V(SHARED_SPACE_JS_OBJECT_HAS_INSTANCE_INDEX, JSFunction,                     \
+    shared_space_js_object_has_instance)
 
 #include "torque-generated/src/objects/contexts-tq.inc"
 

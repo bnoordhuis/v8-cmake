@@ -120,15 +120,9 @@ class JSFunction : public TorqueGeneratedJSFunction<
   // are fully initialized.
   DECL_ACCESSORS(code, Code)
   DECL_RELEASE_ACQUIRE_ACCESSORS(code, Code)
-  // Convenient overloads to avoid unnecessary InstructionStream <->
-  // Code conversions.
-  // TODO(v8:11880): remove once |code| accessors are migrated to
-  // Code.
-  inline void set_code(InstructionStream code, ReleaseStoreTag,
-                       WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
 
   // Returns the address of the function code's instruction start.
-  inline Address code_entry_point() const;
+  inline Address instruction_start() const;
 
   // Get the abstract code associated with the function, which will either be
   // a InstructionStream object or a BytecodeArray.
@@ -193,7 +187,7 @@ class JSFunction : public TorqueGeneratedJSFunction<
 
   // Sets the interrupt budget based on whether the function has a feedback
   // vector and any optimized code.
-  void SetInterruptBudget(Isolate* isolate);
+  void SetInterruptBudget(Isolate* isolate, bool deoptimize = false);
 
   // If slack tracking is active, it computes instance size of the initial map
   // with minimum permissible object slack.  If it is not active, it simply
@@ -285,9 +279,14 @@ class JSFunction : public TorqueGeneratedJSFunction<
       Handle<JSReceiver> new_target);
 
   // Like GetDerivedMap, but returns a map with a RAB / GSAB ElementsKind.
-  static V8_WARN_UNUSED_RESULT MaybeHandle<Map> GetDerivedRabGsabMap(
+  static V8_WARN_UNUSED_RESULT MaybeHandle<Map> GetDerivedRabGsabTypedArrayMap(
       Isolate* isolate, Handle<JSFunction> constructor,
       Handle<JSReceiver> new_target);
+
+  // Like GetDerivedMap, but can be used for DataViews for retrieving / creating
+  // a map with a JS_RAB_GSAB_DATA_VIEW instance type.
+  static V8_WARN_UNUSED_RESULT MaybeHandle<Map> GetDerivedRabGsabDataViewMap(
+      Isolate* isolate, Handle<JSReceiver> new_target);
 
   // Get and set the prototype property on a JSFunction. If the
   // function has an initial map the prototype is set on the initial

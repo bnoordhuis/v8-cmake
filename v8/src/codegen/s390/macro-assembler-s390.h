@@ -41,9 +41,9 @@ Register GetRegisterThatIsNotOneOf(Register reg1, Register reg2 = no_reg,
                                    Register reg5 = no_reg,
                                    Register reg6 = no_reg);
 
-class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
  public:
-  using TurboAssemblerBase::TurboAssemblerBase;
+  using MacroAssemblerBase::MacroAssemblerBase;
 
   void CallBuiltin(Builtin builtin, Condition cond = al);
   void TailCallBuiltin(Builtin builtin, Condition cond = al);
@@ -131,25 +131,18 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
 
   void Call(Label* target);
 
-  // Load the builtin given by the Smi in |builtin_index| into the same
-  // register.
-  void LoadEntryFromBuiltinIndex(Register builtin_index);
+  // Load the builtin given by the Smi in |builtin_index| into |target|.
+  void LoadEntryFromBuiltinIndex(Register builtin_index, Register target);
   void LoadEntryFromBuiltin(Builtin builtin, Register destination);
   MemOperand EntryFromBuiltinAsOperand(Builtin builtin);
 
   // Load the code entry point from the Code object.
-  void LoadCodeEntry(Register destination, Register code_object);
-  // Load code entry point from the Code object and compute
-  // InstructionStream object pointer out of it. Must not be used for
-  // Codes corresponding to builtins, because their entry points
-  // values point to the embedded instruction stream in .text section.
-  void LoadCodeInstructionStreamNonBuiltin(Register destination,
-                                           Register code_object);
+  void LoadCodeInstructionStart(Register destination, Register code_object);
   void CallCodeObject(Register code_object);
   void JumpCodeObject(Register code_object,
                       JumpMode jump_mode = JumpMode::kJump);
 
-  void CallBuiltinByIndex(Register builtin_index);
+  void CallBuiltinByIndex(Register builtin_index, Register target);
 
   // Register move. May do nothing if the registers are identical.
   void Move(Register dst, Smi smi) { LoadSmiLiteral(dst, smi); }
@@ -923,12 +916,23 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
   // garbage collection, since that might move the code and invalidate the
   // return address (unless this is somehow accounted for by the called
   // function).
-  void CallCFunction(ExternalReference function, int num_arguments);
-  void CallCFunction(Register function, int num_arguments);
-  void CallCFunction(ExternalReference function, int num_reg_arguments,
-                     int num_double_arguments);
-  void CallCFunction(Register function, int num_reg_arguments,
-                     int num_double_arguments);
+  enum class SetIsolateDataSlots {
+    kNo,
+    kYes,
+  };
+  void CallCFunction(
+      ExternalReference function, int num_arguments,
+      SetIsolateDataSlots set_isolate_data_slots = SetIsolateDataSlots::kYes);
+  void CallCFunction(
+      Register function, int num_arguments,
+      SetIsolateDataSlots set_isolate_data_slots = SetIsolateDataSlots::kYes);
+  void CallCFunction(
+      ExternalReference function, int num_reg_arguments,
+      int num_double_arguments,
+      SetIsolateDataSlots set_isolate_data_slots = SetIsolateDataSlots::kYes);
+  void CallCFunction(
+      Register function, int num_reg_arguments, int num_double_arguments,
+      SetIsolateDataSlots set_isolate_data_slots = SetIsolateDataSlots::kYes);
 
   void MovFromFloatParameter(DoubleRegister dst);
   void MovFromFloatResult(DoubleRegister dst);
@@ -1209,7 +1213,7 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
                                Simd128Register scratch);
   void I8x16Swizzle(Simd128Register dst, Simd128Register src1,
                     Simd128Register src2, Register scratch1, Register scratch2,
-                    Simd128Register scratch3, Simd128Register scratch4);
+                    Simd128Register scratch3);
   void S128Const(Simd128Register dst, uint64_t high, uint64_t low,
                  Register scratch1, Register scratch2);
   void I8x16Shuffle(Simd128Register dst, Simd128Register src1,
@@ -1218,6 +1222,11 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
                     Simd128Register scratch3);
   void I32x4DotI16x8S(Simd128Register dst, Simd128Register src1,
                       Simd128Register src2, Simd128Register scratch);
+  void I16x8DotI8x16S(Simd128Register dst, Simd128Register src1,
+                      Simd128Register src2, Simd128Register scratch);
+  void I32x4DotI8x16AddS(Simd128Register dst, Simd128Register src1,
+                         Simd128Register src2, Simd128Register src3,
+                         Simd128Register scratch1, Simd128Register scratch2);
   void I16x8Q15MulRSatS(Simd128Register dst, Simd128Register src1,
                         Simd128Register src2, Simd128Register scratch1,
                         Simd128Register scratch2, Simd128Register scratch3);
@@ -1464,17 +1473,11 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
 #endif
   }
 
-  // Loads a field containing a HeapObject and decompresses it if pointer
-  // compression is enabled.
-  void LoadTaggedPointerField(const Register& destination,
-                              const MemOperand& field_operand,
-                              const Register& scratch = no_reg);
-  void LoadTaggedSignedField(Register destination, MemOperand field_operand);
-
   // Loads a field containing any tagged value and decompresses it if necessary.
-  void LoadAnyTaggedField(const Register& destination,
-                          const MemOperand& field_operand,
-                          const Register& scratch = no_reg);
+  void LoadTaggedField(const Register& destination,
+                       const MemOperand& field_operand,
+                       const Register& scratch = no_reg);
+  void LoadTaggedSignedField(Register destination, MemOperand field_operand);
 
   // Loads a field containing smi value and untags it.
   void SmiUntagField(Register dst, const MemOperand& src);
@@ -1486,11 +1489,9 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
 
   void DecompressTaggedSigned(Register destination, MemOperand field_operand);
   void DecompressTaggedSigned(Register destination, Register src);
-  void DecompressTaggedPointer(Register destination, MemOperand field_operand);
-  void DecompressTaggedPointer(Register destination, Register source);
-  void DecompressTaggedPointer(const Register& destination, Tagged_t immediate);
-  void DecompressAnyTagged(Register destination, MemOperand field_operand);
-  void DecompressAnyTagged(Register destination, Register source);
+  void DecompressTagged(Register destination, MemOperand field_operand);
+  void DecompressTagged(Register destination, Register source);
+  void DecompressTagged(const Register& destination, Tagged_t immediate);
 
   // CountLeadingZeros will corrupt the scratch register pair (eg. r0:r1)
   void CountLeadingZerosU32(Register dst, Register src,
@@ -1501,22 +1502,6 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
                              Register scratch_pair = r0);
   void CountTrailingZerosU64(Register dst, Register src,
                              Register scratch_pair = r0);
-
- private:
-  static const int kSmiShift = kSmiTagSize + kSmiShiftSize;
-
-  void CallCFunctionHelper(Register function, int num_reg_arguments,
-                           int num_double_arguments);
-
-  void Jump(intptr_t target, RelocInfo::Mode rmode, Condition cond = al);
-  int CalculateStackPassedWords(int num_reg_arguments,
-                                int num_double_arguments);
-};
-
-// MacroAssembler implements a collection of frequently used macros.
-class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
- public:
-  using TurboAssembler::TurboAssembler;
 
   void LoadStackLimit(Register destination, StackLimitKind kind);
   // It assumes that the arguments are located below the stack pointer.
@@ -1594,9 +1579,6 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
   // Jump to a runtime routine.
   void JumpToExternalReference(const ExternalReference& builtin,
                                bool builtin_exit_frame = false);
-
-  // Generates a trampoline to jump to the off-heap instruction stream.
-  void JumpToOffHeapInstructionStream(Address entry);
 
   // Compare the object in a register to a value and jump if they are equal.
   void JumpIfRoot(Register with, RootIndex index, Label* if_equal) {
@@ -1748,6 +1730,9 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
   void AssertUndefinedOrAllocationSite(Register object,
                                        Register scratch) NOOP_UNLESS_DEBUG_CODE;
 
+  void AssertJSAny(Register object, Register map_tmp, Register tmp,
+                   AbortReason abort_reason) NOOP_UNLESS_DEBUG_CODE;
+
   template <typename Field>
   void DecodeField(Register dst, Register src) {
     ExtractBitRange(dst, src, Field::kShift + Field::kSize - 1, Field::kShift);
@@ -1803,6 +1788,15 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
 
  private:
   static const int kSmiShift = kSmiTagSize + kSmiShiftSize;
+
+  void CallCFunctionHelper(Register function, int num_reg_arguments,
+                           int num_double_arguments,
+                           SetIsolateDataSlots set_isolate_data_slots);
+
+  void Jump(intptr_t target, RelocInfo::Mode rmode, Condition cond = al);
+  int CalculateStackPassedWords(int num_reg_arguments,
+                                int num_double_arguments);
+
   // Helper functions for generating invokes.
   void InvokePrologue(Register expected_parameter_count,
                       Register actual_parameter_count, Label* done,

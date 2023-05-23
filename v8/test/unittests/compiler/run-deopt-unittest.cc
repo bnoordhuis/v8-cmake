@@ -11,10 +11,12 @@ namespace v8 {
 namespace internal {
 namespace compiler {
 
-static void IsOptimized(const v8::FunctionCallbackInfo<v8::Value>& args) {
-  JavaScriptFrameIterator it(reinterpret_cast<Isolate*>(args.GetIsolate()));
+static void IsOptimized(const v8::FunctionCallbackInfo<v8::Value>& info) {
+  CHECK(i::ValidateCallbackInfo(info));
+  JavaScriptStackFrameIterator it(
+      reinterpret_cast<Isolate*>(info.GetIsolate()));
   JavaScriptFrame* frame = it.frame();
-  return args.GetReturnValue().Set(frame->is_turbofan());
+  return info.GetReturnValue().Set(frame->is_turbofan());
 }
 
 class RunDeoptTest : public TestWithContext {

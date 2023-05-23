@@ -66,7 +66,7 @@ void RelocInfo::apply(intptr_t delta) {
 
 Address RelocInfo::target_address() {
   DCHECK(IsCodeTargetMode(rmode_) || IsWasmCall(rmode_) ||
-         IsNearBuiltinEntry(rmode_));
+         IsNearBuiltinEntry(rmode_) || IsWasmStubCall(rmode_));
   return Assembler::target_address_at(pc_, constant_pool_);
 }
 
@@ -128,7 +128,7 @@ Handle<HeapObject> Assembler::compressed_embedded_object_handle_at(
 }
 
 void Assembler::deserialization_set_special_target_at(
-    Address instruction_payload, InstructionStream code, Address target) {
+    Address instruction_payload, Code code, Address target) {
   set_target_address_at(instruction_payload,
                         !code.is_null() ? code.constant_pool() : kNullAddress,
                         target);
@@ -162,7 +162,7 @@ void Assembler::deserialization_set_target_internal_reference_at(
 HeapObject RelocInfo::target_object(PtrComprCageBase cage_base) {
   DCHECK(IsCodeTarget(rmode_) || IsEmbeddedObjectMode(rmode_));
   if (IsCompressedEmbeddedObject(rmode_)) {
-    return HeapObject::cast(Object(V8HeapCompressionScheme::DecompressTaggedAny(
+    return HeapObject::cast(Object(V8HeapCompressionScheme::DecompressTagged(
         cage_base,
         Assembler::target_compressed_address_at(pc_, constant_pool_))));
   } else {
@@ -186,23 +186,18 @@ Handle<HeapObject> RelocInfo::target_object_handle(Assembler* origin) {
   }
 }
 
-void RelocInfo::set_target_object(Heap* heap, HeapObject target,
-                                  WriteBarrierMode write_barrier_mode,
+void RelocInfo::set_target_object(HeapObject target,
                                   ICacheFlushMode icache_flush_mode) {
   DCHECK(IsCodeTarget(rmode_) || IsEmbeddedObjectMode(rmode_));
   if (IsCompressedEmbeddedObject(rmode_)) {
     Assembler::set_target_compressed_address_at(
         pc_, constant_pool_,
-        V8HeapCompressionScheme::CompressTagged(target.ptr()),
+        V8HeapCompressionScheme::CompressObject(target.ptr()),
         icache_flush_mode);
   } else {
     DCHECK(IsFullEmbeddedObject(rmode_));
     Assembler::set_target_address_at(pc_, constant_pool_, target.ptr(),
                                      icache_flush_mode);
-  }
-  if (write_barrier_mode == UPDATE_WRITE_BARRIER && !host().is_null() &&
-      !v8_flags.disable_write_barriers) {
-    WriteBarrierForCode(host(), this, target);
   }
 }
 

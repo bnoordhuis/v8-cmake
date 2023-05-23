@@ -21,12 +21,12 @@ std::string DisassembleFunction(const char* function) {
           CcTest::global()->Get(context, v8_str(function)).ToLocalChecked())));
 
   Isolate* isolate = CcTest::i_isolate();
-  Handle<InstructionStream> code(FromCode(f->code()), isolate);
-  Address begin = code->raw_instruction_start();
-  Address end = code->raw_instruction_end();
+  Handle<Code> code(f->code(), isolate);
+  Address begin = code->instruction_start();
+  Address end = code->instruction_end();
   std::ostringstream os;
-  Disassembler::Decode(isolate, os, reinterpret_cast<byte*>(begin),
-                       reinterpret_cast<byte*>(end), CodeReference(code));
+  Disassembler::Decode(isolate, os, reinterpret_cast<uint8_t*>(begin),
+                       reinterpret_cast<uint8_t*>(end), CodeReference(code));
   return os.str();
 }
 

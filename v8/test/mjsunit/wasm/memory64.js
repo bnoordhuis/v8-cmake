@@ -13,26 +13,31 @@ const GB = 1024 * 1024 * 1024;
 // The current limit is 16GB. Adapt this test if this changes.
 const max_num_pages = 16 * GB / kPageSize;
 
-function BasicMemory64Tests(num_pages) {
+function BasicMemory64Tests(num_pages, use_atomic_ops) {
   const num_bytes = num_pages * kPageSize;
-  print(`Testing ${num_bytes} bytes (${num_pages} pages)`);
+  print(`Testing ${num_bytes} bytes (${num_pages} pages) on ${
+      use_atomic_ops ? '' : 'non-'}atomic memory`);
 
   let builder = new WasmModuleBuilder();
   builder.addMemory64(num_pages, num_pages, true);
 
+  // A memory operation with alignment (0) and offset (0).
+  let op = (non_atomic, atomic) => use_atomic_ops ?
+      [kAtomicPrefix, atomic, 0, 0] :
+      [non_atomic, 0, 0];
   builder.addFunction('load', makeSig([kWasmF64], [kWasmI32]))
       .addBody([
-        kExprLocalGet, 0,       // local.get 0
-        kExprI64UConvertF64,    // i64.uconvert_sat.f64
-        kExprI32LoadMem, 0, 0,  // i32.load_mem align=1 offset=0
+        kExprLocalGet, 0,                           // local.get 0
+        kExprI64UConvertF64,                        // i64.uconvert_sat.f64
+        ...op(kExprI32LoadMem, kExprI32AtomicLoad)  // load
       ])
       .exportFunc();
   builder.addFunction('store', makeSig([kWasmF64, kWasmI32], []))
       .addBody([
-        kExprLocalGet, 0,        // local.get 0
-        kExprI64UConvertF64,     // i64.uconvert_sat.f64
-        kExprLocalGet, 1,        // local.get 1
-        kExprI32StoreMem, 0, 0,  // i32.store_mem align=1 offset=0
+        kExprLocalGet, 0,                             // local.get 0
+        kExprI64UConvertF64,                          // i64.uconvert_sat.f64
+        kExprLocalGet, 1,                             // local.get 1
+        ...op(kExprI32StoreMem, kExprI32AtomicStore)  // store
       ])
       .exportFunc();
 
@@ -56,19 +61,42 @@ function BasicMemory64Tests(num_pages) {
     assertEquals(num_bytes, array.length);
   }
 
+  const GB = Math.pow(2, 30);
   assertEquals(0, load(num_bytes - 4));
-  assertThrows(() => load(num_bytes - 3));
+  assertTraps(kTrapMemOutOfBounds, () => load(num_bytes));
+  assertTraps(kTrapMemOutOfBounds, () => load(num_bytes - 3));
+  assertTraps(kTrapMemOutOfBounds, () => load(num_bytes - 4 + 4 * GB));
+  assertTraps(kTrapMemOutOfBounds, () => store(num_bytes));
+  assertTraps(kTrapMemOutOfBounds, () => store(num_bytes - 3));
+  assertTraps(kTrapMemOutOfBounds, () => store(num_bytes - 4 + 4 * GB));
+  if (use_atomic_ops) {
+    assertTraps(kTrapUnalignedAccess, () => load(num_bytes - 7));
+    assertTraps(kTrapUnalignedAccess, () => store(num_bytes - 7));
+  }
 
   store(num_bytes - 4, 0x12345678);
   assertEquals(0x12345678, load(num_bytes - 4));
 
-  let kStoreOffset = 27;
+  let kStoreOffset = use_atomic_ops ? 40 : 27;
   store(kStoreOffset, 11);
   assertEquals(11, load(kStoreOffset));
 
-  // Now check 100 random positions.
-  for (let i = 0; i < 100; ++i) {
-    let position = Math.floor(Math.random() * num_bytes);
+  // Now check some interesting positions, plus 100 random positions.
+  const positions = [
+    // Nothing at the beginning.
+    0, 1,
+    // Check positions around the store offset.
+    kStoreOffset - 1, kStoreOffset, kStoreOffset + 1,
+    // Check the end.
+    num_bytes - 5, num_bytes - 4, num_bytes - 3, num_bytes - 2, num_bytes - 1,
+    // Check positions at the end, truncated to 32 bit (might be
+    // redundant).
+    (num_bytes - 5) >>> 0, (num_bytes - 4) >>> 0, (num_bytes - 3) >>> 0,
+    (num_bytes - 2) >>> 0, (num_bytes - 1) >>> 0
+  ];
+  const random_positions =
+      Array.from({length: 100}, () => Math.floor(Math.random() * num_bytes));
+  for (let position of positions.concat(random_positions)) {
     let expected = 0;
     if (position == kStoreOffset) {
       expected = 11;
@@ -166,8 +194,41 @@ function allowOOM(fn) {
   assertEquals(-1n, instance.exports.grow(1n << 32n));
   assertEquals(-1n, instance.exports.grow(1n << 33n));
   assertEquals(-1n, instance.exports.grow(1n << 63n));
-  assertEquals(-1n, instance.exports.grow(7n));  // Above the of 10.
+  assertEquals(-1n, instance.exports.grow(7n));  // Above the maximum of 10.
   assertEquals(4n, instance.exports.grow(6n));   // Just at the maximum of 10.
+})();
+
+(function TestGrow64_ToMemory() {
+  print(arguments.callee.name);
+  let builder = new WasmModuleBuilder();
+  builder.addMemory64(1, 10, true);
+
+  // Grow memory and store the result in memory for inspection from JS.
+  builder.addFunction('grow', makeSig([kWasmI64], []))
+      .addBody([
+        kExprI64Const, 0,       // i64.const (offset for result)
+        kExprLocalGet, 0,       // local.get 0
+        kExprMemoryGrow, 0,     // memory.grow 0
+        kExprI64StoreMem, 3, 0  // store result to memory
+      ])
+      .exportFunc();
+
+  let instance = builder.instantiate();
+  function grow(arg) {
+    instance.exports.grow(arg);
+    let i64_arr = new BigInt64Array(instance.exports.memory.buffer, 0, 1);
+    return i64_arr[0];
+  }
+
+  assertEquals(1n, grow(2n));
+  assertEquals(3n, grow(1n));
+  assertEquals(-1n, grow(-1n));
+  assertEquals(-1n, grow(1n << 31n));
+  assertEquals(-1n, grow(1n << 32n));
+  assertEquals(-1n, grow(1n << 33n));
+  assertEquals(-1n, grow(1n << 63n));
+  assertEquals(-1n, grow(7n));  // Above the maximum of 10.
+  assertEquals(4n, grow(6n));   // Just at the maximum of 10.
 })();
 
 (function TestBulkMemoryOperations() {
@@ -370,4 +431,37 @@ function allowOOM(fn) {
   assertEquals('OK', worker.getMessage());
   assertEquals(kValue, instance.exports.load(kOffset2));
   assertEquals(5n, instance.exports.grow(1n));
+})();
+
+(function TestAtomics_SmallMemory() {
+  print(arguments.callee.name);
+  BasicMemory64Tests(4, true);
+})();
+
+(function TestAtomics_5GB() {
+  print(arguments.callee.name);
+  let num_pages = 5 * GB / kPageSize;
+  // This test can fail if 5GB of memory cannot be allocated.
+  allowOOM(() => BasicMemory64Tests(num_pages, true));
+})();
+
+(function Test64BitOffsetOn32BitMemory() {
+  print(arguments.callee.name);
+  let builder = new WasmModuleBuilder();
+  builder.addMemory(1, 1, false);
+
+  builder.addFunction('load', makeSig([kWasmI32], [kWasmI32]))
+      .addBody([
+        // local.get 0
+        kExprLocalGet, 0,
+        // i32.load align=0 offset=2^32+2
+        kExprI32LoadMem, 0, ...wasmSignedLeb64(Math.pow(2, 32) + 2),
+      ])
+      .exportFunc();
+
+  // Instantiation works, this should throw at runtime.
+  let instance = builder.instantiate();
+  let load = instance.exports.load;
+
+  assertTraps(kTrapMemOutOfBounds, () => load(0));
 })();

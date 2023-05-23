@@ -16,6 +16,7 @@
 #include "src/compiler/loop-variable-optimizer.h"
 #include "src/compiler/node-properties.h"
 #include "src/compiler/node.h"
+#include "src/compiler/opcodes.h"
 #include "src/compiler/operation-typer.h"
 #include "src/compiler/simplified-operator.h"
 #include "src/compiler/type-cache.h"
@@ -79,6 +80,7 @@ class Typer::Visitor : public Reducer {
       SIMPLIFIED_BIGINT_UNOP_LIST(DECLARE_UNARY_CASE)
       SIMPLIFIED_SPECULATIVE_NUMBER_UNOP_LIST(DECLARE_UNARY_CASE)
       SIMPLIFIED_SPECULATIVE_BIGINT_UNOP_LIST(DECLARE_UNARY_CASE)
+      DECLARE_UNARY_CASE(ChangeUint32ToUint64)
 #undef DECLARE_UNARY_CASE
 #define DECLARE_BINARY_CASE(x, ...) \
   case IrOpcode::k##x:              \
@@ -177,6 +179,7 @@ class Typer::Visitor : public Reducer {
       DECLARE_IMPOSSIBLE_CASE(DebugBreak)
       DECLARE_IMPOSSIBLE_CASE(Comment)
       DECLARE_IMPOSSIBLE_CASE(LoadImmutable)
+      DECLARE_IMPOSSIBLE_CASE(StorePair)
       DECLARE_IMPOSSIBLE_CASE(Store)
       DECLARE_IMPOSSIBLE_CASE(StackSlot)
       DECLARE_IMPOSSIBLE_CASE(Word32Popcnt)
@@ -215,7 +218,6 @@ class Typer::Visitor : public Reducer {
       DECLARE_IMPOSSIBLE_CASE(ChangeInt32ToInt64)
       DECLARE_IMPOSSIBLE_CASE(ChangeInt64ToFloat64)
       DECLARE_IMPOSSIBLE_CASE(ChangeUint32ToFloat64)
-      DECLARE_IMPOSSIBLE_CASE(ChangeUint32ToUint64)
       DECLARE_IMPOSSIBLE_CASE(TruncateFloat64ToFloat32)
       DECLARE_IMPOSSIBLE_CASE(TruncateInt64ToInt32)
       DECLARE_IMPOSSIBLE_CASE(RoundFloat64ToInt32)
@@ -240,6 +242,7 @@ class Typer::Visitor : public Reducer {
       DECLARE_IMPOSSIBLE_CASE(LoadStackCheckOffset)
       DECLARE_IMPOSSIBLE_CASE(LoadFramePointer)
       DECLARE_IMPOSSIBLE_CASE(LoadParentFramePointer)
+      DECLARE_IMPOSSIBLE_CASE(LoadRootRegister)
       DECLARE_IMPOSSIBLE_CASE(UnalignedLoad)
       DECLARE_IMPOSSIBLE_CASE(UnalignedStore)
       DECLARE_IMPOSSIBLE_CASE(Int32PairAdd)
@@ -250,6 +253,8 @@ class Typer::Visitor : public Reducer {
       DECLARE_IMPOSSIBLE_CASE(Word32PairSar)
       DECLARE_IMPOSSIBLE_CASE(ProtectedLoad)
       DECLARE_IMPOSSIBLE_CASE(ProtectedStore)
+      DECLARE_IMPOSSIBLE_CASE(LoadTrapOnNull)
+      DECLARE_IMPOSSIBLE_CASE(StoreTrapOnNull)
       DECLARE_IMPOSSIBLE_CASE(MemoryBarrier)
       DECLARE_IMPOSSIBLE_CASE(SignExtendWord8ToInt32)
       DECLARE_IMPOSSIBLE_CASE(SignExtendWord16ToInt32)
@@ -302,6 +307,7 @@ class Typer::Visitor : public Reducer {
 
   Zone* zone() { return typer_->zone(); }
   Graph* graph() { return typer_->graph(); }
+  JSHeapBroker* broker() { return typer_->broker(); }
 
   void SetWeakened(NodeId node_id) { weakened_nodes_.insert(node_id); }
   bool IsWeakened(NodeId node_id) {
@@ -354,6 +360,7 @@ class Typer::Visitor : public Reducer {
   SIMPLIFIED_BIGINT_UNOP_LIST(DECLARE_METHOD)
   SIMPLIFIED_SPECULATIVE_NUMBER_UNOP_LIST(DECLARE_METHOD)
   SIMPLIFIED_SPECULATIVE_BIGINT_UNOP_LIST(DECLARE_METHOD)
+  DECLARE_METHOD(ChangeUint32ToUint64)
 #undef DECLARE_METHOD
 #define DECLARE_METHOD(Name)                       \
   static Type Name(Type lhs, Type rhs, Typer* t) { \
@@ -387,6 +394,7 @@ class Typer::Visitor : public Reducer {
   SIMPLIFIED_BIGINT_UNOP_LIST(DECLARE_METHOD)
   SIMPLIFIED_SPECULATIVE_NUMBER_UNOP_LIST(DECLARE_METHOD)
   SIMPLIFIED_SPECULATIVE_BIGINT_UNOP_LIST(DECLARE_METHOD)
+  DECLARE_METHOD(ChangeUint32ToUint64)
 #undef DECLARE_METHOD
   static Type ObjectIsArrayBufferView(Type, Typer*);
   static Type ObjectIsBigInt(Type, Typer*);
@@ -739,7 +747,7 @@ Type Typer::Visitor::ObjectIsConstructor(Type type, Typer* t) {
   // TODO(turbofan): Introduce a Type::Constructor?
   CHECK(!type.IsNone());
   if (type.IsHeapConstant() &&
-      type.AsHeapConstant()->Ref().map().is_constructor()) {
+      type.AsHeapConstant()->Ref().map(t->broker()).is_constructor()) {
     return t->singleton_true_;
   }
   if (!type.Maybe(Type::Callable())) return t->singleton_false_;
@@ -1081,6 +1089,24 @@ bool Typer::Visitor::InductionVariablePhiTypeIsPrefixedPoint(
   if (arith_type.IsNone()) {
     type = Type::None();
   } else {
+    // We support a few additional type conversions on the lhs of the arithmetic
+    // operation. This needs to be kept in sync with the corresponding code in
+    // {LoopVariableOptimizer::TryGetInductionVariable}.
+    Node* arith_input = arith->InputAt(0);
+    switch (arith_input->opcode()) {
+      case IrOpcode::kSpeculativeToNumber:
+        type = typer_->operation_typer_.SpeculativeToNumber(type);
+        break;
+      case IrOpcode::kJSToNumber:
+        type = typer_->operation_typer_.ToNumber(type);
+        break;
+      case IrOpcode::kJSToNumberConvertBigInt:
+        type = typer_->operation_typer_.ToNumberConvertBigInt(type);
+        break;
+      default:
+        break;
+    }
+
     // Apply ordinary typing to the "increment" operation.
     // clang-format off
     switch (arith->opcode()) {
@@ -1190,8 +1216,6 @@ Type Typer::Visitor::TypeTypeGuard(Node* node) {
   Type const type = Operand(node, 0);
   return typer_->operation_typer()->TypeTypeGuard(node->op(), type);
 }
-
-Type Typer::Visitor::TypeFoldConstant(Node* node) { return Operand(node, 0); }
 
 Type Typer::Visitor::TypeDead(Node* node) { return Type::None(); }
 Type Typer::Visitor::TypeDeadValue(Node* node) { return Type::None(); }
@@ -1430,7 +1454,7 @@ Type Typer::Visitor::TypeJSCreateGeneratorObject(Node* node) {
 
 Type Typer::Visitor::TypeJSCreateClosure(Node* node) {
   SharedFunctionInfoRef shared =
-      JSCreateClosureNode{node}.Parameters().shared_info(typer_->broker());
+      JSCreateClosureNode{node}.Parameters().shared_info();
   if (IsClassConstructor(shared.kind())) {
     return Type::ClassConstructor();
   } else {
@@ -1504,7 +1528,7 @@ Type Typer::Visitor::TypeJSLoadNamed(Node* node) {
   // is not a private brand here. Otherwise Type::NonInternal() is wrong.
   JSLoadNamedNode n(node);
   NamedAccess const& p = n.Parameters();
-  DCHECK(!p.name(typer_->broker()).object()->IsPrivateBrand());
+  DCHECK(!p.name().object()->IsPrivateBrand());
 #endif
   return Type::NonInternal();
 }
@@ -1712,10 +1736,10 @@ Type Typer::Visitor::JSCallTyper(Type fun, Typer* t) {
     return Type::NonInternal();
   }
   JSFunctionRef function = fun.AsHeapConstant()->Ref().AsJSFunction();
-  if (!function.shared().HasBuiltinId()) {
+  if (!function.shared(t->broker()).HasBuiltinId()) {
     return Type::NonInternal();
   }
-  switch (function.shared().builtin_id()) {
+  switch (function.shared(t->broker()).builtin_id()) {
     case Builtin::kMathRandom:
       return Type::PlainNumber();
     case Builtin::kMathFloor:
@@ -2349,7 +2373,7 @@ Type Typer::Visitor::TypeCheckNotTaggedHole(Node* node) {
 
 Type Typer::Visitor::TypeCheckClosure(Node* node) {
   FeedbackCellRef cell = MakeRef(typer_->broker(), FeedbackCellOf(node->op()));
-  base::Optional<SharedFunctionInfoRef> shared = cell.shared_function_info();
+  OptionalSharedFunctionInfoRef shared = cell.shared_function_info(broker());
   if (!shared.has_value()) return Type::Function();
 
   if (IsClassConstructor(shared->kind())) {
@@ -2575,9 +2599,7 @@ Type Typer::Visitor::TypeRuntimeAbort(Node* node) { UNREACHABLE(); }
 
 Type Typer::Visitor::TypeAssertType(Node* node) { UNREACHABLE(); }
 
-Type Typer::Visitor::TypeVerifyType(Node* node) {
-  return TypeOrNone(node->InputAt(0));
-}
+Type Typer::Visitor::TypeVerifyType(Node* node) { UNREACHABLE(); }
 
 Type Typer::Visitor::TypeCheckTurboshaftTypeOf(Node* node) {
   return TypeOrNone(node->InputAt(0));

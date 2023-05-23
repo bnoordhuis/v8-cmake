@@ -24,6 +24,7 @@
 #include "src/wasm/wasm-constants.h"
 #include "src/wasm/wasm-init-expr.h"
 #include "src/wasm/wasm-limits.h"
+#include "src/wasm/well-known-imports.h"
 
 namespace v8::internal {
 class WasmModuleObject;
@@ -35,6 +36,7 @@ using WasmName = base::Vector<const char>;
 
 struct AsmJsOffsets;
 class ErrorThrower;
+class WellKnownImportsList;
 
 // Reference to a string in the wire bytes.
 class WireBytesRef {
@@ -129,17 +131,26 @@ struct WasmElemSegment {
 
   // Construct an active segment.
   WasmElemSegment(ValueType type, uint32_t table_index,
-                  ConstantExpression offset, ElementType element_type)
+                  ConstantExpression offset, ElementType element_type,
+                  uint32_t element_count, uint32_t elements_wire_bytes_offset)
       : status(kStatusActive),
         type(type),
         table_index(table_index),
         offset(std::move(offset)),
-        element_type(element_type) {}
+        element_type(element_type),
+        element_count(element_count),
+        elements_wire_bytes_offset(elements_wire_bytes_offset) {}
 
   // Construct a passive or declarative segment, which has no table index or
   // offset.
-  WasmElemSegment(ValueType type, Status status, ElementType element_type)
-      : status(status), type(type), table_index(0), element_type(element_type) {
+  WasmElemSegment(ValueType type, Status status, ElementType element_type,
+                  uint32_t element_count, uint32_t elements_wire_bytes_offset)
+      : status(status),
+        type(type),
+        table_index(0),
+        element_type(element_type),
+        element_count(element_count),
+        elements_wire_bytes_offset(elements_wire_bytes_offset) {
     DCHECK_NE(status, kStatusActive);
   }
 
@@ -148,7 +159,9 @@ struct WasmElemSegment {
       : status(kStatusActive),
         type(kWasmBottom),
         table_index(0),
-        element_type(kFunctionIndexElements) {}
+        element_type(kFunctionIndexElements),
+        element_count(0),
+        elements_wire_bytes_offset(0) {}
 
   WasmElemSegment(const WasmElemSegment&) = delete;
   WasmElemSegment(WasmElemSegment&&) V8_NOEXCEPT = default;
@@ -160,7 +173,8 @@ struct WasmElemSegment {
   uint32_t table_index;
   ConstantExpression offset;
   ElementType element_type;
-  std::vector<ConstantExpression> entries;
+  uint32_t element_count;
+  uint32_t elements_wire_bytes_offset;
 };
 
 // Static representation of a wasm import.
@@ -304,7 +318,7 @@ class V8_EXPORT_PRIVATE LazilyGeneratedNames {
 
 class V8_EXPORT_PRIVATE AsmJsOffsetInformation {
  public:
-  explicit AsmJsOffsetInformation(base::Vector<const byte> encoded_offsets);
+  explicit AsmJsOffsetInformation(base::Vector<const uint8_t> encoded_offsets);
 
   // Destructor defined in wasm-module.cc, where the definition of
   // {AsmJsOffsets} is available.
@@ -488,7 +502,20 @@ struct FunctionTypeFeedback {
 struct TypeFeedbackStorage {
   std::unordered_map<uint32_t, FunctionTypeFeedback> feedback_for_function;
   // Accesses to {feedback_for_function} are guarded by this mutex.
-  mutable base::Mutex mutex;
+  // Multiple reads are allowed (shared lock), but only exclusive writes.
+  // Currently known users of the mutex are:
+  // - LiftoffCompiler: writes {call_targets}.
+  // - TransitiveTypeFeedbackProcessor: reads {call_targets},
+  //   writes {feedback_vector}, reads {feedback_vector.size()}.
+  // - TriggerTierUp: increments {tierup_priority}.
+  // - WasmGraphBuilder: reads {feedback_vector}.
+  // - Feedback vector allocation: reads {call_targets.size()}.
+  // - PGO ProfileGenerator: reads everything.
+  // - PGO deserializer: writes everything, currently not locked, relies on
+  //   being called before multi-threading enters the picture.
+  mutable base::SharedMutex mutex;
+
+  WellKnownImportsList well_known_imports;
 };
 
 struct WasmTable;
@@ -545,6 +572,10 @@ struct V8_EXPORT_PRIVATE WasmModule {
   BranchHintInfo branch_hints;
   // Pairs of module offsets and mark id.
   std::vector<std::pair<uint32_t, uint32_t>> inst_traces;
+
+  // This is the only member of {WasmModule} where we store dynamic information
+  // that's not a decoded representation of the wire bytes.
+  // TODO(jkummerow): Rename.
   mutable TypeFeedbackStorage type_feedback;
 
   const ModuleOrigin origin;
@@ -729,12 +760,12 @@ V8_EXPORT_PRIVATE int GetSubtypingDepth(const WasmModule* module,
 // It is illegal for anyone receiving a ModuleWireBytes to store pointers based
 // on module_bytes, as this storage is only guaranteed to be alive as long as
 // this struct is alive.
-// As {ModuleWireBytes} is just a wrapper around a {base::Vector<const byte>},
-// it should generally be passed by value.
+// As {ModuleWireBytes} is just a wrapper around a {base::Vector<const
+// uint8_t>}, it should generally be passed by value.
 struct V8_EXPORT_PRIVATE ModuleWireBytes {
-  explicit ModuleWireBytes(base::Vector<const byte> module_bytes)
+  explicit ModuleWireBytes(base::Vector<const uint8_t> module_bytes)
       : module_bytes_(module_bytes) {}
-  ModuleWireBytes(const byte* start, const byte* end)
+  ModuleWireBytes(const uint8_t* start, const uint8_t* end)
       : module_bytes_(start, static_cast<int>(end - start)) {
     DCHECK_GE(kMaxInt, end - start);
   }
@@ -751,19 +782,19 @@ struct V8_EXPORT_PRIVATE ModuleWireBytes {
     return ref.offset() <= size && ref.length() <= size - ref.offset();
   }
 
-  base::Vector<const byte> GetFunctionBytes(
+  base::Vector<const uint8_t> GetFunctionBytes(
       const WasmFunction* function) const {
     return module_bytes_.SubVector(function->code.offset(),
                                    function->code.end_offset());
   }
 
-  base::Vector<const byte> module_bytes() const { return module_bytes_; }
-  const byte* start() const { return module_bytes_.begin(); }
-  const byte* end() const { return module_bytes_.end(); }
+  base::Vector<const uint8_t> module_bytes() const { return module_bytes_; }
+  const uint8_t* start() const { return module_bytes_.begin(); }
+  const uint8_t* end() const { return module_bytes_.end(); }
   size_t length() const { return module_bytes_.length(); }
 
  private:
-  base::Vector<const byte> module_bytes_;
+  base::Vector<const uint8_t> module_bytes_;
 };
 ASSERT_TRIVIALLY_COPYABLE(ModuleWireBytes);
 
@@ -831,7 +862,7 @@ class TruncatedUserString {
   explicit TruncatedUserString(base::Vector<T> name)
       : TruncatedUserString(name.begin(), name.length()) {}
 
-  TruncatedUserString(const byte* start, size_t len)
+  TruncatedUserString(const uint8_t* start, size_t len)
       : TruncatedUserString(reinterpret_cast<const char*>(start), len) {}
 
   TruncatedUserString(const char* start, size_t len)

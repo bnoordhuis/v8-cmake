@@ -56,6 +56,11 @@ constexpr auto StaticJSCallInterfaceDescriptor<DerivedDescriptor>::registers() {
   return CallInterfaceDescriptor::DefaultJSRegisterArray();
 }
 
+// static
+constexpr auto CompareNoContextDescriptor::registers() {
+  return CompareDescriptor::registers();
+}
+
 template <typename DerivedDescriptor>
 void StaticCallInterfaceDescriptor<DerivedDescriptor>::Initialize(
     CallInterfaceDescriptorData* data) {
@@ -386,7 +391,14 @@ constexpr auto BaselineLeaveFrameDescriptor::registers() {
 
 // static
 constexpr auto OnStackReplacementDescriptor::registers() {
+#if V8_TARGET_ARCH_MIPS64
+  return RegisterArray(kReturnRegister0, kJavaScriptCallArgCountRegister,
+                       kJavaScriptCallTargetRegister,
+                       kJavaScriptCallCodeStartRegister,
+                       kJavaScriptCallNewTargetRegister);
+#else
   return DefaultRegisterArray();
+#endif
 }
 
 // static

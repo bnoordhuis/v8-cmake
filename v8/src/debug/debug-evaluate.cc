@@ -96,7 +96,7 @@ MaybeHandle<Object> DebugEvaluate::Local(Isolate* isolate,
   DisableBreak disable_break_scope(isolate->debug());
 
   // Get the frame where the debugging is performed.
-  StackTraceFrameIterator it(isolate, frame_id);
+  DebuggableStackFrameIterator it(isolate, frame_id);
 #if V8_ENABLE_WEBASSEMBLY
   if (it.is_wasm()) {
     WasmFrame* frame = WasmFrame::cast(it.frame());
@@ -137,7 +137,7 @@ MaybeHandle<Object> DebugEvaluate::WithTopmostArguments(Isolate* isolate,
   // Handle the processing of break.
   DisableBreak disable_break_scope(isolate->debug());
   Factory* factory = isolate->factory();
-  JavaScriptFrameIterator it(isolate);
+  JavaScriptStackFrameIterator it(isolate);
 
   // Get context and receiver.
   Handle<Context> native_context(
@@ -524,6 +524,7 @@ bool BytecodeHasNoSideEffect(interpreter::Bytecode bytecode) {
     case Bytecode::kToNumber:
     case Bytecode::kToNumeric:
     case Bytecode::kToString:
+    case Bytecode::kToBoolean:
     // Misc.
     case Bytecode::kIncBlockCounter:  // Coverage counters.
     case Bytecode::kForInEnumerate:
@@ -916,6 +917,13 @@ DebugInfo::SideEffectState BuiltinGetSideEffectState(Builtin id) {
     case Builtin::kLocalePrototypeCaseFirst:
     case Builtin::kLocalePrototypeCollation:
     case Builtin::kLocalePrototypeCollations:
+    case Builtin::kLocalePrototypeGetCalendars:
+    case Builtin::kLocalePrototypeGetCollations:
+    case Builtin::kLocalePrototypeGetHourCycles:
+    case Builtin::kLocalePrototypeGetNumberingSystems:
+    case Builtin::kLocalePrototypeGetTextInfo:
+    case Builtin::kLocalePrototypeGetTimeZones:
+    case Builtin::kLocalePrototypeGetWeekInfo:
     case Builtin::kLocalePrototypeHourCycle:
     case Builtin::kLocalePrototypeHourCycles:
     case Builtin::kLocalePrototypeLanguage:
@@ -1067,8 +1075,9 @@ DebugInfo::SideEffectState DebugEvaluate::FunctionGetSideEffectState(
     return requires_runtime_checks ? DebugInfo::kRequiresRuntimeChecks
                                    : DebugInfo::kHasNoSideEffect;
   } else if (info->IsApiFunction()) {
-    if (info->GetCode().is_builtin()) {
-      return info->GetCode().builtin_id() == Builtin::kHandleApiCall
+    Code code = info->GetCode(isolate);
+    if (code.is_builtin()) {
+      return code.builtin_id() == Builtin::kHandleApiCall
                  ? DebugInfo::kHasNoSideEffect
                  : DebugInfo::kHasSideEffects;
     }
@@ -1233,17 +1242,15 @@ void DebugEvaluate::VerifyTransitiveBuiltins(Isolate* isolate) {
   for (Builtin caller = Builtins::kFirst; caller <= Builtins::kLast; ++caller) {
     DebugInfo::SideEffectState state = BuiltinGetSideEffectState(caller);
     if (state != DebugInfo::kHasNoSideEffect) continue;
-    InstructionStream code = FromCode(isolate->builtins()->code(caller));
+    Code code = isolate->builtins()->code(caller);
     int mode = RelocInfo::ModeMask(RelocInfo::CODE_TARGET) |
                RelocInfo::ModeMask(RelocInfo::RELATIVE_CODE_TARGET);
 
     for (RelocIterator it(code, mode); !it.done(); it.next()) {
       RelocInfo* rinfo = it.rinfo();
       DCHECK(RelocInfo::IsCodeTargetMode(rinfo->rmode()));
-      CodeLookupResult lookup_result =
-          isolate->heap()->GcSafeFindCodeForInnerPointer(
-              rinfo->target_address());
-      CHECK(lookup_result.IsFound());
+      Code lookup_result =
+          isolate->heap()->FindCodeForInnerPointer(rinfo->target_address());
       Builtin callee = lookup_result.builtin_id();
       if (BuiltinGetSideEffectState(callee) == DebugInfo::kHasNoSideEffect) {
         continue;

@@ -27,6 +27,8 @@
 
 #include <stdlib.h>
 
+#include "src/common/globals.h"
+
 #ifdef __linux__
 #include <errno.h>
 #include <fcntl.h>
@@ -41,6 +43,7 @@
 #include "src/handles/global-handles.h"
 #include "src/heap/mark-compact-inl.h"
 #include "src/heap/mark-compact.h"
+#include "src/heap/marking-inl.h"
 #include "src/init/v8.h"
 #include "src/objects/objects-inl.h"
 #include "test/cctest/cctest.h"
@@ -67,8 +70,8 @@ TEST(Promotion) {
 
     // Array should be in the new space.
     CHECK(heap->InSpace(*array, NEW_SPACE));
-    CcTest::CollectAllGarbage();
-    CcTest::CollectAllGarbage();
+    heap::CollectAllGarbage(heap);
+    heap::CollectAllGarbage(heap);
     CHECK(heap->InSpace(*array, OLD_SPACE));
   }
 }
@@ -119,7 +122,7 @@ HEAP_TEST(MarkCompactCollector) {
   Handle<JSGlobalObject> global(isolate->context().global_object(), isolate);
 
   // call mark-compact when heap is empty
-  CcTest::CollectGarbage(OLD_SPACE);
+  heap::CollectGarbage(heap, OLD_SPACE);
 
   AllocationResult allocation;
   if (!v8_flags.single_generation) {
@@ -129,7 +132,7 @@ HEAP_TEST(MarkCompactCollector) {
       allocation =
           AllocateFixedArrayForTest(heap, arraysize, AllocationType::kYoung);
     } while (!allocation.IsFailure());
-    CcTest::CollectGarbage(NEW_SPACE);
+    heap::CollectGarbage(heap, NEW_SPACE);
     AllocateFixedArrayForTest(heap, arraysize, AllocationType::kYoung)
         .ToObjectChecked();
   }
@@ -138,7 +141,7 @@ HEAP_TEST(MarkCompactCollector) {
   do {
     allocation = AllocateMapForTest(isolate);
   } while (!allocation.IsFailure());
-  CcTest::CollectGarbage(OLD_SPACE);
+  heap::CollectGarbage(heap, OLD_SPACE);
   AllocateMapForTest(isolate).ToObjectChecked();
 
   { HandleScope scope(isolate);
@@ -150,7 +153,7 @@ HEAP_TEST(MarkCompactCollector) {
     factory->NewJSObject(function);
   }
 
-  CcTest::CollectGarbage(OLD_SPACE);
+  heap::CollectGarbage(heap, OLD_SPACE);
 
   { HandleScope scope(isolate);
     Handle<String> func_name = factory->InternalizeUtf8String("theFunction");
@@ -168,7 +171,7 @@ HEAP_TEST(MarkCompactCollector) {
     Object::SetProperty(isolate, obj, prop_name, twenty_three).Check();
   }
 
-  CcTest::CollectGarbage(OLD_SPACE);
+  heap::CollectGarbage(heap, OLD_SPACE);
 
   { HandleScope scope(isolate);
     Handle<String> obj_name = factory->InternalizeUtf8String("theObject");
@@ -204,7 +207,7 @@ HEAP_TEST(DoNotEvacuatePinnedPages) {
   CHECK(heap->InSpace(*handles.front(), OLD_SPACE));
   page->SetFlag(MemoryChunk::PINNED);
 
-  CcTest::CollectAllGarbage();
+  heap::CollectAllGarbage(heap);
   heap->EnsureSweepingCompleted(Heap::SweepingForcedFinalizationMode::kV8Only);
 
   // The pinned flag should prevent the page from moving.
@@ -214,7 +217,7 @@ HEAP_TEST(DoNotEvacuatePinnedPages) {
 
   page->ClearFlag(MemoryChunk::PINNED);
 
-  CcTest::CollectAllGarbage();
+  heap::CollectAllGarbage(heap);
   heap->EnsureSweepingCompleted(Heap::SweepingForcedFinalizationMode::kV8Only);
 
   // `compact_on_every_full_gc` ensures that this page is an evacuation
@@ -222,86 +225,6 @@ HEAP_TEST(DoNotEvacuatePinnedPages) {
   for (Handle<FixedArray> object : handles) {
     CHECK_NE(page, Page::FromHeapObject(*object));
   }
-}
-
-HEAP_TEST(ObjectStartBitmap) {
-#ifdef V8_ENABLE_INNER_POINTER_RESOLUTION_OSB
-  CcTest::InitializeVM();
-  Isolate* isolate = CcTest::i_isolate();
-  v8::HandleScope sc(CcTest::isolate());
-
-  Heap* heap = isolate->heap();
-  heap::SealCurrentObjects(heap);
-
-  auto* factory = isolate->factory();
-
-  Handle<HeapObject> h1 = factory->NewStringFromStaticChars("hello");
-  Handle<HeapObject> h2 = factory->NewStringFromStaticChars("world");
-
-  HeapObject obj1 = *h1;
-  HeapObject obj2 = *h2;
-  Page* page1 = Page::FromHeapObject(obj1);
-  Page* page2 = Page::FromHeapObject(obj2);
-
-  CHECK(page1->object_start_bitmap()->CheckBit(obj1.address()));
-  CHECK(page2->object_start_bitmap()->CheckBit(obj2.address()));
-
-  {
-    // We need a safepoint for calling FindBasePtr.
-    IsolateSafepointScope scope(heap);
-
-    for (int k = 0; k < obj1.Size(); ++k) {
-      Address obj1_inner_ptr = obj1.address() + k;
-      CHECK_EQ(obj1.address(),
-               page1->object_start_bitmap()->FindBasePtr(obj1_inner_ptr));
-    }
-    for (int k = 0; k < obj2.Size(); ++k) {
-      Address obj2_inner_ptr = obj2.address() + k;
-      CHECK_EQ(obj2.address(),
-               page2->object_start_bitmap()->FindBasePtr(obj2_inner_ptr));
-    }
-  }
-
-  // TODO(v8:12851): Patch the location of handle h2 with an inner pointer.
-  // For now, garbage collection doesn't work with inner pointers in handles,
-  // so we're sticking to a zero offset.
-  const size_t offset = 0;
-  h2.PatchValue(String::FromAddress(h2->address() + offset));
-
-  CcTest::CollectAllGarbage();
-
-  obj1 = *h1;
-  obj2 = HeapObject::FromAddress(h2->address() - offset);
-  page1 = Page::FromHeapObject(obj1);
-  page2 = Page::FromHeapObject(obj2);
-
-  CHECK(obj1.IsString());
-  CHECK(obj2.IsString());
-
-  // Bits set in the object_start_bitmap are not preserved when objects are
-  // evacuated.
-  CHECK(!page1->object_start_bitmap()->CheckBit(obj1.address()));
-  CHECK(!page2->object_start_bitmap()->CheckBit(obj2.address()));
-
-  {
-    // We need a safepoint for calling FindBasePtr.
-    IsolateSafepointScope scope(heap);
-
-    // After FindBasePtr, the bits should be properly set again.
-    for (int k = 0; k < obj1.Size(); ++k) {
-      Address obj1_inner_ptr = obj1.address() + k;
-      CHECK_EQ(obj1.address(),
-               page1->object_start_bitmap()->FindBasePtr(obj1_inner_ptr));
-    }
-    CHECK(page1->object_start_bitmap()->CheckBit(obj1.address()));
-    for (int k = obj2.Size() - 1; k >= 0; --k) {
-      Address obj2_inner_ptr = obj2.address() + k;
-      CHECK_EQ(obj2.address(),
-               page2->object_start_bitmap()->FindBasePtr(obj2_inner_ptr));
-    }
-    CHECK(page2->object_start_bitmap()->CheckBit(obj2.address()));
-  }
-#endif  // V8_ENABLE_INNER_POINTER_RESOLUTION_OSB
 }
 
 #if defined(__has_feature)
@@ -422,7 +345,7 @@ TEST(Regress5829) {
   }
   CHECK(marking->IsMarking() || marking->IsStopped());
   if (marking->IsStopped()) {
-    heap->StartIncrementalMarking(i::Heap::kNoGCFlags,
+    heap->StartIncrementalMarking(i::GCFlag::kNoFlags,
                                   i::GarbageCollectionReason::kTesting);
   }
   CHECK(marking->IsMarking());
@@ -435,9 +358,7 @@ TEST(Regress5829) {
   heap->CreateFillerObjectAt(old_end - kTaggedSize, kTaggedSize);
   heap->old_space()->FreeLinearAllocationArea();
   Page* page = Page::FromAddress(array->address());
-  MarkingState* marking_state = heap->marking_state();
-  for (auto object_and_size :
-       LiveObjectRange<kGreyObjects>(page, marking_state->bitmap(page))) {
+  for (auto object_and_size : LiveObjectRange(page)) {
     CHECK(!object_and_size.first.IsFreeSpaceOrFiller());
   }
 }

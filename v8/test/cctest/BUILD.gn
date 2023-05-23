@@ -104,8 +104,6 @@ v8_source_set("cctest_sources") {
     "heap/test-external-string-tracker.cc",
     "heap/test-heap.cc",
     "heap/test-incremental-marking.cc",
-    "heap/test-invalidated-slots.cc",
-    "heap/test-iterators.cc",
     "heap/test-mark-compact.cc",
     "heap/test-memory-measurement.cc",
     "heap/test-spaces.cc",
@@ -147,6 +145,7 @@ v8_source_set("cctest_sources") {
     "test-property-details.cc",
     "test-ptr-compr-cage.cc",
     "test-random-number-generator.cc",
+    "test-regexp.cc",
     "test-sampler-api.cc",
     "test-shared-strings.cc",
     "test-smi-lexicographic-compare.cc",
@@ -338,7 +337,6 @@ v8_source_set("cctest_sources") {
       "wasm/test-run-wasm-atomics64.cc",
       "wasm/test-run-wasm-bulk-memory.cc",
       "wasm/test-run-wasm-exceptions.cc",
-      "wasm/test-run-wasm-interpreter.cc",
       "wasm/test-run-wasm-js.cc",
       "wasm/test-run-wasm-memory64.cc",
       "wasm/test-run-wasm-module.cc",
@@ -376,7 +374,7 @@ v8_source_set("cctest_sources") {
 
   if (v8_enable_i18n_support) {
     defines += [ "V8_INTL_SUPPORT" ]
-    public_deps += [ "//third_party/icu" ]
+    public_deps += [ v8_icu_path ]
   }
 
   cflags = []

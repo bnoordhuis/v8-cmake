@@ -1,9 +1,9 @@
 [
   {
     "url": "https://chromium.googlesource.com/v8/v8.git",
-    "commit": "09464881ae235f5218b5f6f30b3adac0107008d4",
+    "commit": "07c05c4b8c5e8916e604c09692d7b6e1813c606e",
     "/* comment */": "Dependency v8 must be first.",
-    "branch": "branch-heads/11.1",
+    "branch": "branch-heads/11.5",
     "path": ""
   },
   {
@@ -20,13 +20,13 @@
   },
   {
     "url": "https://chromium.googlesource.com/chromium/src/base/trace_event/common.git",
-    "commit": "68e6038b5350cba18c341cc7c572170af5c5b20c",
+    "commit": "147f65333c38ddd1ebf554e89965c243c8ce50b3",
     "branch": "master",
     "path": "base/trace_event/common"
   },
   {
     "url": "https://chromium.googlesource.com/chromium/src/third_party/zlib.git",
-    "commit": "dca2b915e29ee8d0bb25cd44a84b32e67c8cabd0",
+    "commit": "14dd4c4455602c9b71a1a89b5cafd1f4030d2e3f",
     "branch": "master",
     "path": "third_party/zlib"
   },

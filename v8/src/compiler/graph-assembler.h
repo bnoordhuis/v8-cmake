@@ -361,6 +361,7 @@ class V8_EXPORT_PRIVATE GraphAssembler {
   TNode<UintPtrT> UintPtrAdd(TNode<UintPtrT> left, TNode<UintPtrT> right);
   TNode<UintPtrT> UintPtrSub(TNode<UintPtrT> left, TNode<UintPtrT> right);
   TNode<UintPtrT> UintPtrDiv(TNode<UintPtrT> left, TNode<UintPtrT> right);
+  TNode<UintPtrT> ChangeUint32ToUintPtr(SloppyTNode<Uint32T> value);
 
 #ifdef V8_MAP_PACKING
   Node* PackMapWord(TNode<Map> map);
@@ -413,9 +414,13 @@ class V8_EXPORT_PRIVATE GraphAssembler {
   Node* ProtectedStore(MachineRepresentation rep, Node* object, Node* offset,
                        Node* value);
   Node* ProtectedLoad(MachineType type, Node* object, Node* offset);
+  Node* LoadTrapOnNull(MachineType type, Node* object, Node* offset);
+  Node* StoreTrapOnNull(StoreRepresentation rep, Node* object, Node* offset,
+                        Node* value);
 
   Node* Retain(Node* buffer);
   Node* IntPtrAdd(Node* a, Node* b);
+  Node* IntPtrSub(Node* a, Node* b);
 
   Node* DeoptimizeIf(DeoptimizeReason reason, FeedbackSource const& feedback,
                      Node* condition, Node* frame_state);
@@ -938,11 +943,13 @@ class V8_EXPORT_PRIVATE JSGraphAssembler : public GraphAssembler {
   // Constructs a JSGraphAssembler. If {schedule} is not null, the graph
   // assembler will maintain the schedule as it updates blocks.
   JSGraphAssembler(
-      JSGraph* jsgraph, Zone* zone, BranchSemantics branch_semantics,
+      JSHeapBroker* broker, JSGraph* jsgraph, Zone* zone,
+      BranchSemantics branch_semantics,
       base::Optional<NodeChangedCallback> node_changed_callback = base::nullopt,
       bool mark_loop_exits = false)
       : GraphAssembler(jsgraph, zone, branch_semantics, node_changed_callback,
                        mark_loop_exits),
+        broker_(broker),
         jsgraph_(jsgraph),
         outermost_catch_scope_(CatchScope::Outermost(zone)),
         catch_scope_(&outermost_catch_scope_) {
@@ -951,7 +958,7 @@ class V8_EXPORT_PRIVATE JSGraphAssembler : public GraphAssembler {
 
   Node* SmiConstant(int32_t value);
   TNode<HeapObject> HeapConstant(Handle<HeapObject> object);
-  TNode<Object> Constant(const ObjectRef& ref);
+  TNode<Object> Constant(ObjectRef ref);
   TNode<Number> NumberConstant(double value);
   Node* CEntryStubConstant(int result_size);
 
@@ -1049,7 +1056,9 @@ class V8_EXPORT_PRIVATE JSGraphAssembler : public GraphAssembler {
   TNode<Object> JSCallRuntime2(Runtime::FunctionId function_id,
                                TNode<Object> arg0, TNode<Object> arg1,
                                TNode<Context> context, FrameState frame_state);
+  Node* Chained(const Operator* op, Node* input);
 
+  JSHeapBroker* broker() const { return broker_; }
   JSGraph* jsgraph() const { return jsgraph_; }
   Isolate* isolate() const { return jsgraph()->isolate(); }
   SimplifiedOperatorBuilder* simplified() override {
@@ -1371,6 +1380,7 @@ class V8_EXPORT_PRIVATE JSGraphAssembler : public GraphAssembler {
   Operator const* PlainPrimitiveToNumberOperator();
 
  private:
+  JSHeapBroker* broker_;
   JSGraph* jsgraph_;
   SetOncePointer<Operator const> to_number_operator_;
 

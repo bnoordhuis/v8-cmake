@@ -26,6 +26,7 @@ struct WasmLoopInfo;
 
 namespace wasm {
 
+class AssumptionsJournal;
 struct FunctionBody;
 class WasmFeatures;
 struct WasmModule;
@@ -55,14 +56,14 @@ struct DanglingExceptions {
   size_t Size() const { return exception_values.size(); }
 };
 
-V8_EXPORT_PRIVATE DecodeResult
-BuildTFGraph(AccountingAllocator* allocator, const WasmFeatures& enabled,
-             const WasmModule* module, compiler::WasmGraphBuilder* builder,
-             WasmFeatures* detected, const FunctionBody& body,
-             std::vector<compiler::WasmLoopInfo>* loop_infos,
-             DanglingExceptions* dangling_exceptions,
-             compiler::NodeOriginTable* node_origins, int func_index,
-             InlinedStatus inlined_status);
+V8_EXPORT_PRIVATE void BuildTFGraph(
+    AccountingAllocator* allocator, const WasmFeatures& enabled,
+    const WasmModule* module, compiler::WasmGraphBuilder* builder,
+    WasmFeatures* detected, const FunctionBody& body,
+    std::vector<compiler::WasmLoopInfo>* loop_infos,
+    DanglingExceptions* dangling_exceptions,
+    compiler::NodeOriginTable* node_origins, int func_index,
+    AssumptionsJournal* assumptions, InlinedStatus inlined_status);
 
 }  // namespace wasm
 }  // namespace internal

@@ -367,7 +367,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   // This sets the branch destination (which is in the constant pool on ARM).
   // This is for calls and branches within generated code.
   inline static void deserialization_set_special_target_at(
-      Address constant_pool_entry, InstructionStream code, Address target);
+      Address constant_pool_entry, Code code, Address target);
 
   // Get the size of the special target encoded at 'location'.
   inline static int deserialization_special_target_size(Address location);
@@ -1093,11 +1093,9 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   // called before any use of db/dd/dq/dp to ensure that constant pools
   // are not emitted as part of the tables generated.
   void db(uint8_t data);
-  void dd(uint32_t data, RelocInfo::Mode rmode = RelocInfo::NO_INFO);
-  void dq(uint64_t data, RelocInfo::Mode rmode = RelocInfo::NO_INFO);
-  void dp(uintptr_t data, RelocInfo::Mode rmode = RelocInfo::NO_INFO) {
-    dd(data, rmode);
-  }
+  void dd(uint32_t data);
+  void dq(uint64_t data);
+  void dp(uintptr_t data) { dd(data); }
 
   // Read/patch instructions
   Instr instr_at(int pos) {
@@ -1360,7 +1358,7 @@ class EnsureSpace {
 
 class PatchingAssembler : public Assembler {
  public:
-  PatchingAssembler(const AssemblerOptions& options, byte* address,
+  PatchingAssembler(const AssemblerOptions& options, uint8_t* address,
                     int instructions);
   ~PatchingAssembler();
 
@@ -1379,11 +1377,20 @@ class PatchingAssembler : public Assembler {
 // constructors. We do not have assertions for this.
 class V8_EXPORT_PRIVATE V8_NODISCARD UseScratchRegisterScope {
  public:
-  explicit UseScratchRegisterScope(Assembler* assembler);
-  ~UseScratchRegisterScope();
+  explicit UseScratchRegisterScope(Assembler* assembler)
+      : assembler_(assembler),
+        old_available_(*assembler->GetScratchRegisterList()),
+        old_available_vfp_(*assembler->GetScratchVfpRegisterList()) {}
+
+  ~UseScratchRegisterScope() {
+    *assembler_->GetScratchRegisterList() = old_available_;
+    *assembler_->GetScratchVfpRegisterList() = old_available_vfp_;
+  }
 
   // Take a register from the list and return it.
-  Register Acquire();
+  Register Acquire() {
+    return assembler_->GetScratchRegisterList()->PopFirst();
+  }
   SwVfpRegister AcquireS() { return AcquireVfp<SwVfpRegister>(); }
   LowDwVfpRegister AcquireLowD() { return AcquireVfp<LowDwVfpRegister>(); }
   DwVfpRegister AcquireD() {
@@ -1435,7 +1442,7 @@ class V8_EXPORT_PRIVATE V8_NODISCARD UseScratchRegisterScope {
 
  private:
   friend class Assembler;
-  friend class TurboAssembler;
+  friend class MacroAssembler;
 
   template <typename T>
   bool CanAcquireVfp() const;

@@ -133,7 +133,7 @@ void LazilyGeneratedNames::AddForTesting(int function_index,
 }
 
 AsmJsOffsetInformation::AsmJsOffsetInformation(
-    base::Vector<const byte> encoded_offsets)
+    base::Vector<const uint8_t> encoded_offsets)
     : encoded_offsets_(base::OwnedVector<const uint8_t>::Of(encoded_offsets)) {}
 
 AsmJsOffsetInformation::~AsmJsOffsetInformation() = default;
@@ -297,7 +297,7 @@ Handle<JSObject> GetTypeForGlobal(Isolate* isolate, bool is_mutable,
   Handle<JSFunction> object_function = isolate->object_function();
   Handle<JSObject> object = factory->NewJSObject(object_function);
   Handle<String> mutable_string = factory->InternalizeUtf8String("mutable");
-  Handle<String> value_string = factory->InternalizeUtf8String("value");
+  Handle<String> value_string = factory->value_string();
   JSObject::AddProperty(isolate, object, mutable_string,
                         factory->ToBoolean(is_mutable), NONE);
   JSObject::AddProperty(isolate, object, value_string,
@@ -338,7 +338,7 @@ Handle<JSObject> GetTypeForTable(Isolate* isolate, ValueType type,
 
   Handle<JSFunction> object_function = isolate->object_function();
   Handle<JSObject> object = factory->NewJSObject(object_function);
-  Handle<String> element_string = factory->InternalizeUtf8String("element");
+  Handle<String> element_string = factory->element_string();
   Handle<String> minimum_string = factory->InternalizeUtf8String("minimum");
   Handle<String> maximum_string = factory->InternalizeUtf8String("maximum");
   JSObject::AddProperty(isolate, object, element_string, element, NONE);
@@ -358,14 +358,14 @@ Handle<JSArray> GetImports(Isolate* isolate,
   Factory* factory = isolate->factory();
 
   Handle<String> module_string = factory->InternalizeUtf8String("module");
-  Handle<String> name_string = factory->InternalizeUtf8String("name");
+  Handle<String> name_string = factory->name_string();
   Handle<String> kind_string = factory->InternalizeUtf8String("kind");
   Handle<String> type_string = factory->InternalizeUtf8String("type");
 
-  Handle<String> function_string = factory->InternalizeUtf8String("function");
+  Handle<String> function_string = factory->function_string();
   Handle<String> table_string = factory->InternalizeUtf8String("table");
   Handle<String> memory_string = factory->InternalizeUtf8String("memory");
-  Handle<String> global_string = factory->InternalizeUtf8String("global");
+  Handle<String> global_string = factory->global_string();
   Handle<String> tag_string = factory->InternalizeUtf8String("tag");
 
   // Create the result array.
@@ -458,14 +458,14 @@ Handle<JSArray> GetExports(Isolate* isolate,
   auto enabled_features = i::wasm::WasmFeatures::FromIsolate(isolate);
   Factory* factory = isolate->factory();
 
-  Handle<String> name_string = factory->InternalizeUtf8String("name");
+  Handle<String> name_string = factory->name_string();
   Handle<String> kind_string = factory->InternalizeUtf8String("kind");
   Handle<String> type_string = factory->InternalizeUtf8String("type");
 
-  Handle<String> function_string = factory->InternalizeUtf8String("function");
+  Handle<String> function_string = factory->function_string();
   Handle<String> table_string = factory->InternalizeUtf8String("table");
   Handle<String> memory_string = factory->InternalizeUtf8String("memory");
-  Handle<String> global_string = factory->InternalizeUtf8String("global");
+  Handle<String> global_string = factory->global_string();
   Handle<String> tag_string = factory->InternalizeUtf8String("tag");
 
   // Create the result array.
@@ -599,8 +599,8 @@ Handle<JSArray> GetCustomSections(Isolate* isolate,
   return array_object;
 }
 
-// Get the source position from a given function index and byte offset,
-// for either asm.js or pure Wasm modules.
+// Get the source position from a given function index and wire bytes offset
+// (relative to the function entry), for either asm.js or pure Wasm modules.
 int GetSourcePosition(const WasmModule* module, uint32_t func_index,
                       uint32_t byte_offset, bool is_at_number_conversion) {
   DCHECK_EQ(is_asmjs_module(module),
@@ -666,10 +666,8 @@ size_t GetWireBytesHash(base::Vector<const uint8_t> wire_bytes) {
 }
 
 int NumFeedbackSlots(const WasmModule* module, int func_index) {
-  if (!v8_flags.wasm_speculative_inlining) return 0;
-  // TODO(clemensb): Avoid the mutex once this ships, or at least switch to a
-  // shared mutex.
-  base::MutexGuard type_feedback_guard{&module->type_feedback.mutex};
+  base::SharedMutexGuard<base::kShared> type_feedback_guard{
+      &module->type_feedback.mutex};
   auto it = module->type_feedback.feedback_for_function.find(func_index);
   if (it == module->type_feedback.feedback_for_function.end()) return 0;
   // The number of call instructions is capped by max function size.

@@ -367,8 +367,8 @@ class RegExpClassRanges final : public RegExpTree {
 };
 
 struct CharacterClassStringLess {
-  bool operator()(const base::Vector<const base::uc32>& lhs,
-                  const base::Vector<const base::uc32>& rhs) const {
+  bool operator()(base::Vector<const base::uc32> lhs,
+                  base::Vector<const base::uc32> rhs) const {
     // Longer strings first so we generate matches for the largest string
     // possible.
     if (lhs.length() != rhs.length()) {
@@ -413,9 +413,12 @@ class RegExpClassSetOperand final : public RegExpTree {
   void Subtract(RegExpClassSetOperand* other,
                 ZoneList<CharacterRange>* temp_ranges, Zone* zone);
 
-  bool has_strings() const { return !strings_->empty(); }
+  bool has_strings() const { return strings_ != nullptr && !strings_->empty(); }
   ZoneList<CharacterRange>* ranges() { return ranges_; }
-  CharacterClassStrings* strings() { return strings_; }
+  CharacterClassStrings* strings() {
+    DCHECK_NOT_NULL(strings_);
+    return strings_;
+  }
 
  private:
   ZoneList<CharacterRange>* ranges_;
@@ -433,6 +436,10 @@ class RegExpClassSetExpression final : public RegExpTree {
                            ZoneList<RegExpTree*>* operands);
 
   DECL_BOILERPLATE(ClassSetExpression);
+
+  // Create an empty class set expression (matches everything if |is_negated|,
+  // nothing otherwise).
+  static RegExpClassSetExpression* Empty(Zone* zone, bool is_negated);
 
   bool IsTextElement() override { return true; }
   int min_match() override { return 0; }

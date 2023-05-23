@@ -18,7 +18,6 @@ extern class WasmInstanceObject extends JSObject;
 // a sandboxed pointer, because that would require having access to the isolate
 // root in the first place.
 extern class WasmApiFunctionRef extends HeapObject {
-  isolate_root: RawPtr;
   native_context: NativeContext;
   callable: JSReceiver|Undefined;
   // Present when compiling JSFastApiCall wrappers, needed
@@ -41,6 +40,8 @@ extern class WasmInternalFunction extends HeapObject {
   external: JSFunction|Undefined;
   // This field is used when the call target is null.
   code: Code;
+  // The function index if ref is a WasmInstanceObject, -1 otherwise.
+  function_index: Smi;
   // The call target. Tagged with the kWasmInternalFunctionCallTargetTag
   call_target: ExternalPointer;
 }
@@ -75,13 +76,11 @@ extern class WasmExportedFunctionData extends WasmFunctionData {
 extern class WasmJSFunctionData extends WasmFunctionData {
   serialized_return_count: Smi;
   serialized_parameter_count: Smi;
-  // TODO(7748): Maybe store the canonical type index of the signature instead.
   serialized_signature: PodArrayOfWasmValueType;
 }
 
 extern class WasmCapiFunctionData extends WasmFunctionData {
   embedder_data: Foreign;  // Managed<wasm::FuncData>
-  // TODO(7748): Maybe store the canonical type index of the signature instead.
   serialized_signature: PodArrayOfWasmValueType;
 }
 
@@ -91,13 +90,12 @@ extern class WasmResumeData extends HeapObject {
 }
 
 extern class WasmIndirectFunctionTable extends Struct {
+  sig_ids: ByteArray;
+  targets: ByteArray;
+  refs: FixedArray;
   size: uint32;
   @if(TAGGED_SIZE_8_BYTES) optional_padding: uint32;
   @ifnot(TAGGED_SIZE_8_BYTES) optional_padding: void;
-  sig_ids: RawPtr;
-  targets: RawPtr;
-  managed_native_allocations: Foreign|Undefined;
-  refs: FixedArray;
 }
 
 extern class WasmContinuationObject extends HeapObject {
@@ -112,6 +110,12 @@ extern class WasmSuspenderObject extends JSObject {
   resume: JSObject|Undefined;
   reject: JSObject|Undefined;
   state: Smi;  // 0: Inactive, 1: Active, 2: Suspended.
+  // Number of Wasm-to-JS frames in this suspender's stack.
+  // If the value is non-zero, this means that there are JS frames on the stack
+  // and trying to suspend should trap.
+  wasm_to_js_counter: uint32;
+  @if(TAGGED_SIZE_8_BYTES) optional_padding: uint32;
+  @ifnot(TAGGED_SIZE_8_BYTES) optional_padding: void;
 }
 
 extern class WasmExceptionTag extends Struct {
@@ -219,4 +223,12 @@ extern class WasmArray extends WasmObject {
 class WasmStringViewIter extends HeapObject {
   string: String;
   offset: uint32;  // Index into string.
+
+  @if(TAGGED_SIZE_8_BYTES) optional_padding: uint32;
+  @ifnot(TAGGED_SIZE_8_BYTES) optional_padding: void;
 }
+
+extern class WasmNull extends HeapObject {}
+
+extern macro WasmNullConstant(): WasmNull;
+const kWasmNull: WasmNull = WasmNullConstant();

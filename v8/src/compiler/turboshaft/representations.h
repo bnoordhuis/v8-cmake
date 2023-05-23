@@ -83,7 +83,7 @@ class RegisterRepresentation {
     }
   }
 
-  bool IsFloat() {
+  constexpr bool IsFloat() {
     switch (*this) {
       case Enum::kFloat32:
       case Enum::kFloat64:
@@ -180,10 +180,12 @@ class RegisterRepresentation {
   static constexpr Enum kInvalid = static_cast<Enum>(-1);
 };
 
-V8_INLINE bool operator==(RegisterRepresentation a, RegisterRepresentation b) {
+V8_INLINE constexpr bool operator==(RegisterRepresentation a,
+                                    RegisterRepresentation b) {
   return a.value() == b.value();
 }
-V8_INLINE bool operator!=(RegisterRepresentation a, RegisterRepresentation b) {
+V8_INLINE constexpr bool operator!=(RegisterRepresentation a,
+                                    RegisterRepresentation b) {
   return a.value() != b.value();
 }
 
@@ -464,6 +466,19 @@ class MemoryRepresentation {
     }
   }
 
+  // The required register representation for storing a value. When pointer
+  // compression is enabled, we only store the lower 32bit of a tagged value,
+  // which we indicate as `RegisterRepresentation::Compressed()` here.
+  RegisterRepresentation ToRegisterRepresentationForStore() const {
+    RegisterRepresentation result = ToRegisterRepresentation();
+#ifdef V8_COMPRESS_POINTERS
+    if (result == RegisterRepresentation::Tagged()) {
+      result = RegisterRepresentation::Compressed();
+    }
+#endif
+    return result;
+  }
+
   MachineType ToMachineType() const {
     switch (*this) {
       case Int8():
@@ -533,7 +548,7 @@ class MemoryRepresentation {
     }
   }
 
-  static MemoryRepresentation FromMachineRepresentation(
+  static constexpr MemoryRepresentation FromMachineRepresentation(
       MachineRepresentation rep) {
     switch (rep) {
       case MachineRepresentation::kWord8:

@@ -27,7 +27,11 @@ namespace internal {
 class IsCompiledScope;
 class FeedbackVectorSpec;
 
-enum class UpdateFeedbackMode { kOptionalFeedback, kGuaranteedFeedback };
+enum class UpdateFeedbackMode {
+  kOptionalFeedback,
+  kGuaranteedFeedback,
+  kNoFeedback,
+};
 
 // Which feedback slots to clear in Clear().
 enum class ClearBehavior {
@@ -203,11 +207,6 @@ class FeedbackVector
   DEFINE_TORQUE_GENERATED_FEEDBACK_VECTOR_FLAGS()
   static_assert(TieringState::kLastTieringState <= TieringStateBits::kMax);
 
-  static const bool kFeedbackVectorMaybeOptimizedCodeIsStoreRelease = true;
-  using TorqueGeneratedFeedbackVector<FeedbackVector,
-                                      HeapObject>::maybe_optimized_code;
-  DECL_RELEASE_ACQUIRE_WEAK_ACCESSORS(maybe_optimized_code)
-
   static constexpr uint32_t kFlagsMaybeHasTurbofanCode =
       FeedbackVector::MaybeHasTurbofanCodeBit::kMask;
   static constexpr uint32_t kFlagsMaybeHasMaglevCode =
@@ -224,9 +223,6 @@ class FeedbackVector
 
   inline FeedbackMetadata metadata() const;
   inline FeedbackMetadata metadata(AcquireLoadTag tag) const;
-
-  // Increment profiler ticks, saturating at the maximal value.
-  void SaturatingIncrementProfilerTicks();
 
   // Forward declare the non-atomic accessors.
   using TorqueGeneratedFeedbackVector::invocation_count;
@@ -270,7 +266,8 @@ class FeedbackVector
   inline void set_maybe_has_turbofan_code(bool value);
 
   void SetOptimizedCode(Code code);
-  void EvictOptimizedCodeMarkedForDeoptimization(SharedFunctionInfo shared,
+  void EvictOptimizedCodeMarkedForDeoptimization(Isolate* isolate,
+                                                 SharedFunctionInfo shared,
                                                  const char* reason);
   void ClearOptimizedCode();
 

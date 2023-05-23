@@ -9,6 +9,7 @@
 
 #include "src/base/logging.h"
 #include "src/base/platform/mutex.h"
+#include "src/heap/sweeper.h"
 #include "src/objects/js-array-buffer.h"
 #include "src/tasks/cancelable-task.h"
 
@@ -46,11 +47,13 @@ struct ArrayBufferList final {
 class ArrayBufferSweeper final {
  public:
   enum class SweepingType { kYoung, kFull };
+  enum class TreatAllYoungAsPromoted { kNo, kYes };
 
   explicit ArrayBufferSweeper(Heap* heap);
   ~ArrayBufferSweeper();
 
-  void RequestSweep(SweepingType sweeping_type);
+  void RequestSweep(SweepingType sweeping_type,
+                    TreatAllYoungAsPromoted treat_young_as_promoted);
   void EnsureFinished();
 
   // Track the given ArrayBufferExtension for the given JSArrayBuffer.
@@ -82,10 +85,13 @@ class ArrayBufferSweeper final {
   void IncrementExternalMemoryCounters(size_t bytes);
   void DecrementExternalMemoryCounters(size_t bytes);
 
-  void Prepare(SweepingType type);
+  void Prepare(SweepingType type,
+               TreatAllYoungAsPromoted treat_all_young_as_promoted);
   void Finalize();
 
   void ReleaseAll(ArrayBufferList* extension);
+
+  void DoSweep();
 
   Heap* const heap_;
   std::unique_ptr<SweepingJob> job_;
@@ -93,6 +99,7 @@ class ArrayBufferSweeper final {
   base::ConditionVariable job_finished_;
   ArrayBufferList young_;
   ArrayBufferList old_;
+  Sweeper::LocalSweeper local_sweeper_;
 };
 
 }  // namespace internal

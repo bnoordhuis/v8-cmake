@@ -17,6 +17,7 @@
 #include "src/objects/compressed-slots-inl.h"
 #include "src/objects/fixed-array.h"
 #include "src/objects/heap-object.h"
+#include "src/objects/instruction-stream.h"
 #include "src/objects/maybe-object-inl.h"
 #include "src/objects/slots-inl.h"
 
@@ -45,12 +46,12 @@ namespace heap_internals {
 struct MemoryChunk {
   static constexpr uintptr_t kFlagsOffset = kSizetSize;
   static constexpr uintptr_t kHeapOffset = kSizetSize + kUIntptrSize;
-  static constexpr uintptr_t kInSharedHeapBit = uintptr_t{1} << 0;
+  static constexpr uintptr_t kInWritableSharedSpaceBit = uintptr_t{1} << 0;
   static constexpr uintptr_t kFromPageBit = uintptr_t{1} << 3;
   static constexpr uintptr_t kToPageBit = uintptr_t{1} << 4;
   static constexpr uintptr_t kMarkingBit = uintptr_t{1} << 5;
   static constexpr uintptr_t kReadOnlySpaceBit = uintptr_t{1} << 6;
-  static constexpr uintptr_t kIsExecutableBit = uintptr_t{1} << 21;
+  static constexpr uintptr_t kIsExecutableBit = uintptr_t{1} << 19;
 
   V8_INLINE static heap_internals::MemoryChunk* FromHeapObject(
       HeapObject object) {
@@ -60,7 +61,9 @@ struct MemoryChunk {
 
   V8_INLINE bool IsMarking() const { return GetFlags() & kMarkingBit; }
 
-  V8_INLINE bool InSharedHeap() const { return GetFlags() & kInSharedHeapBit; }
+  V8_INLINE bool InWritableSharedSpace() const {
+    return GetFlags() & kInWritableSharedSpaceBit;
+  }
 
   V8_INLINE bool InYoungGeneration() const {
     if (V8_ENABLE_THIRD_PARTY_HEAP_BOOL) return false;
@@ -72,7 +75,7 @@ struct MemoryChunk {
   V8_INLINE bool IsYoungOrSharedChunk() const {
     if (V8_ENABLE_THIRD_PARTY_HEAP_BOOL) return false;
     constexpr uintptr_t kYoungOrSharedChunkMask =
-        kFromPageBit | kToPageBit | kInSharedHeapBit;
+        kFromPageBit | kToPageBit | kInWritableSharedSpaceBit;
     return GetFlags() & kYoungOrSharedChunkMask;
   }
 
@@ -106,10 +109,12 @@ inline void CombinedWriteBarrierInternal(HeapObject host, HeapObjectSlot slot,
   heap_internals::MemoryChunk* value_chunk =
       heap_internals::MemoryChunk::FromHeapObject(value);
 
-  const bool host_in_young_gen = host_chunk->InYoungGeneration();
+  const bool pointers_from_here_are_interesting =
+      !host_chunk->IsYoungOrSharedChunk();
   const bool is_marking = host_chunk->IsMarking();
 
-  if (!host_in_young_gen && value_chunk->IsYoungOrSharedChunk()) {
+  if (pointers_from_here_are_interesting &&
+      value_chunk->IsYoungOrSharedChunk()) {
     // Generational or shared heap write barrier (old-to-new or old-to-shared).
     Heap_CombinedGenerationalAndSharedBarrierSlow(host, slot.address(), value);
   }
@@ -190,10 +195,12 @@ inline void CombinedEphemeronWriteBarrier(EphemeronHashTable host,
   heap_internals::MemoryChunk* value_chunk =
       heap_internals::MemoryChunk::FromHeapObject(heap_object_value);
 
-  const bool host_in_young_gen = host_chunk->InYoungGeneration();
+  const bool pointers_from_here_are_interesting =
+      !host_chunk->IsYoungOrSharedChunk();
   const bool is_marking = host_chunk->IsMarking();
 
-  if (!host_in_young_gen && value_chunk->IsYoungOrSharedChunk()) {
+  if (pointers_from_here_are_interesting &&
+      value_chunk->IsYoungOrSharedChunk()) {
     Heap_CombinedGenerationalAndSharedEphemeronBarrierSlow(host, slot.address(),
                                                            heap_object_value);
   }
@@ -298,7 +305,7 @@ void WriteBarrier::Shared(InstructionStream host, RelocInfo* reloc_info,
 
   heap_internals::MemoryChunk* value_chunk =
       heap_internals::MemoryChunk::FromHeapObject(value);
-  if (!value_chunk->InSharedHeap()) return;
+  if (!value_chunk->InWritableSharedSpace()) return;
 
   SharedSlow(host, reloc_info, value);
 }

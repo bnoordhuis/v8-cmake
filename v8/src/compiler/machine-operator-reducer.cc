@@ -381,6 +381,10 @@ Node* MachineOperatorReducer::TruncateInt64ToInt32(Node* value) {
   return reduction.Changed() ? reduction.replacement() : node;
 }
 
+Node* MachineOperatorReducer::ChangeInt32ToInt64(Node* value) {
+  return graph()->NewNode(machine()->ChangeInt32ToInt64(), value);
+}
+
 // Perform constant folding and strength reduction on machine operators.
 Reduction MachineOperatorReducer::Reduce(Node* node) {
   switch (node->opcode()) {
@@ -1028,7 +1032,8 @@ Reduction MachineOperatorReducer::Reduce(Node* node) {
       break;
     }
     case IrOpcode::kLoad:
-    case IrOpcode::kProtectedLoad: {
+    case IrOpcode::kProtectedLoad:
+    case IrOpcode::kLoadTrapOnNull: {
       Node* input0 = node->InputAt(0);
       Node* input1 = node->InputAt(1);
       if (input0->opcode() == IrOpcode::kInt64Add) {
@@ -1282,7 +1287,10 @@ Reduction MachineOperatorReducer::ReduceInt64Div(Node* node) {
   }
   if (m.LeftEqualsRight()) {  // x / x => x != 0
     Node* const zero = Int64Constant(0);
-    return Replace(Word64Equal(Word64Equal(m.left().node(), zero), zero));
+    // {Word64Equal} can get reduced to a bool/int32, but we need this
+    // operation to produce an int64.
+    return Replace(ChangeInt32ToInt64(
+        Word64Equal(Word64Equal(m.left().node(), zero), zero)));
   }
   if (m.right().Is(-1)) {  // x / -1 => 0 - x
     node->ReplaceInput(0, Int64Constant(0));
@@ -1358,7 +1366,10 @@ Reduction MachineOperatorReducer::ReduceUint64Div(Node* node) {
   }
   if (m.LeftEqualsRight()) {  // x / x => x != 0
     Node* const zero = Int64Constant(0);
-    return Replace(Word64Equal(Word64Equal(m.left().node(), zero), zero));
+    // {Word64Equal} can get reduced to a bool/int32, but we need this
+    // operation to produce an int64.
+    return Replace(ChangeInt32ToInt64(
+        Word64Equal(Word64Equal(m.left().node(), zero), zero)));
   }
   if (m.right().HasResolvedValue()) {
     Node* const dividend = m.left().node();
@@ -2876,14 +2887,19 @@ Reduction MachineOperatorReducer::SimplifyBranch(Node* node) {
         case IrOpcode::kBranch:
           SwapBranches(node);
           break;
-        case IrOpcode::kTrapIf:
-          NodeProperties::ChangeOp(node,
-                                   common()->TrapUnless(TrapIdOf(node->op())));
+        case IrOpcode::kTrapIf: {
+          const bool has_frame_state = node->op()->ValueInputCount() > 1;
+          NodeProperties::ChangeOp(
+              node,
+              common()->TrapUnless(TrapIdOf(node->op()), has_frame_state));
           break;
-        case IrOpcode::kTrapUnless:
-          NodeProperties::ChangeOp(node,
-                                   common()->TrapIf(TrapIdOf(node->op())));
+        }
+        case IrOpcode::kTrapUnless: {
+          const bool has_frame_state = node->op()->ValueInputCount() > 1;
+          NodeProperties::ChangeOp(
+              node, common()->TrapIf(TrapIdOf(node->op()), has_frame_state));
           break;
+        }
         case IrOpcode::kDeoptimizeIf: {
           DeoptimizeParameters p = DeoptimizeParametersOf(node->op());
           NodeProperties::ChangeOp(

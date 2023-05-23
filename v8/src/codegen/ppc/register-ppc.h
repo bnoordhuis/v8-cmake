@@ -29,7 +29,7 @@ namespace internal {
 #define MAYBE_ALLOCATEABLE_CONSTANT_POOL_REGISTER(V) V(r28)
 #endif
 
-#ifdef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
+#ifdef V8_COMPRESS_POINTERS
 #define MAYBE_ALLOCATABLE_CAGE_REGISTERS(V)
 #else
 #define MAYBE_ALLOCATABLE_CAGE_REGISTERS(V)  V(r27)
@@ -136,6 +136,13 @@ ASSERT_TRIVIALLY_COPYABLE(Register);
 static_assert(sizeof(Register) <= sizeof(int),
               "Register can efficiently be passed by value");
 
+// Assign |source| value to |no_reg| and return the |source|'s previous value.
+inline Register ReassignRegister(Register& source) {
+  Register result = source;
+  source = Register::no_reg();
+  return result;
+}
+
 #define DEFINE_REGISTER(R) \
   constexpr Register R = Register::from_code(kRegCode_##R);
 GENERAL_REGISTERS(DEFINE_REGISTER)
@@ -146,11 +153,17 @@ constexpr Register no_reg = Register::no_reg();
 constexpr Register kConstantPoolRegister = r28;  // Constant pool.
 constexpr Register kRootRegister = r29;          // Roots array pointer.
 constexpr Register cp = r30;                     // JavaScript context pointer.
-#ifdef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
+#ifdef V8_COMPRESS_POINTERS
 constexpr Register kPtrComprCageBaseRegister = r27;  // callee save
 #else
-constexpr Register kPtrComprCageBaseRegister = kRootRegister;
+constexpr Register kPtrComprCageBaseRegister = no_reg;
 #endif
+
+// PPC64 calling convention
+constexpr Register arg_reg_1 = r3;
+constexpr Register arg_reg_2 = r4;
+constexpr Register arg_reg_3 = r5;
+constexpr Register arg_reg_4 = r6;
 
 // Returns the number of padding slots needed for stack pointer alignment.
 constexpr int ArgumentPaddingSlots(int argument_count) {
@@ -308,7 +321,6 @@ constexpr Register kJavaScriptCallTargetRegister = kJSFunctionRegister;
 constexpr Register kJavaScriptCallNewTargetRegister = r6;
 constexpr Register kJavaScriptCallExtraArg1Register = r5;
 
-constexpr Register kOffHeapTrampolineRegister = ip;
 constexpr Register kRuntimeCallFunctionRegister = r4;
 constexpr Register kRuntimeCallArgCountRegister = r3;
 constexpr Register kRuntimeCallArgvRegister = r5;

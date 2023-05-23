@@ -35,7 +35,7 @@ namespace internal {
          R(x19) R(x20) R(x21) R(x22) R(x23) R(x24) R(x25) \
   R(x27)
 
-#ifdef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
+#ifdef V8_COMPRESS_POINTERS
 #define MAYBE_ALLOCATABLE_GENERAL_REGISTERS(R)
 #else
 #define MAYBE_ALLOCATABLE_GENERAL_REGISTERS(R) R(x28)
@@ -191,6 +191,16 @@ class CPURegister : public RegisterBase<CPURegister, kRegAfterLast> {
 
   bool IsSameSizeAndType(const CPURegister& other) const;
 
+  constexpr bool IsEven() const { return (code() % 2) == 0; }
+
+  int MaxCode() const {
+    if (IsVRegister()) {
+      return kNumberOfVRegisters - 1;
+    }
+    DCHECK(IsRegister());
+    return kNumberOfRegisters - 1;
+  }
+
  protected:
   uint8_t reg_size_;
   RegisterType reg_type_;
@@ -258,6 +268,13 @@ class Register : public CPURegister {
 ASSERT_TRIVIALLY_COPYABLE(Register);
 static_assert(sizeof(Register) <= sizeof(int),
               "Register can efficiently be passed by value");
+
+// Assign |source| value to |no_reg| and return the |source|'s previous value.
+inline Register ReassignRegister(Register& source) {
+  Register result = source;
+  source = Register::no_reg();
+  return result;
+}
 
 // Stack frame alignment and padding.
 constexpr int ArgumentPaddingSlots(int argument_count) {
@@ -486,10 +503,10 @@ ALIAS_REGISTER(Register, wip1, w17);
 ALIAS_REGISTER(Register, kRootRegister, x26);
 ALIAS_REGISTER(Register, rr, x26);
 // Pointer cage base register.
-#ifdef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
+#ifdef V8_COMPRESS_POINTERS
 ALIAS_REGISTER(Register, kPtrComprCageBaseRegister, x28);
 #else
-ALIAS_REGISTER(Register, kPtrComprCageBaseRegister, kRootRegister);
+ALIAS_REGISTER(Register, kPtrComprCageBaseRegister, no_reg);
 #endif
 // Context pointer register.
 ALIAS_REGISTER(Register, cp, x27);
@@ -515,6 +532,12 @@ ALIAS_REGISTER(VRegister, fp_scratch2, d31);
 
 #undef ALIAS_REGISTER
 
+// Arm64 calling convention
+constexpr Register arg_reg_1 = x0;
+constexpr Register arg_reg_2 = x1;
+constexpr Register arg_reg_3 = x2;
+constexpr Register arg_reg_4 = x3;
+
 // AreAliased returns true if any of the named registers overlap. Arguments set
 // to NoReg are ignored. The system stack pointer may be specified.
 V8_EXPORT_PRIVATE bool AreAliased(
@@ -536,6 +559,8 @@ V8_EXPORT_PRIVATE bool AreSameSizeAndType(
 // AreSameFormat returns true if all of the specified VRegisters have the same
 // vector format. Arguments set to NoVReg are ignored, as are any subsequent
 // arguments. At least one argument (reg1) must be valid (not NoVReg).
+bool AreSameFormat(const Register& reg1, const Register& reg2,
+                   const Register& reg3 = NoReg, const Register& reg4 = NoReg);
 bool AreSameFormat(const VRegister& reg1, const VRegister& reg2,
                    const VRegister& reg3 = NoVReg,
                    const VRegister& reg4 = NoVReg);
@@ -544,10 +569,15 @@ bool AreSameFormat(const VRegister& reg1, const VRegister& reg2,
 // consecutive in the register file. Arguments may be set to NoVReg, and if so,
 // subsequent arguments must also be NoVReg. At least one argument (reg1) must
 // be valid (not NoVReg).
-V8_EXPORT_PRIVATE bool AreConsecutive(const VRegister& reg1,
-                                      const VRegister& reg2,
-                                      const VRegister& reg3 = NoVReg,
-                                      const VRegister& reg4 = NoVReg);
+V8_EXPORT_PRIVATE bool AreConsecutive(const CPURegister& reg1,
+                                      const CPURegister& reg2,
+                                      const CPURegister& reg3 = NoReg,
+                                      const CPURegister& reg4 = NoReg);
+
+bool AreEven(const CPURegister& reg1, const CPURegister& reg2,
+             const CPURegister& reg3 = NoReg, const CPURegister& reg4 = NoReg,
+             const CPURegister& reg5 = NoReg, const CPURegister& reg6 = NoReg,
+             const CPURegister& reg7 = NoReg, const CPURegister& reg8 = NoReg);
 
 using FloatRegister = VRegister;
 using DoubleRegister = VRegister;
@@ -576,7 +606,6 @@ constexpr Register kJavaScriptCallTargetRegister = kJSFunctionRegister;
 constexpr Register kJavaScriptCallNewTargetRegister = x3;
 constexpr Register kJavaScriptCallExtraArg1Register = x2;
 
-constexpr Register kOffHeapTrampolineRegister = ip0;
 constexpr Register kRuntimeCallFunctionRegister = x1;
 constexpr Register kRuntimeCallArgCountRegister = x0;
 constexpr Register kRuntimeCallArgvRegister = x11;

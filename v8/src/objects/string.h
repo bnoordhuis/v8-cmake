@@ -195,9 +195,7 @@ class String : public TorqueGeneratedString<String, Name> {
 
   template <typename IsolateT>
   EXPORT_TEMPLATE_DECLARE(V8_EXPORT_PRIVATE)
-  void MakeThin(IsolateT* isolate, String canonical,
-                UpdateInvalidatedObjectSize update_invalidated_object_size =
-                    UpdateInvalidatedObjectSize::kYes);
+  void MakeThin(IsolateT* isolate, String canonical);
 
   template <typename Char>
   V8_INLINE base::Vector<const Char> GetCharVector(
@@ -218,8 +216,8 @@ class String : public TorqueGeneratedString<String, Name> {
 
   // Returns the address of the character at an offset into this string.
   // Requires: this->IsFlat()
-  const byte* AddressOfCharacterAt(int start_index,
-                                   const DisallowGarbageCollection& no_gc);
+  const uint8_t* AddressOfCharacterAt(int start_index,
+                                      const DisallowGarbageCollection& no_gc);
 
   // Forward declare the non-atomic (set_)length defined in torque.
   using TorqueGeneratedString::length;
@@ -422,7 +420,7 @@ class String : public TorqueGeneratedString<String, Name> {
       v8::String::ExternalStringResource* resource);
   V8_EXPORT_PRIVATE bool MakeExternal(
       v8::String::ExternalOneByteStringResource* resource);
-  bool SupportsExternalization();
+  bool SupportsExternalization(v8::String::Encoding);
 
   // Conversion.
   // "array index": an index allowed by the ES spec for JSArrays.
@@ -933,6 +931,8 @@ class SlicedString : public TorqueGeneratedSlicedString<SlicedString, String> {
 class ExternalString
     : public TorqueGeneratedExternalString<ExternalString, String> {
  public:
+  class BodyDescriptor;
+
   DECL_VERIFIER(ExternalString)
 
   // Size of uncached external strings.
@@ -999,8 +999,6 @@ class ExternalOneByteString
   inline uint8_t Get(int index, PtrComprCageBase cage_base,
                      const SharedStringAccessGuardIfNeeded& access_guard) const;
 
-  class BodyDescriptor;
-
   static_assert(kSize == kSizeOfAllExternalStrings);
 
   TQ_OBJECT_CONSTRUCTORS(ExternalOneByteString)
@@ -1045,8 +1043,6 @@ class ExternalTwoByteString
 
   // For regexp code.
   inline const uint16_t* ExternalTwoByteStringGetData(unsigned start);
-
-  class BodyDescriptor;
 
   static_assert(kSize == kSizeOfAllExternalStrings);
 

@@ -34,6 +34,7 @@
 
 #include "src/codegen/riscv/assembler-riscv.h"
 
+#include "src/base/bits.h"
 #include "src/base/cpu.h"
 #include "src/codegen/assembler-inl.h"
 #include "src/codegen/safepoint-table.h"
@@ -71,6 +72,10 @@ void CpuFeatures::ProbeImpl(bool cross_compile) {
   base::CPU cpu;
   if (cpu.has_fpu()) supported_ |= 1u << FPU;
   if (cpu.has_rvv()) supported_ |= 1u << RISCV_SIMD;
+  if (cpu.riscv_mmu() == base::CPU::RV_MMU_MODE::kRiscvSV57) {
+    FATAL("SV57 is not supported");
+    UNIMPLEMENTED();
+  }
   // Set a static value on whether SIMD is supported.
   // This variable is only used for certain archs to query SupportWasmSimd128()
   // at runtime in builtins using an extern ref. Other callers should use
@@ -132,10 +137,8 @@ Register ToRegister(int num) {
 
 const int RelocInfo::kApplyMask =
     RelocInfo::ModeMask(RelocInfo::INTERNAL_REFERENCE) |
-    RelocInfo::ModeMask(RelocInfo::NEAR_BUILTIN_ENTRY) |
     RelocInfo::ModeMask(RelocInfo::INTERNAL_REFERENCE_ENCODED) |
-    RelocInfo::ModeMask(RelocInfo::RELATIVE_CODE_TARGET) |
-    RelocInfo::ModeMask(RelocInfo::CODE_TARGET);
+    RelocInfo::ModeMask(RelocInfo::RELATIVE_CODE_TARGET);
 
 bool RelocInfo::IsCodedSpecially() {
   // The deserializer needs to know whether a pointer is specially coded.  Being
@@ -490,7 +493,7 @@ void Assembler::disassembleInstr(Instr instr) {
   disasm::Disassembler disasm(converter);
   base::EmbeddedVector<char, 128> disasm_buffer;
 
-  disasm.InstructionDecode(disasm_buffer, reinterpret_cast<byte*>(&instr));
+  disasm.InstructionDecode(disasm_buffer, reinterpret_cast<uint8_t*>(&instr));
   DEBUG_PRINTF("%s\n", disasm_buffer.begin());
 }
 
@@ -887,8 +890,29 @@ void Assembler::EBREAK() {
 
 void Assembler::nop() { addi(ToRegister(0), ToRegister(0), 0); }
 
+inline int64_t signExtend(uint64_t V, int N) {
+  return int64_t(V << (64 - N)) >> (64 - N);
+}
+
 #if V8_TARGET_ARCH_RISCV64
 void Assembler::RV_li(Register rd, int64_t imm) {
+  UseScratchRegisterScope temps(this);
+  if (RecursiveLiCount(imm) > GeneralLiCount(imm, temps.hasAvailable())) {
+    GeneralLi(rd, imm);
+  } else {
+    RecursiveLi(rd, imm);
+  }
+}
+
+int Assembler::RV_li_count(int64_t imm, bool is_get_temp_reg) {
+  if (RecursiveLiCount(imm) > GeneralLiCount(imm, is_get_temp_reg)) {
+    return GeneralLiCount(imm, is_get_temp_reg);
+  } else {
+    return RecursiveLiCount(imm);
+  }
+}
+
+void Assembler::GeneralLi(Register rd, int64_t imm) {
   // 64-bit imm is put in the register rd.
   // In most cases the imm is 32 bit and 2 instructions are generated. If a
   // temporary register is available, in the worst case, 6 instructions are
@@ -916,6 +940,7 @@ void Assembler::RV_li(Register rd, int64_t imm) {
     }
     return;
   } else {
+    UseScratchRegisterScope temps(this);
     // 64-bit case: divide imm into two 32-bit parts, upper and lower
     int64_t up_32 = imm >> 32;
     int64_t low_32 = imm & 0xffffffffull;
@@ -924,7 +949,6 @@ void Assembler::RV_li(Register rd, int64_t imm) {
     if (up_32 == 0 || low_32 == 0) {
       // No temp register is needed
     } else {
-      UseScratchRegisterScope temps(this);
       BlockTrampolinePoolScope block_trampoline_pool(this);
       temp_reg = temps.hasAvailable() ? temps.Acquire() : no_reg;
     }
@@ -1040,145 +1064,28 @@ void Assembler::RV_li(Register rd, int64_t imm) {
   }
 }
 
-int Assembler::li_estimate(int64_t imm, bool is_get_temp_reg) {
-  int count = 0;
-  // imitate Assembler::RV_li
-  if (is_int32(imm + 0x800)) {
-    // 32-bit case. Maximum of 2 instructions generated
-    int64_t high_20 = ((imm + 0x800) >> 12);
-    int64_t low_12 = imm << 52 >> 52;
-    if (high_20) {
-      count++;
-      if (low_12) {
-        count++;
-      }
-    } else {
-      count++;
-    }
-    return count;
-  } else {
-    // 64-bit case: divide imm into two 32-bit parts, upper and lower
-    int64_t up_32 = imm >> 32;
-    int64_t low_32 = imm & 0xffffffffull;
-    // Check if a temporary register is available
-    if (is_get_temp_reg) {
-      // keep track of hardware behavior for lower part in sim_low
-      int64_t sim_low = 0;
-      // Build lower part
-      if (low_32 != 0) {
-        int64_t high_20 = ((low_32 + 0x800) >> 12);
-        int64_t low_12 = low_32 & 0xfff;
-        if (high_20) {
-          // Adjust to 20 bits for the case of overflow
-          high_20 &= 0xfffff;
-          sim_low = ((high_20 << 12) << 32) >> 32;
-          count++;
-          if (low_12) {
-            sim_low += (low_12 << 52 >> 52) | low_12;
-            count++;
-          }
-        } else {
-          sim_low = low_12;
-          count++;
-        }
-      }
-      if (sim_low & 0x100000000) {
-        // Bit 31 is 1. Either an overflow or a negative 64 bit
-        if (up_32 == 0) {
-          // Positive number, but overflow because of the add 0x800
-          count++;
-          count++;
-          return count;
-        }
-        // low_32 is a negative 64 bit after the build
-        up_32 = (up_32 - 0xffffffff) & 0xffffffff;
-      }
-      if (up_32 == 0) {
-        return count;
-      }
-      int64_t high_20 = (up_32 + 0x800) >> 12;
-      int64_t low_12 = up_32 & 0xfff;
-      if (high_20) {
-        // Adjust to 20 bits for the case of overflow
-        high_20 &= 0xfffff;
-        count++;
-        if (low_12) {
-          count++;
-        }
-      } else {
-        count++;
-      }
-      // Put it at the bgining of register
-      count++;
-      if (low_32 != 0) {
-        count++;
-      }
-      return count;
-    }
-    // No temp register. Build imm in rd.
-    // Build upper 32 bits first in rd. Divide lower 32 bits parts and add
-    // parts to the upper part by doing shift and add.
-    // First build upper part in rd.
-    int64_t high_20 = (up_32 + 0x800) >> 12;
-    int64_t low_12 = up_32 & 0xfff;
-    if (high_20) {
-      // Adjust to 20 bits for the case of overflow
-      high_20 &= 0xfffff;
-      count++;
-      if (low_12) {
-        count++;
-      }
-    } else {
-      count++;
-    }
-    // upper part already in rd. Each part to be added to rd, has maximum of 11
-    // bits, and always starts with a 1. rd is shifted by the size of the part
-    // plus the number of zeros between the parts. Each part is added after the
-    // left shift.
-    uint32_t mask = 0x80000000;
-    int32_t i;
-    for (i = 0; i < 32; i++) {
-      if ((low_32 & mask) == 0) {
-        mask >>= 1;
-        if (i == 31) {
-          // rest is zero
-          count++;
-        }
-        continue;
-      }
-      // The first 1 seen
-      if ((i + 11) < 32) {
-        // Pick 11 bits
-        count++;
-        count++;
-        i += 10;
-        mask >>= 11;
-      } else {
-        count++;
-        count++;
-        break;
-      }
-    }
-  }
-  return count;
-}
-
 void Assembler::li_ptr(Register rd, int64_t imm) {
-  // Initialize rd with an address
-  // Pointers are 48 bits
-  // 6 fixed instructions are generated
-  DCHECK_EQ((imm & 0xfff0000000000000ll), 0);
-  int64_t a6 = imm & 0x3f;                      // bits 0:5. 6 bits
-  int64_t b11 = (imm >> 6) & 0x7ff;             // bits 6:11. 11 bits
-  int64_t high_31 = (imm >> 17) & 0x7fffffff;   // 31 bits
-  int64_t high_20 = ((high_31 + 0x800) >> 12);  // 19 bits
-  int64_t low_12 = high_31 & 0xfff;             // 12 bits
-  lui(rd, (int32_t)high_20);
-  addi(rd, rd, low_12);  // 31 bits in rd.
-  slli(rd, rd, 11);      // Space for next 11 bis
-  ori(rd, rd, b11);      // 11 bits are put in. 42 bit in rd
-  slli(rd, rd, 6);       // Space for next 6 bits
-  ori(rd, rd, a6);       // 6 bits are put in. 48 bis in rd
+  base::CPU cpu;
+  if (cpu.riscv_mmu() != base::CPU::RV_MMU_MODE::kRiscvSV57) {
+    // Initialize rd with an address
+    // Pointers are 48 bits
+    // 6 fixed instructions are generated
+    DCHECK_EQ((imm & 0xfff0000000000000ll), 0);
+    int64_t a6 = imm & 0x3f;                      // bits 0:5. 6 bits
+    int64_t b11 = (imm >> 6) & 0x7ff;             // bits 6:11. 11 bits
+    int64_t high_31 = (imm >> 17) & 0x7fffffff;   // 31 bits
+    int64_t high_20 = ((high_31 + 0x800) >> 12);  // 19 bits
+    int64_t low_12 = high_31 & 0xfff;             // 12 bits
+    lui(rd, (int32_t)high_20);
+    addi(rd, rd, low_12);  // 31 bits in rd.
+    slli(rd, rd, 11);      // Space for next 11 bis
+    ori(rd, rd, b11);      // 11 bits are put in. 42 bit in rd
+    slli(rd, rd, 6);       // Space for next 6 bits
+    ori(rd, rd, a6);       // 6 bits are put in. 48 bis in rd
+  } else {
+    FATAL("SV57 is not supported");
+    UNIMPLEMENTED();
+  }
 }
 
 void Assembler::li_constant(Register rd, int64_t imm) {
@@ -1210,7 +1117,7 @@ void Assembler::RV_li(Register rd, int32_t imm) {
   }
 }
 
-int Assembler::li_estimate(int32_t imm, bool is_get_temp_reg) {
+int Assembler::RV_li_count(int32_t imm, bool is_get_temp_reg) {
   int count = 0;
   // imitate Assembler::RV_li
   int32_t high_20 = ((imm + 0x800) >> 12);
@@ -1381,7 +1288,7 @@ void Assembler::GrowBuffer() {
   // Set up new buffer.
   std::unique_ptr<AssemblerBuffer> new_buffer = buffer_->Grow(new_size);
   DCHECK_EQ(new_size, new_buffer->size());
-  byte* new_start = new_buffer->start();
+  uint8_t* new_start = new_buffer->start();
 
   // Copy the data.
   intptr_t pc_delta = new_start - buffer_start_;
@@ -1400,9 +1307,9 @@ void Assembler::GrowBuffer() {
                                reloc_info_writer.last_pc() + pc_delta);
 
   // Relocate runtime entries.
-  base::Vector<byte> instructions{buffer_start_,
-                                  static_cast<size_t>(pc_offset())};
-  base::Vector<const byte> reloc_info{reloc_info_writer.pos(), reloc_size};
+  base::Vector<uint8_t> instructions{buffer_start_,
+                                     static_cast<size_t>(pc_offset())};
+  base::Vector<const uint8_t> reloc_info{reloc_info_writer.pos(), reloc_size};
   for (RelocIterator it(instructions, reloc_info, 0); !it.done(); it.next()) {
     RelocInfo::Mode rmode = it.rinfo()->rmode();
     if (rmode == RelocInfo::INTERNAL_REFERENCE) {
@@ -1419,21 +1326,13 @@ void Assembler::db(uint8_t data) {
   EmitHelper(data);
 }
 
-void Assembler::dd(uint32_t data, RelocInfo::Mode rmode) {
-  if (!RelocInfo::IsNoInfo(rmode)) {
-    DCHECK(RelocInfo::IsLiteralConstant(rmode));
-    RecordRelocInfo(rmode);
-  }
+void Assembler::dd(uint32_t data) {
   if (!is_buffer_growth_blocked()) CheckBuffer();
   DEBUG_PRINTF("%p(%x): constant 0x%x\n", pc_, pc_offset(), data);
   EmitHelper(data);
 }
 
-void Assembler::dq(uint64_t data, RelocInfo::Mode rmode) {
-  if (!RelocInfo::IsNoInfo(rmode)) {
-    DCHECK(RelocInfo::IsLiteralConstant(rmode));
-    RecordRelocInfo(rmode);
-  }
+void Assembler::dq(uint64_t data) {
   if (!is_buffer_growth_blocked()) CheckBuffer();
   EmitHelper(data);
 }
@@ -1454,8 +1353,7 @@ void Assembler::dd(Label* label) {
 void Assembler::RecordRelocInfo(RelocInfo::Mode rmode, intptr_t data) {
   if (!ShouldRecordRelocInfo(rmode)) return;
   // We do not try to reuse pool constants.
-  RelocInfo rinfo(reinterpret_cast<Address>(pc_), rmode, data,
-                  InstructionStream());
+  RelocInfo rinfo(reinterpret_cast<Address>(pc_), rmode, data);
   DCHECK_GE(buffer_space(), kMaxRelocSize);  // Too late to grow buffer here.
   reloc_info_writer.Write(&rinfo);
 }
@@ -1716,24 +1614,6 @@ void Assembler::set_target_value_at(Address pc, uint32_t target,
 }
 #endif
 
-UseScratchRegisterScope::UseScratchRegisterScope(Assembler* assembler)
-    : available_(assembler->GetScratchRegisterList()),
-      old_available_(*available_) {}
-
-UseScratchRegisterScope::~UseScratchRegisterScope() {
-  *available_ = old_available_;
-}
-
-Register UseScratchRegisterScope::Acquire() {
-  DCHECK_NOT_NULL(available_);
-  DCHECK(!available_->is_empty());
-  int index =
-      static_cast<int>(base::bits::CountTrailingZeros32(available_->bits()));
-  *available_ &= RegList::FromBits(~(1U << index));
-
-  return Register::from_code(index);
-}
-
 bool UseScratchRegisterScope::hasAvailable() const {
   return !available_->is_empty();
 }
@@ -1912,6 +1792,327 @@ const size_t ConstantPool::kApproxDistToPool64 = kApproxDistToPool32;
 const size_t ConstantPool::kOpportunityDistToPool32 = 64 * KB;
 const size_t ConstantPool::kOpportunityDistToPool64 = 64 * KB;
 const size_t ConstantPool::kApproxMaxEntryCount = 512;
+
+#if defined(V8_TARGET_ARCH_RISCV64)
+// LLVM Code
+//===- RISCVMatInt.cpp - Immediate materialisation -------------*- C++
+//-*--===//
+//
+//  Part of the LLVM Project, under the Apache License v2.0 with LLVM
+//  Exceptions. See https://llvm.org/LICENSE.txt for license information.
+//  SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+void Assembler::RecursiveLi(Register rd, int64_t val) {
+  if (val > 0 && RecursiveLiImplCount(val) > 2) {
+    unsigned LeadingZeros = base::bits::CountLeadingZeros((uint64_t)val);
+    uint64_t ShiftedVal = (uint64_t)val << LeadingZeros;
+    int countFillZero = RecursiveLiImplCount(ShiftedVal) + 1;
+    if (countFillZero < RecursiveLiImplCount(val)) {
+      RecursiveLiImpl(rd, ShiftedVal);
+      srli(rd, rd, LeadingZeros);
+      return;
+    }
+  }
+  RecursiveLiImpl(rd, val);
+}
+
+int Assembler::RecursiveLiCount(int64_t val) {
+  if (val > 0 && RecursiveLiImplCount(val) > 2) {
+    unsigned LeadingZeros = base::bits::CountLeadingZeros((uint64_t)val);
+    uint64_t ShiftedVal = (uint64_t)val << LeadingZeros;
+    // Fill in the bits that will be shifted out with 1s. An example where
+    // this helps is trailing one masks with 32 or more ones. This will
+    // generate ADDI -1 and an SRLI.
+    int countFillZero = RecursiveLiImplCount(ShiftedVal) + 1;
+    if (countFillZero < RecursiveLiImplCount(val)) {
+      return countFillZero;
+    }
+  }
+  return RecursiveLiImplCount(val);
+}
+
+void Assembler::RecursiveLiImpl(Register rd, int64_t Val) {
+  if (is_int32(Val)) {
+    // Depending on the active bits in the immediate Value v, the following
+    // instruction sequences are emitted:
+    //
+    // v == 0                        : ADDI
+    // v[0,12) != 0 && v[12,32) == 0 : ADDI
+    // v[0,12) == 0 && v[12,32) != 0 : LUI
+    // v[0,32) != 0                  : LUI+ADDI(W)
+    int64_t Hi20 = ((Val + 0x800) >> 12) & 0xFFFFF;
+    int64_t Lo12 = Val << 52 >> 52;
+
+    if (Hi20) {
+      lui(rd, (int32_t)Hi20);
+    }
+
+    if (Lo12 || Hi20 == 0) {
+      if (Hi20) {
+        addiw(rd, rd, Lo12);
+      } else {
+        addi(rd, zero_reg, Lo12);
+      }
+    }
+    return;
+  }
+
+  // In the worst case, for a full 64-bit constant, a sequence of 8
+  // instructions (i.e., LUI+ADDIW+SLLI+ADDI+SLLI+ADDI+SLLI+ADDI) has to be
+  // emitted. Note that the first two instructions (LUI+ADDIW) can contribute
+  // up to 32 bits while the following ADDI instructions contribute up to 12
+  // bits each.
+  //
+  // On the first glance, implementing this seems to be possible by simply
+  // emitting the most significant 32 bits (LUI+ADDIW) followed by as many
+  // left shift (SLLI) and immediate additions (ADDI) as needed. However, due
+  // to the fact that ADDI performs a sign extended addition, doing it like
+  // that would only be possible when at most 11 bits of the ADDI instructions
+  // are used. Using all 12 bits of the ADDI instructions, like done by GAS,
+  // actually requires that the constant is processed starting with the least
+  // significant bit.
+  //
+  // In the following, constants are processed from LSB to MSB but instruction
+  // emission is performed from MSB to LSB by recursively calling
+  // generateInstSeq. In each recursion, first the lowest 12 bits are removed
+  // from the constant and the optimal shift amount, which can be greater than
+  // 12 bits if the constant is sparse, is determined. Then, the shifted
+  // remaining constant is processed recursively and gets emitted as soon as
+  // it fits into 32 bits. The emission of the shifts and additions is
+  // subsequently performed when the recursion returns.
+
+  int64_t Lo12 = Val << 52 >> 52;
+  int64_t Hi52 = ((uint64_t)Val + 0x800ull) >> 12;
+  int ShiftAmount = 12 + base::bits::CountTrailingZeros((uint64_t)Hi52);
+  Hi52 = signExtend(Hi52 >> (ShiftAmount - 12), 64 - ShiftAmount);
+
+  // If the remaining bits don't fit in 12 bits, we might be able to reduce
+  // the shift amount in order to use LUI which will zero the lower 12 bits.
+  bool Unsigned = false;
+  if (ShiftAmount > 12 && !is_int12(Hi52)) {
+    if (is_int32((uint64_t)Hi52 << 12)) {
+      // Reduce the shift amount and add zeros to the LSBs so it will match
+      // LUI.
+      ShiftAmount -= 12;
+      Hi52 = (uint64_t)Hi52 << 12;
+    }
+  }
+  RecursiveLi(rd, Hi52);
+
+  if (Unsigned) {
+  } else {
+    slli(rd, rd, ShiftAmount);
+  }
+  if (Lo12) {
+    addi(rd, rd, Lo12);
+  }
+}
+
+int Assembler::RecursiveLiImplCount(int64_t Val) {
+  int count = 0;
+  if (is_int32(Val)) {
+    // Depending on the active bits in the immediate Value v, the following
+    // instruction sequences are emitted:
+    //
+    // v == 0                        : ADDI
+    // v[0,12) != 0 && v[12,32) == 0 : ADDI
+    // v[0,12) == 0 && v[12,32) != 0 : LUI
+    // v[0,32) != 0                  : LUI+ADDI(W)
+    int64_t Hi20 = ((Val + 0x800) >> 12) & 0xFFFFF;
+    int64_t Lo12 = Val << 52 >> 52;
+
+    if (Hi20) {
+      // lui(rd, (int32_t)Hi20);
+      count++;
+    }
+
+    if (Lo12 || Hi20 == 0) {
+      //   unsigned AddiOpc = (IsRV64 && Hi20) ? RISCV::ADDIW : RISCV::ADDI;
+      //   Res.push_back(RISCVMatInt::Inst(AddiOpc, Lo12));
+      count++;
+    }
+    return count;
+  }
+
+  // In the worst case, for a full 64-bit constant, a sequence of 8
+  // instructions (i.e., LUI+ADDIW+SLLI+ADDI+SLLI+ADDI+SLLI+ADDI) has to be
+  // emitted. Note that the first two instructions (LUI+ADDIW) can contribute
+  // up to 32 bits while the following ADDI instructions contribute up to 12
+  // bits each.
+  //
+  // On the first glance, implementing this seems to be possible by simply
+  // emitting the most significant 32 bits (LUI+ADDIW) followed by as many
+  // left shift (SLLI) and immediate additions (ADDI) as needed. However, due
+  // to the fact that ADDI performs a sign extended addition, doing it like
+  // that would only be possible when at most 11 bits of the ADDI instructions
+  // are used. Using all 12 bits of the ADDI instructions, like done by GAS,
+  // actually requires that the constant is processed starting with the least
+  // significant bit.
+  //
+  // In the following, constants are processed from LSB to MSB but instruction
+  // emission is performed from MSB to LSB by recursively calling
+  // generateInstSeq. In each recursion, first the lowest 12 bits are removed
+  // from the constant and the optimal shift amount, which can be greater than
+  // 12 bits if the constant is sparse, is determined. Then, the shifted
+  // remaining constant is processed recursively and gets emitted as soon as
+  // it fits into 32 bits. The emission of the shifts and additions is
+  // subsequently performed when the recursion returns.
+
+  int64_t Lo12 = Val << 52 >> 52;
+  int64_t Hi52 = ((uint64_t)Val + 0x800ull) >> 12;
+  int ShiftAmount = 12 + base::bits::CountTrailingZeros((uint64_t)Hi52);
+  Hi52 = signExtend(Hi52 >> (ShiftAmount - 12), 64 - ShiftAmount);
+
+  // If the remaining bits don't fit in 12 bits, we might be able to reduce
+  // the shift amount in order to use LUI which will zero the lower 12 bits.
+  bool Unsigned = false;
+  if (ShiftAmount > 12 && !is_int12(Hi52)) {
+    if (is_int32((uint64_t)Hi52 << 12)) {
+      // Reduce the shift amount and add zeros to the LSBs so it will match
+      // LUI.
+      ShiftAmount -= 12;
+      Hi52 = (uint64_t)Hi52 << 12;
+    }
+  }
+
+  count += RecursiveLiImplCount(Hi52);
+
+  if (Unsigned) {
+  } else {
+    // slli(rd, rd, ShiftAmount);
+    count++;
+  }
+  if (Lo12) {
+    // addi(rd, rd, Lo12);
+    count++;
+  }
+  return count;
+}
+
+int Assembler::GeneralLiCount(int64_t imm, bool is_get_temp_reg) {
+  int count = 0;
+  // imitate Assembler::RV_li
+  if (is_int32(imm + 0x800)) {
+    // 32-bit case. Maximum of 2 instructions generated
+    int64_t high_20 = ((imm + 0x800) >> 12);
+    int64_t low_12 = imm << 52 >> 52;
+    if (high_20) {
+      count++;
+      if (low_12) {
+        count++;
+      }
+    } else {
+      count++;
+    }
+    return count;
+  } else {
+    // 64-bit case: divide imm into two 32-bit parts, upper and lower
+    int64_t up_32 = imm >> 32;
+    int64_t low_32 = imm & 0xffffffffull;
+    // Check if a temporary register is available
+    if (is_get_temp_reg) {
+      // keep track of hardware behavior for lower part in sim_low
+      int64_t sim_low = 0;
+      // Build lower part
+      if (low_32 != 0) {
+        int64_t high_20 = ((low_32 + 0x800) >> 12);
+        int64_t low_12 = low_32 & 0xfff;
+        if (high_20) {
+          // Adjust to 20 bits for the case of overflow
+          high_20 &= 0xfffff;
+          sim_low = ((high_20 << 12) << 32) >> 32;
+          count++;
+          if (low_12) {
+            sim_low += (low_12 << 52 >> 52) | low_12;
+            count++;
+          }
+        } else {
+          sim_low = low_12;
+          count++;
+        }
+      }
+      if (sim_low & 0x100000000) {
+        // Bit 31 is 1. Either an overflow or a negative 64 bit
+        if (up_32 == 0) {
+          // Positive number, but overflow because of the add 0x800
+          count++;
+          count++;
+          return count;
+        }
+        // low_32 is a negative 64 bit after the build
+        up_32 = (up_32 - 0xffffffff) & 0xffffffff;
+      }
+      if (up_32 == 0) {
+        return count;
+      }
+      int64_t high_20 = (up_32 + 0x800) >> 12;
+      int64_t low_12 = up_32 & 0xfff;
+      if (high_20) {
+        // Adjust to 20 bits for the case of overflow
+        high_20 &= 0xfffff;
+        count++;
+        if (low_12) {
+          count++;
+        }
+      } else {
+        count++;
+      }
+      // Put it at the bgining of register
+      count++;
+      if (low_32 != 0) {
+        count++;
+      }
+      return count;
+    }
+    // No temp register. Build imm in rd.
+    // Build upper 32 bits first in rd. Divide lower 32 bits parts and add
+    // parts to the upper part by doing shift and add.
+    // First build upper part in rd.
+    int64_t high_20 = (up_32 + 0x800) >> 12;
+    int64_t low_12 = up_32 & 0xfff;
+    if (high_20) {
+      // Adjust to 20 bits for the case of overflow
+      high_20 &= 0xfffff;
+      count++;
+      if (low_12) {
+        count++;
+      }
+    } else {
+      count++;
+    }
+    // upper part already in rd. Each part to be added to rd, has maximum of
+    // 11 bits, and always starts with a 1. rd is shifted by the size of the
+    // part plus the number of zeros between the parts. Each part is added
+    // after the left shift.
+    uint32_t mask = 0x80000000;
+    int32_t i;
+    for (i = 0; i < 32; i++) {
+      if ((low_32 & mask) == 0) {
+        mask >>= 1;
+        if (i == 31) {
+          // rest is zero
+          count++;
+        }
+        continue;
+      }
+      // The first 1 seen
+      if ((i + 11) < 32) {
+        // Pick 11 bits
+        count++;
+        count++;
+        i += 10;
+        mask >>= 11;
+      } else {
+        count++;
+        count++;
+        break;
+      }
+    }
+  }
+  return count;
+}
+#endif
 
 }  // namespace internal
 }  // namespace v8

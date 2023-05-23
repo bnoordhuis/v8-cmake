@@ -15,6 +15,7 @@
 #include "src/objects/descriptor-array.h"
 #include "src/objects/feedback-vector.h"
 #include "src/objects/heap-number.h"
+#include "src/objects/hole.h"
 #include "src/objects/literal-objects.h"
 #include "src/objects/map.h"
 #include "src/objects/oddball.h"
@@ -26,6 +27,10 @@
 #include "src/objects/swiss-name-dictionary.h"
 #include "src/roots/roots.h"
 #include "src/roots/static-roots.h"
+
+#if V8_ENABLE_WEBASSEMBLY
+#include "src/wasm/wasm-objects.h"
+#endif
 
 namespace v8 {
 namespace internal {
@@ -75,18 +80,18 @@ ReadOnlyRoots::ReadOnlyRoots(LocalIsolate* isolate)
 // have the right type, and to avoid the heavy #includes that would be
 // required for checked casts.
 
-#define ROOT_ACCESSOR(Type, name, CamelName)                          \
-  Type ReadOnlyRoots::name() const {                                  \
-    DCHECK(CheckType_##name());                                       \
-    return unchecked_##name();                                        \
-  }                                                                   \
-  Type ReadOnlyRoots::unchecked_##name() const {                      \
-    return Type::unchecked_cast(Object(at(RootIndex::k##CamelName))); \
-  }                                                                   \
-  Handle<Type> ReadOnlyRoots::name##_handle() const {                 \
-    DCHECK(CheckType_##name());                                       \
-    Address* location = GetLocation(RootIndex::k##CamelName);         \
-    return Handle<Type>(location);                                    \
+#define ROOT_ACCESSOR(Type, name, CamelName)                         \
+  Type ReadOnlyRoots::name() const {                                 \
+    DCHECK(CheckType_##name());                                      \
+    return unchecked_##name();                                       \
+  }                                                                  \
+  Type ReadOnlyRoots::unchecked_##name() const {                     \
+    return Type::unchecked_cast(object_at(RootIndex::k##CamelName)); \
+  }                                                                  \
+  Handle<Type> ReadOnlyRoots::name##_handle() const {                \
+    DCHECK(CheckType_##name());                                      \
+    Address* location = GetLocation(RootIndex::k##CamelName);        \
+    return Handle<Type>(location);                                   \
   }
 
 READ_ONLY_ROOT_LIST(ROOT_ACCESSOR)
@@ -104,11 +109,11 @@ Address* ReadOnlyRoots::GetLocation(RootIndex root_index) const {
 }
 
 Address ReadOnlyRoots::first_name_for_protector() const {
-  return at(RootIndex::kFirstNameForProtector);
+  return address_at(RootIndex::kFirstNameForProtector);
 }
 
 Address ReadOnlyRoots::last_name_for_protector() const {
-  return at(RootIndex::kLastNameForProtector);
+  return address_at(RootIndex::kLastNameForProtector);
 }
 
 bool ReadOnlyRoots::IsNameForProtector(HeapObject object) const {
@@ -123,9 +128,17 @@ void ReadOnlyRoots::VerifyNameForProtectorsPages() const {
            Page::FromAddress(last_name_for_protector()));
 }
 
-Address ReadOnlyRoots::at(RootIndex root_index) const {
+Handle<Object> ReadOnlyRoots::handle_at(RootIndex root_index) const {
+  return Handle<Object>(GetLocation(root_index));
+}
+
+Object ReadOnlyRoots::object_at(RootIndex root_index) const {
+  return Object(address_at(root_index));
+}
+
+Address ReadOnlyRoots::address_at(RootIndex root_index) const {
 #if V8_STATIC_ROOTS_BOOL
-  return V8HeapCompressionScheme::DecompressTaggedPointer(
+  return V8HeapCompressionScheme::DecompressTagged(
       V8HeapCompressionScheme::base(),
       StaticReadOnlyRootsPointerTable[static_cast<int>(root_index)]);
 #else

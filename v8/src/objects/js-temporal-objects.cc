@@ -608,7 +608,8 @@ Handle<BigInt> SystemUTCEpochNanoseconds(Isolate* isolate) {
   TEMPORAL_ENTER_FUNC();
   // 1. Let ns be the approximate current UTC date and time, in nanoseconds
   // since the epoch.
-  double ms = V8::GetCurrentPlatform()->CurrentClockTimeMillis();
+  double ms =
+      V8::GetCurrentPlatform()->CurrentClockTimeMillisecondsHighResolution();
   // 2. Set ns to the result of clamping ns between −8.64 × 10^21 and 8.64 ×
   // 10^21.
 
@@ -3106,16 +3107,8 @@ MaybeHandle<JSTemporalZonedDateTime> SystemZonedDateTime(
 }
 
 int CompareResultToSign(ComparisonResult r) {
-  switch (r) {
-    case ComparisonResult::kEqual:
-      return 0;
-    case ComparisonResult::kLessThan:
-      return -1;
-    case ComparisonResult::kGreaterThan:
-      return 1;
-    case ComparisonResult::kUndefined:
-      UNREACHABLE();
-  }
+  DCHECK_NE(r, ComparisonResult::kUndefined);
+  return static_cast<int>(r);
 }
 
 // #sec-temporal-formattimezoneoffsetstring

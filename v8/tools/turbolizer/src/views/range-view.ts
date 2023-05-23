@@ -7,27 +7,183 @@ import { createElement, getNumericCssValue,
          setCssValue, storageGetItem, storageSetItem } from "../common/util";
 import { SequenceView } from "./sequence-view";
 import { Interval } from "../interval";
-import { ChildRange, Range, SequenceBlock } from "../phases/sequence-phase";
+import { ChildRange, Range, RangeToolTip, SequenceBlock } from "../phases/sequence-phase";
+import { SelectionBroker } from "../selection/selection-broker";
+import { BlockSelectionHandler,
+         RegisterAllocationSelectionHandler } from "../selection/selection-handler";
 
 // This class holds references to the HTMLElements that represent each cell.
 class Grid {
   elements: Array<Array<HTMLElement>>;
+  background: HTMLCanvasElement;
+  backgroundContext: CanvasRenderingContext2D;
+  backgroundScrollLeft: number;
+  backgroundScrollTop: number;
+  backgroundFocusRow: number;
+  backgroundFocusColumn: number;
+  rows: number;
+  columns: number;
 
-  constructor() {
+  constructor(canvas: HTMLCanvasElement) {
     this.elements = new Array<Array<HTMLElement>>();
+    this.background = canvas;
+    this.backgroundContext = this.background.getContext("2d");
+    this.background.style.setProperty("margin-left", "0px");
+    this.backgroundScrollLeft = 0;
+    this.backgroundScrollTop = 0;
+    this.backgroundFocusRow = -1;
+    this.backgroundFocusColumn = -1;
   }
 
   public setRow(row: number, elementsRow: Array<HTMLElement>): void {
     this.elements[row] = elementsRow;
   }
 
+  public updateBackgroundFocusPoint(row: number, column: number): void {
+    this.backgroundFocusRow = row;
+    this.backgroundFocusColumn = column;
+  }
+
+  public clearBackgroundFocusPoint(): void {
+    this.backgroundFocusRow = -1;
+    this.backgroundFocusColumn = -1;
+  }
+
+  public updateBackground(view: RangeView, scrollTop: number, scrollLeft: number): void {
+    // Update canvas size.
+    if (view.divs.grid === undefined) return;
+    if (view.divs.registers === undefined) return;
+    if (view.divs.positionHeaders === null) return;
+    const positions = view.divs.positionHeaders.lastChild as HTMLElement;
+    const gridBoundRect = view.divs.grid.getBoundingClientRect();
+    const yAxisBoundRect = view.divs.yAxis.getBoundingClientRect();
+    this.background.style.setProperty(
+      "margin-left", yAxisBoundRect.width.toString() + "px");
+    this.background.style.setProperty(
+      "margin-top", (yAxisBoundRect.top - gridBoundRect.top).toString() + "px");
+    const rangePosCellSize = view.divs.getRangePositionCellSize();
+    const rangeRegCellSize = view.divs.getRangeRegCellSize();
+    const flipped = view.userSettings.get("flipped");
+    const canvasWidth = Math.min(gridBoundRect.width,
+      flipped ? view.divs.registers.getBoundingClientRect().width :
+                positions.getBoundingClientRect().width);
+    const canvasHeight = Math.min(gridBoundRect.height,
+      flipped ? positions.getBoundingClientRect().height :
+                view.divs.registers.getBoundingClientRect().height);
+    this.background.setAttribute("width", canvasWidth.toString());
+    this.background.setAttribute("height", canvasHeight.toString());
+    const firstPosition = view.instructionRangeHandler.getFirstPosition();
+    // Draw background lines and highlight select sections.
+    if (!flipped) {
+      const startRow = Math.floor(scrollTop / rangeRegCellSize[1]);
+      const endRow = Math.floor((scrollTop + canvasHeight) / rangeRegCellSize[1]);
+      const startColumn = Math.floor(scrollLeft / rangePosCellSize[0]);
+      const endColumn = Math.floor((scrollLeft + canvasWidth) / rangePosCellSize[0]);
+      // Draw the highlight region.
+      this.backgroundContext.fillStyle = C.RANGE_BACKGROUND_SELECT_COLOR;
+      let yAxisPos = startRow * rangeRegCellSize[1] - scrollTop + C.RANGE_REGISTER_BORDER_WIDTH;
+      for (let row = startRow; row <= endRow; row++) {
+        if (view.divs.isRangeRegSelected(row)) {
+          this.backgroundContext.fillRect(0, yAxisPos, canvasWidth, rangeRegCellSize[1]);
+        }
+        yAxisPos += rangeRegCellSize[1];
+      }
+      let xAxisPos = startColumn * rangePosCellSize[0] - scrollLeft;
+      for (let column = startColumn; column <= endColumn; column++) {
+        if (view.divs.isRangePositionSelected(column)) {
+          this.backgroundContext.fillRect(xAxisPos, 0, rangePosCellSize[0], canvasHeight);
+        }
+        xAxisPos += rangePosCellSize[0];
+      }
+      // Draw the focus point.
+      if (this.canShowFocus([startRow, endRow,
+                             startColumn + firstPosition, endColumn + firstPosition])) {
+        this.backgroundContext.fillStyle = C.RANGE_BACKGROUND_FOCUS_COLOR;
+        const xPos = (this.backgroundFocusColumn - firstPosition) * rangePosCellSize[0] - scrollLeft;
+        const yPos = this.backgroundFocusRow * rangeRegCellSize[1] - scrollTop;
+        this.backgroundContext.fillRect(xPos, yPos, rangePosCellSize[0], rangeRegCellSize[1]);
+      }
+      // Draw the background lines.
+      this.backgroundContext.fillStyle = C.RANGE_BACKGROUND_BORDER_COLOR;
+      yAxisPos = (startRow + 1) * rangeRegCellSize[1] - scrollTop;
+      for (let row = startRow; row <= endRow; row++) {
+        this.backgroundContext.fillRect(0, yAxisPos - C.RANGE_REGISTER_BORDER_WIDTH,
+                                        canvasWidth, C.RANGE_REGISTER_BORDER_WIDTH_X2);
+        yAxisPos += rangeRegCellSize[1];
+      }
+      xAxisPos = (startColumn + 1) * rangePosCellSize[0] - scrollLeft;
+      for (let column = startColumn; column <= endColumn; column++) {
+        const borderWidth = this.getBorderWidth(view, column + firstPosition);
+        this.backgroundContext.fillRect(xAxisPos - borderWidth, 0, borderWidth, canvasHeight);
+        xAxisPos += rangePosCellSize[0];
+      }
+    } else {
+      const startRow = Math.floor(scrollTop / rangePosCellSize[1]);
+      const endRow = Math.floor((scrollTop + canvasHeight) / rangePosCellSize[1]);
+      const startColumn = Math.floor(scrollLeft / rangeRegCellSize[0]);
+      const endColumn = Math.floor((scrollLeft + canvasWidth) / rangeRegCellSize[0]);
+      // Draw the highlight region.
+      this.backgroundContext.fillStyle = C.RANGE_BACKGROUND_SELECT_COLOR;
+      let yAxisPos = startRow * rangePosCellSize[1] - scrollTop;
+      for (let row = startRow; row <= endRow; row++) {
+        if (view.divs.isRangePositionSelected(row)) {
+          this.backgroundContext.fillRect(0, yAxisPos, canvasWidth, rangePosCellSize[1]);
+        }
+        yAxisPos += rangePosCellSize[1];
+      }
+      let xAxisPos = startColumn * rangeRegCellSize[0] - scrollLeft + C.RANGE_REGISTER_BORDER_WIDTH;
+      for (let column = startColumn; column <= endColumn; column++) {
+        if (view.divs.isRangeRegSelected(column)) {
+          this.backgroundContext.fillRect(xAxisPos, 0, rangeRegCellSize[0], canvasHeight);
+        }
+        xAxisPos += rangeRegCellSize[0];
+      }
+      // Draw the focus point.
+      if (this.canShowFocus([startColumn, endColumn,
+                             startRow + firstPosition, endRow + firstPosition])) {
+        this.backgroundContext.fillStyle = C.RANGE_BACKGROUND_FOCUS_COLOR;
+        const xPos = this.backgroundFocusRow * rangeRegCellSize[0] - scrollLeft;
+        const yPos = (this.backgroundFocusColumn - firstPosition) * rangePosCellSize[1] - scrollTop;
+        this.backgroundContext.fillRect(xPos, yPos, rangeRegCellSize[0], rangePosCellSize[1]);
+      }
+      // Draw the background lines.
+      this.backgroundContext.fillStyle = C.RANGE_BACKGROUND_BORDER_COLOR;
+      yAxisPos = (startRow + 1) * rangePosCellSize[1] - scrollTop;
+      for (let row = startRow; row <= endRow; row++) {
+        const borderWidth = this.getBorderWidth(view, row + firstPosition);
+        this.backgroundContext.fillRect(0, yAxisPos - borderWidth, canvasWidth, borderWidth);
+        yAxisPos += rangePosCellSize[1];
+      }
+      xAxisPos = (startColumn + 1) * rangeRegCellSize[0] - scrollLeft;
+      for (let column = startColumn; column <= endColumn; column++) {
+        this.backgroundContext.fillRect(xAxisPos - C.RANGE_REGISTER_BORDER_WIDTH, 0,
+                                        C.RANGE_REGISTER_BORDER_WIDTH_X2, canvasHeight);
+        xAxisPos += rangeRegCellSize[0];
+      }
+    }
+    this.backgroundScrollLeft = scrollLeft;
+    this.backgroundScrollTop = scrollTop;
+  }
+
   public getCell(row: number, column: number): HTMLElement {
+    if (this.elements[row] === undefined) return undefined;
     return this.elements[row][column];
   }
 
   public getInterval(row: number, column: number): HTMLElement {
     // The cell is within an inner wrapper div which is within the interval div.
     return this.getCell(row, column).parentElement.parentElement;
+  }
+
+  private getBorderWidth(view: RangeView, position: number): number {
+    return view.blocksData.isBlockBorder(position) ? view.cssVariables.blockBorderWidth :
+            view.blocksData.isInstructionBorder(position) ? view.cssVariables.instrBorder :
+                                                              C.RANGE_POSITION_BORDER_WIDTH;
+  }
+
+  private canShowFocus(bound: Array<number>): boolean {
+    return this.backgroundFocusRow >= bound[0] && this.backgroundFocusRow <= bound[1] &&
+            this.backgroundFocusColumn >= bound[2] && this.backgroundFocusColumn <= bound[3];
   }
 }
 
@@ -64,7 +220,7 @@ class GridAccessor {
     return this.currentGrid().getInterval(row, column);
   }
 
-  private currentGrid(): Grid {
+  public currentGrid(): Grid {
     return this.grids.get(this.sequenceView.currentPhaseIndex);
   }
 }
@@ -107,12 +263,14 @@ class CSSVariables {
   positionBorder: number;
   blockBorderWidth: number;
   flippedPositionHeight: number;
+  instrBorder: number;
 
   constructor() {
     this.positionWidth = getNumericCssValue("--range-position-width");
     this.positionBorder = getNumericCssValue("--range-position-border");
     this.blockBorderWidth = getNumericCssValue("--range-block-border");
     this.flippedPositionHeight = getNumericCssValue("--range-flipped-position-height");
+    this.instrBorder = getNumericCssValue("--range-instr-border");
   }
 
   setVariables(numPositions: number, numRegisters: number) {
@@ -154,6 +312,7 @@ class UserSettings {
       this.reset(settingName);
       toggleInput.disabled = false;
     };
+    toggleEl.onclick = (e: MouseEvent) => { e.stopPropagation(); };
     toggleEl.insertBefore(toggleInput, toggleEl.firstChild);
     return toggleEl;
   }
@@ -300,6 +459,34 @@ class Divs {
     titleEl.appendChild(userSettings.getToggleElement("flipped", "Switched Axes"));
     return titleEl;
   }
+
+  public getRangePositionCellSize(): Array<number> {
+    const positions = this.positionHeaders.lastChild as HTMLElement;
+    if (positions.children.length == 0) return [0, 0];
+    const rangePositionRect = positions.children[0].getBoundingClientRect();
+    return [rangePositionRect.width, rangePositionRect.height];
+  }
+
+  public getRangeRegCellSize(): Array<number> {
+    if (this.registers.children.length == 0) return [0, 0];
+    const yAxisRect = this.registers.children[0].getBoundingClientRect();
+    return [yAxisRect.width, yAxisRect.height];
+  }
+
+  public isRangePositionSelected(column: number): boolean {
+    const positions = this.positionHeaders.lastChild as HTMLElement;
+    if (positions.children.length < column) return false;
+    const rangePositionEl = positions.children[column] as HTMLElement;
+    if (rangePositionEl === undefined) return false;
+    return rangePositionEl.classList.contains('selected');
+  }
+
+  public isRangeRegSelected(row: number): boolean {
+    if (this.registers.children.length < row) return false;
+    const rangeRegisterEl = this.registers.children[row] as HTMLElement;
+    if (rangeRegisterEl === undefined) return false;
+    return rangeRegisterEl.classList.contains('selected');
+  }
 }
 
 class RowConstructor {
@@ -325,31 +512,49 @@ class RowConstructor {
   // depending on whether that position is the start of an interval or not.
   // RangePair is used to allow the two fixed register live ranges of normal and deferred to be
   // easily combined into a single row.
-  construct(grid: Grid, row: number, registerIndex: number, ranges: [Range, Range],
-            getElementForEmptyPosition: (position: number) => HTMLElement,
+  construct(grid: Grid, row: number, registerId: string, registerIndex: number,
+            ranges: [Range, Range], getElementForEmptyPosition: (position: number) => HTMLElement,
             callbackForInterval: (position: number, interval: HTMLElement) => void): boolean {
     // Construct all of the new intervals.
     const intervalMap = this.elementsForIntervals(registerIndex, ranges);
     if (intervalMap.size == 0) return false;
-    const positions = new Array<HTMLElement>(this.view.instructionRangeHandler.numPositions);
+    const positionsArray = new Array<HTMLElement>(this.view.instructionRangeHandler.numPositions);
+    const posOffset = this.view.instructionRangeHandler.getPositionFromIndex(0);
+    let blockId = this.view.instructionRangeHandler.getBlockIdFromIndex(0);
+    let lastIntervalEndPos = -1;
     for (let column = 0; column < this.view.instructionRangeHandler.numPositions; ++column) {
       const interval = intervalMap.get(column);
       if (interval === undefined) {
-        positions[column] = getElementForEmptyPosition(column);
+        if (column == lastIntervalEndPos || column == this.view.instructionRangeHandler.numPositions - 1) {
+          // Add one empty div element at the end of interval to display the use mark.
+          positionsArray[column] = getElementForEmptyPosition(column);
+          this.view.selectionHandler.addCell(positionsArray[column], row,
+                                      column + posOffset, blockId, registerId, undefined, true);
+        } else {
+          positionsArray[column] = undefined;
+        }
+        if (this.view.blocksData.isBlockBorder(column + posOffset)) ++blockId;
       } else {
         callbackForInterval(column, interval);
         this.view.intervalsAccessor.addInterval(interval);
-        const intervalPositionElements = this.view.getPositionElementsFromInterval(interval);
+        const innerWrapper = this.view.getInnerWrapperFromInterval(interval);
+        const intervalNodeId = interval.dataset.nodeId;
+        this.view.selectionHandler.addInterval(interval, innerWrapper, intervalNodeId, registerId);
+        const intervalPositionElements = innerWrapper.children;
         for (let j = 0; j < intervalPositionElements.length; ++j) {
           const intervalColumn = column + j;
           // Point positions to the new elements.
-          positions[intervalColumn] = (intervalPositionElements[j] as HTMLElement);
+          positionsArray[intervalColumn] = (intervalPositionElements[j] as HTMLElement);
+          this.view.selectionHandler.addCell(positionsArray[intervalColumn], row,
+                                      intervalColumn + posOffset, blockId, registerId, intervalNodeId);
+          if (this.view.blocksData.isBlockBorder(intervalColumn + posOffset)) ++blockId;
         }
         column += intervalPositionElements.length - 1;
+        lastIntervalEndPos = column + 1;
       }
     }
 
-    grid.setRow(row, positions);
+    grid.setRow(row, positionsArray);
 
     for (const range of ranges) {
       if (!range) continue;
@@ -375,7 +580,7 @@ class RowConstructor {
                       this.view.instructionRangeHandler.convertIntervalPositionsToIndexes(interval);
           }
           const intervalEl = this.elementForInterval(childRange, interval, tooltip,
-            index, range.isDeferred);
+                                                     index, range.isDeferred);
           intervalMap.set(interval.start, intervalEl);
         }
       }
@@ -383,20 +588,21 @@ class RowConstructor {
     return intervalMap;
   }
 
-  private elementForInterval(childRange: ChildRange, interval: Interval,
-                             tooltip: string, index: number, isDeferred: boolean): HTMLElement {
+  private elementForInterval(childRange: ChildRange, interval: Interval, tooltip: RangeToolTip,
+                             index: number, isDeferred: boolean): HTMLElement
+  {
     const intervalEl = createElement("div", "range-interval");
-    intervalEl.dataset.tooltip = tooltip;
-    const title = `${childRange.id}:${index} ${tooltip}`;
+    intervalEl.dataset.tooltip = tooltip.text;
+    const title = `${childRange.id}:${index} ${tooltip.text}`;
     intervalEl.setAttribute("title", isDeferred ? `deferred: ${title}` : title);
-    this.setIntervalColor(intervalEl, tooltip);
+    this.setIntervalColor(intervalEl, tooltip.text);
 
     const intervalInnerWrapper = createElement("div", "range-interval-wrapper");
     intervalEl.style.gridColumn = `${(interval.start + 1)} / ${(interval.end + 1)}`;
     const intervalLength = interval.end - interval.start;
     intervalInnerWrapper.style.gridTemplateColumns =
       this.getGridTemplateColumnsValueForInterval(intervalLength);
-    const intervalStringEls = this.elementsForIntervalString(tooltip, intervalLength);
+    const intervalStringEls = this.elementsForIntervalString(tooltip.text, intervalLength);
     intervalEl.appendChild(intervalStringEls.main);
     intervalEl.appendChild(intervalStringEls.behind);
 
@@ -411,6 +617,10 @@ class RowConstructor {
     }
 
     intervalEl.appendChild(intervalInnerWrapper);
+    // Either the tooltip represents the interval id, or a new id is required.
+    const intervalNodeId = tooltip.isId ? tooltip.text
+                                        : "interval-" + index + "-" + interval.start;
+    intervalEl.dataset.nodeId = intervalNodeId;
     return intervalEl;
   }
 
@@ -444,7 +654,10 @@ class RowConstructor {
           if (!this.view.instructionRangeHandler.isPositionInRange(use)) continue;
           use = this.view.instructionRangeHandler.getIndexFromPosition(use);
         }
-        grid.getCell(row, use).classList.toggle("range-use", true);
+        const gridCell = grid.getCell(row, use);
+        if (gridCell !== undefined) {
+          gridCell.classList.toggle("range-use", true);
+        }
       }
     }
   }
@@ -580,7 +793,11 @@ class RangeViewConstructor {
   }
 
   public construct(): void {
-    this.grid = new Grid();
+    const backgroundCanvas = document.createElement("canvas");
+    const backgroundCanvasDiv = createElement("div", "range-background-canvas-div");
+    backgroundCanvasDiv.appendChild(backgroundCanvas);
+
+    this.grid = new Grid(backgroundCanvas);
     this.view.gridAccessor.addGrid(this.grid);
 
     this.view.divs.wholeHeader = this.elementForHeader();
@@ -594,8 +811,11 @@ class RangeViewConstructor {
       this.view.scrollHandler.syncScroll(ToSync.TOP, this.view.divs.yAxis, this.view.divs.grid);
       this.view.scrollHandler.saveScroll();
     };
+
+    gridContainer.appendChild(backgroundCanvasDiv);
     gridContainer.appendChild(this.view.divs.yAxis);
     gridContainer.appendChild(this.view.divs.grid);
+    this.view.selectionHandler.addBackground(this.view.divs.grid);
     this.view.divs.showOnLoad.appendChild(gridContainer);
 
     this.resetGroups();
@@ -644,11 +864,13 @@ class RangeViewConstructor {
   private addVirtualRanges(row: number): number {
     return this.view.instructionRangeHandler.forEachLiveRange(row,
       (registerIndex: number, row: number, registerName: string, range: Range) => {
-        const rowEl = this.elementForRow(row, registerIndex, [range, undefined]);
+        const registerId = C.VIRTUAL_REGISTER_ID_PREFIX + registerName;
+        const rowEl = this.elementForRow(row, registerId, registerIndex, [range, undefined]);
         if (rowEl) {
-          const registerEl = this.elementForRegister(row, registerName, true);
+          const registerEl = this.elementForRegister(row, registerName, registerId, true);
           this.addRowToGroup(row, rowEl);
           this.view.divs.registers.appendChild(registerEl);
+          this.view.focusHandler.virtualRegisterToRowMap.set(registerIndex, row);
           ++(this.registerTypeHeaderData.virtualCount);
           return true;
         }
@@ -659,10 +881,10 @@ class RangeViewConstructor {
   private addFixedRanges(row: number): void {
     row = this.view.instructionRangeHandler.forEachFixedRange(row,
       (registerIndex: number, row: number, registerName: string, ranges: [Range, Range]) => {
-        const rowEl = this.elementForRow(row, registerIndex, ranges);
+        const rowEl = this.elementForRow(row, registerName, registerIndex, ranges);
         if (rowEl) {
           this.registerTypeHeaderData.countFixedRegister(registerName, ranges);
-          const registerEl = this.elementForRegister(row, registerName, false);
+          const registerEl = this.elementForRegister(row, registerName, registerName, false);
           this.addRowToGroup(row, rowEl);
           this.view.divs.registers.appendChild(registerEl);
           return true;
@@ -678,13 +900,14 @@ class RangeViewConstructor {
   // Each row of positions and intervals associated with a register is contained in a single
   // HTMLElement. RangePair is used to allow the two fixed register live ranges of normal and
   // deferred to be easily combined into a single row.
-  private elementForRow(row: number, registerIndex: number, ranges: [Range, Range]): HTMLElement {
+  private elementForRow(row: number, registerId: string, registerIndex: number,
+                        ranges: [Range, Range]): HTMLElement {
     const rowEl = createElement("div", "range-positions");
 
     const getElementForEmptyPosition = (column: number) => {
       const position = this.view.instructionRangeHandler.getPositionFromIndex(column);
       const blockBorder = this.view.blocksData.isBlockBorder(position);
-      const classes = "range-position range-empty " + (blockBorder
+      const classes = "range-position range-empty range-background-div " + (blockBorder
         ? "range-block-border" : this.view.blocksData.isInstructionBorder(position)
           ? "range-instr-border" : "range-position-border");
 
@@ -699,19 +922,21 @@ class RangeViewConstructor {
     };
 
     // Only construct the row if it has any intervals.
-    if (this.view.rowConstructor.construct(this.grid, row, registerIndex, ranges,
+    if (this.view.rowConstructor.construct(this.grid, row, registerId, registerIndex, ranges,
                                            getElementForEmptyPosition, callbackForInterval)) {
       return rowEl;
     }
     return undefined;
   }
 
-  private elementForRegister(row: number, registerName: string, isVirtual: boolean) {
+  private elementForRegister(row: number, registerName: string,
+                             registerId: string, isVirtual: boolean) {
     const regEl = createElement("div", "range-reg");
     this.view.stringConstructor.setRegisterString(registerName, isVirtual, regEl);
     regEl.dataset.virtual = isVirtual.toString();
     regEl.setAttribute("title", registerName);
     regEl.style.gridColumn = String(row + 1);
+    this.view.selectionHandler.addRegister(regEl, registerId, row);
     return regEl;
   }
 
@@ -810,21 +1035,24 @@ class RangeViewConstructor {
     element.style.gridTemplateRows = `repeat(${8 * instrCount},
       calc((${this.view.cssVariables.flippedPositionHeight}em +
             ${this.view.cssVariables.blockBorderWidth}px)/2))`;
+    this.view.selectionHandler.addBlock(element, blockId, firstColumn);
     return element;
   }
 
   private elementForInstructionHeader(): HTMLElement {
     const headerEl = createElement("div", "range-instruction-ids");
+    let blockId = this.view.instructionRangeHandler.getBlockIdFromIndex(0);
     let instrId = this.view.instructionRangeHandler.getInstructionIdFromIndex(0);
     const instrLimit = instrId + this.view.instructionRangeHandler.numInstructions;
     for (; instrId < instrLimit; ++instrId) {
-      headerEl.appendChild(this.elementForInstruction(instrId));
+      headerEl.appendChild(this.elementForInstruction(instrId, blockId));
+      if (this.view.blocksData.isInstructionIdOnBlockBorder(instrId)) ++blockId;
     }
 
     return headerEl;
   }
 
-  private elementForInstruction(instrId: number): HTMLElement {
+  private elementForInstruction(instrId: number, blockId: number): HTMLElement {
     const isBlockBorder = this.view.blocksData.isInstructionIdOnBlockBorder(instrId);
     const classes = "range-instruction-id range-header-element "
       + (isBlockBorder ? "range-block-border" : "range-instr-border");
@@ -834,23 +1062,27 @@ class RangeViewConstructor {
     const instrIndex = this.view.instructionRangeHandler.getInstructionIndex(instrId);
     const firstGridCol = (instrIndex * C.POSITIONS_PER_INSTRUCTION) + 1;
     element.style.gridColumn = `${firstGridCol} / ${(firstGridCol + C.POSITIONS_PER_INSTRUCTION)}`;
+    this.view.selectionHandler.addInstruction(element, instrId, instrIndex, blockId);
     return element;
   }
 
   private elementForPositionHeader(): HTMLElement {
     const headerEl = createElement("div", "range-positions range-positions-header");
 
+    let blockId = this.view.instructionRangeHandler.getBlockIdFromIndex(0);
     let position = this.view.instructionRangeHandler.getPositionFromIndex(0);
     const lastPos = this.view.instructionRangeHandler.getLastPosition();
     for (; position <= lastPos; ++position) {
       const isBlockBorder = this.view.blocksData.isBlockBorder(position);
-      headerEl.appendChild(this.elementForPosition(position, isBlockBorder));
+      headerEl.appendChild(this.elementForPosition(position, blockId, isBlockBorder));
+      if (isBlockBorder) ++blockId;
     }
 
     return headerEl;
   }
 
-  private elementForPosition(position: number, isBlockBorder: boolean): HTMLElement {
+  private elementForPosition(position: number, blockId: number,
+                             isBlockBorder: boolean): HTMLElement {
     const classes = "range-position range-header-element " +
       (isBlockBorder ? "range-block-border"
         : this.view.blocksData.isInstructionBorder(position) ? "range-instr-border"
@@ -858,6 +1090,7 @@ class RangeViewConstructor {
 
     const element = createElement("div", classes, String(position));
     element.setAttribute("title", String(position));
+    this.view.selectionHandler.addPosition(element, position, blockId);
     return element;
   }
 
@@ -892,30 +1125,32 @@ class PhaseChangeHandler {
     this.view.intervalsAccessor.forEachInterval((phase, interval) => {
       interval.classList.toggle("range-hidden", phase != this.view.sequenceView.currentPhaseIndex);
     });
+    this.view.focusHandler.resetFocus();
   }
 
   private addNewIntervals(): void {
     // All Grids should point to the same HTMLElement for empty cells in the grid,
     // so as to avoid duplication. The current Grid is used to retrieve these elements.
     const currentGrid = this.view.gridAccessor.getAnyGrid();
-    const newGrid = new Grid();
+    const newGrid = new Grid(currentGrid.background);
     this.view.gridAccessor.addGrid(newGrid);
 
     let row = 0;
-    row = this.view.instructionRangeHandler.forEachLiveRange(row, (registerIndex: number,
-                                                          row: number, _: string, range: Range) => {
-      this.addnewIntervalsInRange(currentGrid, newGrid, row, registerIndex, [range, undefined]);
-      return true;
+    row = this.view.instructionRangeHandler.forEachLiveRange(row,
+      (registerIndex: number, row: number, registerName: string, range: Range) => {
+        this.addnewIntervalsInRange(currentGrid, newGrid, row,
+                    C.VIRTUAL_REGISTER_ID_PREFIX + registerName, registerIndex, [range, undefined]);
+        return true;
     });
 
     this.view.instructionRangeHandler.forEachFixedRange(row,
-      (registerIndex, row, _, ranges) => {
-        this.addnewIntervalsInRange(currentGrid, newGrid, row, registerIndex, ranges);
+      (registerIndex, row, registerName, ranges) => {
+        this.addnewIntervalsInRange(currentGrid, newGrid, row, registerName, registerIndex, ranges);
         return true;
       });
   }
 
-  private addnewIntervalsInRange(currentGrid: Grid, newGrid: Grid, row: number,
+  private addnewIntervalsInRange(currentGrid: Grid, newGrid: Grid, row: number, registerId: string,
                                  registerIndex: number, ranges: [Range, Range]): void {
     const numReplacements = new Map<HTMLElement, number>();
 
@@ -943,7 +1178,7 @@ class PhaseChangeHandler {
       currentInterval.insertAdjacentElement("afterend", interval);
     };
 
-    this.view.rowConstructor.construct(newGrid, row, registerIndex, ranges,
+    this.view.rowConstructor.construct(newGrid, row, registerId, registerIndex, ranges,
       getElementForEmptyPosition, callbackForInterval);
   }
 }
@@ -1027,6 +1262,10 @@ class InstructionRangeHandler {
 
   public getLastPosition(): number {
     return this.positionRange[1] - 1;
+  }
+
+  public getFirstPosition(): number {
+    return this.positionRange[0];
   }
 
   public getPositionFromIndex(index: number): number {
@@ -1152,6 +1391,330 @@ class InstructionRangeHandler {
   }
 }
 
+// This class tracks what element is selected and scrolls it into view.
+class FocusHandler implements RegisterAllocationSelectionHandler, BlockSelectionHandler {
+  rangeView: RangeView;
+  virtualRegisterToRowMap: Map<number, number>;
+  elementInFocus: HTMLElement;
+  isBackgroundInFocus: boolean;
+  // coordsInFocus in used to resetFocus after it may have been cleared as well as
+  // allowing for quick access to the coordinates.
+  coordsInFocus: [number, number];
+
+  constructor(rangeView: RangeView) {
+    this.rangeView = rangeView;
+    this.virtualRegisterToRowMap = new Map<number, number>();
+    this.elementInFocus = undefined;
+    this.isBackgroundInFocus = false;
+    this.coordsInFocus = [-1, -1];
+  }
+
+  private getHeaderElement(row: number, index: number) {
+    return this.rangeView.divs.positionHeaders.children[C.RANGES_NUM_POS_HEADER_ROWS + row]
+                                              .children[index] as HTMLElement;
+  }
+
+  private moveFocusTo(element: HTMLElement, eventInitDict?: MouseEventInit) {
+    if (element !== undefined) {
+      element.scrollIntoView({ block: 'nearest' });
+    } else if (this.isBackgroundInFocus) {
+      // TODO: find a way to locate the background scroll offset.
+    }
+  }
+
+  public isInFocus(element: HTMLElement) {
+    return this.elementInFocus == element;
+  }
+
+  public setFocus(element: HTMLElement, row: number, column: number, isBackground?: boolean) {
+    this.clear();
+    this.coordsInFocus[0] = row;
+    this.coordsInFocus[1] = column;
+    if (element !== undefined) {
+      element.classList.toggle("focused", true);
+    }
+    this.elementInFocus = element;
+    this.isBackgroundInFocus = isBackground;
+    if (isBackground) {
+      this.rangeView.gridAccessor.currentGrid().updateBackgroundFocusPoint(row, column);
+    }
+  }
+
+  public setFocusVirtualRegister(register: number) {
+    const row = this.virtualRegisterToRowMap.get(register);
+    if (row) this.moveFocusTo(this.rangeView.divs.registers.children[row] as HTMLElement);
+  }
+
+  public clear() {
+    if (this.elementInFocus) {
+      this.elementInFocus.classList.toggle("focused", false);
+      this.elementInFocus = undefined;
+    }
+    const curGrid = this.rangeView.gridAccessor.currentGrid();
+    if (curGrid !== undefined) {
+      curGrid.clearBackgroundFocusPoint();
+      curGrid.updateBackground(this.rangeView, this.rangeView.divs.grid.scrollTop,
+                               this.rangeView.divs.grid.scrollLeft);
+      this.isBackgroundInFocus = false;
+    }
+  }
+
+  public clearCoordsInFocus() {
+    this.coordsInFocus[0] = -1;
+    this.coordsInFocus[1] = -1;
+  }
+
+  public resetFocus() {
+    this.clear();
+    // Restore focus if saved.
+    if (this.coordsInFocus[0] >= 0 || this.coordsInFocus[1] >= 0) {
+      this.moveFocusTo(this.rangeView.gridAccessor.getCell(this.coordsInFocus[0],
+                                                          this.coordsInFocus[1]));
+    }
+  }
+
+  public select(instructionIds: Array<number>, selected: boolean, scrollIntoView: boolean): void {}
+
+  public brokeredClear(): void {
+    this.clear();
+  }
+
+  public brokeredRegisterAllocationSelect(instructionsOffsets: Array<[number, number]>,
+                                          selected: boolean): void {
+    if (!selected) return;
+    for (const offsetPair of instructionsOffsets) {
+      for (const offset of offsetPair) {
+        const instr = this.getHeaderElement(C.RANGES_INSTR_GRID_ROW,
+                                this.rangeView.instructionRangeHandler.getInstructionIndex(offset));
+        if (instr) this.moveFocusTo(instr, { shiftKey: true });
+      }
+    }
+  }
+
+  public brokeredBlockSelect(blockIds: Array<number>, selected: boolean): void {
+    if (!selected) return;
+    for (const id of blockIds) {
+      const block = this.getHeaderElement(C.RANGES_BLOCK_GRID_ROW,
+                                          this.rangeView.instructionRangeHandler.getBlockIndex(id));
+      if (block) this.moveFocusTo(block, { shiftKey: true });
+    }
+  }
+}
+
+// This class works in tandem with the selectionHandlers defined in text-view.ts
+// rather than updating HTMLElements explicitly itself.
+export class RangeViewSelectionHandler {
+  sequenceView: SequenceView;
+  rangeView: RangeView;
+  rowToRegisterId: Map<number, string>;
+  positionToBlockId: Map<number, number>;
+
+  constructor(rangeView: RangeView) {
+    this.rangeView = rangeView;
+    this.sequenceView = this.rangeView.sequenceView;
+    this.rowToRegisterId = new Map<number, string>();
+    this.positionToBlockId = new Map<number, number>();
+
+    // Clear all selections when container is clicked.
+    this.rangeView.divs.container.onclick = (e: MouseEvent) => {
+      if (!e.shiftKey) this.sequenceView.broker.broadcastClear(null);
+      this.rangeView.focusHandler.clearCoordsInFocus();
+    };
+  }
+
+  public addBlock(element: HTMLElement, id: number, firstColumn: number): void {
+    element.onclick = (e: MouseEvent) => {
+      e.stopPropagation();
+      if (!e.shiftKey) {
+        this.clear();
+      }
+      this.select(null, null, [id], true);
+      this.rangeView.focusHandler.setFocus(element, C.RANGES_BLOCK_GRID_ROW, firstColumn);
+    };
+    this.sequenceView.addHtmlElementForBlockId(id, element);
+    this.sequenceView.addHtmlElementForBlockId(this.sequenceView.getSubId(id), element);
+  }
+
+  public addInstruction(element: HTMLElement, id: number, index: number, blockId: number): void {
+    // Select the block which contains the instruction and all positions and cells
+    // that are within this instruction.=
+    element.onclick = (e: MouseEvent) => {
+      e.stopPropagation();
+      if (!e.shiftKey) {
+        this.clear();
+      }
+      this.select(null, [id], [this.sequenceView.getSubId(blockId)], true);
+      this.rangeView.focusHandler.setFocus(element, C.RANGES_INSTR_GRID_ROW,
+                                           C.POSITIONS_PER_INSTRUCTION * index);
+    };
+    this.sequenceView.addHtmlElementForBlockId(blockId, element);
+    this.sequenceView.addHtmlElementForInstructionId(id, element);
+    this.sequenceView.addHtmlElementForInstructionId(this.sequenceView.getSubId(id), element);
+  }
+
+  public addPosition(element: HTMLElement, position: number, blockId: number): void {
+    const instrId = Math.floor(position / C.POSITIONS_PER_INSTRUCTION);
+    const column = this.rangeView.instructionRangeHandler.getIndexFromPosition(position);
+    // Select the block and instruction which contains this position.
+    element.onclick = (e: MouseEvent) => {
+      e.stopPropagation();
+      if (!e.shiftKey) {
+        this.clear();
+      }
+      this.select(["position-" + position], [this.sequenceView.getSubId(instrId)],
+                                            [this.sequenceView.getSubId(blockId)], true);
+      this.rangeView.focusHandler.setFocus(element, C.RANGES_POS_GRID_ROW, column);
+    };
+    this.sequenceView.addHtmlElementForBlockId(blockId, element);
+    this.sequenceView.addHtmlElementForInstructionId(instrId, element);
+    this.sequenceView.addHtmlElementForNodeId("position-" + position, element);
+    this.positionToBlockId.set(position, blockId);
+  }
+
+  public addRegister(element: HTMLElement, registerId: string, row: number): void {
+    const rowGroupIndex = (Math.floor(row / C.ROW_GROUP_SIZE) * 2) + 1;
+    element.onclick = (e: MouseEvent) => {
+      e.stopPropagation();
+      if (!this.canSelectRow(element, row, rowGroupIndex)) return;
+      if (!e.shiftKey) {
+        this.clear();
+      }
+      // The register also effectively selects the row.
+      this.select([registerId], null, null, true);
+      this.rangeView.focusHandler.setFocus(element, row, C.RANGES_POS_GRID_ROW);
+    };
+    this.sequenceView.addHtmlElementForNodeId(registerId, element);
+    this.rowToRegisterId.set(row, registerId);
+  }
+
+  public addRow(element: HTMLElement, registerId: string): void {
+    // Highlight row when register is selected.
+    this.rangeView.sequenceView.addHtmlElementForNodeId(registerId, element);
+  }
+
+  public addInterval(intervalEl: HTMLElement, intervalInnerWrapperEl: HTMLElement,
+                     intervalNodeId: string, registerId: string): void {
+    // Highlight interval when the interval is selected.
+    this.sequenceView.addHtmlElementForNodeId(intervalNodeId, intervalEl);
+    // Highlight inner wrapper when row is selected, allowing for different color highlighting.
+    this.sequenceView.addHtmlElementForNodeId(registerId, intervalInnerWrapperEl);
+  }
+
+  public addCell(element: HTMLElement, row: number, position: number,
+                 blockId: number, registerId: string, intervalNodeId?: string, isEmptyCell?: boolean): void {
+    const instrId = Math.floor(position / C.POSITIONS_PER_INSTRUCTION);
+    const column = this.rangeView.instructionRangeHandler.getIndexFromPosition(position);
+    // Select the relevant row by the registerId, and the column by position.
+    // Also select the instruction and the block in which the position is in.
+    const select = [registerId, "position-" + position];
+    if (intervalNodeId) select.push(intervalNodeId);
+    const rowGroupIndex = (Math.floor(row / C.ROW_GROUP_SIZE) * 2) + 1;
+    element.onclick = (e: MouseEvent) => {
+      e.stopPropagation();
+      if (!this.canSelectRow(element, row, rowGroupIndex)) return;
+      if (!e.shiftKey) {
+        this.clear();
+      }
+      this.select(select, [this.sequenceView.getSubId(instrId)],
+                          [this.sequenceView.getSubId(blockId)], true);
+      this.rangeView.focusHandler.setFocus(element, row, column);
+    };
+    if (!isEmptyCell) {
+      this.sequenceView.addHtmlElementForBlockId(blockId, element);
+      this.sequenceView.addHtmlElementForInstructionId(instrId, element);
+      this.sequenceView.addHtmlElementForNodeId("position-" + position, element);
+    }
+  }
+
+  public addBackground(background: HTMLElement): void {
+    background.onclick = (e: MouseEvent) => {
+      if (this.rangeView.divs.grid === undefined) return;
+      if (this.rangeView.divs.registers === undefined) return;
+      if (this.rangeView.divs.positionHeaders === null) return;
+      const gridBoundRect = this.rangeView.divs.grid.getBoundingClientRect();
+      const clickLeft = e.clientX - gridBoundRect.left + this.rangeView.divs.grid.scrollLeft;
+      const clickTop = e.clientY - gridBoundRect.top + this.rangeView.divs.grid.scrollTop;
+      const rangePosCellSize = this.rangeView.divs.getRangePositionCellSize();
+      const rangeRegCellSize = this.rangeView.divs.getRangeRegCellSize();
+      const firstPosition = this.rangeView.instructionRangeHandler.getFirstPosition();
+      let row = -1;
+      let column = -1;
+      if (this.rangeView.userSettings.get("flipped")) {
+        row = Math.floor(clickLeft / rangeRegCellSize[0]);
+        column = Math.floor(clickTop / rangePosCellSize[1]) + firstPosition;
+      } else {
+        row = Math.floor(clickTop / rangeRegCellSize[1]);
+        column = Math.floor(clickLeft / rangePosCellSize[0]) + firstPosition;
+      }
+      if (!this.rowToRegisterId.has(row)) return;
+      const registerId = this.rowToRegisterId.get(row);
+      const positionId = "position-" + column;
+      e.stopPropagation();
+      if (!e.shiftKey) {
+        this.clear();
+      }
+      this.rangeView.focusHandler.setFocus(undefined, row, column, true);
+      const instrId = Math.floor(column / C.POSITIONS_PER_INSTRUCTION);
+      const blockId = this.positionToBlockId.get(column);
+      this.select([registerId, positionId], [this.sequenceView.getSubId(instrId)],
+                                            [this.sequenceView.getSubId(blockId)], true);
+    };
+  }
+
+  public updateBackground(): void {
+    this.rangeView.gridAccessor.currentGrid().updateBackground(this.rangeView,
+      this.rangeView.divs.grid.scrollTop, this.rangeView.divs.grid.scrollLeft);
+  }
+
+  private canSelectRow(element: HTMLElement, row: number, rowGroupIndex: number): boolean {
+    // No need to repeat work if already in focus.
+    if (this.rangeView.focusHandler.isInFocus(element)) return false;
+    // Don't select anything if the row group which this row is included in is hidden.
+    if (row >= 0
+        && this.rangeView.divs.grid.children[rowGroupIndex].classList.contains("range-hidden")) {
+      this.rangeView.scrollHandler.syncHidden();
+      return false;
+    }
+    return true;
+  }
+
+  // Don't call multiple times in a row or the SelectionMapsHandlers will clear their previous
+  // causing the HTMLElements to not be deselected by select.
+  private clear(): void {
+    this.rangeView.focusHandler.clear();
+    this.sequenceView.blockSelections.clearCurrent();
+    this.sequenceView.instructionSelections.clearCurrent();
+    this.sequenceView.nodeSelections.clearCurrent();
+    // Mark as cleared so that the HTMLElements are not updated on broadcastClear.
+    // The HTMLElements will be updated when select is called.
+    this.sequenceView.selectionCleared = true;
+    // broadcastClear calls brokeredClear on all SelectionHandlers but that which is passed to it.
+    this.sequenceView.broker.broadcastClear(this.sequenceView.nodeSelectionHandler);
+    this.sequenceView.selectionCleared = false;
+  }
+
+  private select(nodeIds: Iterable<string>, instrIds: Iterable<number>,
+                 blockIds: Iterable<number>, selected: boolean): void {
+    // Add nodeIds and blockIds to selections.
+    if (nodeIds) this.sequenceView.nodeSelections.current.select(nodeIds, selected);
+    if (instrIds) this.sequenceView.instructionSelections.current.select(instrIds, selected);
+    if (blockIds) this.sequenceView.blockSelections.current.select(blockIds, selected);
+    // Update the HTMLElements.
+    this.sequenceView.updateSelection(true);
+    if (nodeIds) {
+      // Broadcast selections to other SelectionHandlers.
+      this.sequenceView.broker.broadcastNodeSelect(this.sequenceView.nodeSelectionHandler,
+        this.sequenceView.nodeSelections.current.selectedKeys(), selected);
+    }
+    if (instrIds) {
+      this.sequenceView.broker.broadcastInstructionSelect(
+            this.sequenceView.registerAllocationSelectionHandler,
+            Array.from(this.sequenceView.instructionSelections.current.selectedKeysAsAbsNumbers()),
+            selected);
+    }
+  }
+}
+
 class DisplayResetter {
   view: RangeView;
   isFlipped: boolean;
@@ -1194,6 +1757,7 @@ class DisplayResetter {
     this.view.divs.yAxisLabel.innerText = this.isFlipped
                                           ? this.view.divs.yAxisLabel.dataset.flipped
                                           : this.view.divs.yAxisLabel.dataset.notFlipped;
+    this.view.focusHandler.resetFocus();
   }
 
   private resetLayout(): void {
@@ -1234,7 +1798,7 @@ class DisplayResetter {
       const intervalEl = interval as HTMLElement;
       const spanEl = intervalEl.children[0] as HTMLElement;
       const spanElBehind = intervalEl.children[1] as HTMLElement;
-      const intervalLength = this.view.getPositionElementsFromInterval(interval).length;
+      const intervalLength = this.view.getInnerWrapperFromInterval(interval).children.length;
       this.view.stringConstructor.setIntervalString(spanEl, spanElBehind,
                                                     intervalEl.dataset.tooltip, intervalLength);
       const intervalInnerWrapper = intervalEl.children[2] as HTMLElement;
@@ -1261,6 +1825,8 @@ class ScrollHandler {
 
   constructor(view: RangeView) {
     this.view = view;
+    this.scrollTop = 0;
+    this.scrollLeft = 0;
   }
 
   // This function is used to hide the rows which are not currently in view and
@@ -1343,12 +1909,21 @@ class ScrollHandler {
       this.scrollTopTimeout = setTimeout(() => {
         target.onscroll = this.scrollTopFunc;
         this.syncHidden();
-      }, 500);
+      }, 100);
     } else {
       this.scrollLeftTimeout = setTimeout(() => {
         target.onscroll = this.scrollLeftFunc;
         this.syncHidden();
-      }, 500);
+      }, 100);
+    }
+
+    // Update background cell.
+    const currentGrid = this.view.gridAccessor.currentGrid();
+    const gridScrollTop = this.view.divs.grid.scrollTop;
+    const gridScrollLeft = this.view.divs.grid.scrollLeft;
+    if (currentGrid !== undefined && (currentGrid.backgroundScrollLeft != gridScrollLeft ||
+                                     currentGrid.backgroundScrollTop != gridScrollTop)) {
+      currentGrid.updateBackground(this.view, gridScrollTop, gridScrollLeft);
     }
   }
 
@@ -1390,6 +1965,8 @@ export class RangeView {
   scrollHandler: ScrollHandler;
   phaseChangeHandler: PhaseChangeHandler;
   instructionRangeHandler: InstructionRangeHandler;
+  selectionHandler: RangeViewSelectionHandler;
+  focusHandler: FocusHandler;
   displayResetter: DisplayResetter;
   rowConstructor: RowConstructor;
   stringConstructor: StringConstructor;
@@ -1404,7 +1981,7 @@ export class RangeView {
     this.instructionRangeHandler = new InstructionRangeHandler(this, firstInstr, lastInstr);
   }
 
-  public initializeContent(blocks: Array<SequenceBlock>): void {
+  public initializeContent(blocks: Array<SequenceBlock>, broker: SelectionBroker): void {
     if (!this.initialized) {
       this.gridAccessor = new GridAccessor(this.sequenceView);
       this.intervalsAccessor = new IntervalElementsAccessor(this.sequenceView);
@@ -1424,16 +2001,19 @@ export class RangeView {
       this.scrollHandler = new ScrollHandler(this);
       this.rowConstructor = new RowConstructor(this);
       this.stringConstructor = new StringConstructor(this);
+      this.selectionHandler = new RangeViewSelectionHandler(this);
+      this.sequenceView.setRangeViewSelectionHandler(this.selectionHandler);
+      this.focusHandler = new FocusHandler(this);
+      broker.addBlockHandler(this.focusHandler);
+      broker.addRegisterAllocatorHandler(this.focusHandler);
       const constructor = new RangeViewConstructor(this);
       constructor.construct();
       this.cssVariables.setVariables(this.instructionRangeHandler.numPositions,
                                      this.divs.registers.children.length);
       this.phaseChangeHandler = new PhaseChangeHandler(this);
       let maxVirtualRegisterNumber = 0;
-      for (const register of this.divs.registers.children) {
-        const registerEl = register as HTMLElement;
-        maxVirtualRegisterNumber = Math.max(maxVirtualRegisterNumber,
-                                            parseInt(registerEl.title.substring(1), 10));
+      for (const register of this.focusHandler.virtualRegisterToRowMap.keys()) {
+        maxVirtualRegisterNumber = Math.max(maxVirtualRegisterNumber, register);
       }
       this.maxLengthVirtualRegisterNumber = Math.floor(Math.log10(maxVirtualRegisterNumber)) + 1;
       this.initialized = true;
@@ -1458,8 +2038,10 @@ export class RangeView {
       if (this.divs.registers.children.length) {
         setTimeout(() => {
           this.userSettings.resetFromSessionStorage();
+          this.focusHandler.resetFocus();
           this.scrollHandler.restoreScroll();
           this.scrollHandler.syncHidden();
+          this.selectionHandler.updateBackground();
           this.divs.showOnLoad.style.visibility = "visible";
         }, 100);
       }
@@ -1483,10 +2065,13 @@ export class RangeView {
   }
 
   public onresize(): void {
-    if (this.divs.registers.children.length && this.isShown) this.scrollHandler.syncHidden();
+    if (this.divs.registers.children.length && this.isShown) {
+     this.scrollHandler.syncHidden();
+     this.selectionHandler.updateBackground();
+    }
   }
 
-  public getPositionElementsFromInterval(interval: HTMLElement): HTMLCollection {
-    return interval.children[2].children;
+  public getInnerWrapperFromInterval(interval: HTMLElement) {
+    return interval.children[2] as HTMLElement;
   }
 }

@@ -285,8 +285,9 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase,
   // This sets the branch destination (which gets loaded at the call address).
   // This is for calls and branches within generated code.  The serializer
   // has already deserialized the lui/ori instructions etc.
-  inline static void deserialization_set_special_target_at(
-      Address instruction_payload, InstructionStream code, Address target);
+  inline static void deserialization_set_special_target_at(Address location,
+                                                           Code code,
+                                                           Address target);
 
   // Get the size of the special target encoded at 'instruction_payload'.
   inline static int deserialization_special_target_size(
@@ -371,9 +372,21 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase,
 
   // Assembler Pseudo Instructions (Tables 25.2, 25.3, RISC-V Unprivileged ISA)
   void nop();
+#if defined(V8_TARGET_ARCH_RISCV64)
+  void RecursiveLiImpl(Register rd, intptr_t imm);
+  void RecursiveLi(Register rd, intptr_t imm);
+  static int RecursiveLiCount(intptr_t imm);
+  static int RecursiveLiImplCount(intptr_t imm);
   void RV_li(Register rd, intptr_t imm);
+  static int RV_li_count(int64_t imm, bool is_get_temp_reg = false);
   // Returns the number of instructions required to load the immediate
-  static int li_estimate(intptr_t imm, bool is_get_temp_reg = false);
+  void GeneralLi(Register rd, int64_t imm);
+  static int GeneralLiCount(intptr_t imm, bool is_get_temp_reg = false);
+#endif
+#if defined(V8_TARGET_ARCH_RISCV32)
+  void RV_li(Register rd, int32_t imm);
+  static int RV_li_count(int32_t imm, bool is_get_temp_reg = false);
+#endif
   // Loads an immediate, always using 8 instructions, regardless of the value,
   // so that it can be modified later.
   void li_constant(Register rd, intptr_t imm);
@@ -442,11 +455,9 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase,
   // Writes a single byte or word of data in the code stream.  Used for
   // inline tables, e.g., jump-tables.
   void db(uint8_t data);
-  void dd(uint32_t data, RelocInfo::Mode rmode = RelocInfo::NO_INFO);
-  void dq(uint64_t data, RelocInfo::Mode rmode = RelocInfo::NO_INFO);
-  void dp(uintptr_t data, RelocInfo::Mode rmode = RelocInfo::NO_INFO) {
-    dq(data, rmode);
-  }
+  void dd(uint32_t data);
+  void dq(uint64_t data);
+  void dp(uintptr_t data) { dq(data); }
   void dd(Label* label);
 
   Instruction* pc() const { return reinterpret_cast<Instruction*>(pc_); }
@@ -599,6 +610,8 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase,
   };
 
   VectorUnit VU;
+
+  void ClearVectorunit() { VU.clear(); }
 
  protected:
   // Readable constants for base and offset adjustment helper, these indicate if
@@ -826,12 +839,33 @@ class EnsureSpace {
   explicit inline EnsureSpace(Assembler* assembler);
 };
 
+// This scope utility allows scratch registers to be managed safely. The
+// Assembler's GetScratchRegisterList() is used as a pool of scratch
+// registers. These registers can be allocated on demand, and will be returned
+// at the end of the scope.
+//
+// When the scope ends, the Assembler's list will be restored to its original
+// state, even if the list is modified by some other means. Note that this scope
+// can be nested but the destructors need to run in the opposite order as the
+// constructors. We do not have assertions for this.
 class V8_EXPORT_PRIVATE UseScratchRegisterScope {
  public:
-  explicit UseScratchRegisterScope(Assembler* assembler);
-  ~UseScratchRegisterScope();
+  explicit UseScratchRegisterScope(Assembler* assembler)
+      : available_(assembler->GetScratchRegisterList()),
+        old_available_(*available_) {}
 
-  Register Acquire();
+  ~UseScratchRegisterScope() { *available_ = old_available_; }
+
+  // Take a register from the list and return it.
+  Register Acquire() {
+    DCHECK_NOT_NULL(available_);
+    DCHECK(!available_->is_empty());
+    int index =
+        static_cast<int>(base::bits::CountTrailingZeros32(available_->bits()));
+    *available_ &= RegList::FromBits(~(1U << index));
+
+    return Register::from_code(index);
+  }
   bool hasAvailable() const;
   void Include(const RegList& list) { *available_ |= list; }
   void Exclude(const RegList& list) {

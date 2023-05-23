@@ -313,11 +313,16 @@ TEST(GetObjectProperties) {
   CHECK(Contains(props->brief, "\"" + std::string(80, 'a') + "...\""));
 
   // GetObjectProperties can read cacheable external strings.
+  StringResource* string_resource = new StringResource(true);
   auto external_string =
-      v8::String::NewExternalTwoByte(isolate, new StringResource(true));
+      v8::String::NewExternalTwoByte(isolate, string_resource);
   o = v8::Utils::OpenHandle(*external_string.ToLocalChecked());
   props = d::GetObjectProperties(o->ptr(), &ReadMemory, heap_addresses);
   CHECK(Contains(props->brief, "\"abcde\""));
+  CheckProp(*props->properties[5], "char16_t", "raw_characters",
+            d::PropertyKind::kArrayOfKnownSize, string_resource->length());
+  CHECK_EQ(props->properties[5]->address,
+           reinterpret_cast<uintptr_t>(string_resource->data()));
   // GetObjectProperties cannot read uncacheable external strings.
   external_string =
       v8::String::NewExternalTwoByte(isolate, new StringResource(false));
@@ -352,6 +357,7 @@ TEST(GetObjectProperties) {
   props = d::GetObjectProperties(
       ReadProp<i::Tagged_t>(*props, "instance_descriptors"), &ReadMemory,
       heap_addresses);
+  CHECK_EQ(props->num_properties, 6);
   // It should have at least two descriptors (possibly plus slack).
   CheckProp(*props->properties[1], "uint16_t", "number_of_all_descriptors");
   uint16_t number_of_all_descriptors =
@@ -359,7 +365,7 @@ TEST(GetObjectProperties) {
   CHECK_GE(number_of_all_descriptors, 2);
   // The "descriptors" property should describe the struct layout for each
   // element in the array.
-  const d::ObjectProperty& descriptors = *props->properties[6];
+  const d::ObjectProperty& descriptors = *props->properties[5];
   // No C++ type is reported directly because there may not be an actual C++
   // struct with this layout, hence the empty string in this check.
   CheckProp(descriptors, /*type=*/"", "descriptors",

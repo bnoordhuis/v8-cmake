@@ -53,17 +53,8 @@ struct NodeMatcher {
 };
 
 inline Node* SkipValueIdentities(Node* node) {
-#ifdef DEBUG
-  bool seen_fold_constant = false;
-#endif
-  do {
-#ifdef DEBUG
-    if (node->opcode() == IrOpcode::kFoldConstant) {
-      DCHECK(!seen_fold_constant);
-      seen_fold_constant = true;
-    }
-#endif
-  } while (NodeProperties::IsValueIdentity(node, &node));
+  while (NodeProperties::IsValueIdentity(node, &node)) {
+  }
   DCHECK_NOT_NULL(node);
   return node;
 }
@@ -73,9 +64,7 @@ inline Node* SkipValueIdentities(Node* node) {
 // Note that value identities on the input node are skipped when matching. The
 // resolved value may not be a parameter of the input node. The node() method
 // returns the unmodified input node. This is by design, as reducers may wish to
-// match value constants but delay reducing the node until a later phase. For
-// example, binary operator reducers may opt to keep FoldConstant operands while
-// applying a reduction that match on the constant value of the FoldConstant.
+// match value constants but delay reducing the node until a later phase.
 template <typename T, IrOpcode::Value kOpcode>
 struct ValueMatcher : public NodeMatcher {
   using ValueType = T;
@@ -762,6 +751,7 @@ struct BaseWithIndexAndDisplacementMatcher {
         case IrOpcode::kLoad:
         case IrOpcode::kLoadImmutable:
         case IrOpcode::kProtectedLoad:
+        case IrOpcode::kLoadTrapOnNull:
         case IrOpcode::kInt32Add:
         case IrOpcode::kInt64Add:
           // Skip addressing uses.
@@ -778,6 +768,7 @@ struct BaseWithIndexAndDisplacementMatcher {
           break;
         case IrOpcode::kStore:
         case IrOpcode::kProtectedStore:
+        case IrOpcode::kStoreTrapOnNull:
           // If the stored value is this node, it is not an addressing use.
           if (from->InputAt(2) == node) return false;
           // Otherwise it is used as an address and skipped.

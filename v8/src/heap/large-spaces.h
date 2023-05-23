@@ -30,20 +30,29 @@ class LargePage : public MemoryChunk {
   // A limit to guarantee that we do not overflow typed slot offset in the old
   // to old remembered set. Note that this limit is higher than what assembler
   // already imposes on x64 and ia32 architectures.
-  static const int kMaxCodePageSize = 512 * MB;
+  static constexpr int kMaxCodePageSize = 512 * MB;
+
+  static LargePage* cast(MemoryChunk* chunk) {
+    DCHECK_IMPLIES(chunk, chunk->IsLargePage());
+    return static_cast<LargePage*>(chunk);
+  }
+
+  static LargePage* cast(BasicMemoryChunk* chunk) {
+    return cast(MemoryChunk::cast(chunk));
+  }
+
+  static LargePage* FromHeapObject(HeapObject o) {
+    DCHECK(!V8_ENABLE_THIRD_PARTY_HEAP_BOOL);
+    return cast(MemoryChunk::FromHeapObject(o));
+  }
 
   LargePage(Heap* heap, BaseSpace* space, size_t chunk_size, Address area_start,
             Address area_end, VirtualMemory reservation,
             Executability executable);
 
-  static LargePage* FromHeapObject(HeapObject o) {
-    DCHECK(!V8_ENABLE_THIRD_PARTY_HEAP_BOOL);
-    return static_cast<LargePage*>(MemoryChunk::FromHeapObject(o));
-  }
-
   HeapObject GetObject() const { return HeapObject::FromAddress(area_start()); }
 
-  LargePage* next_page() { return static_cast<LargePage*>(list_node_.next()); }
+  LargePage* next_page() { return LargePage::cast(list_node_.next()); }
   const LargePage* next_page() const {
     return static_cast<const LargePage*>(list_node_.next());
   }
@@ -113,8 +122,6 @@ class V8_EXPORT_PRIVATE LargeObjectSpace : public Space {
   const_iterator end() const { return const_iterator(nullptr); }
 
   std::unique_ptr<ObjectIterator> GetObjectIterator(Heap* heap) override;
-
-  virtual bool is_off_thread() const { return false; }
 
 #ifdef VERIFY_HEAP
   void Verify(Isolate* isolate, SpaceVerificationVisitor* visitor) const final;

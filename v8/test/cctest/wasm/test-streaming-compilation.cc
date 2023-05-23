@@ -195,8 +195,9 @@ class StreamTester {
     Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
     v8::Local<v8::Context> context = isolate->GetCurrentContext();
 
+    WasmFeatures features = WasmFeatures::FromIsolate(i_isolate);
     stream_ = GetWasmEngine()->StartStreamingCompilation(
-        i_isolate, WasmFeatures::All(), v8::Utils::OpenHandle(*context),
+        i_isolate, features, v8::Utils::OpenHandle(*context),
         "WebAssembly.compileStreaming()",
         std::make_shared<TestResolver>(i_isolate, &state_, &error_message_,
                                        &module_object_));
@@ -324,7 +325,7 @@ ZoneBuffer GetValidCompiledModuleBytes(v8::Isolate* isolate, Zone* zone,
   }
   while (true) {
     WasmCodeRefScope code_ref_scope;
-    std::vector<WasmCode*> all_code = native_module->SnapshotCodeTable();
+    std::vector<WasmCode*> all_code = native_module->SnapshotCodeTable().first;
     if (std::all_of(all_code.begin(), all_code.end(), [](const WasmCode* code) {
           return code && code->tier() == ExecutionTier::kTurbofan;
         })) {
@@ -345,7 +346,7 @@ ZoneBuffer GetValidCompiledModuleBytes(v8::Isolate* isolate, Zone* zone,
   // Serialize the NativeModule.
   i::wasm::WasmSerializer serializer(native_module);
   size_t size = serializer.GetSerializedNativeModuleSize();
-  std::vector<byte> buffer(size);
+  std::vector<uint8_t> buffer(size);
   CHECK(serializer.SerializeNativeModule(base::VectorOf(buffer)));
   ZoneBuffer result(zone, size);
   result.write(buffer.data(), size);
@@ -1344,7 +1345,7 @@ STREAM_TEST(TestDeserializationFails) {
   ZoneBuffer module_bytes =
       GetValidCompiledModuleBytes(isolate, tester.zone(), wire_bytes);
   // corrupt header
-  byte first_byte = *module_bytes.begin();
+  uint8_t first_byte = *module_bytes.begin();
   module_bytes.patch_u8(0, first_byte + 1);
   tester.SetCompiledModuleBytes(base::VectorOf(module_bytes));
   tester.OnBytesReceived(wire_bytes.begin(), wire_bytes.size());

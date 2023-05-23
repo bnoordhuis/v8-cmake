@@ -36,12 +36,17 @@ namespace compiler {
   V(Arm64S128Load8x8U)                                     \
   V(Arm64StoreLane)                                        \
   V(Arm64Str)                                              \
+  V(Arm64StrPair)                                          \
   V(Arm64Strb)                                             \
   V(Arm64StrD)                                             \
   V(Arm64Strh)                                             \
   V(Arm64StrQ)                                             \
   V(Arm64StrS)                                             \
   V(Arm64StrW)                                             \
+  V(Arm64StrWPair)                                         \
+  V(Arm64LdrDecompressTaggedSigned)                        \
+  V(Arm64LdrDecompressTagged)                              \
+  V(Arm64StrCompressTagged)                                \
   V(Arm64Word64AtomicLoadUint64)                           \
   V(Arm64Word64AtomicStoreWord64)
 
@@ -198,13 +203,8 @@ namespace compiler {
   V(Arm64Float64InsertHighWord32)                    \
   V(Arm64Float64MoveU64)                             \
   V(Arm64U64MoveFloat64)                             \
-  V(Arm64LdrDecompressTaggedSigned)                  \
-  V(Arm64LdrDecompressTaggedPointer)                 \
-  V(Arm64LdrDecompressAnyTagged)                     \
   V(Arm64LdarDecompressTaggedSigned)                 \
-  V(Arm64LdarDecompressTaggedPointer)                \
-  V(Arm64LdarDecompressAnyTagged)                    \
-  V(Arm64StrCompressTagged)                          \
+  V(Arm64LdarDecompressTagged)                       \
   V(Arm64StlrCompressTagged)                         \
   V(Arm64LdrDecodeSandboxedPointer)                  \
   V(Arm64StrEncodeSandboxedPointer)                  \

@@ -16,6 +16,8 @@
 
 namespace v8::internal::compiler::turboshaft {
 
+#include "src/compiler/turboshaft/define-assembler-macros.inc"
+
 template <class Next>
 class BranchEliminationReducer : public Next {
   // # General overview
@@ -113,6 +115,23 @@ class BranchEliminationReducer : public Next {
   //               \  /
   //              merge2
   //
+  //   2bis- In the 2nd optimization, if `cond` is a Phi of 2 values that come
+  //   from B1 and B2, then the same optimization can be applied for a similar
+  //   result. For instance:
+  //
+  //     if (cond) {                                if (cond) {
+  //       x = 1                                        x = 1;
+  //     } else {                becomes                B1
+  //       x = 0                 ======>            } else {
+  //     }                                              x = 0;
+  //     if (x) B1 else B2                              B2;
+  //                                                }
+  //
+  //   If `x` is more complex than a simple boolean, then the 2nd branch will
+  //   remain, except that it will be on `x`'s value directly rather than on a
+  //   Phi (so, it avoids creating a Phi, and it will probably be better for
+  //   branch prediction).
+  //
   //
   //   3- Optimizing {Return} nodes through merges. It checks that
   //    the return value is actually a {Phi} and the Return is dominated
@@ -168,16 +187,10 @@ class BranchEliminationReducer : public Next {
   // that's the case, then we copy the destination block, and the 1st
   // optimization will replace its final Branch by a Goto when reaching it.
  public:
-  using Next::Asm;
-  template <class... Args>
-  explicit BranchEliminationReducer(const std::tuple<Args...>& args)
-      : Next(args),
-        dominator_path_(Asm().phase_zone()),
-        known_conditions_(Asm().phase_zone(),
-                          Asm().input_graph().DominatorTreeDepth() * 2) {}
+  TURBOSHAFT_REDUCER_BOILERPLATE()
 
-  void Bind(Block* new_block, const Block* origin = nullptr) {
-    Next::Bind(new_block, origin);
+  void Bind(Block* new_block) {
+    Next::Bind(new_block);
 
     if (ShouldSkipOptimizationStep()) {
       // It's important to have a ShouldSkipOptimizationStep here, because
@@ -212,40 +225,32 @@ class BranchEliminationReducer : public Next {
     }
   }
 
-  OpIndex ReduceBranch(OpIndex cond, Block* if_true, Block* if_false,
-                       BranchHint hint) {
+  OpIndex REDUCE(Branch)(OpIndex cond, Block* if_true, Block* if_false,
+                         BranchHint hint) {
     LABEL_BLOCK(no_change) {
       return Next::ReduceBranch(cond, if_true, if_false, hint);
     }
     if (ShouldSkipOptimizationStep()) goto no_change;
 
-    const Block* old_if_true = if_true->Origin();
-    const Block* old_if_false = if_false->Origin();
-    if (old_if_true == nullptr || old_if_false == nullptr) goto no_change;
-
-    const Operation& first_op_true =
-        old_if_true->FirstOperation(Asm().input_graph());
-    const Operation& first_op_false =
-        old_if_false->FirstOperation(Asm().input_graph());
-    bool branches_empty = first_op_true.template Is<GotoOp>() &&
-                          first_op_false.template Is<GotoOp>();
-
-    // We apply the fourth optimization, replacing empty braches with a Goto
-    // to their destination (if it's the same block).
-    if (branches_empty) {
-      const GotoOp& goto_op = first_op_true.template Cast<GotoOp>();
-      Block* merge_block = goto_op.destination;
-      DCHECK_NOT_NULL(merge_block);
-
-      // It's possible that the true and false branches goto different blocks,
-      // in which case we can't apply this optimization.
-      Block* other_merge_block =
-          first_op_false.template Cast<GotoOp>().destination;
-      if (merge_block == other_merge_block &&
-          !merge_block->HasPhis(Asm().input_graph())) {
-        Block* new_merge_block = Asm().MapToNewGraph(merge_block->index());
-        Asm().Goto(new_merge_block);
-        return OpIndex::Invalid();
+    if (const Block* if_true_origin = if_true->OriginForBlockStart()) {
+      if (const Block* if_false_origin = if_false->OriginForBlockStart()) {
+        const Operation& first_op_true =
+            if_true_origin->FirstOperation(Asm().input_graph());
+        const Operation& first_op_false =
+            if_false_origin->FirstOperation(Asm().input_graph());
+        const GotoOp* true_goto = first_op_true.template TryCast<GotoOp>();
+        const GotoOp* false_goto = first_op_false.template TryCast<GotoOp>();
+        // We apply the fourth optimization, replacing empty braches with a
+        // Goto to their destination (if it's the same block).
+        if (true_goto && false_goto &&
+            true_goto->destination == false_goto->destination) {
+          Block* merge_block = true_goto->destination;
+          if (!merge_block->HasPhis(Asm().input_graph())) {
+            // Using `ReduceInputGraphGoto()` here enables more optimizations.
+            Asm().Goto(merge_block->MapToNextGraph());
+            return OpIndex::Invalid();
+          }
+        }
       }
     }
 
@@ -259,12 +264,14 @@ class BranchEliminationReducer : public Next {
     goto no_change;
   }
 
-  OpIndex ReduceSelect(OpIndex cond, OpIndex vtrue, OpIndex vfalse,
-                       RegisterRepresentation rep, BranchHint hint,
-                       SelectOp::Implementation implem) {
+  OpIndex REDUCE(Select)(OpIndex cond, OpIndex vtrue, OpIndex vfalse,
+                         RegisterRepresentation rep, BranchHint hint,
+                         SelectOp::Implementation implem) {
     LABEL_BLOCK(no_change) {
       return Next::ReduceSelect(cond, vtrue, vfalse, rep, hint, implem);
     }
+    if (ShouldSkipOptimizationStep()) goto no_change;
+
     if (auto cond_value = known_conditions_.Get(cond)) {
       if (*cond_value) {
         return vtrue;
@@ -275,21 +282,14 @@ class BranchEliminationReducer : public Next {
     goto no_change;
   }
 
-  OpIndex ReduceGoto(Block* new_dst) {
-    LABEL_BLOCK(no_change) { return Next::ReduceGoto(new_dst); }
+  OpIndex REDUCE(Goto)(Block* destination) {
+    LABEL_BLOCK(no_change) { return Next::ReduceGoto(destination); }
     if (ShouldSkipOptimizationStep()) goto no_change;
 
-    const Block* old_dst;
-    old_dst = new_dst->Origin();
-    if (old_dst == nullptr) {
-      // We optimize Gotos based on the structure of the input graph. If the
-      // destination has no Origin set, then it's not a block resulting from a
-      // direct translation of the input graph, and we thus cannot optimize this
-      // Goto.
-      goto no_change;
-    }
-    if (!old_dst->IsMerge()) goto no_change;
-    if (old_dst->HasExactlyNPredecessors(1)) {
+    const Block* destination_origin = destination->OriginForBlockStart();
+    if (!destination_origin || !destination_origin->IsMerge()) goto no_change;
+
+    if (destination_origin->HasExactlyNPredecessors(1)) {
       // There is no point in trying the 2nd optimization: this would remove
       // neither Phi nor Branch.
       // TODO(dmercadier, tebbi): this block has a single predecessor and a
@@ -297,48 +297,59 @@ class BranchEliminationReducer : public Next {
       goto no_change;
     }
 
-    const Operation& last_op = old_dst->LastOperation(Asm().input_graph());
+    const Operation& last_op =
+        destination_origin->LastOperation(Asm().input_graph());
     if (const BranchOp* branch = last_op.template TryCast<BranchOp>()) {
       OpIndex condition =
           Asm().template MapToNewGraph<true>(branch->condition());
-      if (!condition.valid()) {
-        // The condition of the subsequent block's Branch hasn't been visited
-        // before, so we definitely don't know its value.
-        goto no_change;
-      }
-      base::Optional<bool> condition_value = known_conditions_.Get(condition);
-      if (!condition_value.has_value()) {
-        // We've already visited the subsequent block's Branch condition, but we
-        // don't know its value right now.
-        goto no_change;
-      }
+      if (condition.valid()) {
+        base::Optional<bool> condition_value = known_conditions_.Get(condition);
+        if (!condition_value.has_value()) {
+          // We've already visited the subsequent block's Branch condition, but
+          // we don't know its value right now.
+          goto no_change;
+        }
 
-      // The next block {new_dst} is a Merge, and ends with a Branch whose
-      // condition is already known. As per the 2nd optimization, we'll process
-      // {new_dst} right away, and we'll end it with a Goto instead of its
-      // current Branch.
-      Asm().CloneAndInlineBlock(old_dst);
-      return OpIndex::Invalid();
+        // The next block {new_dst} is a Merge, and ends with a Branch whose
+        // condition is already known. As per the 2nd optimization, we'll
+        // process {new_dst} right away, and we'll end it with a Goto instead of
+        // its current Branch.
+        Asm().CloneAndInlineBlock(destination_origin);
+        return OpIndex::Invalid();
+      } else {
+        // Optimization 2bis:
+        // {condition} hasn't been visited yet, and thus it doesn't have a
+        // mapping to the new graph. However, if it's the result of a Phi whose
+        // input is coming from the current block, then it still makes sense to
+        // inline {destination_origin}: the condition will then be known.
+        if (destination_origin->Contains(branch->condition())) {
+          const PhiOp* cond = Asm()
+                                  .input_graph()
+                                  .Get(branch->condition())
+                                  .template TryCast<PhiOp>();
+          if (!cond) goto no_change;
+          Asm().CloneAndInlineBlock(destination_origin);
+          return OpIndex::Invalid();
+        }
+      }
     } else if (const ReturnOp* return_op =
                    last_op.template TryCast<ReturnOp>()) {
       // The destination block in the old graph ends with a Return
       // and the old destination is a merge block, so we can directly
       // inline the destination block in place of the Goto.
-      // We pass `false` to `direct_input` here, as we're looking one
-      // block ahead of the current one.
-      // TODO(nicohartmann@): Temporarily disable this "optimization" because it
-      // prevents dead code elimination in some cases. Reevaluate this and
+      // TODO(nicohartmann@): Temporarily disable this "optimization" because
+      // it prevents dead code elimination in some cases. Reevaluate this and
       // reenable if phases have been reordered properly.
-      // Asm().CloneAndInlineBlock(old_dst, false);
+      // Asm().CloneAndInlineBlock(old_dst);
       // return OpIndex::Invalid();
     }
 
     goto no_change;
   }
 
-  OpIndex ReduceDeoptimizeIf(OpIndex condition, OpIndex frame_state,
-                             bool negated,
-                             const DeoptimizeParameters* parameters) {
+  OpIndex REDUCE(DeoptimizeIf)(OpIndex condition, OpIndex frame_state,
+                               bool negated,
+                               const DeoptimizeParameters* parameters) {
     LABEL_BLOCK(no_change) {
       return Next::ReduceDeoptimizeIf(condition, frame_state, negated,
                                       parameters);
@@ -357,22 +368,27 @@ class BranchEliminationReducer : public Next {
     }
   }
 
-  OpIndex ReduceTrapIf(OpIndex condition, bool negated, const TrapId trap_id) {
+  OpIndex REDUCE(TrapIf)(OpIndex condition, OpIndex frame_state, bool negated,
+                         const TrapId trap_id) {
     LABEL_BLOCK(no_change) {
-      return Next::ReduceTrapIf(condition, negated, trap_id);
+      return Next::ReduceTrapIf(condition, frame_state, negated, trap_id);
     }
     if (ShouldSkipOptimizationStep()) goto no_change;
 
     base::Optional<bool> condition_value = known_conditions_.Get(condition);
     if (!condition_value.has_value()) goto no_change;
 
-    if ((*condition_value && !negated) || (!*condition_value && negated)) {
-      // The condition is true, so we always trap.
-      return Next::ReduceUnreachable();
-    } else {
-      // The condition is false, so we never trap.
-      return OpIndex::Invalid();
+    if (Asm().template Is<ConstantOp>(condition)) {
+      goto no_change;
     }
+
+    OpIndex static_condition = Asm().Word32Constant(*condition_value);
+    if (negated) {
+      Asm().TrapIfNot(static_condition, frame_state, trap_id);
+    } else {
+      Asm().TrapIf(static_condition, frame_state, trap_id);
+    }
+    return OpIndex::Invalid();
   }
 
  private:
@@ -481,9 +497,12 @@ class BranchEliminationReducer : public Next {
   // TODO(dmercadier): use the SnapshotTable to replace {dominator_path_} and
   // {known_conditions_}, and to reuse the existing merging/replay logic of the
   // SnapshotTable.
-  ZoneVector<Block*> dominator_path_;
-  LayeredHashMap<OpIndex, bool> known_conditions_;
+  ZoneVector<Block*> dominator_path_{Asm().phase_zone()};
+  LayeredHashMap<OpIndex, bool> known_conditions_{
+      Asm().phase_zone(), Asm().input_graph().DominatorTreeDepth() * 2};
 };
+
+#include "src/compiler/turboshaft/undef-assembler-macros.inc"
 
 }  // namespace v8::internal::compiler::turboshaft
 

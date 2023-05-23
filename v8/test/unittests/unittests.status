@@ -18,12 +18,11 @@
   'PersistentHandlesTest.DereferencePersistentHandleFailsWhenDisallowed': [SKIP, ['mode == debug', FAIL]],
 
   # https://crbug.com/v8/8919
-  'PlatformTest.StackAlignment': [PASS, ['not is_clang', SKIP]],
+  'PlatformTest.StackAlignment': [PASS, ['not clang', SKIP]],
 
   # We do not yet shrink weak maps after they have been emptied by the GC
-  'WeakMapsTest.Shrinking': [FAIL],
-
-  'WeakSetsTest.WeakSet_Shrinking': [FAIL],
+  'WeakMapsTest.Shrinking': [SKIP],
+  'WeakSetsTest.WeakSet_Shrinking': [SKIP],
 
   # This tests only that the preparser and parser agree, so there is no point in
   # running several variants. Note that this still takes ages, because there
@@ -181,7 +180,7 @@
 }],
 
 ################################################################################
-['is_clang == False and (arch == riscv64 or arch == riscv32)',{
+['not clang and (arch == riscv64 or arch == riscv32)',{
   'LoggingTest.SourceLocation':[SKIP]  # issue-174
 }],
 
@@ -195,6 +194,7 @@
   'LogInterpretedFramesNativeStackWithSerializationTest.LogInterpretedFramesNativeStackWithSerialization': [SKIP],
 }], # lite_mode
 
+##############################################################################
 ['variant == jitless', {
   # --interpreted-frames-native-stack tests
   'LogExternalInterpretedFramesNativeStackTest.ExternalLogEventListenerWithInterpretedFramesNativeStack': [SKIP],
@@ -202,6 +202,25 @@
   'LogInterpretedFramesNativeStackWithSerializationTest.LogInterpretedFramesNativeStackWithSerialization': [SKIP],
   'InterpreterTest.InterpreterWithNativeStack': [SKIP],
 }], # jitless
+
+##############################################################################
+['has_jitless', {
+  # Feedback collection maintenance is (mostly) disabled.
+  'FeedbackVectorTest.Vector*': [SKIP],
+  'InterpreterTest.InterpreterBigIntComparisons': [SKIP],
+  'InterpreterTest.InterpreterBinaryOpSmiTypeFeedback': [SKIP],
+  'InterpreterTest.InterpreterUnaryOpFeedback': [SKIP],
+  'InterpreterTest.InterpreterStringComparisons': [SKIP],
+  'InterpreterTest.InterpreterSmiComparisons': [SKIP],
+  'InterpreterTest.InterpreterStringAdd': [SKIP],
+  'InterpreterTest.InterpreterMixedComparisons': [SKIP],
+  'InterpreterTest.InterpreterHeapNumberComparisons': [SKIP],
+  'InterpreterTest.InterpreterBinaryOpsBigInt': [SKIP],
+  'InterpreterTest.InterpreterBinaryOpTypeFeedback': [SKIP],
+  'InterpreterTest.InterpreterBitwiseTypeFeedback': [SKIP],
+  # These require executable code space.
+  'AssemblerX64Test.*': [SKIP],
+}],  # has_jitless
 
 ################################################################################
 ['third_party_heap', {
@@ -246,7 +265,6 @@
   'WeakMapsTest.WeakMapsWithChainedEntries': [SKIP],
   'WeakMapsTest.Weakness': [SKIP],
   'WeakSetsTest.WeakSet_Weakness': [SKIP],
-  'WebSnapshotTest.SFIDeduplicationAfterBytecodeFlushing': [SKIP],
 
   # CodeRange tests
   'CodePagesTest.LargeCodeObjectWithSignalHandler': [SKIP],
@@ -263,13 +281,6 @@
   'FactoryCodeBuilderOOMTest.Factory_CodeBuilder_BuildOOM': [SKIP],
   'FactoryCodeBuilderOOMTest.Factory_CodeBuilder_TryBuildOOM': [SKIP],
 }], # third_party_heap
-
-################################################################################
-['variant == always_sparkplug', {
-  # SFI deduplication tests check compilation state, which always_sparkplug
-  # can break.
-  'WebSnapshotTest.SFIDeduplication*': [SKIP],
-}],
 
 ##############################################################################
 ['byteorder == big', {
@@ -331,13 +342,28 @@
 }],  # variant == no_wasm_traps
 
 ##############################################################################
-['no_i18n == True', {
+['not i18n', {
   'RegExpTestWithContext.UnicodePropertyEscapeCodeSize': [SKIP],
-}],  # no_i18n == True
+}],  # not i18n
 
 ##############################################################################
 ['no_simd_hardware == True', {
   'WasmDisassemblerTest.Simd': [SKIP],
 }],  # no_simd_hardware == True
+
+['tsan and mode == debug', {
+  'LazyCompileDispatcherTest.CompileLazy2FinishesDispatcherJob': [SKIP],
+}],
+
+# With the official_build flag exceptions are disabled. Therefore torque
+# tests fail that rely on catching them (v8:13945).
+['official_build', {
+  'LanguageServerJson.ParserError': [FAIL],
+  'FlagDefinitionsTest.FreezeFlags': [FAIL],
+  'LanguageServerJson.LexerError': [FAIL],
+  'Torque.DoubleUnderScorePrefixIllegalForIdentifiers': [FAIL],
+  'Torque.ImportNonExistentFile': [FAIL],
+  'Torque.Enums': [FAIL],
+}],  # 'official_build'
 
 ]

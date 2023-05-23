@@ -173,7 +173,7 @@ class DebugInfoImpl {
   // is in the function of the given index.
   int DeadBreakpoint(int func_index, base::Vector<const int> breakpoints,
                      Isolate* isolate) {
-    StackTraceFrameIterator it(isolate);
+    DebuggableStackFrameIterator it(isolate);
     if (it.done() || !it.is_wasm()) return 0;
     auto* wasm_frame = WasmFrame::cast(it.frame());
     if (static_cast<int>(wasm_frame->function_index()) != func_index) return 0;
@@ -209,7 +209,7 @@ class DebugInfoImpl {
     // Recompile the function with Liftoff, setting the new breakpoints.
     // Not thread-safe. The caller is responsible for locking {mutex_}.
     CompilationEnv env = native_module_->CreateCompilationEnv();
-    auto* function = &native_module_->module()->functions[func_index];
+    auto* function = &env.module->functions[func_index];
     base::Vector<const uint8_t> wire_bytes = native_module_->wire_bytes();
     FunctionBody body{function->sig, function->code.offset(),
                       wire_bytes.begin() + function->code.offset(),
@@ -218,9 +218,17 @@ class DebugInfoImpl {
 
     // Debug side tables for stepping are generated lazily.
     bool generate_debug_sidetable = for_debugging == kWithBreakpoints;
-    // Debugging with lazy validation is not supported yet. Fix this when
-    // needed.
-    CHECK(native_module_->module()->function_was_validated(func_index));
+    // If lazy validation is on, we might need to lazily validate here.
+    if (V8_UNLIKELY(!env.module->function_was_validated(func_index))) {
+      WasmFeatures unused_detected_features;
+      DecodeResult validation_result = ValidateFunctionBody(
+          env.enabled_features, env.module, &unused_detected_features, body);
+      // Handling illegal modules here is tricky. As lazy validation is off by
+      // default anyway and this is for debugging only, we just crash for now.
+      CHECK_WITH_MSG(validation_result.ok(),
+                     validation_result.error().message().c_str());
+      env.module->set_function_validated(func_index);
+    }
     WasmCompilationResult result = ExecuteLiftoffCompilation(
         &env, body,
         LiftoffOptions{}
@@ -235,8 +243,8 @@ class DebugInfoImpl {
     if (!result.succeeded()) FATAL("Liftoff compilation failed");
     DCHECK_EQ(generate_debug_sidetable, debug_sidetable != nullptr);
 
-    WasmCode* new_code = native_module_->PublishCode(
-        native_module_->AddCompiledCode(std::move(result)));
+    WasmCode* new_code =
+        native_module_->PublishCode(native_module_->AddCompiledCode(result));
 
     DCHECK(new_code->is_inspectable());
     if (generate_debug_sidetable) {
@@ -621,7 +629,7 @@ class DebugInfoImpl {
     // The first return location is after the breakpoint, others are after wasm
     // calls.
     ReturnLocation return_location = kAfterBreakpoint;
-    for (StackTraceFrameIterator it(isolate); !it.done();
+    for (DebuggableStackFrameIterator it(isolate); !it.done();
          it.Advance(), return_location = kAfterWasmCall) {
       // We still need the flooded function for stepping.
       if (it.frame()->id() == stepping_frame) continue;
@@ -640,8 +648,8 @@ class DebugInfoImpl {
     DCHECK_EQ(frame->function_index(), new_code->index());
     DCHECK_EQ(frame->native_module(), new_code->native_module());
     DCHECK(frame->wasm_code()->is_liftoff());
-    Address new_pc =
-        FindNewPC(frame, new_code, frame->byte_offset(), return_location);
+    Address new_pc = FindNewPC(frame, new_code, frame->generated_code_offset(),
+                               return_location);
 #ifdef DEBUG
     int old_position = frame->position();
 #endif
@@ -780,14 +788,14 @@ namespace {
 
 // Return the next breakable position at or after {offset_in_func} in function
 // {func_index}, or 0 if there is none.
-// Note that 0 is never a breakable position in wasm, since the first byte
+// Note that 0 is never a breakable position in wasm, since the first uint8_t
 // contains the locals count for the function.
 int FindNextBreakablePosition(wasm::NativeModule* native_module, int func_index,
                               int offset_in_func) {
   AccountingAllocator alloc;
   Zone tmp(&alloc, ZONE_NAME);
   wasm::BodyLocalDecls locals;
-  const byte* module_start = native_module->wire_bytes().begin();
+  const uint8_t* module_start = native_module->wire_bytes().begin();
   const wasm::WasmFunction& func =
       native_module->module()->functions[func_index];
   wasm::BytecodeIterator iterator(module_start + func.code.offset(),
@@ -1095,7 +1103,7 @@ bool WasmScript::GetPossibleBreakpoints(
     return false;
   AccountingAllocator alloc;
   Zone tmp(&alloc, ZONE_NAME);
-  const byte* module_start = native_module->wire_bytes().begin();
+  const uint8_t* module_start = native_module->wire_bytes().begin();
 
   for (int func_idx = start_func_index; func_idx <= end_func_index;
        ++func_idx) {

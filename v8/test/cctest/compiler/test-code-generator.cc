@@ -838,7 +838,8 @@ class TestEnvironment : public HandleAndZoneScope {
     for (auto move : *moves) {
       int to_index = OperandToStatePosition(
           TeardownLayout(), AllocatedOperand::cast(move->destination()));
-      state_out->set(to_index, GetMoveSource(state_in, move));
+      Object source = GetMoveSource(state_in, move);
+      state_out->set(to_index, source);
     }
     // If we generated redundant moves, they were eliminated automatically and
     // don't appear in the parallel move. Simulate them now.
@@ -1138,16 +1139,15 @@ class CodeGeneratorTester {
 
     constexpr size_t kMaxUnoptimizedFrameHeight = 0;
     constexpr size_t kMaxPushedArgumentCount = 0;
-    constexpr wasm::AssemblerBufferCache* kNoBufferCache = nullptr;
     generator_ = new CodeGenerator(
         environment->main_zone(), &frame_, &linkage_,
         environment->instructions(), &info_, environment->main_isolate(),
         base::Optional<OsrHelper>(), kNoSourcePosition, nullptr,
-        AssemblerOptions::Default(environment->main_isolate()), kNoBufferCache,
+        AssemblerOptions::Default(environment->main_isolate()),
         Builtin::kNoBuiltinId, kMaxUnoptimizedFrameHeight,
         kMaxPushedArgumentCount);
 
-    generator_->tasm()->CodeEntry();
+    generator_->masm()->CodeEntry();
 
     // Force a frame to be created.
     generator_->frame_access_state()->MarkHasFrame(true);
@@ -1239,10 +1239,10 @@ class CodeGeneratorTester {
 
   void CheckAssembleMove(InstructionOperand* source,
                          InstructionOperand* destination) {
-    int start = generator_->tasm()->pc_offset();
+    int start = generator_->masm()->pc_offset();
     generator_->AssembleMove(MaybeTranslateSlot(source),
                              MaybeTranslateSlot(destination));
-    CHECK(generator_->tasm()->pc_offset() > start);
+    CHECK(generator_->masm()->pc_offset() > start);
   }
 
   void CheckAssembleMoves(ParallelMove* moves) {
@@ -1255,15 +1255,15 @@ class CodeGeneratorTester {
 
   void CheckAssembleSwap(InstructionOperand* source,
                          InstructionOperand* destination) {
-    int start = generator_->tasm()->pc_offset();
+    int start = generator_->masm()->pc_offset();
     generator_->AssembleSwap(MaybeTranslateSlot(source),
                              MaybeTranslateSlot(destination));
-    CHECK(generator_->tasm()->pc_offset() > start);
+    CHECK(generator_->masm()->pc_offset() > start);
   }
 
   Handle<Code> Finalize() {
     generator_->FinishCode();
-    generator_->safepoints()->Emit(generator_->tasm(),
+    generator_->safepoints()->Emit(generator_->masm(),
                                    frame_.GetTotalFrameSlotCount());
     generator_->MaybeEmitOutOfLineConstantPool();
 
@@ -1662,12 +1662,10 @@ TEST(Regress_1171759) {
           AssemblerOptions::Default(handles.main_isolate()), m.ExportForTest())
           .ToHandleChecked();
 
-  std::shared_ptr<wasm::NativeModule> module = AllocateNativeModule(
-      handles.main_isolate(), code->raw_instruction_size());
+  std::shared_ptr<wasm::NativeModule> module =
+      AllocateNativeModule(handles.main_isolate(), code->instruction_size());
   wasm::WasmCodeRefScope wasm_code_ref_scope;
-  Handle<InstructionStream> istream(code->instruction_stream(),
-                                    handles.main_isolate());
-  byte* code_start = module->AddCodeForTesting(istream)->instructions().begin();
+  uint8_t* code_start = module->AddCodeForTesting(code)->instructions().begin();
 
   // Generate a minimal calling function, to push stack arguments.
   RawMachineAssemblerTester<int32_t> mt;

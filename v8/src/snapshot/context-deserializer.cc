@@ -6,16 +6,19 @@
 
 #include "src/api/api-inl.h"
 #include "src/common/assert-scope.h"
+#include "src/logging/counters-scopes.h"
 
 namespace v8 {
 namespace internal {
 
+// static
 MaybeHandle<Context> ContextDeserializer::DeserializeContext(
     Isolate* isolate, const SnapshotData* data, bool can_rehash,
     Handle<JSGlobalProxy> global_proxy,
     v8::DeserializeEmbedderFieldsCallback embedder_fields_deserializer) {
+  NestedTimedHistogramScope histogram_timer(
+      isolate->counters()->snapshot_deserialize_context());
   ContextDeserializer d(isolate, data, can_rehash);
-
   MaybeHandle<Object> maybe_result =
       d.Deserialize(isolate, global_proxy, embedder_fields_deserializer);
 
@@ -66,7 +69,7 @@ void ContextDeserializer::DeserializeEmbedderFields(
     int index = source()->GetInt();
     int size = source()->GetInt();
     // TODO(yangguo,jgruber): Turn this into a reusable shared buffer.
-    byte* data = new byte[size];
+    uint8_t* data = new uint8_t[size];
     source()->CopyRaw(data, size);
     embedder_fields_deserializer.callback(v8::Utils::ToLocal(obj), index,
                                           {reinterpret_cast<char*>(data), size},

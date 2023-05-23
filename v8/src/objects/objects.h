@@ -158,7 +158,8 @@
 //     - PropertyCell
 //     - PropertyArray
 //     - InstructionStream
-//     - AbstractCode, a wrapper around InstructionStream or BytecodeArray
+//     - AbstractCode, a wrapper around Code or BytecodeArray
+//     - GcSafeCode, a wrapper around Code
 //     - Map
 //     - Foreign
 //     - SmallOrderedHashTable
@@ -262,10 +263,10 @@ const int kStubMinorKeyBits = kSmiValueSize - kStubMajorKeyBits - 1;
 // Result of an abstract relational comparison of x and y, implemented according
 // to ES6 section 7.2.11 Abstract Relational Comparison.
 enum class ComparisonResult {
-  kLessThan,     // x < y
-  kEqual,        // x = y
-  kGreaterThan,  // x > y
-  kUndefined     // at least one of x or y was undefined or NaN
+  kLessThan = -1,    // x < y
+  kEqual = 0,        // x = y
+  kGreaterThan = 1,  // x > y
+  kUndefined = 2     // at least one of x or y was undefined or NaN
 };
 
 // (Returns false whenever {result} is kUndefined.)
@@ -307,7 +308,7 @@ class Object : public TaggedImpl<HeapObjectReferenceType::STRONG, Address> {
   // writable shared heap.
   V8_INLINE bool InSharedHeap() const;
 
-  V8_INLINE bool InSharedWritableHeap() const;
+  V8_INLINE bool InWritableSharedSpace() const;
 
 #define IS_TYPE_FUNCTION_DECL(Type) \
   V8_INLINE bool Is##Type() const;  \
@@ -327,6 +328,7 @@ class Object : public TaggedImpl<HeapObjectReferenceType::STRONG, Address> {
   V8_INLINE bool Is##Type(ReadOnlyRoots roots) const;   \
   V8_INLINE bool Is##Type() const;
   ODDBALL_LIST(IS_TYPE_FUNCTION_DECL)
+  HOLE_LIST(IS_TYPE_FUNCTION_DECL)
   IS_TYPE_FUNCTION_DECL(NullOrUndefined, , /* unused */)
 #undef IS_TYPE_FUNCTION_DECL
 
@@ -901,6 +903,8 @@ class MapWord {
   // collection.  Only valid during a scavenge collection (specifically,
   // when all map words are heap object pointers, i.e. not during a full GC).
   inline bool IsForwardingAddress() const;
+
+  V8_EXPORT_PRIVATE static bool IsMapOrForwarded(Map map);
 
   // Create a map word from a forwarding address.
   static inline MapWord FromForwardingAddress(HeapObject map_word_host,

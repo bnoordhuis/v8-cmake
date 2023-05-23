@@ -105,21 +105,22 @@ namespace internal {
   F(WeakCollectionDelete, 3, 1)              \
   F(WeakCollectionSet, 4, 1)
 
-#define FOR_EACH_INTRINSIC_COMPILER(F, I) \
-  F(CompileOptimizedOSR, 0, 1)            \
-  F(CompileOptimizedOSRFromMaglev, 1, 1)  \
-  F(LogOrTraceOptimizedOSREntry, 0, 1)    \
-  F(CompileLazy, 1, 1)                    \
-  F(CompileBaseline, 1, 1)                \
-  F(CompileOptimized, 1, 1)               \
-  F(InstallBaselineCode, 1, 1)            \
-  F(HealOptimizedCodeSlot, 1, 1)          \
-  F(FunctionLogNextExecution, 1, 1)       \
-  F(InstantiateAsmJs, 4, 1)               \
-  F(NotifyDeoptimized, 0, 1)              \
-  F(ObserveNode, 1, 1)                    \
-  F(ResolvePossiblyDirectEval, 6, 1)      \
-  F(VerifyType, 1, 1)                     \
+#define FOR_EACH_INTRINSIC_COMPILER(F, I)       \
+  F(CompileOptimizedOSR, 0, 1)                  \
+  F(CompileOptimizedOSRFromMaglev, 1, 1)        \
+  F(CompileOptimizedOSRFromMaglevInlined, 2, 1) \
+  F(LogOrTraceOptimizedOSREntry, 0, 1)          \
+  F(CompileLazy, 1, 1)                          \
+  F(CompileBaseline, 1, 1)                      \
+  F(CompileOptimized, 1, 1)                     \
+  F(InstallBaselineCode, 1, 1)                  \
+  F(HealOptimizedCodeSlot, 1, 1)                \
+  F(FunctionLogNextExecution, 1, 1)             \
+  F(InstantiateAsmJs, 4, 1)                     \
+  F(NotifyDeoptimized, 0, 1)                    \
+  F(ObserveNode, 1, 1)                          \
+  F(ResolvePossiblyDirectEval, 6, 1)            \
+  F(VerifyType, 1, 1)                           \
   F(CheckTurboshaftTypeOf, 2, 1)
 
 #define FOR_EACH_INTRINSIC_DATE(F, I) F(DateCurrentTime, 0, 1)
@@ -351,7 +352,6 @@ namespace internal {
   F(DefineObjectOwnProperty, 3, 1)                                     \
   F(SetNamedProperty, 3, 1)                                            \
   F(SetOwnPropertyIgnoreAttributes, 4, 1)                              \
-  F(DefineKeyedOwnPropertyInLiteral_Simple, 3, 1)                      \
   F(ShrinkNameDictionary, 1, 1)                                        \
   F(ShrinkSwissNameDictionary, 1, 1)                                   \
   F(ToFastProperties, 1, 1)                                            \
@@ -462,6 +462,8 @@ namespace internal {
   F(StringAdd, 2, 1)                      \
   F(StringBuilderConcat, 3, 1)            \
   F(StringCharCodeAt, 2, 1)               \
+  F(StringCodePointAt, 2, 1)              \
+  F(StringCompare, 2, 1)                  \
   F(StringEqual, 2, 1)                    \
   F(StringEscapeQuotes, 1, 1)             \
   F(StringGreaterThan, 2, 1)              \
@@ -509,6 +511,7 @@ namespace internal {
   F(CurrentFrameIsTurbofan, 0, 1)             \
   F(DebugPrint, -1, 1)                        \
   F(DebugPrintPtr, 1, 1)                      \
+  F(DebugPrintWord, 5, 1)                     \
   F(DebugTrace, 0, 1)                         \
   F(DebugTrackRetainingPath, -1, 1)           \
   F(DeoptimizeFunction, 1, 1)                 \
@@ -599,7 +602,8 @@ namespace internal {
   F(TurbofanStaticAssert, 1, 1)               \
   F(TypedArraySpeciesProtector, 0, 1)         \
   F(WaitForBackgroundOptimization, 0, 1)      \
-  I(DeoptimizeNow, 0, 1)
+  I(DeoptimizeNow, 0, 1)                      \
+  F(LeakHole, 0, 1)
 
 #define FOR_EACH_INTRINSIC_TYPEDARRAY(F, I)    \
   F(ArrayBufferDetach, -1, 1)                  \
@@ -610,50 +614,54 @@ namespace internal {
   F(TypedArraySet, 2, 1)                       \
   F(TypedArraySortFast, 1, 1)
 
-#define FOR_EACH_INTRINSIC_WASM(F, I) \
-  F(ThrowBadSuspenderError, 0, 1)     \
-  F(ThrowWasmError, 1, 1)             \
-  F(ThrowWasmStackOverflow, 0, 1)     \
-  F(WasmI32AtomicWait, 4, 1)          \
-  F(WasmI64AtomicWait, 5, 1)          \
-  F(WasmAtomicNotify, 3, 1)           \
-  F(WasmMemoryGrow, 2, 1)             \
-  F(WasmStackGuard, 0, 1)             \
-  F(WasmThrow, 2, 1)                  \
-  F(WasmReThrow, 1, 1)                \
-  F(WasmThrowJSTypeError, 0, 1)       \
-  F(WasmRefFunc, 1, 1)                \
-  F(WasmFunctionTableGet, 3, 1)       \
-  F(WasmFunctionTableSet, 4, 1)       \
-  F(WasmTableInit, 6, 1)              \
-  F(WasmTableCopy, 6, 1)              \
-  F(WasmTableGrow, 3, 1)              \
-  F(WasmTableFill, 5, 1)              \
-  F(WasmJSToWasmObject, 2, 1)         \
-  F(WasmCompileLazy, 2, 1)            \
-  F(WasmAllocateFeedbackVector, 3, 1) \
-  F(WasmCompileWrapper, 2, 1)         \
-  F(WasmTriggerTierUp, 1, 1)          \
-  F(WasmDebugBreak, 0, 1)             \
-  F(WasmArrayCopy, 5, 1)              \
-  F(WasmArrayNewSegment, 5, 1)        \
-  F(WasmAllocateSuspender, 0, 1)      \
-  F(WasmSyncStackLimit, 0, 1)         \
-  F(WasmCreateResumePromise, 2, 1)    \
-  F(WasmStringNewWtf8, 5, 1)          \
-  F(WasmStringNewWtf8Array, 4, 1)     \
-  F(WasmStringNewWtf16, 4, 1)         \
-  F(WasmStringNewWtf16Array, 3, 1)    \
-  F(WasmStringConst, 2, 1)            \
-  F(WasmStringMeasureUtf8, 1, 1)      \
-  F(WasmStringMeasureWtf8, 1, 1)      \
-  F(WasmStringEncodeWtf8, 5, 1)       \
-  F(WasmStringEncodeWtf16, 6, 1)      \
-  F(WasmStringEncodeWtf8Array, 4, 1)  \
-  F(WasmStringAsWtf8, 1, 1)           \
-  F(WasmStringViewWtf8Encode, 6, 1)   \
-  F(WasmStringViewWtf8Slice, 3, 1)    \
-  F(WasmStringCompare, 2, 1)
+#define FOR_EACH_INTRINSIC_WASM(F, I)         \
+  F(ThrowBadSuspenderError, 0, 1)             \
+  F(ThrowWasmError, 1, 1)                     \
+  F(ThrowWasmStackOverflow, 0, 1)             \
+  F(WasmI32AtomicWait, 4, 1)                  \
+  F(WasmI64AtomicWait, 5, 1)                  \
+  F(WasmAtomicNotify, 3, 1)                   \
+  F(WasmMemoryGrow, 2, 1)                     \
+  F(WasmStackGuard, 0, 1)                     \
+  F(WasmThrow, 2, 1)                          \
+  F(WasmReThrow, 1, 1)                        \
+  F(WasmThrowJSTypeError, 0, 1)               \
+  F(WasmThrowTypeError, 2, 1)                 \
+  F(WasmRefFunc, 1, 1)                        \
+  F(WasmInternalFunctionCreateExternal, 1, 1) \
+  F(WasmFunctionTableGet, 3, 1)               \
+  F(WasmFunctionTableSet, 4, 1)               \
+  F(WasmTableInit, 6, 1)                      \
+  F(WasmTableCopy, 6, 1)                      \
+  F(WasmTableGrow, 3, 1)                      \
+  F(WasmTableFill, 5, 1)                      \
+  F(WasmJSToWasmObject, 2, 1)                 \
+  F(WasmCompileLazy, 2, 1)                    \
+  F(WasmAllocateFeedbackVector, 3, 1)         \
+  F(WasmCompileWrapper, 2, 1)                 \
+  F(WasmTriggerTierUp, 1, 1)                  \
+  F(WasmDebugBreak, 0, 1)                     \
+  F(WasmArrayCopy, 5, 1)                      \
+  F(WasmArrayNewSegment, 5, 1)                \
+  F(WasmArrayInitSegment, 6, 1)               \
+  F(WasmAllocateSuspender, 0, 1)              \
+  F(WasmSyncStackLimit, 0, 1)                 \
+  F(WasmCreateResumePromise, 2, 1)            \
+  F(WasmStringNewWtf8, 5, 1)                  \
+  F(WasmStringNewWtf8Array, 4, 1)             \
+  F(WasmStringNewWtf16, 4, 1)                 \
+  F(WasmStringNewWtf16Array, 3, 1)            \
+  F(WasmStringConst, 2, 1)                    \
+  F(WasmStringMeasureUtf8, 1, 1)              \
+  F(WasmStringMeasureWtf8, 1, 1)              \
+  F(WasmStringEncodeWtf8, 5, 1)               \
+  F(WasmStringEncodeWtf16, 6, 1)              \
+  F(WasmStringEncodeWtf8Array, 4, 1)          \
+  F(WasmStringAsWtf8, 1, 1)                   \
+  F(WasmStringViewWtf8Encode, 6, 1)           \
+  F(WasmStringViewWtf8Slice, 3, 1)            \
+  F(WasmStringFromCodePoint, 1, 1)            \
+  F(WasmStringHash, 1, 1)
 
 #define FOR_EACH_INTRINSIC_WASM_TEST(F, I) \
   F(DeserializeWasmModule, 2, 1)           \
@@ -671,6 +679,7 @@ namespace internal {
   F(IsThreadInWasm, 0, 1)                  \
   F(IsWasmCode, 1, 1)                      \
   F(IsWasmTrapHandlerEnabled, 0, 1)        \
+  F(IsWasmPartialOOBWriteNoop, 0, 1)       \
   F(SerializeWasmModule, 1, 1)             \
   F(SetWasmCompileControls, 2, 1)          \
   F(SetWasmInstantiateControls, 0, 1)      \
@@ -679,6 +688,7 @@ namespace internal {
   F(WasmGetNumberOfInstances, 1, 1)        \
   F(WasmNumCodeSpaces, 1, 1)               \
   F(WasmEnterDebugging, 0, 1)              \
+  F(WasmLeaveDebugging, 0, 1)              \
   F(WasmTierUpFunction, 1, 1)              \
   F(WasmTraceEnter, 0, 1)                  \
   F(WasmTraceExit, 1, 1)                   \
@@ -983,6 +993,7 @@ enum class OptimizationStatus {
   kTopmostFrameIsBaseline = 1 << 17,
   kIsLazy = 1 << 18,
   kTopmostFrameIsMaglev = 1 << 19,
+  kOptimizeOnNextCallOptimizesToMaglev = 1 << 20,
 };
 
 }  // namespace internal

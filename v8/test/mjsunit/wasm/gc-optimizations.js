@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 // Flags: --experimental-wasm-gc --no-liftoff --no-wasm-lazy-compilation
-// Flags: --no-wasm-inlining --no-wasm-speculative-inlining
+// Flags: --no-experimental-wasm-inlining
 
 // This tests are meant to examine if Turbofan CsaLoadElimination works
 // correctly for wasm. The TurboFan graphs can be examined with --trace-turbo.
@@ -334,9 +334,8 @@ d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
               kExprI32Mul])
     .exportFunc();
   let instance = builder.instantiate();
-  // TODO(manoskouk): Add this when we allow arrays at the boundary.
-  // assertEquals(10 * 11,
-  //              instance.exports.tester(instance.exports.producer(10)));
+  assertEquals(10 * 11,
+               instance.exports.tester(instance.exports.producer(10)));
 })();
 
 (function WasmLoadEliminationUnrelatedTypes() {
@@ -638,4 +637,39 @@ d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
     .exportFunc();
 
   builder.instantiate({});
+})();
+
+(function RedundantExternalizeInternalize() {
+  print(arguments.callee.name);
+  let builder = new WasmModuleBuilder();
+  let array = builder.addArray(kWasmI32, true);
+
+  builder.addFunction('createArray',
+      makeSig([kWasmI32], [kWasmExternRef]))
+    .addBody([
+      kExprLocalGet, 0,
+      kGCPrefix, kExprArrayNewFixed, array, 1,
+      kGCPrefix, kExprExternExternalize,
+    ])
+    .exportFunc();
+
+  builder.addFunction('get', makeSig([kWasmExternRef, kWasmI32], [kWasmI32]))
+    .addBody([
+      kExprLocalGet, 0,
+      kGCPrefix, kExprExternInternalize,
+      // The following two operations are optimized away.
+      kGCPrefix, kExprExternExternalize,
+      kGCPrefix, kExprExternInternalize,
+      //
+      kGCPrefix, kExprRefCastNull, array,
+      kExprLocalGet, 1,
+      kGCPrefix, kExprArrayGet, array,
+    ])
+    .exportFunc();
+
+  let instance = builder.instantiate({});
+  let wasm = instance.exports;
+
+  let wasmArray = wasm.createArray(10);
+  assertEquals(10, wasm.get(wasmArray, 0));
 })();

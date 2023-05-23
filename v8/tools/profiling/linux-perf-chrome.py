@@ -54,8 +54,16 @@ chrome_options = optparse.OptionGroup(
     "These convenience for a better script experience that are forward directly"
     "to chrome. Any other chrome option can be passed after the '--' arguments"
     "separator.")
-chrome_options.add_option("--user-data-dir", dest="user_data_dir", default=None)
-chrome_options.add_option("--js-flags", dest="js_flags")
+chrome_options.add_option(
+    "--user-data-dir",
+    dest="user_data_dir",
+    default=None,
+    help="Chrome's profile location. "
+    "By default a temp directory is used.")
+chrome_options.add_option(
+    "--js-flags",
+    dest="js_flags",
+    help="Comma-separated list of flags passed to V8.")
 chrome_options.add_option(
     "--renderer-cmd-prefix",
     default=None,
@@ -136,10 +144,10 @@ with tempfile.TemporaryDirectory(prefix="chrome-") as tmp_dir_path:
       str(chrome_bin),
   ]
   if options.user_data_dir is None:
-    cmd.append(f"--user-data-dir={tempdir}")
+    options.user_data_dir = tempdir
+  cmd.append(f"--user-data-dir={options.user_data_dir}")
   cmd += [
       "--no-sandbox",
-      "--incognito",
       "--enable-benchmarking",
       "--no-first-run",
       "--no-default-browser-check",
@@ -253,7 +261,10 @@ try:
   subprocess.check_call("gcertstatus >&/dev/null || gcert", shell=True)
   has_gcert = True
 
-  cmd = ["pprof", "-flame", f"-add_comment={shlex.join(sys.argv)}"]
+  cmd = [
+      "pprof", "-symbolize=local", "-flame",
+      f"-add_comment={shlex.join(sys.argv)}"
+  ]
   print("# Processing and uploading largest pprof result")
   url = subprocess.check_output(cmd + [largest_result]).decode('utf-8').strip()
   print("# PPROF RESULT")
@@ -267,6 +278,6 @@ except subprocess.CalledProcessError as e:
   if has_gcert:
     raise Exception("Could not generate pprof results") from e
   print("# Please run `gcert` for generating pprof results")
-  print(f"pprof -flame {' '.join(rel_path_strings)}")
+  print(f"pprof -symbolize=local -flame {' '.join(rel_path_strings)}")
 except KeyboardInterrupt:
   exit(1)

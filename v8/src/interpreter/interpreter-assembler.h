@@ -9,6 +9,7 @@
 #include "src/common/globals.h"
 #include "src/interpreter/bytecode-register.h"
 #include "src/interpreter/bytecodes.h"
+#include "src/objects/bytecode-array.h"
 #include "src/runtime/runtime.h"
 
 namespace v8 {
@@ -74,6 +75,7 @@ class V8_EXPORT_PRIVATE InterpreterAssembler : public CodeStubAssembler {
   // Accumulator.
   TNode<Object> GetAccumulator();
   void SetAccumulator(TNode<Object> value);
+  void ClobberAccumulator(TNode<Object> clobber_value);
 
   // Context.
   TNode<Context> GetContext();
@@ -143,9 +145,25 @@ class V8_EXPORT_PRIVATE InterpreterAssembler : public CodeStubAssembler {
 
   TNode<JSFunction> LoadFunctionClosure();
 
-  // Load the FeedbackVector for the current function. The retuned node could be
-  // undefined.
+  // Load the FeedbackVector for the current function. The returned node could
+  // be undefined.
   TNode<HeapObject> LoadFeedbackVector();
+
+  TNode<HeapObject> LoadFeedbackVectorOrUndefinedIfJitless() {
+#ifndef V8_JITLESS
+    return LoadFeedbackVector();
+#else
+    return UndefinedConstant();
+#endif  // V8_JITLESS
+  }
+
+  static constexpr UpdateFeedbackMode DefaultUpdateFeedbackMode() {
+#ifndef V8_JITLESS
+    return UpdateFeedbackMode::kOptionalFeedback;
+#else
+    return UpdateFeedbackMode::kNoFeedback;
+#endif  // !V8_JITLESS
+  }
 
   // Call JSFunction or Callable |function| with |args| arguments, possibly
   // including the receiver depending on |receiver_mode|. After the call returns
@@ -169,8 +187,7 @@ class V8_EXPORT_PRIVATE InterpreterAssembler : public CodeStubAssembler {
   void CallJSWithSpreadAndDispatch(TNode<Object> function,
                                    TNode<Context> context,
                                    const RegListNodePair& args,
-                                   TNode<UintPtrT> slot_id,
-                                   TNode<HeapObject> maybe_feedback_vector);
+                                   TNode<UintPtrT> slot_id);
 
   // Call constructor |target| with |args| arguments (not including receiver).
   // The |new_target| is the same as the |target| for the new keyword, but
@@ -188,8 +205,7 @@ class V8_EXPORT_PRIVATE InterpreterAssembler : public CodeStubAssembler {
                                     TNode<Context> context,
                                     TNode<Object> new_target,
                                     const RegListNodePair& args,
-                                    TNode<UintPtrT> slot_id,
-                                    TNode<HeapObject> maybe_feedback_vector);
+                                    TNode<UintPtrT> slot_id);
 
   // Call runtime function with |args| arguments.
   template <class T = Object>
@@ -236,6 +252,18 @@ class V8_EXPORT_PRIVATE InterpreterAssembler : public CodeStubAssembler {
 
   // Updates the profiler interrupt budget for a return.
   void UpdateInterruptBudgetOnReturn();
+
+  // Adjusts the interrupt budget by the provided weight. Returns the new
+  // budget.
+  TNode<Int32T> UpdateInterruptBudget(TNode<Int32T> weight);
+  // Decrements the bytecode array's interrupt budget by a 32-bit unsigned
+  // |weight| and calls Runtime::kInterrupt if counter reaches zero.
+  enum StackCheckBehavior {
+    kEnableStackCheck,
+    kDisableStackCheck,
+  };
+  void DecreaseInterruptBudget(TNode<Int32T> weight,
+                               StackCheckBehavior stack_check_behavior);
 
   TNode<Int8T> LoadOsrState(TNode<FeedbackVector> feedback_vector);
 
@@ -331,11 +359,6 @@ class V8_EXPORT_PRIVATE InterpreterAssembler : public CodeStubAssembler {
   // Traces the current bytecode by calling |function_id|.
   void TraceBytecode(Runtime::FunctionId function_id);
 
-  // Updates the bytecode array's interrupt budget by a 32-bit unsigned |weight|
-  // and calls Runtime::kInterrupt if counter reaches zero. If |backward|, then
-  // the interrupt budget is decremented, otherwise it is incremented.
-  void UpdateInterruptBudget(TNode<Int32T> weight, bool backward);
-
   // Returns the offset of register |index| relative to RegisterFilePointer().
   TNode<IntPtrT> RegisterFrameOffset(TNode<IntPtrT> index);
 
@@ -374,10 +397,8 @@ class V8_EXPORT_PRIVATE InterpreterAssembler : public CodeStubAssembler {
   // pool element.
   TNode<UintPtrT> BytecodeOperandConstantPoolIdx(int operand_index);
 
-  // Jump relative to the current bytecode by the |jump_offset|. If |backward|,
-  // then jump backward (subtract the offset), otherwise jump forward (add the
-  // offset). Helper function for Jump and JumpBackward.
-  void Jump(TNode<IntPtrT> jump_offset, bool backward);
+  // Jump to a specific bytecode offset.
+  void JumpToOffset(TNode<IntPtrT> new_bytecode_offset);
 
   // Jump forward relative to the current bytecode by |jump_offset| if the
   // |condition| is true. Helper function for JumpIfTaggedEqual and
@@ -409,7 +430,7 @@ class V8_EXPORT_PRIVATE InterpreterAssembler : public CodeStubAssembler {
   // Updates and returns BytecodeOffset() advanced by delta bytecodes.
   // Traces the exit of the current bytecode.
   TNode<IntPtrT> Advance(int delta);
-  TNode<IntPtrT> Advance(TNode<IntPtrT> delta, bool backward = false);
+  TNode<IntPtrT> Advance(TNode<IntPtrT> delta);
 
   // Look ahead for short Star and inline it in a branch, including subsequent
   // dispatch. Anything after this point can assume that the following

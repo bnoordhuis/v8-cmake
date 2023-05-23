@@ -27,7 +27,10 @@ MemoryReducer::MemoryReducer(Heap* heap)
           reinterpret_cast<v8::Isolate*>(heap->isolate()))),
       state_(State::CreateUninitialized()),
       js_calls_counter_(0),
-      js_calls_sample_time_ms_(0.0) {}
+      js_calls_sample_time_ms_(0.0) {
+  DCHECK(v8_flags.incremental_marking);
+  DCHECK(v8_flags.memory_reducer);
+}
 
 MemoryReducer::TimerTask::TimerTask(MemoryReducer* memory_reducer)
     : CancelableTask(memory_reducer->heap()->isolate()),
@@ -75,9 +78,9 @@ void MemoryReducer::NotifyTimer(const Event& event) {
       heap()->isolate()->PrintWithTimestamp("Memory reducer: started GC #%d\n",
                                             state_.started_gcs());
     }
-    heap()->StartIdleIncrementalMarking(
-        GarbageCollectionReason::kMemoryReducer,
-        kGCCallbackFlagCollectAllExternalMemory);
+    heap()->StartIncrementalMarking(GCFlag::kReduceMemoryFootprint,
+                                    GarbageCollectionReason::kMemoryReducer,
+                                    kGCCallbackFlagCollectAllExternalMemory);
   } else if (state_.id() == kWait) {
     if (!heap()->incremental_marking()->IsStopped() &&
         heap()->ShouldOptimizeForMemoryUsage()) {
@@ -97,6 +100,7 @@ void MemoryReducer::NotifyTimer(const Event& event) {
 }
 
 void MemoryReducer::NotifyMarkCompact(size_t committed_memory_before) {
+  if (!v8_flags.incremental_marking) return;
   const size_t committed_memory = heap()->CommittedOldGenerationMemory();
 
   // Trigger one more GC if
@@ -111,6 +115,7 @@ void MemoryReducer::NotifyMarkCompact(size_t committed_memory_before) {
       false,
       false};
   const Id old_action = state_.id();
+  int old_started_gcs = state_.started_gcs();
   state_ = Step(state_, event);
   if (old_action != kWait && state_.id() == kWait) {
     // If we are transitioning to the WAIT state, start the timer.
@@ -119,7 +124,7 @@ void MemoryReducer::NotifyMarkCompact(size_t committed_memory_before) {
   if (old_action == kRun) {
     if (v8_flags.trace_gc_verbose) {
       heap()->isolate()->PrintWithTimestamp(
-          "Memory reducer: finished GC #%d (%s)\n", state_.started_gcs(),
+          "Memory reducer: finished GC #%d (%s)\n", old_started_gcs,
           state_.id() == kWait ? "will do more" : "done");
     }
   }
@@ -129,7 +134,7 @@ void MemoryReducer::NotifyPossibleGarbage() {
   const MemoryReducer::Event event{MemoryReducer::kPossibleGarbage,
                                    heap()->MonotonicallyIncreasingTimeInMs(),
                                    0,
-                                   0,
+                                   false,
                                    false,
                                    false};
   const Id old_action = state_.id();
@@ -149,11 +154,14 @@ bool MemoryReducer::WatchdogGC(const State& state, const Event& event) {
 // For specification of this function see the comment for MemoryReducer class.
 MemoryReducer::State MemoryReducer::Step(const State& state,
                                          const Event& event) {
-  if (!v8_flags.incremental_marking || !v8_flags.memory_reducer) {
-    return State::CreateUninitialized();
-  }
+  DCHECK(v8_flags.memory_reducer);
+  DCHECK(v8_flags.incremental_marking);
+
   switch (state.id()) {
     case kDone:
+      CHECK_IMPLIES(
+          v8_flags.memory_reducer_single_gc,
+          state.started_gcs() == 0 || state.started_gcs() == kMaxNumberOfGCs);
       if (event.type == kTimer) {
         return state;
       } else if (event.type == kMarkCompact) {
@@ -174,6 +182,8 @@ MemoryReducer::State MemoryReducer::Step(const State& state,
             state.last_gc_time_ms());
       }
     case kWait:
+      CHECK_IMPLIES(v8_flags.memory_reducer_single_gc,
+                    state.started_gcs() == 0);
       switch (event.type) {
         case kPossibleGarbage:
           return state;
@@ -199,8 +209,11 @@ MemoryReducer::State MemoryReducer::Step(const State& state,
                                    event.time_ms + kLongDelayMs, event.time_ms);
       }
     case kRun:
+      CHECK_IMPLIES(v8_flags.memory_reducer_single_gc,
+                    state.started_gcs() == 1);
       if (event.type == kMarkCompact) {
-        if (state.started_gcs() < kMaxNumberOfGCs &&
+        if (!v8_flags.memory_reducer_single_gc &&
+            state.started_gcs() < kMaxNumberOfGCs &&
             (event.next_gc_likely_to_collect_more ||
              state.started_gcs() == 1)) {
           return State::CreateWait(state.started_gcs(),

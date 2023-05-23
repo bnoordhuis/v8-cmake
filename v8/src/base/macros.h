@@ -22,12 +22,7 @@
 // Creates an unique identifier. Useful for scopes to avoid shadowing names.
 #define UNIQUE_IDENTIFIER(base) CONCAT(base, __COUNTER__)
 
-// TODO(all) Replace all uses of this macro with C++'s offsetof. To do that, we
-// have to make sure that only standard-layout types and simple field
-// designators are used.
-#define OFFSET_OF(type, field) \
-  (reinterpret_cast<intptr_t>(&(reinterpret_cast<type*>(16)->field)) - 16)
-
+#define OFFSET_OF(type, field) offsetof(type, field)
 
 // The arraysize(arr) macro returns the # of elements in an array arr.
 // The expression is a compile-time constant, and therefore can be
@@ -239,7 +234,7 @@ struct is_trivially_copyable {
 // The arguments are guaranteed to be evaluated from left to right.
 struct Use {
   template <typename T>
-  Use(T&&) {}  // NOLINT(runtime/explicit)
+  constexpr Use(T&&) {}  // NOLINT(runtime/explicit)
 };
 #define USE(...)                                                   \
   do {                                                             \

@@ -20,6 +20,7 @@
 #include "src/execution/v8threads.h"
 #include "src/logging/log.h"
 #include "src/objects/js-generator-inl.h"
+#include "src/objects/js-objects.h"
 #include "src/objects/objects-inl.h"
 #include "src/parsing/parse-info.h"
 #include "src/parsing/parsing.h"
@@ -536,8 +537,8 @@ bool ParseScript(Isolate* isolate, Handle<Script> script, ParseInfo* parse_info,
     isolate->OptionalRescheduleException(false);
     DCHECK(try_catch.HasCaught());
     result->message = try_catch.Message()->Get();
-    auto self = Utils::OpenHandle(*try_catch.Message());
-    auto msg = i::Handle<i::JSMessageObject>::cast(self);
+    i::Handle<i::JSMessageObject> msg = Utils::OpenHandle(*try_catch.Message());
+    i::JSMessageObject::EnsureSourcePositionsAvailable(isolate, msg);
     result->line_number = msg->GetLineNumber();
     result->column_number = msg->GetColumnNumber();
     result->status = debug::LiveEditResult::COMPILE_ERROR;
@@ -654,7 +655,8 @@ class FunctionDataMap : public ThreadVisitor {
   }
 
   void VisitThread(Isolate* isolate, ThreadLocalTop* top) override {
-    for (JavaScriptFrameIterator it(isolate, top); !it.done(); it.Advance()) {
+    for (JavaScriptStackFrameIterator it(isolate, top); !it.done();
+         it.Advance()) {
       std::vector<Handle<SharedFunctionInfo>> sfis;
       it.frame()->GetFunctions(&sfis);
       for (auto& sfi : sfis) {
@@ -701,6 +703,11 @@ bool CanPatchScript(const LiteralMap& changed, Handle<Script> script,
     Handle<SharedFunctionInfo> sfi;
     if (!data->shared.ToHandle(&sfi)) {
       continue;
+    } else if (IsModule(sfi->kind())) {
+      DCHECK(script->origin_options().IsModule() && sfi->is_toplevel());
+      result->status =
+          debug::LiveEditResult::BLOCKED_BY_TOP_LEVEL_ES_MODULE_CHANGE;
+      return false;
     } else if (data->stack_position == FunctionData::ON_STACK) {
       result->status = debug::LiveEditResult::BLOCKED_BY_ACTIVE_FUNCTION;
       return false;
@@ -796,7 +803,7 @@ ScopeInfo FindOuterScopeInfoFromScriptSfi(Isolate* isolate,
 MaybeHandle<ScopeInfo> DetermineOuterScopeInfo(Isolate* isolate,
                                                Handle<Script> script) {
   if (!script->has_eval_from_shared()) return kNullMaybeHandle;
-  DCHECK_EQ(script->compilation_type(), Script::COMPILATION_TYPE_EVAL);
+  DCHECK_EQ(script->compilation_type(), Script::CompilationType::kEval);
   ScopeInfo scope_info = script->eval_from_shared().scope_info();
   // Sloppy eval compiles use the ScopeInfo of the context. Let's find it.
   while (!scope_info.IsEmpty()) {
@@ -847,8 +854,8 @@ void LiveEdit::PatchScript(Isolate* isolate, Handle<Script> script,
                    &literals, result))
     return;
 
-  Handle<Script> new_script = isolate->factory()->CloneScript(script);
-  new_script->set_source(*new_source);
+  Handle<Script> new_script =
+      isolate->factory()->CloneScript(script, new_source);
   UnoptimizedCompileState new_compile_state;
   UnoptimizedCompileFlags new_flags =
       UnoptimizedCompileFlags::ForScriptCompile(isolate, *new_script);
@@ -975,7 +982,7 @@ void LiveEdit::PatchScript(Isolate* isolate, Handle<Script> script,
     isolate->compilation_cache()->Remove(sfi);
     for (auto& js_function : data->js_functions) {
       js_function->set_shared(*new_sfi);
-      js_function->set_code(js_function->shared().GetCode(), kReleaseStore);
+      js_function->set_code(js_function->shared().GetCode(isolate));
 
       js_function->set_raw_feedback_cell(
           *isolate->factory()->many_closures_cell());

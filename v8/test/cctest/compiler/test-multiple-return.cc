@@ -174,8 +174,6 @@ void TestReturnMultipleValues(MachineType type, int min_count, int max_count) {
         code->Disassemble("multi_value", os, handles.main_isolate());
       }
 #endif
-      Handle<InstructionStream> istream(code->instruction_stream(),
-                                        handles.main_isolate());
 
       const int a = 47, b = 12;
       int expect = 0;
@@ -187,10 +185,10 @@ void TestReturnMultipleValues(MachineType type, int min_count, int max_count) {
       }
 
       std::shared_ptr<wasm::NativeModule> module = AllocateNativeModule(
-          handles.main_isolate(), istream->raw_instruction_size());
+          handles.main_isolate(), code->instruction_size());
       wasm::WasmCodeRefScope wasm_code_ref_scope;
-      byte* code_start =
-          module->AddCodeForTesting(istream)->instructions().begin();
+      uint8_t* code_start =
+          module->AddCodeForTesting(code)->instructions().begin();
 
       RawMachineAssemblerTester<int32_t> mt(CodeKind::JS_TO_WASM_FUNCTION);
       const int input_count = 2 + param_count;
@@ -218,9 +216,9 @@ void TestReturnMultipleValues(MachineType type, int min_count, int max_count) {
       }
       mt.Return(ToInt32(&mt, type, ret));
 #ifdef ENABLE_DISASSEMBLER
-      Handle<InstructionStream> code2 = mt.GetInstructionStream();
       if (v8_flags.print_code) {
         StdoutStream os;
+        Handle<Code> code2 = mt.GetCode();
         code2->Disassemble("multi_value_call", os, handles.main_isolate());
       }
 #endif
@@ -282,14 +280,12 @@ void ReturnLastValue(MachineType type) {
                             AssemblerOptions::Default(handles.main_isolate()),
                             m.ExportForTest())
                             .ToHandleChecked();
-    Handle<InstructionStream> istream(code->instruction_stream(),
-                                      handles.main_isolate());
 
-    std::shared_ptr<wasm::NativeModule> module = AllocateNativeModule(
-        handles.main_isolate(), istream->raw_instruction_size());
+    std::shared_ptr<wasm::NativeModule> module =
+        AllocateNativeModule(handles.main_isolate(), code->instruction_size());
     wasm::WasmCodeRefScope wasm_code_ref_scope;
-    byte* code_start =
-        module->AddCodeForTesting(istream)->instructions().begin();
+    uint8_t* code_start =
+        module->AddCodeForTesting(code)->instructions().begin();
 
     // Generate caller.
     int expect = return_count - 1;
@@ -348,14 +344,12 @@ void ReturnSumOfReturns(MachineType type) {
                             AssemblerOptions::Default(handles.main_isolate()),
                             m.ExportForTest())
                             .ToHandleChecked();
-    Handle<InstructionStream> istream(code->instruction_stream(),
-                                      handles.main_isolate());
 
-    std::shared_ptr<wasm::NativeModule> module = AllocateNativeModule(
-        handles.main_isolate(), istream->raw_instruction_size());
+    std::shared_ptr<wasm::NativeModule> module =
+        AllocateNativeModule(handles.main_isolate(), code->instruction_size());
     wasm::WasmCodeRefScope wasm_code_ref_scope;
-    byte* code_start =
-        module->AddCodeForTesting(istream)->instructions().begin();
+    uint8_t* code_start =
+        module->AddCodeForTesting(code)->instructions().begin();
 
     // Generate caller.
     RawMachineAssemblerTester<int32_t> mt;

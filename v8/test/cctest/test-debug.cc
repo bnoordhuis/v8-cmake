@@ -43,6 +43,7 @@
 #include "src/objects/objects-inl.h"
 #include "src/utils/utils.h"
 #include "test/cctest/cctest.h"
+#include "test/cctest/heap/heap-utils.h"
 
 using ::v8::internal::Handle;
 using ::v8::internal::StepInto;  // From StepAction enum
@@ -167,8 +168,8 @@ void CheckDebuggerUnloaded() {
   // Collect garbage to ensure weak handles are cleared.
   i::DisableConservativeStackScanningScopeForTesting no_stack_scanning(
       CcTest::heap());
-  CcTest::CollectAllGarbage();
-  CcTest::CollectAllGarbage();
+  heap::CollectAllGarbage(CcTest::heap());
+  heap::CollectAllGarbage(CcTest::heap());
 
   // Iterate the heap and check that there are no debugger related objects left.
   HeapObjectIterator iterator(CcTest::heap());
@@ -228,10 +229,10 @@ class DebugEventBreakPointCollectGarbage : public v8::debug::DebugDelegate {
     break_point_hit_count++;
     if (break_point_hit_count % 2 == 0) {
       // Scavenge.
-      CcTest::CollectGarbage(v8::internal::NEW_SPACE);
+      i::heap::CollectGarbage(CcTest::heap(), i::NEW_SPACE);
     } else {
       // Mark sweep compact.
-      CcTest::CollectAllGarbage();
+      i::heap::CollectAllGarbage(CcTest::heap());
     }
   }
 };
@@ -248,7 +249,7 @@ class DebugEventBreak : public v8::debug::DebugDelegate {
 
     // Run the garbage collector to enforce heap verification if option
     // --verify-heap is set.
-    CcTest::CollectGarbage(v8::internal::NEW_SPACE);
+    i::heap::CollectGarbage(CcTest::heap(), i::NEW_SPACE);
 
     // Set the break flag again to come back here as soon as possible.
     v8::debug::SetBreakOnNextFunctionCall(CcTest::isolate());
@@ -582,8 +583,6 @@ TEST(BreakPointApiIntrinsics) {
 
   DebugEventCounter delegate;
   v8::debug::SetDebugDelegate(env->GetIsolate(), &delegate);
-
-  v8::Local<v8::Function> builtin;
 
   // === Test that using API-exposed functions won't trigger breakpoints ===
   {
@@ -1069,8 +1068,9 @@ TEST(BreakPointBuiltinNewContext) {
   CheckDebuggerUnloaded();
 }
 
-void NoOpFunctionCallback(const v8::FunctionCallbackInfo<v8::Value>& args) {
-  args.GetReturnValue().Set(v8_num(2));
+void NoOpFunctionCallback(const v8::FunctionCallbackInfo<v8::Value>& info) {
+  CHECK(i::ValidateCallbackInfo(info));
+  info.GetReturnValue().Set(v8_num(2));
 }
 
 TEST(BreakPointApiFunction) {
@@ -1155,11 +1155,12 @@ TEST(BreakPointApiConstructor) {
   CheckDebuggerUnloaded();
 }
 
-void GetWrapperCallback(const v8::FunctionCallbackInfo<v8::Value>& args) {
-  args.GetReturnValue().Set(
-      args[0]
+void GetWrapperCallback(const v8::FunctionCallbackInfo<v8::Value>& info) {
+  CHECK(i::ValidateCallbackInfo(info));
+  info.GetReturnValue().Set(
+      info[0]
           .As<v8::Object>()
-          ->Get(args.GetIsolate()->GetCurrentContext(), args[1])
+          ->Get(info.GetIsolate()->GetCurrentContext(), info[1])
           .ToLocalChecked());
 }
 
@@ -1209,10 +1210,11 @@ TEST(BreakPointApiGetter) {
   CheckDebuggerUnloaded();
 }
 
-void SetWrapperCallback(const v8::FunctionCallbackInfo<v8::Value>& args) {
-  CHECK(args[0]
+void SetWrapperCallback(const v8::FunctionCallbackInfo<v8::Value>& info) {
+  CHECK(i::ValidateCallbackInfo(info));
+  CHECK(info[0]
             .As<v8::Object>()
-            ->Set(args.GetIsolate()->GetCurrentContext(), args[1], args[2])
+            ->Set(info.GetIsolate()->GetCurrentContext(), info[1], info[2])
             .FromJust());
 }
 
@@ -1607,7 +1609,7 @@ TEST(BreakPointConditionBuiltin) {
   // === Test rest arguments ===
   break_point_hit_count = 0;
   builtin = CompileRun("String.fromCharCode").As<v8::Function>();
-  CompileRun("function f(...args) { return String.fromCharCode(...args); }");
+  CompileRun("function f(...info) { return String.fromCharCode(...info); }");
   CHECK_EQ(0, break_point_hit_count);
 
   // Run with breakpoint.
@@ -1754,12 +1756,12 @@ static void CallAndGC(v8::Local<v8::Context> context,
     CHECK_EQ(1 + i * 3, break_point_hit_count);
 
     // Scavenge and call function.
-    CcTest::CollectGarbage(v8::internal::NEW_SPACE);
+    i::heap::CollectGarbage(CcTest::heap(), i::NEW_SPACE);
     f->Call(context, recv, 0, nullptr).ToLocalChecked();
     CHECK_EQ(2 + i * 3, break_point_hit_count);
 
     // Mark sweep (and perhaps compact) and call function.
-    CcTest::CollectAllGarbage();
+    i::heap::CollectAllGarbage(CcTest::heap());
     f->Call(context, recv, 0, nullptr).ToLocalChecked();
     CHECK_EQ(3 + i * 3, break_point_hit_count);
   }
@@ -2719,7 +2721,6 @@ TEST(DebugStepWith) {
                   v8::Object::New(env->GetIsolate()))
             .FromJust());
   v8::Local<v8::Function> foo = CompileFunction(&env, src, "foo");
-  v8::Local<v8::Value> result;
   SetBreakPoint(foo, 8);  // "var a = {};"
 
   run_step.set_step_action(StepInto);
@@ -3123,7 +3124,9 @@ TEST(DebugBreakInWrappedScript) {
   CheckDebuggerUnloaded();
 }
 
-static void EmptyHandler(const v8::FunctionCallbackInfo<v8::Value>& args) {}
+static void EmptyHandler(const v8::FunctionCallbackInfo<v8::Value>& info) {
+  CHECK(i::ValidateCallbackInfo(info));
+}
 
 TEST(DebugScopeIteratorWithFunctionTemplate) {
   LocalContext env;
@@ -3991,8 +3994,9 @@ class DebugBreakStackTraceListener : public v8::debug::DebugDelegate {
   }
 };
 
-static void AddDebugBreak(const v8::FunctionCallbackInfo<v8::Value>& args) {
-  v8::debug::SetBreakOnNextFunctionCall(args.GetIsolate());
+static void AddDebugBreak(const v8::FunctionCallbackInfo<v8::Value>& info) {
+  CHECK(i::ValidateCallbackInfo(info));
+  v8::debug::SetBreakOnNextFunctionCall(info.GetIsolate());
 }
 
 TEST(DebugBreakStackTrace) {
@@ -4251,8 +4255,9 @@ class DebugEventExpectNoException : public v8::debug::DebugDelegate {
 };
 
 static void TryCatchWrappedThrowCallback(
-    const v8::FunctionCallbackInfo<v8::Value>& args) {
-  v8::TryCatch try_catch(args.GetIsolate());
+    const v8::FunctionCallbackInfo<v8::Value>& info) {
+  CHECK(i::ValidateCallbackInfo(info));
+  v8::TryCatch try_catch(info.GetIsolate());
   CompileRun("throw 'rejection';");
   CHECK(try_catch.HasCaught());
 }
@@ -4570,24 +4575,6 @@ TEST(DebugCoverageWithScriptDataOutOfScope) {
   CHECK_EQ(26, function_data.EndOffset());
 }
 
-TEST(BuiltinsExceptionPrediction) {
-  v8::Isolate* isolate = CcTest::isolate();
-  i::Isolate* iisolate = CcTest::i_isolate();
-  v8::HandleScope handle_scope(isolate);
-  v8::Context::New(isolate);
-
-  i::Builtins* builtins = iisolate->builtins();
-  bool fail = false;
-  for (i::Builtin builtin = i::Builtins::kFirst; builtin <= i::Builtins::kLast;
-       ++builtin) {
-    i::Code code = builtins->code(builtin);
-    if (code.kind() != i::CodeKind::BUILTIN) continue;
-    auto prediction = code.GetBuiltinCatchPrediction();
-    USE(prediction);
-  }
-  CHECK(!fail);
-}
-
 TEST(DebugGetPossibleBreakpointsReturnLocations) {
   LocalContext env;
   v8::Isolate* isolate = env->GetIsolate();
@@ -4716,13 +4703,13 @@ UNINITIALIZED_TEST(LoadedAtStartupScripts) {
 
     std::vector<i::Handle<i::Script>> scripts;
     CompileWithOrigin(v8_str("function foo(){}"), v8_str("normal.js"), false);
-    std::unordered_map<int, int> count_by_type;
+    std::unordered_map<i::Script::Type, int> count_by_type;
     {
       i::DisallowGarbageCollection no_gc;
       i::Script::Iterator iterator(i_isolate);
       for (i::Script script = iterator.Next(); !script.is_null();
            script = iterator.Next()) {
-        if (script.type() == i::Script::TYPE_NATIVE &&
+        if (script.type() == i::Script::Type::kNative &&
             script.name().IsUndefined(i_isolate)) {
           continue;
         }
@@ -4730,21 +4717,21 @@ UNINITIALIZED_TEST(LoadedAtStartupScripts) {
         scripts.emplace_back(script, i_isolate);
       }
     }
-    CHECK_EQ(count_by_type[i::Script::TYPE_NATIVE], 0);
-    CHECK_EQ(count_by_type[i::Script::TYPE_EXTENSION], 1);
-    CHECK_EQ(count_by_type[i::Script::TYPE_NORMAL], 1);
+    CHECK_EQ(count_by_type[i::Script::Type::kNative], 0);
+    CHECK_EQ(count_by_type[i::Script::Type::kExtension], 1);
+    CHECK_EQ(count_by_type[i::Script::Type::kNormal], 1);
 #if V8_ENABLE_WEBASSEMBLY
-    CHECK_EQ(count_by_type[i::Script::TYPE_WASM], 0);
+    CHECK_EQ(count_by_type[i::Script::Type::kWasm], 0);
 #endif  // V8_ENABLE_WEBASSEMBLY
-    CHECK_EQ(count_by_type[i::Script::TYPE_INSPECTOR], 0);
+    CHECK_EQ(count_by_type[i::Script::Type::kInspector], 0);
 
     i::Handle<i::Script> gc_script =
         FindScript(i_isolate, scripts, "v8/gc").ToHandleChecked();
-    CHECK_EQ(gc_script->type(), i::Script::TYPE_EXTENSION);
+    CHECK_EQ(gc_script->type(), i::Script::Type::kExtension);
 
     i::Handle<i::Script> normal_script =
         FindScript(i_isolate, scripts, "normal.js").ToHandleChecked();
-    CHECK_EQ(normal_script->type(), i::Script::TYPE_NORMAL);
+    CHECK_EQ(normal_script->type(), i::Script::Type::kNormal);
   }
   isolate->Dispose();
 }
@@ -4978,7 +4965,8 @@ TEST(GetPrivateFields) {
           .ToLocalChecked());
   std::vector<v8::Local<v8::Value>> names;
   std::vector<v8::Local<v8::Value>> values;
-  CHECK(v8::debug::GetPrivateMembers(context, object, &names, &values));
+  int filter = static_cast<int>(v8::debug::PrivateMemberFilter::kPrivateFields);
+  CHECK(v8::debug::GetPrivateMembers(context, object, filter, &names, &values));
 
   CHECK_EQ(names.size(), 2);
   for (int i = 0; i < 2; i++) {
@@ -5010,7 +4998,7 @@ TEST(GetPrivateFields) {
       env->Global()
           ->Get(context, v8_str(env->GetIsolate(), "x"))
           .ToLocalChecked());
-  CHECK(v8::debug::GetPrivateMembers(context, object, &names, &values));
+  CHECK(v8::debug::GetPrivateMembers(context, object, filter, &names, &values));
 
   CHECK_EQ(names.size(), 3);
   for (int i = 0; i < 3; i++) {
@@ -5045,7 +5033,7 @@ TEST(GetPrivateFields) {
       env->Global()
           ->Get(context, v8_str(env->GetIsolate(), "x"))
           .ToLocalChecked());
-  CHECK(v8::debug::GetPrivateMembers(context, object, &names, &values));
+  CHECK(v8::debug::GetPrivateMembers(context, object, filter, &names, &values));
 
   CHECK_EQ(names.size(), 2);
   for (int i = 0; i < 2; i++) {
@@ -5084,31 +5072,46 @@ TEST(GetPrivateMethodsAndAccessors) {
           .ToLocalChecked());
   std::vector<v8::Local<v8::Value>> names;
   std::vector<v8::Local<v8::Value>> values;
-  CHECK(v8::debug::GetPrivateMembers(context, object, &names, &values));
 
-  CHECK_EQ(names.size(), 4);
-  for (int i = 0; i < 4; i++) {
+  int accessor_filter =
+      static_cast<int>(v8::debug::PrivateMemberFilter::kPrivateAccessors);
+  int method_filter =
+      static_cast<int>(v8::debug::PrivateMemberFilter::kPrivateMethods);
+
+  CHECK(v8::debug::GetPrivateMembers(context, object, method_filter, &names,
+                                     &values));
+  CHECK_EQ(names.size(), 1);
+  {
+    v8::Local<v8::Value> name = names[0];
+    v8::Local<v8::Value> value = values[0];
+    CHECK(name->IsString());
+    CHECK(v8_str("#method")->Equals(context, name.As<v8::String>()).FromJust());
+    CHECK(value->IsFunction());
+  }
+
+  names.clear();
+  values.clear();
+  CHECK(v8::debug::GetPrivateMembers(context, object, accessor_filter, &names,
+                                     &values));
+  CHECK_EQ(names.size(), 3);
+  for (int i = 0; i < 3; i++) {
     v8::Local<v8::Value> name = names[i];
     v8::Local<v8::Value> value = values[i];
     CHECK(name->IsString());
     std::string name_str = FromString(v8_isolate, name.As<v8::String>());
-    if (name_str == "#method") {
-      CHECK(value->IsFunction());
+    CHECK(v8::debug::AccessorPair::IsAccessorPair(value));
+    v8::Local<v8::debug::AccessorPair> accessors =
+        value.As<v8::debug::AccessorPair>();
+    if (name_str == "#accessor") {
+      CHECK(accessors->getter()->IsFunction());
+      CHECK(accessors->setter()->IsFunction());
+    } else if (name_str == "#readOnly") {
+      CHECK(accessors->getter()->IsFunction());
+      CHECK(accessors->setter()->IsNull());
     } else {
-      CHECK(v8::debug::AccessorPair::IsAccessorPair(value));
-      v8::Local<v8::debug::AccessorPair> accessors =
-          value.As<v8::debug::AccessorPair>();
-      if (name_str == "#accessor") {
-        CHECK(accessors->getter()->IsFunction());
-        CHECK(accessors->setter()->IsFunction());
-      } else if (name_str == "#readOnly") {
-        CHECK(accessors->getter()->IsFunction());
-        CHECK(accessors->setter()->IsNull());
-      } else {
-        CHECK_EQ(name_str, "#writeOnly");
-        CHECK(accessors->getter()->IsNull());
-        CHECK(accessors->setter()->IsFunction());
-      }
+      CHECK_EQ(name_str, "#writeOnly");
+      CHECK(accessors->getter()->IsNull());
+      CHECK(accessors->setter()->IsFunction());
     }
   }
 
@@ -5130,31 +5133,41 @@ TEST(GetPrivateMethodsAndAccessors) {
       env->Global()
           ->Get(context, v8_str(env->GetIsolate(), "x"))
           .ToLocalChecked());
-  CHECK(v8::debug::GetPrivateMembers(context, object, &names, &values));
 
-  CHECK_EQ(names.size(), 4);
-  for (int i = 0; i < 4; i++) {
+  CHECK(v8::debug::GetPrivateMembers(context, object, method_filter, &names,
+                                     &values));
+  CHECK_EQ(names.size(), 1);
+  {
+    v8::Local<v8::Value> name = names[0];
+    v8::Local<v8::Value> value = values[0];
+    CHECK(name->IsString());
+    CHECK(v8_str("#method")->Equals(context, name.As<v8::String>()).FromJust());
+    CHECK(value->IsFunction());
+  }
+
+  names.clear();
+  values.clear();
+  CHECK(v8::debug::GetPrivateMembers(context, object, accessor_filter, &names,
+                                     &values));
+  CHECK_EQ(names.size(), 3);
+  for (int i = 0; i < 3; i++) {
     v8::Local<v8::Value> name = names[i];
     v8::Local<v8::Value> value = values[i];
     CHECK(name->IsString());
     std::string name_str = FromString(v8_isolate, name.As<v8::String>());
-    if (name_str == "#method") {
-      CHECK(value->IsFunction());
+    CHECK(v8::debug::AccessorPair::IsAccessorPair(value));
+    v8::Local<v8::debug::AccessorPair> accessors =
+        value.As<v8::debug::AccessorPair>();
+    if (name_str == "#accessor") {
+      CHECK(accessors->getter()->IsFunction());
+      CHECK(accessors->setter()->IsFunction());
+    } else if (name_str == "#readOnly") {
+      CHECK(accessors->getter()->IsFunction());
+      CHECK(accessors->setter()->IsNull());
     } else {
-      CHECK(v8::debug::AccessorPair::IsAccessorPair(value));
-      v8::Local<v8::debug::AccessorPair> accessors =
-          value.As<v8::debug::AccessorPair>();
-      if (name_str == "#accessor") {
-        CHECK(accessors->getter()->IsFunction());
-        CHECK(accessors->setter()->IsFunction());
-      } else if (name_str == "#readOnly") {
-        CHECK(accessors->getter()->IsFunction());
-        CHECK(accessors->setter()->IsNull());
-      } else {
-        CHECK_EQ(name_str, "#writeOnly");
-        CHECK(accessors->getter()->IsNull());
-        CHECK(accessors->setter()->IsFunction());
-      }
+      CHECK_EQ(name_str, "#writeOnly");
+      CHECK(accessors->getter()->IsNull());
+      CHECK(accessors->setter()->IsFunction());
     }
   }
 
@@ -5177,24 +5190,34 @@ TEST(GetPrivateMethodsAndAccessors) {
       env->Global()
           ->Get(context, v8_str(env->GetIsolate(), "x"))
           .ToLocalChecked());
-  CHECK(v8::debug::GetPrivateMembers(context, object, &names, &values));
 
-  CHECK_EQ(names.size(), 2);
-  for (int i = 0; i < 2; i++) {
-    v8::Local<v8::Value> name = names[i];
-    v8::Local<v8::Value> value = values[i];
+  CHECK(v8::debug::GetPrivateMembers(context, object, method_filter, &names,
+                                     &values));
+  CHECK_EQ(names.size(), 1);
+  {
+    v8::Local<v8::Value> name = names[0];
+    v8::Local<v8::Value> value = values[0];
     CHECK(name->IsString());
-    std::string name_str = FromString(v8_isolate, name.As<v8::String>());
-    if (name_str == "#method") {
-      CHECK(value->IsFunction());
-    } else {
-      CHECK_EQ(name_str, "#accessor");
-      CHECK(v8::debug::AccessorPair::IsAccessorPair(value));
-      v8::Local<v8::debug::AccessorPair> accessors =
-          value.As<v8::debug::AccessorPair>();
-      CHECK(accessors->getter()->IsFunction());
-      CHECK(accessors->setter()->IsFunction());
-    }
+    CHECK(v8_str("#method")->Equals(context, name.As<v8::String>()).FromJust());
+    CHECK(value->IsFunction());
+  }
+
+  names.clear();
+  values.clear();
+  CHECK(v8::debug::GetPrivateMembers(context, object, accessor_filter, &names,
+                                     &values));
+  CHECK_EQ(names.size(), 1);
+  {
+    v8::Local<v8::Value> name = names[0];
+    v8::Local<v8::Value> value = values[0];
+    CHECK(name->IsString());
+    CHECK(
+        v8_str("#accessor")->Equals(context, name.As<v8::String>()).FromJust());
+    CHECK(v8::debug::AccessorPair::IsAccessorPair(value));
+    v8::Local<v8::debug::AccessorPair> accessors =
+        value.As<v8::debug::AccessorPair>();
+    CHECK(accessors->getter()->IsFunction());
+    CHECK(accessors->setter()->IsFunction());
   }
 }
 
@@ -5219,31 +5242,48 @@ TEST(GetPrivateStaticMethodsAndAccessors) {
           .ToLocalChecked());
   std::vector<v8::Local<v8::Value>> names;
   std::vector<v8::Local<v8::Value>> values;
-  CHECK(v8::debug::GetPrivateMembers(context, object, &names, &values));
 
-  CHECK_EQ(names.size(), 4);
-  for (int i = 0; i < 4; i++) {
+  int accessor_filter =
+      static_cast<int>(v8::debug::PrivateMemberFilter::kPrivateAccessors);
+  int method_filter =
+      static_cast<int>(v8::debug::PrivateMemberFilter::kPrivateMethods);
+
+  CHECK(v8::debug::GetPrivateMembers(context, object, method_filter, &names,
+                                     &values));
+  CHECK_EQ(names.size(), 1);
+  {
+    v8::Local<v8::Value> name = names[0];
+    v8::Local<v8::Value> value = values[0];
+    CHECK(name->IsString());
+    CHECK(v8_str("#staticMethod")
+              ->Equals(context, name.As<v8::String>())
+              .FromJust());
+    CHECK(value->IsFunction());
+  }
+
+  names.clear();
+  values.clear();
+  CHECK(v8::debug::GetPrivateMembers(context, object, accessor_filter, &names,
+                                     &values));
+  CHECK_EQ(names.size(), 3);
+  for (int i = 0; i < 3; i++) {
     v8::Local<v8::Value> name = names[i];
     v8::Local<v8::Value> value = values[i];
     CHECK(name->IsString());
     std::string name_str = FromString(v8_isolate, name.As<v8::String>());
-    if (name_str == "#staticMethod") {
-      CHECK(value->IsFunction());
+    CHECK(v8::debug::AccessorPair::IsAccessorPair(value));
+    v8::Local<v8::debug::AccessorPair> accessors =
+        value.As<v8::debug::AccessorPair>();
+    if (name_str == "#staticAccessor") {
+      CHECK(accessors->getter()->IsFunction());
+      CHECK(accessors->setter()->IsFunction());
+    } else if (name_str == "#staticReadOnly") {
+      CHECK(accessors->getter()->IsFunction());
+      CHECK(accessors->setter()->IsNull());
     } else {
-      CHECK(v8::debug::AccessorPair::IsAccessorPair(value));
-      v8::Local<v8::debug::AccessorPair> accessors =
-          value.As<v8::debug::AccessorPair>();
-      if (name_str == "#staticAccessor") {
-        CHECK(accessors->getter()->IsFunction());
-        CHECK(accessors->setter()->IsFunction());
-      } else if (name_str == "#staticReadOnly") {
-        CHECK(accessors->getter()->IsFunction());
-        CHECK(accessors->setter()->IsNull());
-      } else {
-        CHECK_EQ(name_str, "#staticWriteOnly");
-        CHECK(accessors->getter()->IsNull());
-        CHECK(accessors->setter()->IsFunction());
-      }
+      CHECK_EQ(name_str, "#staticWriteOnly");
+      CHECK(accessors->getter()->IsNull());
+      CHECK(accessors->setter()->IsFunction());
     }
   }
 }
@@ -5275,31 +5315,47 @@ TEST(GetPrivateStaticAndInstanceMethodsAndAccessors) {
           .ToLocalChecked());
   std::vector<v8::Local<v8::Value>> names;
   std::vector<v8::Local<v8::Value>> values;
-  CHECK(v8::debug::GetPrivateMembers(context, object, &names, &values));
+  int accessor_filter =
+      static_cast<int>(v8::debug::PrivateMemberFilter::kPrivateAccessors);
+  int method_filter =
+      static_cast<int>(v8::debug::PrivateMemberFilter::kPrivateMethods);
 
-  CHECK_EQ(names.size(), 4);
-  for (int i = 0; i < 4; i++) {
+  CHECK(v8::debug::GetPrivateMembers(context, object, method_filter, &names,
+                                     &values));
+  CHECK_EQ(names.size(), 1);
+  {
+    v8::Local<v8::Value> name = names[0];
+    v8::Local<v8::Value> value = values[0];
+    CHECK(name->IsString());
+    CHECK(v8_str("#staticMethod")
+              ->Equals(context, name.As<v8::String>())
+              .FromJust());
+    CHECK(value->IsFunction());
+  }
+
+  names.clear();
+  values.clear();
+  CHECK(v8::debug::GetPrivateMembers(context, object, accessor_filter, &names,
+                                     &values));
+  CHECK_EQ(names.size(), 3);
+  for (int i = 0; i < 3; i++) {
     v8::Local<v8::Value> name = names[i];
     v8::Local<v8::Value> value = values[i];
     CHECK(name->IsString());
     std::string name_str = FromString(v8_isolate, name.As<v8::String>());
-    if (name_str == "#staticMethod") {
-      CHECK(value->IsFunction());
+    CHECK(v8::debug::AccessorPair::IsAccessorPair(value));
+    v8::Local<v8::debug::AccessorPair> accessors =
+        value.As<v8::debug::AccessorPair>();
+    if (name_str == "#staticAccessor") {
+      CHECK(accessors->getter()->IsFunction());
+      CHECK(accessors->setter()->IsFunction());
+    } else if (name_str == "#staticReadOnly") {
+      CHECK(accessors->getter()->IsFunction());
+      CHECK(accessors->setter()->IsNull());
     } else {
-      CHECK(v8::debug::AccessorPair::IsAccessorPair(value));
-      v8::Local<v8::debug::AccessorPair> accessors =
-          value.As<v8::debug::AccessorPair>();
-      if (name_str == "#staticAccessor") {
-        CHECK(accessors->getter()->IsFunction());
-        CHECK(accessors->setter()->IsFunction());
-      } else if (name_str == "#staticReadOnly") {
-        CHECK(accessors->getter()->IsFunction());
-        CHECK(accessors->setter()->IsNull());
-      } else {
-        CHECK_EQ(name_str, "#staticWriteOnly");
-        CHECK(accessors->getter()->IsNull());
-        CHECK(accessors->setter()->IsFunction());
-      }
+      CHECK_EQ(name_str, "#staticWriteOnly");
+      CHECK(accessors->getter()->IsNull());
+      CHECK(accessors->setter()->IsFunction());
     }
   }
 
@@ -5309,31 +5365,40 @@ TEST(GetPrivateStaticAndInstanceMethodsAndAccessors) {
       env->Global()
           ->Get(context, v8_str(env->GetIsolate(), "x"))
           .ToLocalChecked());
-  CHECK(v8::debug::GetPrivateMembers(context, object, &names, &values));
+  CHECK(v8::debug::GetPrivateMembers(context, object, method_filter, &names,
+                                     &values));
+  CHECK_EQ(names.size(), 1);
+  {
+    v8::Local<v8::Value> name = names[0];
+    v8::Local<v8::Value> value = values[0];
+    CHECK(name->IsString());
+    CHECK(v8_str("#method")->Equals(context, name.As<v8::String>()).FromJust());
+    CHECK(value->IsFunction());
+  }
 
-  CHECK_EQ(names.size(), 4);
-  for (int i = 0; i < 4; i++) {
+  names.clear();
+  values.clear();
+  CHECK(v8::debug::GetPrivateMembers(context, object, accessor_filter, &names,
+                                     &values));
+  CHECK_EQ(names.size(), 3);
+  for (int i = 0; i < 3; i++) {
     v8::Local<v8::Value> name = names[i];
     v8::Local<v8::Value> value = values[i];
     CHECK(name->IsString());
     std::string name_str = FromString(v8_isolate, name.As<v8::String>());
-    if (name_str == "#method") {
-      CHECK(value->IsFunction());
+    CHECK(v8::debug::AccessorPair::IsAccessorPair(value));
+    v8::Local<v8::debug::AccessorPair> accessors =
+        value.As<v8::debug::AccessorPair>();
+    if (name_str == "#accessor") {
+      CHECK(accessors->getter()->IsFunction());
+      CHECK(accessors->setter()->IsFunction());
+    } else if (name_str == "#readOnly") {
+      CHECK(accessors->getter()->IsFunction());
+      CHECK(accessors->setter()->IsNull());
     } else {
-      CHECK(v8::debug::AccessorPair::IsAccessorPair(value));
-      v8::Local<v8::debug::AccessorPair> accessors =
-          value.As<v8::debug::AccessorPair>();
-      if (name_str == "#accessor") {
-        CHECK(accessors->getter()->IsFunction());
-        CHECK(accessors->setter()->IsFunction());
-      } else if (name_str == "#readOnly") {
-        CHECK(accessors->getter()->IsFunction());
-        CHECK(accessors->setter()->IsNull());
-      } else {
-        CHECK_EQ(name_str, "#writeOnly");
-        CHECK(accessors->getter()->IsNull());
-        CHECK(accessors->setter()->IsFunction());
-      }
+      CHECK_EQ(name_str, "#writeOnly");
+      CHECK(accessors->getter()->IsNull());
+      CHECK(accessors->setter()->IsFunction());
     }
   }
 }
@@ -5419,6 +5484,7 @@ TEST(TerminateOnResumeAtBreakpoint) {
 namespace {
 bool microtask_one_ran = false;
 static void MicrotaskOne(const v8::FunctionCallbackInfo<v8::Value>& info) {
+  CHECK(i::ValidateCallbackInfo(info));
   CHECK(v8::MicrotasksScope::IsRunningMicrotasks(info.GetIsolate()));
   v8::HandleScope scope(info.GetIsolate());
   v8::MicrotasksScope microtasks(info.GetIsolate()->GetCurrentContext(),
@@ -5615,6 +5681,7 @@ TEST(TerminateOnResumeAtUnhandledRejection) {
 
 namespace {
 void RejectPromiseThroughCpp(const v8::FunctionCallbackInfo<v8::Value>& info) {
+  CHECK(i::ValidateCallbackInfo(info));
   auto data = reinterpret_cast<std::pair<v8::Isolate*, LocalContext*>*>(
       info.Data().As<v8::External>()->Value());
 
@@ -5939,8 +6006,8 @@ class ScopeListener : public v8::debug::DebugDelegate {
                              const std::vector<v8::debug::BreakpointId>&,
                              v8::debug::BreakReasons break_reasons) override {
     i::Isolate* isolate = CcTest::i_isolate();
-    i::StackTraceFrameIterator iterator_(isolate,
-                                         isolate->debug()->break_frame_id());
+    i::DebuggableStackFrameIterator iterator_(
+        isolate, isolate->debug()->break_frame_id());
     // Go up one frame so we are on the script level.
     iterator_.Advance();
 
@@ -6022,4 +6089,71 @@ TEST(DebugEvaluateInWrappedScript) {
   // Get rid of the debug event listener.
   v8::debug::SetDebugDelegate(env->GetIsolate(), nullptr);
   CheckDebuggerUnloaded();
+}
+
+namespace {
+
+class ConditionListener : public v8::debug::DebugDelegate {
+ public:
+  void BreakpointConditionEvaluated(
+      v8::Local<v8::Context> context, v8::debug::BreakpointId breakpoint_id_arg,
+      bool exception_thrown_arg, v8::Local<v8::Value> exception_arg) override {
+    breakpoint_id = breakpoint_id_arg;
+    exception_thrown = exception_thrown_arg;
+    exception = exception_arg;
+  }
+
+  void BreakProgramRequested(v8::Local<v8::Context> context,
+                             const std::vector<v8::debug::BreakpointId>&,
+                             v8::debug::BreakReasons break_reasons) override {
+    break_point_hit_count++;
+  }
+
+  v8::debug::BreakpointId breakpoint_id;
+  bool exception_thrown = false;
+  v8::Local<v8::Value> exception;
+};
+
+}  // namespace
+
+TEST(SuccessfulBreakpointConditionEvaluationEvent) {
+  break_point_hit_count = 0;
+  LocalContext env;
+  v8::Isolate* isolate = env->GetIsolate();
+  v8::HandleScope scope(isolate);
+
+  ConditionListener delegate;
+  v8::debug::SetDebugDelegate(isolate, &delegate);
+
+  v8::Local<v8::Function> foo =
+      CompileFunction(&env, "function foo() { const x = 5; }", "foo");
+
+  i::Handle<i::BreakPoint> bp = SetBreakPoint(foo, 0, "true");
+  foo->Call(env.local(), env->Global(), 0, nullptr).ToLocalChecked();
+  CHECK_EQ(1, break_point_hit_count);
+  CHECK_EQ(bp->id(), delegate.breakpoint_id);
+  CHECK(!delegate.exception_thrown);
+  CHECK(delegate.exception.IsEmpty());
+}
+
+// Checks that SyntaxErrors in breakpoint conditions are reported to the
+// DebugDelegate.
+TEST(FailedBreakpointConditoinEvaluationEvent) {
+  break_point_hit_count = 0;
+  LocalContext env;
+  v8::Isolate* isolate = env->GetIsolate();
+  v8::HandleScope scope(isolate);
+
+  ConditionListener delegate;
+  v8::debug::SetDebugDelegate(isolate, &delegate);
+
+  v8::Local<v8::Function> foo =
+      CompileFunction(&env, "function foo() { const x = 5; }", "foo");
+
+  i::Handle<i::BreakPoint> bp = SetBreakPoint(foo, 0, "bar().");
+  foo->Call(env.local(), env->Global(), 0, nullptr).ToLocalChecked();
+  CHECK_EQ(0, break_point_hit_count);
+  CHECK_EQ(bp->id(), delegate.breakpoint_id);
+  CHECK(delegate.exception_thrown);
+  CHECK(!delegate.exception.IsEmpty());
 }

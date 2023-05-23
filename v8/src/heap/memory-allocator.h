@@ -285,12 +285,17 @@ class MemoryAllocator {
   void RecordLargePageCreated(const LargePage& page);
   void RecordLargePageDestroyed(const LargePage& page);
 
-  std::pair<const NormalPagesSet, const LargePagesSet> SnapshotPageSets()
+  std::pair<const NormalPagesSet, const LargePagesSet> SnapshotPageSetsUnsafe()
+      const {
+    return std::make_pair(normal_pages_, large_pages_);
+  }
+
+  std::pair<const NormalPagesSet, const LargePagesSet> SnapshotPageSetsSafe()
       const {
     // For shared heap, this method may be called by client isolates thus
     // requiring a mutex.
     base::MutexGuard guard(&pages_mutex_);
-    return std::make_pair(normal_pages_, large_pages_);
+    return SnapshotPageSetsUnsafe();
   }
 
  private:
@@ -306,7 +311,8 @@ class MemoryAllocator {
 
   // Computes the size of a MemoryChunk from the size of the object_area and
   // whether the chunk is executable or not.
-  static size_t ComputeChunkSize(size_t area_size, Executability executable);
+  static size_t ComputeChunkSize(size_t area_size, AllocationSpace space,
+                                 Executability executable);
 
   // Internal allocation method for all pages/memory chunks. Returns data about
   // the unintialized memory region.
@@ -324,8 +330,9 @@ class MemoryAllocator {
   // Internal raw allocation method that allocates an aligned MemoryChunk and
   // sets the right memory permissions.
   Address AllocateAlignedMemory(size_t chunk_size, size_t area_size,
-                                size_t alignment, Executability executable,
-                                void* hint, VirtualMemory* controller);
+                                size_t alignment, AllocationSpace space,
+                                Executability executable, void* hint,
+                                VirtualMemory* controller);
 
   // Commit memory region owned by given reservation object.  Returns true if
   // it succeeded and false otherwise.

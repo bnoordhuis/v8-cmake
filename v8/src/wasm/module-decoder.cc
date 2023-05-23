@@ -5,6 +5,7 @@
 #include "src/wasm/module-decoder.h"
 
 #include "src/logging/metrics.h"
+#include "src/tracing/trace-event.h"
 #include "src/wasm/constant-expression.h"
 #include "src/wasm/decoder.h"
 #include "src/wasm/module-decoder-impl.h"
@@ -69,28 +70,12 @@ const char* SectionName(SectionCode code) {
   }
 }
 
-// TODO(mliedtke): Convert ModuleDecoderBase to ModuleDecoder[Impl] and get rid
-// of this additional subclass. Then move the implementation from the impl
-// header to the cc as it isn't a template any more.
-class ModuleDecoderImpl : public ModuleDecoderBase {
- public:
-  ModuleDecoderImpl(WasmFeatures enabled_features,
-                    base::Vector<const uint8_t> wire_bytes, ModuleOrigin origin)
-      : ModuleDecoderBase(enabled_features, wire_bytes, origin,
-                          ITracer::NoTrace) {}
-};
-
 ModuleResult DecodeWasmModule(
     WasmFeatures enabled_features, base::Vector<const uint8_t> wire_bytes,
     bool validate_functions, ModuleOrigin origin, Counters* counters,
     std::shared_ptr<metrics::Recorder> metrics_recorder,
     v8::metrics::Recorder::ContextId context_id,
     DecodingMethod decoding_method) {
-  size_t max_size = max_module_size();
-  if (wire_bytes.size() > max_size) {
-    return ModuleResult{WasmError{0, "size > maximum module size (%zu): %zu",
-                                  max_size, wire_bytes.size()}};
-  }
   if (counters) {
     auto size_counter =
         SELECT_WASM_COUNTER(counters, origin, wasm, module_size_bytes);
@@ -130,6 +115,8 @@ ModuleResult DecodeWasmModule(
 ModuleResult DecodeWasmModule(WasmFeatures enabled_features,
                               base::Vector<const uint8_t> wire_bytes,
                               bool validate_functions, ModuleOrigin origin) {
+  TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.wasm.detailed"),
+               "wasm.DecodeWasmModule");
   ModuleDecoderImpl decoder{enabled_features, wire_bytes, origin};
   return decoder.DecodeModule(validate_functions);
 }
@@ -151,9 +138,8 @@ const std::shared_ptr<WasmModule>& ModuleDecoder::shared_module() const {
   return impl_->shared_module();
 }
 
-void ModuleDecoder::DecodeModuleHeader(base::Vector<const uint8_t> bytes,
-                                       uint32_t offset) {
-  impl_->DecodeModuleHeader(bytes, offset);
+void ModuleDecoder::DecodeModuleHeader(base::Vector<const uint8_t> bytes) {
+  impl_->DecodeModuleHeader(bytes);
 }
 
 void ModuleDecoder::DecodeSection(SectionCode section_code,
@@ -234,7 +220,7 @@ AsmJsOffsetsResult DecodeAsmJsOffsets(
       continue;
     }
     DCHECK(decoder.checkAvailable(size));
-    const byte* table_end = decoder.pc() + size;
+    const uint8_t* table_end = decoder.pc() + size;
     uint32_t locals_size = decoder.consume_u32v("locals size");
     int function_start_position = decoder.consume_u32v("function start pos");
     int function_end_position = function_start_position;
@@ -282,7 +268,7 @@ std::vector<CustomSectionOffset> DecodeCustomSections(
   std::vector<CustomSectionOffset> result;
 
   while (decoder.more()) {
-    byte section_code = decoder.consume_u8("section code");
+    uint8_t section_code = decoder.consume_u8("section code");
     uint32_t section_length = decoder.consume_u32v("section length");
     uint32_t section_start = decoder.pc_offset();
     if (section_code != 0) {
@@ -328,10 +314,10 @@ bool FindNameSection(Decoder* decoder) {
   return true;
 }
 
-enum EmptyNames : bool { kAllowEmptyNames, kSkipEmptyNames };
+enum class EmptyNames : bool { kAllow, kSkip };
 
-void DecodeNameMap(NameMap& target, Decoder& decoder,
-                   EmptyNames empty_names = kSkipEmptyNames) {
+void DecodeNameMapInternal(NameMap& target, Decoder& decoder,
+                           EmptyNames empty_names = EmptyNames::kSkip) {
   uint32_t count = decoder.consume_u32v("names count");
   for (uint32_t i = 0; i < count; i++) {
     uint32_t index = decoder.consume_u32v("index");
@@ -339,20 +325,35 @@ void DecodeNameMap(NameMap& target, Decoder& decoder,
         consume_string(&decoder, unibrow::Utf8Variant::kLossyUtf8, "name");
     if (!decoder.ok()) break;
     if (index > NameMap::kMaxKey) continue;
-    if (empty_names == kSkipEmptyNames && name.is_empty()) continue;
+    if (empty_names == EmptyNames::kSkip && name.is_empty()) continue;
     if (!validate_utf8(&decoder, name)) continue;
     target.Put(index, name);
   }
   target.FinishInitialization();
 }
 
-void DecodeIndirectNameMap(IndirectNameMap& target, Decoder& decoder) {
+void DecodeNameMap(NameMap& target, Decoder& decoder,
+                   uint32_t subsection_payload_length,
+                   EmptyNames empty_names = EmptyNames::kSkip) {
+  if (target.is_set()) {
+    decoder.consume_bytes(subsection_payload_length);
+    return;
+  }
+  DecodeNameMapInternal(target, decoder, empty_names);
+}
+
+void DecodeIndirectNameMap(IndirectNameMap& target, Decoder& decoder,
+                           uint32_t subsection_payload_length) {
+  if (target.is_set()) {
+    decoder.consume_bytes(subsection_payload_length);
+    return;
+  }
   uint32_t outer_count = decoder.consume_u32v("outer count");
   for (uint32_t i = 0; i < outer_count; ++i) {
     uint32_t outer_index = decoder.consume_u32v("outer index");
     if (outer_index > IndirectNameMap::kMaxKey) continue;
     NameMap names;
-    DecodeNameMap(names, decoder);
+    DecodeNameMapInternal(names, decoder);
     target.Put(outer_index, std::move(names));
     if (!decoder.ok()) break;
   }
@@ -377,7 +378,7 @@ void DecodeFunctionNames(base::Vector<const uint8_t> wire_bytes,
         continue;
       }
       // We need to allow empty function names for spec-conformant stack traces.
-      DecodeNameMap(names, decoder, kAllowEmptyNames);
+      DecodeNameMapInternal(names, decoder, EmptyNames::kAllow);
       // The spec allows only one occurrence of each subsection. We could be
       // more permissive and allow repeated subsections; in that case we'd
       // have to delay calling {target.FinishInitialization()} on the function
@@ -406,10 +407,12 @@ class ValidateFunctionsTask : public JobTask {
         next_function_(module->num_imported_functions),
         after_last_function_(next_function_ + module->num_declared_functions),
         error_out_(error_out) {
-    DCHECK(error_out->empty());
+    DCHECK(!error_out->has_error());
   }
 
   void Run(JobDelegate* delegate) override {
+    TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.wasm.detailed"),
+                 "wasm.ValidateFunctionsTask");
     do {
       // Get the index of the next function to validate.
       // {fetch_add} might overrun {after_last_function_} by a bit. Since the
@@ -441,6 +444,7 @@ class ValidateFunctionsTask : public JobTask {
   bool ValidateFunction(int func_index) {
     WasmFeatures unused_detected_features;
     const WasmFunction& function = module_->functions[func_index];
+    DCHECK_LT(0, function.code.offset());
     FunctionBody body{function.sig, function.code.offset(),
                       wire_bytes_.begin() + function.code.offset(),
                       wire_bytes_.begin() + function.code.end_offset()};
@@ -458,7 +462,7 @@ class ValidateFunctionsTask : public JobTask {
   // have (or if we have none yet). Thread-safe.
   void SetError(int func_index, WasmError error) {
     base::MutexGuard mutex_guard{&set_error_mutex_};
-    if (!error_out_->empty() && error_out_->offset() <= error.offset()) {
+    if (error_out_->has_error() && error_out_->offset() <= error.offset()) {
       return;
     }
     *error_out_ = GetWasmErrorWithName(wire_bytes_, func_index, module_, error);
@@ -479,6 +483,9 @@ WasmError ValidateFunctions(const WasmModule* module,
                             WasmFeatures enabled_features,
                             base::Vector<const uint8_t> wire_bytes,
                             std::function<bool(int)> filter) {
+  TRACE_EVENT2(TRACE_DISABLED_BY_DEFAULT("v8.wasm.detailed"),
+               "wasm.ValidateFunctions", "num_declared_functions",
+               module->num_declared_functions, "has_filter", filter != nullptr);
   DCHECK_EQ(kWasmOrigin, module->origin);
 
   class NeverYieldDelegate final : public JobDelegate {
@@ -548,61 +555,47 @@ DecodedNameSection::DecodedNameSection(base::Vector<const uint8_t> wire_bytes,
         decoder.consume_bytes(name_payload_len);
         break;
       case kLocalCode:
-        if (local_names_.is_set()) decoder.consume_bytes(name_payload_len);
         static_assert(kV8MaxWasmFunctions <= IndirectNameMap::kMaxKey);
         static_assert(kV8MaxWasmFunctionLocals <= NameMap::kMaxKey);
-        DecodeIndirectNameMap(local_names_, decoder);
+        DecodeIndirectNameMap(local_names_, decoder, name_payload_len);
         break;
       case kLabelCode:
-        if (label_names_.is_set()) decoder.consume_bytes(name_payload_len);
         static_assert(kV8MaxWasmFunctions <= IndirectNameMap::kMaxKey);
         static_assert(kV8MaxWasmFunctionSize <= NameMap::kMaxKey);
-        DecodeIndirectNameMap(label_names_, decoder);
+        DecodeIndirectNameMap(label_names_, decoder, name_payload_len);
         break;
       case kTypeCode:
-        if (type_names_.is_set()) decoder.consume_bytes(name_payload_len);
         static_assert(kV8MaxWasmTypes <= NameMap::kMaxKey);
-        DecodeNameMap(type_names_, decoder);
+        DecodeNameMap(type_names_, decoder, name_payload_len);
         break;
       case kTableCode:
-        if (table_names_.is_set()) decoder.consume_bytes(name_payload_len);
         static_assert(kV8MaxWasmTables <= NameMap::kMaxKey);
-        DecodeNameMap(table_names_, decoder);
+        DecodeNameMap(table_names_, decoder, name_payload_len);
         break;
       case kMemoryCode:
-        if (memory_names_.is_set()) decoder.consume_bytes(name_payload_len);
         static_assert(kV8MaxWasmMemories <= NameMap::kMaxKey);
-        DecodeNameMap(memory_names_, decoder);
+        DecodeNameMap(memory_names_, decoder, name_payload_len);
         break;
       case kGlobalCode:
-        if (global_names_.is_set()) decoder.consume_bytes(name_payload_len);
         static_assert(kV8MaxWasmGlobals <= NameMap::kMaxKey);
-        DecodeNameMap(global_names_, decoder);
+        DecodeNameMap(global_names_, decoder, name_payload_len);
         break;
       case kElementSegmentCode:
-        if (element_segment_names_.is_set()) {
-          decoder.consume_bytes(name_payload_len);
-        }
         static_assert(kV8MaxWasmTableInitEntries <= NameMap::kMaxKey);
-        DecodeNameMap(element_segment_names_, decoder);
+        DecodeNameMap(element_segment_names_, decoder, name_payload_len);
         break;
       case kDataSegmentCode:
-        if (data_segment_names_.is_set()) {
-          decoder.consume_bytes(name_payload_len);
-        }
         static_assert(kV8MaxWasmDataSegments <= NameMap::kMaxKey);
-        DecodeNameMap(data_segment_names_, decoder);
+        DecodeNameMap(data_segment_names_, decoder, name_payload_len);
         break;
       case kFieldCode:
-        if (field_names_.is_set()) decoder.consume_bytes(name_payload_len);
         static_assert(kV8MaxWasmTypes <= IndirectNameMap::kMaxKey);
         static_assert(kV8MaxWasmStructFields <= NameMap::kMaxKey);
-        DecodeIndirectNameMap(field_names_, decoder);
+        DecodeIndirectNameMap(field_names_, decoder, name_payload_len);
         break;
       case kTagCode:
-        if (tag_names_.is_set()) decoder.consume_bytes(name_payload_len);
         static_assert(kV8MaxWasmTags <= NameMap::kMaxKey);
-        DecodeNameMap(tag_names_, decoder);
+        DecodeNameMap(tag_names_, decoder, name_payload_len);
         break;
     }
   }

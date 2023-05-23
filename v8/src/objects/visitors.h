@@ -9,6 +9,7 @@
 #include "src/objects/code.h"
 #include "src/objects/compressed-slots.h"
 #include "src/objects/foreign.h"
+#include "src/objects/instruction-stream.h"
 #include "src/objects/slots.h"
 
 namespace v8 {
@@ -91,12 +92,14 @@ class RootVisitor {
     UNREACHABLE();
   }
 
-  // Visits a single pointer which is InstructionStream from the execution
-  // stack.
-  virtual void VisitRunningCode(FullObjectSlot p) {
-    // For most visitors, currently running InstructionStream is no different
-    // than any other on-stack pointer.
-    VisitRootPointer(Root::kStackRoots, nullptr, p);
+  // Visits a running Code object and potentially its associated
+  // InstructionStream from the execution stack.
+  virtual void VisitRunningCode(FullObjectSlot code_slot,
+                                FullObjectSlot istream_or_smi_zero_slot) {
+    // For most visitors, currently running code is no different than any other
+    // on-stack pointer.
+    VisitRootPointer(Root::kStackRoots, nullptr, istream_or_smi_zero_slot);
+    VisitRootPointer(Root::kStackRoots, nullptr, code_slot);
   }
 
   // Intended for serialization/deserialization checking: insert, or
@@ -105,6 +108,15 @@ class RootVisitor {
   virtual void Synchronize(VisitorSynchronization::SyncTag tag) {}
 
   static const char* RootName(Root root);
+
+  // The type of collector that invokes this visitor. This is used by the
+  // ConservativeStackVisitor to determine which root pointers on the stack
+  // to follow, during conservative stack scanning. For MARK_COMPACTOR (the
+  // default) all pointers are followed, whereas for young generation
+  // collectors only pointers to objects in the young generation are followed.
+  virtual GarbageCollector collector() const {
+    return GarbageCollector::MARK_COMPACTOR;
+  }
 };
 
 class RelocIterator;
@@ -125,7 +137,8 @@ class ObjectVisitor {
   // slot. The values may be modified on return. Not used when
   // V8_EXTERNAL_CODE_SPACE is not enabled (the InstructionStream pointer slots
   // are visited as a part of on-heap slot visitation - via VisitPointers()).
-  virtual void VisitCodePointer(HeapObject host, CodeObjectSlot slot) = 0;
+  virtual void VisitInstructionStreamPointer(Code host,
+                                             InstructionStreamSlot slot) = 0;
 
   // Custom weak pointers must be ignored by the GC but not other
   // visitors. They're used for e.g., lists that are recreated after GC. The
@@ -153,36 +166,21 @@ class ObjectVisitor {
     VisitPointer(host, value);
   }
 
-  // To allow lazy clearing of inline caches the visitor has
-  // a rich interface for iterating over InstructionStream objects ...
+  // Visits the relocation info using the given iterator.
+  void VisitRelocInfo(InstructionStream host, RelocIterator* it);
 
-  // Visits a code target in the instruction stream.
-  virtual void VisitCodeTarget(InstructionStream host, RelocInfo* rinfo) = 0;
-
-  // Visit pointer embedded into a code object.
-  virtual void VisitEmbeddedPointer(InstructionStream host,
-                                    RelocInfo* rinfo) = 0;
-
-  // Visits an external reference embedded into a code object.
+  virtual void VisitCodeTarget(InstructionStream host, RelocInfo* rinfo) {}
+  virtual void VisitEmbeddedPointer(InstructionStream host, RelocInfo* rinfo) {}
   virtual void VisitExternalReference(InstructionStream host,
                                       RelocInfo* rinfo) {}
-
-  // Visits an external pointer.
-  virtual void VisitExternalPointer(HeapObject host, ExternalPointerSlot slot,
-                                    ExternalPointerTag tag) {}
-
-  // Visits an (encoded) internal reference.
   virtual void VisitInternalReference(InstructionStream host,
                                       RelocInfo* rinfo) {}
-
-  // Visits an off-heap target or near builtin entry in the instruction stream.
   // TODO(ishell): rename to VisitBuiltinEntry.
   virtual void VisitOffHeapTarget(InstructionStream host, RelocInfo* rinfo) {}
 
-  // Visits the relocation info using the given iterator.
-  void VisitRelocInfo(RelocIterator* it);
+  virtual void VisitExternalPointer(HeapObject host, ExternalPointerSlot slot,
+                                    ExternalPointerTag tag) {}
 
-  // Visits the object's map pointer, decoding as necessary
   virtual void VisitMapPointer(HeapObject host) { UNREACHABLE(); }
 };
 
@@ -222,6 +220,106 @@ class ObjectVisitorWithCageBases : public ObjectVisitor {
   const PtrComprCageBase code_cage_base_;
 #endif  // V8_EXTERNAL_CODE_SPACE
 #endif  // V8_COMPRESS_POINTERS
+};
+
+// A wrapper class for root visitors that are used by client isolates during a
+// shared garbage collection. The wrapped visitor only visits heap objects in
+// the shared spaces and ignores everything else. The type parameter `Visitor`
+// should be a subclass of `RootVisitor`, or a similar class that provides the
+// required interface.
+template <typename Visitor = RootVisitor>
+class ClientRootVisitor final : public RootVisitor {
+ public:
+  explicit ClientRootVisitor(Visitor* actual_visitor)
+      : actual_visitor_(actual_visitor) {}
+
+  void VisitRootPointers(Root root, const char* description,
+                         FullObjectSlot start, FullObjectSlot end) final {
+    for (FullObjectSlot p = start; p < end; ++p) {
+      if (!IsSharedHeapObject(*p)) continue;
+      actual_visitor_->VisitRootPointer(root, description, p);
+    }
+  }
+
+  void VisitRootPointers(Root root, const char* description,
+                         OffHeapObjectSlot start, OffHeapObjectSlot end) final {
+    actual_visitor_->VisitRootPointers(root, description, start, end);
+  }
+
+  inline void VisitRunningCode(FullObjectSlot code_slot,
+                               FullObjectSlot maybe_istream_slot) final;
+
+  void Synchronize(VisitorSynchronization::SyncTag tag) final {
+    actual_visitor_->Synchronize(tag);
+  }
+
+ private:
+  V8_INLINE static bool IsSharedHeapObject(Object object) {
+    return object.IsHeapObject() &&
+           HeapObject::cast(object).InWritableSharedSpace();
+  }
+
+  Visitor* const actual_visitor_;
+};
+
+// A wrapper class for object visitors that are used by client isolates during a
+// shared garbage collection. The wrapped visitor only visits heap objects in
+// the shared spaces and ignores everything else. The type parameter `Visitor`
+// should be a subclass of `ObjectVisitorWithCageBases`, or a similar class that
+// provides the required interface.
+template <typename Visitor = ObjectVisitorWithCageBases>
+class ClientObjectVisitor final : public ObjectVisitorWithCageBases {
+ public:
+  explicit ClientObjectVisitor(Visitor* actual_visitor)
+      : ObjectVisitorWithCageBases(actual_visitor->cage_base(),
+                                   actual_visitor->code_cage_base()),
+        actual_visitor_(actual_visitor) {}
+
+  void VisitPointer(HeapObject host, ObjectSlot p) final {
+    if (!IsSharedHeapObject(p.load(cage_base()))) return;
+    actual_visitor_->VisitPointer(host, p);
+  }
+
+  inline void VisitMapPointer(HeapObject host) final;
+
+  void VisitPointers(HeapObject host, ObjectSlot start, ObjectSlot end) final {
+    for (ObjectSlot p = start; p < end; ++p) {
+      // The map slot should be handled in VisitMapPointer.
+      DCHECK_NE(host.map_slot(), p);
+      DCHECK(!HasWeakHeapObjectTag(p.load(cage_base())));
+      VisitPointer(host, p);
+    }
+  }
+
+  void VisitInstructionStreamPointer(Code host,
+                                     InstructionStreamSlot slot) final {
+#if DEBUG
+    Object istream_object = slot.load(code_cage_base());
+    InstructionStream istream;
+    if (istream_object.GetHeapObject(&istream)) {
+      DCHECK(!istream.InWritableSharedSpace());
+    }
+#endif
+  }
+
+  void VisitPointers(HeapObject host, MaybeObjectSlot start,
+                     MaybeObjectSlot end) final {
+    // At the moment, custom roots cannot contain weak pointers.
+    UNREACHABLE();
+  }
+
+  inline void VisitCodeTarget(InstructionStream host, RelocInfo* rinfo) final;
+
+  inline void VisitEmbeddedPointer(InstructionStream host,
+                                   RelocInfo* rinfo) final;
+
+ private:
+  V8_INLINE static bool IsSharedHeapObject(Object object) {
+    return object.IsHeapObject() &&
+           HeapObject::cast(object).InWritableSharedSpace();
+  }
+
+  Visitor* const actual_visitor_;
 };
 
 }  // namespace internal

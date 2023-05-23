@@ -72,10 +72,6 @@ class RawMachineAssemblerTester : public HandleAndZoneScope,
 
   void GenerateCode() { Generate(); }
 
-  Handle<InstructionStream> GetInstructionStream() {
-    return handle(GetCode()->instruction_stream(), main_isolate());
-  }
-
   Handle<Code> GetCode() {
     Generate();
     return code_.ToHandleChecked();
@@ -91,7 +87,7 @@ class RawMachineAssemblerTester : public HandleAndZoneScope,
           &info, main_isolate(), call_descriptor(), graph(),
           AssemblerOptions::Default(main_isolate()), schedule);
     }
-    return code_.ToHandleChecked()->entry();
+    return code_.ToHandleChecked()->instruction_start();
   }
 
  private:

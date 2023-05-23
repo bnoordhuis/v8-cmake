@@ -17,7 +17,6 @@
 #include "src/heap/concurrent-marking.h"
 #include "src/heap/heap.h"
 #include "src/heap/incremental-marking-inl.h"
-#include "src/heap/invalidated-slots-inl.h"
 #include "src/heap/large-spaces.h"
 #include "src/heap/mark-compact.h"
 #include "src/heap/memory-chunk-layout.h"
@@ -141,6 +140,7 @@ size_t Page::ShrinkToHighWaterMark() {
   // Ensure that slot sets are empty. Otherwise the buckets for the shrunk
   // area would not be freed when deallocating this page.
   DCHECK_NULL(slot_set<OLD_TO_NEW>());
+  DCHECK_NULL(slot_set<OLD_TO_NEW_BACKGROUND>());
   DCHECK_NULL(slot_set<OLD_TO_OLD>());
 
   size_t unused = RoundDown(static_cast<size_t>(area_end() - filler.address()),
@@ -173,8 +173,9 @@ void Page::CreateBlackArea(Address start, Address end) {
   DCHECK_LT(start, end);
   DCHECK_EQ(Page::FromAddress(end - 1), this);
   MarkingState* marking_state = heap()->marking_state();
-  marking_state->bitmap(this)->SetRange(AddressToMarkbitIndex(start),
-                                        AddressToMarkbitIndex(end));
+  marking_state->bitmap(this)->SetRange<AccessMode::ATOMIC>(
+      MarkingBitmap::AddressToIndex(start),
+      MarkingBitmap::LimitAddressToIndex(end));
   marking_state->IncrementLiveBytes(this, static_cast<intptr_t>(end - start));
 }
 
@@ -185,8 +186,9 @@ void Page::CreateBlackAreaBackground(Address start, Address end) {
   DCHECK_LT(start, end);
   DCHECK_EQ(Page::FromAddress(end - 1), this);
   AtomicMarkingState* marking_state = heap()->atomic_marking_state();
-  marking_state->bitmap(this)->SetRange(AddressToMarkbitIndex(start),
-                                        AddressToMarkbitIndex(end));
+  marking_state->bitmap(this)->SetRange<AccessMode::ATOMIC>(
+      MarkingBitmap::AddressToIndex(start),
+      MarkingBitmap::LimitAddressToIndex(end));
   heap()->incremental_marking()->IncrementLiveBytesBackground(
       this, static_cast<intptr_t>(end - start));
 }
@@ -198,8 +200,9 @@ void Page::DestroyBlackArea(Address start, Address end) {
   DCHECK_LT(start, end);
   DCHECK_EQ(Page::FromAddress(end - 1), this);
   MarkingState* marking_state = heap()->marking_state();
-  marking_state->bitmap(this)->ClearRange(AddressToMarkbitIndex(start),
-                                          AddressToMarkbitIndex(end));
+  marking_state->bitmap(this)->ClearRange<AccessMode::ATOMIC>(
+      MarkingBitmap::AddressToIndex(start),
+      MarkingBitmap::LimitAddressToIndex(end));
   marking_state->IncrementLiveBytes(this, -static_cast<intptr_t>(end - start));
 }
 
@@ -210,8 +213,9 @@ void Page::DestroyBlackAreaBackground(Address start, Address end) {
   DCHECK_LT(start, end);
   DCHECK_EQ(Page::FromAddress(end - 1), this);
   AtomicMarkingState* marking_state = heap()->atomic_marking_state();
-  marking_state->bitmap(this)->ClearRange(AddressToMarkbitIndex(start),
-                                          AddressToMarkbitIndex(end));
+  marking_state->bitmap(this)->ClearRange<AccessMode::ATOMIC>(
+      MarkingBitmap::AddressToIndex(start),
+      MarkingBitmap::LimitAddressToIndex(end));
   heap()->incremental_marking()->IncrementLiveBytesBackground(
       this, -static_cast<intptr_t>(end - start));
 }
@@ -227,55 +231,40 @@ void Space::RemoveAllocationObserver(AllocationObserver* observer) {
   allocation_counter_.RemoveAllocationObserver(observer);
 }
 
-void Space::PauseAllocationObservers() { allocation_counter_.Pause(); }
-
-void Space::ResumeAllocationObservers() { allocation_counter_.Resume(); }
-
 Address SpaceWithLinearArea::ComputeLimit(Address start, Address end,
                                           size_t min_size) const {
   DCHECK_GE(end - start, min_size);
 
-  if (!allocation_info_.enabled()) {
+  // During GCs we always use the full LAB.
+  if (heap()->IsInGC()) return end;
+
+  if (!heap()->IsInlineAllocationEnabled()) {
     // LABs are disabled, so we fit the requested area exactly.
     return start + min_size;
   }
 
-  if (SupportsAllocationObserver() && allocation_counter_.IsActive()) {
+  // When LABs are enabled, pick the largest possible LAB size by default.
+  size_t step_size = end - start;
+
+  if (SupportsAllocationObserver() && heap()->IsAllocationObserverActive()) {
     // Ensure there are no unaccounted allocations.
     DCHECK_EQ(allocation_info_.start(), allocation_info_.top());
 
-    // Generated code may allocate inline from the linear allocation area for.
-    // To make sure we can observe these allocations, we use a lower ©limit.
     size_t step = allocation_counter_.NextBytes();
     DCHECK_NE(step, 0);
-    size_t rounded_step =
-        RoundSizeDownToObjectAlignment(static_cast<int>(step - 1));
-    // Use uint64_t to avoid overflow on 32-bit
-    uint64_t step_end =
-        static_cast<uint64_t>(start) + std::max(min_size, rounded_step);
-    uint64_t new_end = std::min(step_end, static_cast<uint64_t>(end));
-    return static_cast<Address>(new_end);
+    // Generated code may allocate inline from the linear allocation area. To
+    // make sure we can observe these allocations, we use a lower limit.
+    size_t rounded_step = static_cast<size_t>(
+        RoundSizeDownToObjectAlignment(static_cast<int>(step - 1)));
+    step_size = std::min(step_size, rounded_step);
   }
 
-  // LABs are enabled and no observers attached. Return the whole node for the
-  // LAB.
-  return end;
-}
+  if (v8_flags.stress_marking) {
+    step_size = std::min(step_size, static_cast<size_t>(64));
+  }
 
-void SpaceWithLinearArea::DisableInlineAllocation() {
-  if (!allocation_info_.enabled()) return;
-
-  allocation_info_.SetEnabled(false);
-  FreeLinearAllocationArea();
-  UpdateInlineAllocationLimit(0);
-}
-
-void SpaceWithLinearArea::EnableInlineAllocation() {
-  if (allocation_info_.enabled()) return;
-
-  allocation_info_.SetEnabled(true);
-  AdvanceAllocationObservers();
-  UpdateInlineAllocationLimit(0);
+  DCHECK_LE(start + step_size, end);
+  return start + std::max(step_size, min_size);
 }
 
 void SpaceWithLinearArea::UpdateAllocationOrigins(AllocationOrigin origin) {
@@ -333,7 +322,7 @@ void SpaceWithLinearArea::AddAllocationObserver(AllocationObserver* observer) {
   if (!allocation_counter_.IsStepInProgress()) {
     AdvanceAllocationObservers();
     Space::AddAllocationObserver(observer);
-    UpdateInlineAllocationLimit(0);
+    UpdateInlineAllocationLimit();
   } else {
     Space::AddAllocationObserver(observer);
   }
@@ -344,7 +333,7 @@ void SpaceWithLinearArea::RemoveAllocationObserver(
   if (!allocation_counter_.IsStepInProgress()) {
     AdvanceAllocationObservers();
     Space::RemoveAllocationObserver(observer);
-    UpdateInlineAllocationLimit(0);
+    UpdateInlineAllocationLimit();
   } else {
     Space::RemoveAllocationObserver(observer);
   }
@@ -352,20 +341,20 @@ void SpaceWithLinearArea::RemoveAllocationObserver(
 
 void SpaceWithLinearArea::PauseAllocationObservers() {
   AdvanceAllocationObservers();
-  Space::PauseAllocationObservers();
 }
 
 void SpaceWithLinearArea::ResumeAllocationObservers() {
-  Space::ResumeAllocationObservers();
   MarkLabStartInitialized();
-  UpdateInlineAllocationLimit(0);
+  UpdateInlineAllocationLimit();
 }
 
 void SpaceWithLinearArea::AdvanceAllocationObservers() {
   if (allocation_info_.top() &&
       allocation_info_.start() != allocation_info_.top()) {
-    allocation_counter_.AdvanceAllocationObservers(allocation_info_.top() -
-                                                   allocation_info_.start());
+    if (heap()->IsAllocationObserverActive()) {
+      allocation_counter_.AdvanceAllocationObservers(allocation_info_.top() -
+                                                     allocation_info_.start());
+    }
     MarkLabStartInitialized();
   }
 }
@@ -397,7 +386,8 @@ void SpaceWithLinearArea::InvokeAllocationObservers(
   DCHECK(size_in_bytes == aligned_size_in_bytes ||
          aligned_size_in_bytes == allocation_size);
 
-  if (!SupportsAllocationObserver() || !allocation_counter_.IsActive()) return;
+  if (!SupportsAllocationObserver() || !heap()->IsAllocationObserverActive())
+    return;
 
   if (allocation_size >= allocation_counter_.NextBytes()) {
     // Only the first object in a LAB should reach the next step.
@@ -409,11 +399,6 @@ void SpaceWithLinearArea::InvokeAllocationObservers(
               allocation_info_.limit());
 
     // Ensure that there is a valid object
-    if (identity() == CODE_SPACE) {
-      MemoryChunk* chunk = MemoryChunk::FromAddress(soon_object);
-      heap()->UnprotectAndRegisterMemoryChunk(
-          chunk, UnprotectMemoryOrigin::kMainThread);
-    }
     heap_->CreateFillerObjectAt(soon_object, static_cast<int>(size_in_bytes));
 
 #if DEBUG
@@ -432,9 +417,8 @@ void SpaceWithLinearArea::InvokeAllocationObservers(
     DCHECK_EQ(saved_allocation_info.limit(), allocation_info_.limit());
   }
 
-  DCHECK_IMPLIES(allocation_counter_.IsActive(),
-                 (allocation_info_.limit() - allocation_info_.start()) <
-                     allocation_counter_.NextBytes());
+  DCHECK_LT(allocation_info_.limit() - allocation_info_.start(),
+            allocation_counter_.NextBytes());
 }
 
 #if DEBUG

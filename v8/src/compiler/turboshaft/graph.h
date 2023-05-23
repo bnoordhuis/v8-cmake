@@ -13,6 +13,7 @@
 #include <type_traits>
 
 #include "src/base/iterator.h"
+#include "src/base/logging.h"
 #include "src/base/small-vector.h"
 #include "src/base/vector.h"
 #include "src/codegen/source-position.h"
@@ -23,7 +24,7 @@
 
 namespace v8::internal::compiler::turboshaft {
 
-template <template <class> class... Reducers>
+template <class Reducers>
 class Assembler;
 
 // `OperationBuffer` is a growable, Zone-allocated buffer to store Turboshaft
@@ -330,66 +331,6 @@ class Block : public RandomAccessStackDominatorNode<Block> {
     return pred_count - pred_reverse_index - 1;
   }
 
-  // Returns the index of {target} in the predecessors of the current Block
-  // and if target is not in the list of predecessors, recursively traverses
-  // the predecessor graph up.
-  int GetAnyPredecessorIndex(const Block* target, Zone* zone) const {
-    int pred_count = 0;
-    int pred_reverse_index = -1;
-    // The tuple contains (predecessor, index_in_successor, successor).
-    ZoneQueue<std::tuple<const Block*, int, const Block*>> to_visit(zone);
-    for (Block* pred = last_predecessor_; pred != nullptr;
-         pred = pred->neighboring_predecessor_) {
-      if (pred == target) {
-        DCHECK_EQ(pred_reverse_index, -1);
-        pred_reverse_index = pred_count;
-      } else {
-        to_visit.push(std::make_tuple(pred, pred_count, this));
-      }
-      pred_count++;
-    }
-    if (pred_reverse_index != -1) {
-      // The target was found in the predecessors list.
-      return pred_count - pred_reverse_index - 1;
-    }
-
-    const Block* current = nullptr;
-    int pred_index = -1;
-    const Block* successor = nullptr;
-    // The target is not a direct predecessor of the current block.
-    while (!to_visit.empty()) {
-      std::tie(current, pred_index, successor) = to_visit.front();
-      to_visit.pop();
-      if (current == target) {
-        DCHECK_EQ(pred_reverse_index, -1);
-        pred_reverse_index = pred_index;
-        break;
-      } else {
-        int pred_count = 0;
-        for (Block* pred = current->last_predecessor_; pred != nullptr;
-             pred = pred->neighboring_predecessor_) {
-          to_visit.push(std::make_tuple(pred, pred_count, current));
-          pred_count++;
-        }
-      }
-    }
-    if (pred_reverse_index == -1) {
-      // Target was not found by the BFS above.
-      return -1;
-    }
-
-    // The target was found in the predecessors list, we need to reconstruct
-    // the predecessors count for the current (found) Block's successor.
-    DCHECK_NOT_NULL(current);
-    DCHECK_NOT_NULL(successor);
-    pred_count = 0;
-    for (Block* pred = successor->last_predecessor_; pred != nullptr;
-         pred = pred->neighboring_predecessor_) {
-      pred_count++;
-    }
-    return pred_count - pred_reverse_index - 1;
-  }
-
   // HasExactlyNPredecessors(n) returns the same result as
   // `PredecessorCount() == n`, but stops early and iterates at most the first
   // {n} predecessors.
@@ -407,13 +348,43 @@ class Block : public RandomAccessStackDominatorNode<Block> {
   bool HasPredecessors() const { return last_predecessor_ != nullptr; }
   void ResetLastPredecessor() { last_predecessor_ = nullptr; }
 
-  // The block from the previous graph which produced the current block. This is
-  // used for translating phi nodes from the previous graph.
+  void SetMappingToNextGraph(Block* next_graph_block) {
+    DCHECK_NULL(next_graph_mapping_);
+    DCHECK_NOT_NULL(next_graph_block);
+    next_graph_mapping_ = next_graph_block;
+    next_graph_block->SetOrigin(this);
+  }
+  Block* MapToNextGraph() const {
+    DCHECK_NOT_NULL(next_graph_mapping_);
+    return next_graph_mapping_;
+  }
+  // The block from the previous graph which produced the current block. This
+  // has to be updated to be the last block that contributed operations to the
+  // current block to ensure that phi nodes are created correctly.git cl
   void SetOrigin(const Block* origin) {
-    DCHECK_EQ(origin->graph_generation_ + 1, graph_generation_);
+    DCHECK_IMPLIES(origin != nullptr,
+                   origin->graph_generation_ + 1 == graph_generation_);
     origin_ = origin;
   }
-  const Block* Origin() const { return origin_; }
+  // The block from the input graph that is equivalent as a predecessor. It is
+  // only available for bound blocks and it does *not* refer to an equivalent
+  // block as a branch destination.
+  const Block* OriginForBlockEnd() const {
+    DCHECK(IsBound());
+    return origin_;
+  }
+  // The block from the input graph that corresponds to the current block as a
+  // branch destination. Such a block might not exist, and this function uses a
+  // trick to compute such a block in almost all cases, but might rarely fail
+  // and return `nullptr` instead.
+  const Block* OriginForBlockStart() const {
+    // Check that `origin_` is still valid as a block start and was not changed
+    // to a semantically different block when inlining blocks.
+    if (origin_ && origin_->MapToNextGraph() == this) {
+      return origin_;
+    }
+    return nullptr;
+  }
 
   OpIndex begin() const {
     DCHECK(begin_.valid());
@@ -452,6 +423,9 @@ class Block : public RandomAccessStackDominatorNode<Block> {
 
   explicit Block(Kind kind) : kind_(kind) {}
 
+  uint32_t& custom_data() { return custom_data_; }
+  const uint32_t& custom_data() const { return custom_data_; }
+
  private:
   // AddPredecessor should never be called directly except from Assembler's
   // AddPredecessor and SplitEdge methods, which takes care of maintaining
@@ -465,7 +439,7 @@ class Block : public RandomAccessStackDominatorNode<Block> {
   }
 
   friend class Graph;
-  template <template <class> class... Reducers>
+  template <class Reducers>
   friend class Assembler;
 
   Kind kind_;
@@ -475,6 +449,12 @@ class Block : public RandomAccessStackDominatorNode<Block> {
   Block* last_predecessor_ = nullptr;
   Block* neighboring_predecessor_ = nullptr;
   const Block* origin_ = nullptr;
+  Block* next_graph_mapping_ = nullptr;
+  // The {custom_data_} field can be used by algorithms to temporarily store
+  // block-specific data. This field is not preserved when constructing a new
+  // output graph and algorithms cannot rely on this field being properly reset
+  // after previous uses.
+  uint32_t custom_data_ = 0;
 #ifdef DEBUG
   size_t graph_generation_ = 0;
 #endif
@@ -493,7 +473,13 @@ class Graph {
         graph_zone_(graph_zone),
         source_positions_(graph_zone),
         operation_origins_(graph_zone),
-        operation_types_(graph_zone) {}
+        operation_types_(graph_zone)
+#ifdef DEBUG
+        ,
+        block_type_refinement_(graph_zone)
+#endif
+  {
+  }
 
   // Reset the graph to recycle its memory.
   void Reset() {
@@ -504,6 +490,9 @@ class Graph {
     operation_types_.Reset();
     next_block_ = 0;
     dominator_tree_depth_ = 0;
+#ifdef DEBUG
+    block_type_refinement_.Reset();
+#endif
   }
 
   V8_INLINE const Operation& Get(OpIndex i) const {
@@ -570,7 +559,7 @@ class Graph {
     Op& op = Op::New(this, args...);
     IncrementInputUses(op);
 
-    if (op.Properties().is_required_when_unused) {
+    if (op.Properties().observable_when_unused) {
       // Once the graph is built, an operation with a `saturated_use_count` of 0
       // is guaranteed to be unused and can be removed. Thus, to avoid removing
       // operations that never have uses (such as Goto or Branch), we set the
@@ -609,6 +598,12 @@ class Graph {
     return NewBlock(Block::Kind::kLoopHeader);
   }
   V8_INLINE Block* NewBlock() { return NewBlock(Block::Kind::kMerge); }
+  V8_INLINE Block* NewMappedBlock(Block* origin) {
+    Block* new_block = NewBlock(origin->IsLoop() ? Block::Kind::kLoopHeader
+                                                 : Block::Kind::kMerge);
+    origin->SetMappingToNextGraph(new_block);
+    return new_block;
+  }
 
   V8_INLINE bool Add(Block* block) {
     DCHECK_EQ(block->graph_generation_, generation_);
@@ -654,6 +649,13 @@ class Graph {
   }
   uint32_t op_id_count() const {
     return (operations_.size() + (kSlotsPerId - 1)) / kSlotsPerId;
+  }
+  uint32_t number_of_operations() const {
+    uint32_t number_of_operations = 0;
+    for ([[maybe_unused]] auto& op : AllOperations()) {
+      ++number_of_operations;
+    }
+    return number_of_operations;
   }
   uint32_t op_id_capacity() const {
     return operations_.capacity() / kSlotsPerId;
@@ -802,6 +804,18 @@ class Graph {
     return operation_types_;
   }
   GrowingSidetable<Type>& operation_types() { return operation_types_; }
+#ifdef DEBUG
+  // Store refined types per block here for --trace-turbo printing.
+  // TODO(nicohartmann@): Remove this once we have a proper way to print
+  // type information inside the reducers.
+  using TypeRefinements = std::vector<std::pair<OpIndex, Type>>;
+  const GrowingBlockSidetable<TypeRefinements>& block_type_refinement() const {
+    return block_type_refinement_;
+  }
+  GrowingBlockSidetable<TypeRefinements>& block_type_refinement() {
+    return block_type_refinement_;
+  }
+#endif  // DEBUG
 
   Graph& GetOrCreateCompanion() {
     if (!companion_) {
@@ -826,6 +840,7 @@ class Graph {
     std::swap(operation_origins_, companion.operation_origins_);
     std::swap(operation_types_, companion.operation_types_);
 #ifdef DEBUG
+    std::swap(block_type_refinement_, companion.block_type_refinement_);
     // Update generation index.
     DCHECK_EQ(generation_ + 1, companion.generation_);
     generation_ = companion.generation_++;
@@ -896,6 +911,9 @@ class Graph {
   GrowingSidetable<OpIndex> operation_origins_;
   uint32_t dominator_tree_depth_ = 0;
   GrowingSidetable<Type> operation_types_;
+#ifdef DEBUG
+  GrowingBlockSidetable<TypeRefinements> block_type_refinement_;
+#endif
 
   std::unique_ptr<Graph> companion_ = {};
 #ifdef DEBUG
@@ -906,6 +924,10 @@ class Graph {
 V8_INLINE OperationStorageSlot* AllocateOpStorage(Graph* graph,
                                                   size_t slot_count) {
   return graph->Allocate(slot_count);
+}
+
+V8_INLINE const Operation& Get(const Graph& graph, OpIndex index) {
+  return graph.Get(index);
 }
 
 V8_INLINE const Operation& Block::FirstOperation(const Graph& graph) const {

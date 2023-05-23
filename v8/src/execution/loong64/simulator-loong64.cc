@@ -317,7 +317,8 @@ void Loong64Debugger::Debug() {
       disasm::Disassembler dasm(converter);
       // Use a reasonably large buffer.
       v8::base::EmbeddedVector<char, 256> buffer;
-      dasm.InstructionDecode(buffer, reinterpret_cast<byte*>(sim_->get_pc()));
+      dasm.InstructionDecode(buffer,
+                             reinterpret_cast<uint8_t*>(sim_->get_pc()));
       PrintF("  0x%016" PRIx64 "   %s\n", sim_->get_pc(), buffer.begin());
       last_pc = sim_->get_pc();
     }
@@ -479,11 +480,11 @@ void Loong64Debugger::Debug() {
         // Use a reasonably large buffer.
         v8::base::EmbeddedVector<char, 256> buffer;
 
-        byte* cur = nullptr;
-        byte* end = nullptr;
+        uint8_t* cur = nullptr;
+        uint8_t* end = nullptr;
 
         if (argc == 1) {
-          cur = reinterpret_cast<byte*>(sim_->get_pc());
+          cur = reinterpret_cast<uint8_t*>(sim_->get_pc());
           end = cur + (10 * kInstrSize);
         } else if (argc == 2) {
           int regnum = Registers::Number(arg1);
@@ -491,7 +492,7 @@ void Loong64Debugger::Debug() {
             // The argument is an address or a register name.
             int64_t value;
             if (GetValue(arg1, &value)) {
-              cur = reinterpret_cast<byte*>(value);
+              cur = reinterpret_cast<uint8_t*>(value);
               // Disassemble 10 instructions at <arg1>.
               end = cur + (10 * kInstrSize);
             }
@@ -499,7 +500,7 @@ void Loong64Debugger::Debug() {
             // The argument is the number of instructions.
             int64_t value;
             if (GetValue(arg1, &value)) {
-              cur = reinterpret_cast<byte*>(sim_->get_pc());
+              cur = reinterpret_cast<uint8_t*>(sim_->get_pc());
               // Disassemble <arg1> instructions.
               end = cur + (value * kInstrSize);
             }
@@ -508,7 +509,7 @@ void Loong64Debugger::Debug() {
           int64_t value1;
           int64_t value2;
           if (GetValue(arg1, &value1) && GetValue(arg2, &value2)) {
-            cur = reinterpret_cast<byte*>(value1);
+            cur = reinterpret_cast<uint8_t*>(value1);
             end = cur + (value2 * kInstrSize);
           }
         }
@@ -608,16 +609,16 @@ void Loong64Debugger::Debug() {
         // Use a reasonably large buffer.
         v8::base::EmbeddedVector<char, 256> buffer;
 
-        byte* cur = nullptr;
-        byte* end = nullptr;
+        uint8_t* cur = nullptr;
+        uint8_t* end = nullptr;
 
         if (argc == 1) {
-          cur = reinterpret_cast<byte*>(sim_->get_pc());
+          cur = reinterpret_cast<uint8_t*>(sim_->get_pc());
           end = cur + (10 * kInstrSize);
         } else if (argc == 2) {
           int64_t value;
           if (GetValue(arg1, &value)) {
-            cur = reinterpret_cast<byte*>(value);
+            cur = reinterpret_cast<uint8_t*>(value);
             // no length parameter passed, assume 10 instructions
             end = cur + (10 * kInstrSize);
           }
@@ -625,7 +626,7 @@ void Loong64Debugger::Debug() {
           int64_t value1;
           int64_t value2;
           if (GetValue(arg1, &value1) && GetValue(arg2, &value2)) {
-            cur = reinterpret_cast<byte*>(value1);
+            cur = reinterpret_cast<uint8_t*>(value1);
             end = cur + (value2 * kInstrSize);
           }
         }
@@ -1727,7 +1728,7 @@ void Simulator::WriteW(int64_t addr, int32_t value, Instruction* instr) {
 }
 
 void Simulator::WriteConditionalW(int64_t addr, int32_t value,
-                                  Instruction* instr, int32_t rk_reg) {
+                                  Instruction* instr, int32_t* done) {
   if (addr >= 0 && addr < 0x400) {
     // This has to be a nullptr-dereference, drop into debugger.
     PrintF("Memory write to bad address: 0x%08" PRIx64 " , pc=0x%08" PRIxPTR
@@ -1745,9 +1746,9 @@ void Simulator::WriteConditionalW(int64_t addr, int32_t value,
       TraceMemWr(addr, value, WORD);
       int* ptr = reinterpret_cast<int*>(addr);
       *ptr = value;
-      set_register(rk_reg, 1);
+      *done = 1;
     } else {
-      set_register(rk_reg, 0);
+      *done = 0;
     }
     return;
   }
@@ -1801,7 +1802,7 @@ void Simulator::Write2W(int64_t addr, int64_t value, Instruction* instr) {
 }
 
 void Simulator::WriteConditional2W(int64_t addr, int64_t value,
-                                   Instruction* instr, int32_t rk_reg) {
+                                   Instruction* instr, int32_t* done) {
   if (addr >= 0 && addr < 0x400) {
     // This has to be a nullptr-dereference, drop into debugger.
     PrintF("Memory write to bad address: 0x%08" PRIx64 " , pc=0x%08" PRIxPTR
@@ -1820,9 +1821,9 @@ void Simulator::WriteConditional2W(int64_t addr, int64_t value,
       TraceMemWr(addr, value, DWORD);
       int64_t* ptr = reinterpret_cast<int64_t*>(addr);
       *ptr = value;
-      set_register(rk_reg, 1);
+      *done = 1;
     } else {
-      set_register(rk_reg, 0);
+      *done = 0;
     }
     return;
   }
@@ -2023,16 +2024,17 @@ using SimulatorRuntimeCompareCall = int64_t (*)(double darg0, double darg1);
 using SimulatorRuntimeFPFPCall = double (*)(double darg0, double darg1);
 using SimulatorRuntimeFPCall = double (*)(double darg0);
 using SimulatorRuntimeFPIntCall = double (*)(double darg0, int32_t arg0);
+// Define four args for future flexibility; at the time of this writing only
+// one is ever used.
+using SimulatorRuntimeFPTaggedCall = double (*)(int64_t arg0, int64_t arg1,
+                                                int64_t arg2, int64_t arg3);
 
 // This signature supports direct call in to API function native callback
 // (refer to InvocationCallback in v8.h).
 using SimulatorRuntimeDirectApiCall = void (*)(int64_t arg0);
-using SimulatorRuntimeProfilingApiCall = void (*)(int64_t arg0, void* arg1);
 
 // This signature supports direct call to accessor getter callback.
 using SimulatorRuntimeDirectGetterCall = void (*)(int64_t arg0, int64_t arg1);
-using SimulatorRuntimeProfilingGetterCall = void (*)(int64_t arg0, int64_t arg1,
-                                                     void* arg2);
 
 using MixedRuntimeCall_0 = AnyCType (*)();
 
@@ -2327,6 +2329,19 @@ void Simulator::SoftwareInterrupt() {
             UNREACHABLE();
         }
       }
+    } else if (redirection->type() ==
+               ExternalReference::BUILTIN_FP_POINTER_CALL) {
+      if (v8_flags.trace_sim) {
+        PrintF("Call to host function at %p args %08" PRIx64 " \n",
+               reinterpret_cast<void*>(external), arg0);
+      }
+      SimulatorRuntimeFPTaggedCall target =
+          reinterpret_cast<SimulatorRuntimeFPTaggedCall>(external);
+      double dresult = target(arg0, arg1, arg2, arg3);
+      SetFpResult(dresult);
+      if (v8_flags.trace_sim) {
+        PrintF("Returned %f\n", dresult);
+      }
     } else if (redirection->type() == ExternalReference::DIRECT_API_CALL) {
       if (v8_flags.trace_sim) {
         PrintF("Call to host function at %p args %08" PRIx64 " \n",
@@ -2335,15 +2350,6 @@ void Simulator::SoftwareInterrupt() {
       SimulatorRuntimeDirectApiCall target =
           reinterpret_cast<SimulatorRuntimeDirectApiCall>(external);
       target(arg0);
-    } else if (redirection->type() == ExternalReference::PROFILING_API_CALL) {
-      if (v8_flags.trace_sim) {
-        PrintF("Call to host function at %p args %08" PRIx64 "  %08" PRIx64
-               " \n",
-               reinterpret_cast<void*>(external), arg0, arg1);
-      }
-      SimulatorRuntimeProfilingApiCall target =
-          reinterpret_cast<SimulatorRuntimeProfilingApiCall>(external);
-      target(arg0, Redirection::UnwrapRedirection(arg1));
     } else if (redirection->type() == ExternalReference::DIRECT_GETTER_CALL) {
       if (v8_flags.trace_sim) {
         PrintF("Call to host function at %p args %08" PRIx64 "  %08" PRIx64
@@ -2353,16 +2359,6 @@ void Simulator::SoftwareInterrupt() {
       SimulatorRuntimeDirectGetterCall target =
           reinterpret_cast<SimulatorRuntimeDirectGetterCall>(external);
       target(arg0, arg1);
-    } else if (redirection->type() ==
-               ExternalReference::PROFILING_GETTER_CALL) {
-      if (v8_flags.trace_sim) {
-        PrintF("Call to host function at %p args %08" PRIx64 "  %08" PRIx64
-               "  %08" PRIx64 " \n",
-               reinterpret_cast<void*>(external), arg0, arg1, arg2);
-      }
-      SimulatorRuntimeProfilingGetterCall target =
-          reinterpret_cast<SimulatorRuntimeProfilingGetterCall>(external);
-      target(arg0, arg1, Redirection::UnwrapRedirection(arg2));
     } else {
       DCHECK(redirection->type() == ExternalReference::BUILTIN_CALL ||
              redirection->type() == ExternalReference::BUILTIN_CALL_PAIR);
@@ -2871,8 +2867,10 @@ void Simulator::DecodeTypeOp8() {
                    Registers::Name(rd_reg()), rd(), Registers::Name(rj_reg()),
                    rj(), si14_se);
       addr = si14_se + rj();
+      int32_t LLbit = 0;
       WriteConditionalW(addr, static_cast<int32_t>(rd()), instr_.instr(),
-                        rd_reg());
+                        &LLbit);
+      set_register(rd_reg(), LLbit);
       break;
     }
     case LL_D: {
@@ -2892,7 +2890,9 @@ void Simulator::DecodeTypeOp8() {
                    Registers::Name(rd_reg()), rd(), Registers::Name(rj_reg()),
                    rj(), si14_se);
       addr = si14_se + rj();
-      WriteConditional2W(addr, rd(), instr_.instr(), rd_reg());
+      int32_t LLbit = 0;
+      WriteConditional2W(addr, rd(), instr_.instr(), &LLbit);
+      set_register(rd_reg(), LLbit);
       break;
     }
     default:
@@ -4178,7 +4178,7 @@ void Simulator::DecodeTypeOp17() {
       printf_instr("AMSWAP_DB_W:\t %s: %016lx, %s, %016lx, %s, %016lx\n",
                    Registers::Name(rd_reg()), rd(), Registers::Name(rk_reg()),
                    rk(), Registers::Name(rj_reg()), rj());
-      int32_t rdvalue;
+      int32_t success = 0;
       do {
         {
           base::MutexGuard lock_guard(&GlobalMonitor::Get()->mutex);
@@ -4187,17 +4187,15 @@ void Simulator::DecodeTypeOp17() {
           GlobalMonitor::Get()->NotifyLoadLinked_Locked(
               rj(), &global_monitor_thread_);
         }
-        rdvalue = get_register(rd_reg());
         WriteConditionalW(rj(), static_cast<int32_t>(rk()), instr_.instr(),
-                          rd_reg());
-      } while (!get_register(rd_reg()));
-      set_register(rd_reg(), rdvalue);
+                          &success);
+      } while (!success);
     } break;
     case AMSWAP_DB_D: {
       printf_instr("AMSWAP_DB_D:\t %s: %016lx, %s, %016lx, %s, %016lx\n",
                    Registers::Name(rd_reg()), rd(), Registers::Name(rk_reg()),
                    rk(), Registers::Name(rj_reg()), rj());
-      int64_t rdvalue;
+      int32_t success = 0;
       do {
         {
           base::MutexGuard lock_guard(&GlobalMonitor::Get()->mutex);
@@ -4206,16 +4204,14 @@ void Simulator::DecodeTypeOp17() {
           GlobalMonitor::Get()->NotifyLoadLinked_Locked(
               rj(), &global_monitor_thread_);
         }
-        rdvalue = get_register(rd_reg());
-        WriteConditional2W(rj(), rk(), instr_.instr(), rd_reg());
-      } while (!get_register(rd_reg()));
-      set_register(rd_reg(), rdvalue);
+        WriteConditional2W(rj(), rk(), instr_.instr(), &success);
+      } while (!success);
     } break;
     case AMADD_DB_W: {
       printf_instr("AMADD_DB_W:\t %s: %016lx, %s, %016lx, %s, %016lx\n",
                    Registers::Name(rd_reg()), rd(), Registers::Name(rk_reg()),
                    rk(), Registers::Name(rj_reg()), rj());
-      int32_t rdvalue;
+      int32_t success = 0;
       do {
         {
           base::MutexGuard lock_guard(&GlobalMonitor::Get()->mutex);
@@ -4224,19 +4220,17 @@ void Simulator::DecodeTypeOp17() {
           GlobalMonitor::Get()->NotifyLoadLinked_Locked(
               rj(), &global_monitor_thread_);
         }
-        rdvalue = get_register(rd_reg());
         WriteConditionalW(rj(),
                           static_cast<int32_t>(static_cast<int32_t>(rk()) +
                                                static_cast<int32_t>(rd())),
-                          instr_.instr(), rd_reg());
-      } while (!get_register(rd_reg()));
-      set_register(rd_reg(), rdvalue);
+                          instr_.instr(), &success);
+      } while (!success);
     } break;
     case AMADD_DB_D: {
       printf_instr("AMADD_DB_D:\t %s: %016lx, %s, %016lx, %s, %016lx\n",
                    Registers::Name(rd_reg()), rd(), Registers::Name(rk_reg()),
                    rk(), Registers::Name(rj_reg()), rj());
-      int64_t rdvalue;
+      int32_t success = 0;
       do {
         {
           base::MutexGuard lock_guard(&GlobalMonitor::Get()->mutex);
@@ -4245,16 +4239,14 @@ void Simulator::DecodeTypeOp17() {
           GlobalMonitor::Get()->NotifyLoadLinked_Locked(
               rj(), &global_monitor_thread_);
         }
-        rdvalue = get_register(rd_reg());
-        WriteConditional2W(rj(), rk() + rd(), instr_.instr(), rd_reg());
-      } while (!get_register(rd_reg()));
-      set_register(rd_reg(), rdvalue);
+        WriteConditional2W(rj(), rk() + rd(), instr_.instr(), &success);
+      } while (!success);
     } break;
     case AMAND_DB_W: {
       printf_instr("AMAND_DB_W:\t %s: %016lx, %s, %016lx, %s, %016lx\n",
                    Registers::Name(rd_reg()), rd(), Registers::Name(rk_reg()),
                    rk(), Registers::Name(rj_reg()), rj());
-      int32_t rdvalue;
+      int32_t success = 0;
       do {
         {
           base::MutexGuard lock_guard(&GlobalMonitor::Get()->mutex);
@@ -4263,19 +4255,17 @@ void Simulator::DecodeTypeOp17() {
           GlobalMonitor::Get()->NotifyLoadLinked_Locked(
               rj(), &global_monitor_thread_);
         }
-        rdvalue = get_register(rd_reg());
         WriteConditionalW(rj(),
                           static_cast<int32_t>(static_cast<int32_t>(rk()) &
                                                static_cast<int32_t>(rd())),
-                          instr_.instr(), rd_reg());
-      } while (!get_register(rd_reg()));
-      set_register(rd_reg(), rdvalue);
+                          instr_.instr(), &success);
+      } while (!success);
     } break;
     case AMAND_DB_D: {
       printf_instr("AMAND_DB_D:\t %s: %016lx, %s, %016lx, %s, %016lx\n",
                    Registers::Name(rd_reg()), rd(), Registers::Name(rk_reg()),
                    rk(), Registers::Name(rj_reg()), rj());
-      int64_t rdvalue;
+      int32_t success = 0;
       do {
         {
           base::MutexGuard lock_guard(&GlobalMonitor::Get()->mutex);
@@ -4284,16 +4274,14 @@ void Simulator::DecodeTypeOp17() {
           GlobalMonitor::Get()->NotifyLoadLinked_Locked(
               rj(), &global_monitor_thread_);
         }
-        rdvalue = get_register(rd_reg());
-        WriteConditional2W(rj(), rk() & rd(), instr_.instr(), rd_reg());
-      } while (!get_register(rd_reg()));
-      set_register(rd_reg(), rdvalue);
+        WriteConditional2W(rj(), rk() & rd(), instr_.instr(), &success);
+      } while (!success);
     } break;
     case AMOR_DB_W: {
       printf_instr("AMOR_DB_W:\t %s: %016lx, %s, %016lx, %s, %016lx\n",
                    Registers::Name(rd_reg()), rd(), Registers::Name(rk_reg()),
                    rk(), Registers::Name(rj_reg()), rj());
-      int32_t rdvalue;
+      int32_t success = 0;
       do {
         {
           base::MutexGuard lock_guard(&GlobalMonitor::Get()->mutex);
@@ -4302,19 +4290,17 @@ void Simulator::DecodeTypeOp17() {
           GlobalMonitor::Get()->NotifyLoadLinked_Locked(
               rj(), &global_monitor_thread_);
         }
-        rdvalue = get_register(rd_reg());
         WriteConditionalW(rj(),
                           static_cast<int32_t>(static_cast<int32_t>(rk()) |
                                                static_cast<int32_t>(rd())),
-                          instr_.instr(), rd_reg());
-      } while (!get_register(rd_reg()));
-      set_register(rd_reg(), rdvalue);
+                          instr_.instr(), &success);
+      } while (!success);
     } break;
     case AMOR_DB_D: {
       printf_instr("AMOR_DB_D:\t %s: %016lx, %s, %016lx, %s, %016lx\n",
                    Registers::Name(rd_reg()), rd(), Registers::Name(rk_reg()),
                    rk(), Registers::Name(rj_reg()), rj());
-      int64_t rdvalue;
+      int32_t success = 0;
       do {
         {
           base::MutexGuard lock_guard(&GlobalMonitor::Get()->mutex);
@@ -4323,16 +4309,14 @@ void Simulator::DecodeTypeOp17() {
           GlobalMonitor::Get()->NotifyLoadLinked_Locked(
               rj(), &global_monitor_thread_);
         }
-        rdvalue = get_register(rd_reg());
-        WriteConditional2W(rj(), rk() | rd(), instr_.instr(), rd_reg());
-      } while (!get_register(rd_reg()));
-      set_register(rd_reg(), rdvalue);
+        WriteConditional2W(rj(), rk() | rd(), instr_.instr(), &success);
+      } while (!success);
     } break;
     case AMXOR_DB_W: {
       printf_instr("AMXOR_DB_W:\t %s: %016lx, %s, %016lx, %s, %016lx\n",
                    Registers::Name(rd_reg()), rd(), Registers::Name(rk_reg()),
                    rk(), Registers::Name(rj_reg()), rj());
-      int32_t rdvalue;
+      int32_t success = 0;
       do {
         {
           base::MutexGuard lock_guard(&GlobalMonitor::Get()->mutex);
@@ -4341,19 +4325,17 @@ void Simulator::DecodeTypeOp17() {
           GlobalMonitor::Get()->NotifyLoadLinked_Locked(
               rj(), &global_monitor_thread_);
         }
-        rdvalue = get_register(rd_reg());
         WriteConditionalW(rj(),
                           static_cast<int32_t>(static_cast<int32_t>(rk()) ^
                                                static_cast<int32_t>(rd())),
-                          instr_.instr(), rd_reg());
-      } while (!get_register(rd_reg()));
-      set_register(rd_reg(), rdvalue);
+                          instr_.instr(), &success);
+      } while (!success);
     } break;
     case AMXOR_DB_D: {
       printf_instr("AMXOR_DB_D:\t %s: %016lx, %s, %016lx, %s, %016lx\n",
                    Registers::Name(rd_reg()), rd(), Registers::Name(rk_reg()),
                    rk(), Registers::Name(rj_reg()), rj());
-      int64_t rdvalue;
+      int32_t success = 0;
       do {
         {
           base::MutexGuard lock_guard(&GlobalMonitor::Get()->mutex);
@@ -4362,10 +4344,8 @@ void Simulator::DecodeTypeOp17() {
           GlobalMonitor::Get()->NotifyLoadLinked_Locked(
               rj(), &global_monitor_thread_);
         }
-        rdvalue = get_register(rd_reg());
-        WriteConditional2W(rj(), rk() ^ rd(), instr_.instr(), rd_reg());
-      } while (!get_register(rd_reg()));
-      set_register(rd_reg(), rdvalue);
+        WriteConditional2W(rj(), rk() ^ rd(), instr_.instr(), &success);
+      } while (!success);
     } break;
     case AMMAX_DB_W:
       printf("Sim UNIMPLEMENTED: AMMAX_DB_W\n");
@@ -5298,7 +5278,7 @@ void Simulator::InstructionDecode(Instruction* instr) {
     disasm::NameConverter converter;
     disasm::Disassembler dasm(converter);
     // Use a reasonably large buffer.
-    dasm.InstructionDecode(buffer, reinterpret_cast<byte*>(instr));
+    dasm.InstructionDecode(buffer, reinterpret_cast<uint8_t*>(instr));
   }
 
   static int instr_count = 0;

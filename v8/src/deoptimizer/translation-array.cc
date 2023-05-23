@@ -112,8 +112,24 @@ TranslationOpcode TranslationArrayIterator::NextOpcode() {
   if (remaining_ops_to_use_from_previous_translation_) {
     return NextOpcodeAtPreviousIndex();
   }
-  TranslationOpcode opcode =
-      static_cast<TranslationOpcode>(buffer_.get(index_++));
+  uint8_t opcode_byte = buffer_.get(index_++);
+
+  // If the opcode byte is greater than any valid opcode, then the opcode is
+  // implicitly MATCH_PREVIOUS_TRANSLATION and the operand is the opcode byte
+  // minus kNumTranslationOpcodes. This special-case encoding of the most common
+  // opcode saves some memory.
+  if (opcode_byte >= kNumTranslationOpcodes) {
+    remaining_ops_to_use_from_previous_translation_ =
+        opcode_byte - kNumTranslationOpcodes;
+    opcode_byte =
+        static_cast<uint8_t>(TranslationOpcode::MATCH_PREVIOUS_TRANSLATION);
+  } else if (opcode_byte ==
+             static_cast<uint8_t>(
+                 TranslationOpcode::MATCH_PREVIOUS_TRANSLATION)) {
+    remaining_ops_to_use_from_previous_translation_ = NextOperandUnsigned();
+  }
+
+  TranslationOpcode opcode = static_cast<TranslationOpcode>(opcode_byte);
   DCHECK_LE(index_, buffer_.length());
   DCHECK_LT(static_cast<uint32_t>(opcode), kNumTranslationOpcodes);
   if (TranslationOpcodeIsBegin(opcode)) {
@@ -133,7 +149,6 @@ TranslationOpcode TranslationArrayIterator::NextOpcode() {
     }
     ops_since_previous_index_was_updated_ = 1;
   } else if (opcode == TranslationOpcode::MATCH_PREVIOUS_TRANSLATION) {
-    remaining_ops_to_use_from_previous_translation_ = NextOperandUnsigned();
     for (int i = 0; i < ops_since_previous_index_was_updated_; ++i) {
       SkipOpcodeAndItsOperandsAtPreviousIndex();
     }
@@ -185,7 +200,12 @@ class UnsignedOperand : public OperandBase {
  public:
   explicit UnsignedOperand(uint32_t value) : OperandBase(value) {}
   void WriteVLQ(ZoneVector<uint8_t>* buffer) {
-    base::VLQEncodeUnsigned(buffer, value());
+    base::VLQEncodeUnsigned(
+        [buffer](byte value) {
+          buffer->push_back(value);
+          return &buffer->back();
+        },
+        value());
   }
   bool IsSigned() const { return false; }
 };
@@ -194,7 +214,12 @@ class SignedOperand : public OperandBase {
  public:
   explicit SignedOperand(int32_t value) : OperandBase(value) {}
   void WriteVLQ(ZoneVector<uint8_t>* buffer) {
-    base::VLQEncode(buffer, value());
+    base::VLQEncode(
+        [buffer](byte value) {
+          buffer->push_back(value);
+          return &buffer->back();
+        },
+        value());
   }
   bool IsSigned() const { return true; }
 };
@@ -283,9 +308,22 @@ void TranslationArrayBuilder::FinishPendingInstructionIfNeeded() {
   if (matching_instructions_count_) {
     total_matching_instructions_in_current_translation_ +=
         matching_instructions_count_;
-    AddRawToContents(
-        TranslationOpcode::MATCH_PREVIOUS_TRANSLATION,
-        UnsignedOperand(static_cast<uint32_t>(matching_instructions_count_)));
+
+    // There is a short form for the MATCH_PREVIOUS_TRANSLATION instruction
+    // because it's the most common opcode: rather than spending a byte on the
+    // opcode and a second byte on the operand, we can use only a single byte
+    // which doesn't match any valid opcode.
+    const int kMaxShortenableOperand =
+        std::numeric_limits<uint8_t>::max() - kNumTranslationOpcodes;
+    if (matching_instructions_count_ <= kMaxShortenableOperand) {
+      contents_.push_back(kNumTranslationOpcodes +
+                          matching_instructions_count_);
+    } else {
+      // The operand didn't fit in the opcode byte, so encode it normally.
+      AddRawToContents(
+          TranslationOpcode::MATCH_PREVIOUS_TRANSLATION,
+          UnsignedOperand(static_cast<uint32_t>(matching_instructions_count_)));
+    }
     matching_instructions_count_ = 0;
   }
 }
@@ -396,6 +434,13 @@ void TranslationArrayBuilder::BeginJSToWasmBuiltinContinuationFrame(
       SignedOperand(return_kind ? static_cast<int>(return_kind.value())
                                 : kNoWasmReturnKind));
 }
+
+void TranslationArrayBuilder::BeginWasmInlinedIntoJSFrame(
+    BytecodeOffset bailout_id, int literal_id, unsigned height) {
+  auto opcode = TranslationOpcode::WASM_INLINED_INTO_JS_FRAME;
+  Add(opcode, SignedOperand(bailout_id.ToInt()), SignedOperand(literal_id),
+      SignedOperand(height));
+}
 #endif  // V8_ENABLE_WEBASSEMBLY
 
 void TranslationArrayBuilder::BeginJavaScriptBuiltinContinuationFrame(
@@ -430,7 +475,6 @@ void TranslationArrayBuilder::BeginInterpretedFrame(
     BytecodeOffset bytecode_offset, int literal_id, unsigned height,
     int return_value_offset, int return_value_count) {
   if (return_value_count == 0) {
-    DCHECK_EQ(return_value_offset, 0);
     auto opcode = TranslationOpcode::INTERPRETED_FRAME_WITHOUT_RETURN;
     Add(opcode, SignedOperand(bytecode_offset.ToInt()),
         SignedOperand(literal_id), SignedOperand(height));
@@ -515,8 +559,14 @@ void TranslationArrayBuilder::StoreDoubleRegister(DoubleRegister reg) {
   Add(opcode, SmallUnsignedOperand(static_cast<byte>(reg.code())));
 }
 
+void TranslationArrayBuilder::StoreHoleyDoubleRegister(DoubleRegister reg) {
+  static_assert(DoubleRegister::kNumRegisters - 1 <= base::kDataMask);
+  auto opcode = TranslationOpcode::HOLEY_DOUBLE_REGISTER;
+  Add(opcode, SmallUnsignedOperand(static_cast<byte>(reg.code())));
+}
+
 void TranslationArrayBuilder::StoreStackSlot(int index) {
-  auto opcode = TranslationOpcode::STACK_SLOT;
+  auto opcode = TranslationOpcode::TAGGED_STACK_SLOT;
   Add(opcode, SignedOperand(index));
 }
 
@@ -557,6 +607,11 @@ void TranslationArrayBuilder::StoreFloatStackSlot(int index) {
 
 void TranslationArrayBuilder::StoreDoubleStackSlot(int index) {
   auto opcode = TranslationOpcode::DOUBLE_STACK_SLOT;
+  Add(opcode, SignedOperand(index));
+}
+
+void TranslationArrayBuilder::StoreHoleyDoubleStackSlot(int index) {
+  auto opcode = TranslationOpcode::HOLEY_DOUBLE_STACK_SLOT;
   Add(opcode, SignedOperand(index));
 }
 

@@ -80,7 +80,7 @@ Address RelocInfo::target_internal_reference_address() {
 }
 
 Address RelocInfo::target_address() {
-  DCHECK(IsCodeTarget(rmode_) || IsWasmCall(rmode_));
+  DCHECK(IsCodeTarget(rmode_) || IsWasmCall(rmode_) || IsWasmStubCall(rmode_));
   return Assembler::target_address_at(pc_, constant_pool_);
 }
 
@@ -148,7 +148,7 @@ Handle<Object> Assembler::code_target_object_handle_at(Address pc,
 HeapObject RelocInfo::target_object(PtrComprCageBase cage_base) {
   DCHECK(IsCodeTarget(rmode_) || IsEmbeddedObjectMode(rmode_));
   if (IsCompressedEmbeddedObject(rmode_)) {
-    return HeapObject::cast(Object(V8HeapCompressionScheme::DecompressTaggedAny(
+    return HeapObject::cast(Object(V8HeapCompressionScheme::DecompressTagged(
         cage_base,
         Assembler::target_compressed_address_at(pc_, constant_pool_))));
   } else {
@@ -176,22 +176,18 @@ Handle<HeapObject> RelocInfo::target_object_handle(Assembler* origin) {
   }
 }
 
-void RelocInfo::set_target_object(Heap* heap, HeapObject target,
-                                  WriteBarrierMode write_barrier_mode,
+void RelocInfo::set_target_object(HeapObject target,
                                   ICacheFlushMode icache_flush_mode) {
   DCHECK(IsCodeTarget(rmode_) || IsEmbeddedObjectMode(rmode_));
   if (IsCompressedEmbeddedObject(rmode_)) {
     Assembler::set_target_compressed_address_at(
         pc_, constant_pool_,
-        V8HeapCompressionScheme::CompressTagged(target.ptr()),
+        V8HeapCompressionScheme::CompressObject(target.ptr()),
         icache_flush_mode);
   } else {
     DCHECK(IsFullEmbeddedObject(rmode_));
     Assembler::set_target_address_at(pc_, constant_pool_, target.ptr(),
                                      icache_flush_mode);
-  }
-  if (!host().is_null() && !v8_flags.disable_write_barriers) {
-    WriteBarrierForCode(host(), this, target, write_barrier_mode);
   }
 }
 
@@ -401,7 +397,7 @@ Address Assembler::target_constant_pool_address_at(
 // has already deserialized the mov instructions etc.
 // There is a FIXED_SEQUENCE assumption here
 void Assembler::deserialization_set_special_target_at(
-    Address instruction_payload, InstructionStream code, Address target) {
+    Address instruction_payload, Code code, Address target) {
   set_target_address_at(instruction_payload,
                         !code.is_null() ? code.constant_pool() : kNullAddress,
                         target);

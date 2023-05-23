@@ -15,6 +15,7 @@
 #include 'src/objects/js-atomics-synchronization.h'
 #include 'src/objects/js-function.h'
 #include 'src/objects/js-generator.h'
+#include 'src/objects/js-iterator-helpers.h'
 #include 'src/objects/js-promise.h'
 #include 'src/objects/js-regexp-string-iterator.h'
 #include 'src/objects/js-shadow-realm.h'
@@ -266,7 +267,11 @@ type Callable = JSFunction|JSBoundFunction|JSWrappedFunction|CallableJSProxy|
 type WriteBarrierMode
     generates 'TNode<Int32T>' constexpr 'WriteBarrierMode';
 
-extern enum UpdateFeedbackMode { kOptionalFeedback, kGuaranteedFeedback }
+extern enum UpdateFeedbackMode {
+  kOptionalFeedback,
+  kGuaranteedFeedback,
+  kNoFeedback
+}
 extern operator '==' macro UpdateFeedbackModeEqual(
     constexpr UpdateFeedbackMode, constexpr UpdateFeedbackMode): constexpr bool;
 
@@ -389,6 +394,7 @@ extern enum MessageTemplate {
   kTypedArrayTooShort,
   kTypedArrayTooLargeToSort,
   kInvalidCountValue,
+  kConstructAbstractClass,
   kConstructorNotFunction,
   kSymbolToString,
   kSymbolIteratorInvalid,
@@ -450,6 +456,8 @@ extern enum MessageTemplate {
   kObjectGetterCallable,
   kObjectSetterCallable,
   kPropertyDescObject,
+  kMustBePositive,
+  kIteratorReduceNoInitial,
   ...
 }
 
@@ -515,7 +523,7 @@ const kWasmArrayHeaderSize:
 const kHeapObjectHeaderSize:
     constexpr int32 generates 'HeapObject::kHeaderSize';
 
-type TheHole extends Oddball;
+type TheHole extends HeapObject;
 type Null extends Oddball;
 type Undefined extends Oddball;
 type True extends Oddball;
@@ -538,6 +546,7 @@ extern macro MatchSymbolConstant(): Symbol;
 extern macro MessageStringConstant(): String;
 extern macro NanConstant(): NaN;
 extern macro NameStringConstant(): String;
+extern macro NextStringConstant(): String;
 extern macro NullConstant(): Null;
 extern macro NumberStringConstant(): String;
 extern macro ReturnStringConstant(): String;
@@ -559,6 +568,7 @@ const False: False = FalseConstant();
 const kEmptyString: EmptyString = EmptyStringConstant();
 const kLengthString: String = LengthStringConstant();
 const kMessageString: String = MessageStringConstant();
+const kNextString: String = NextStringConstant();
 const kReturnString: String = ReturnStringConstant();
 
 const kNaN: NaN = NanConstant();
@@ -614,6 +624,7 @@ extern macro SelectBooleanConstant(bool): Boolean;
 extern macro Print(constexpr string): void;
 extern macro Print(constexpr string, Object): void;
 extern macro Print(Object): void;
+extern macro Print(constexpr string, uintptr): void;
 extern macro PrintErr(constexpr string): void;
 extern macro PrintErr(constexpr string, Object): void;
 extern macro PrintErr(Object): void;
@@ -795,7 +806,8 @@ extern macro LoadBufferSmi(RawPtr, constexpr int32): Smi;
 extern macro LoadBufferIntptr(RawPtr, constexpr int32): intptr;
 
 extern runtime StringEqual(Context, String, String): Oddball;
-extern builtin StringLessThan(Context, String, String): Boolean;
+extern builtin StringLessThan(String, String): Boolean;
+extern builtin StringCompare(String, String): Smi;
 extern macro StringCharCodeAt(String, uintptr): char16;
 extern macro StringFromSingleCharCode(char8): String;
 extern macro StringFromSingleCharCode(char16): String;
@@ -885,6 +897,7 @@ extern operator '>=' macro IntPtrGreaterThanOrEqual(intptr, intptr): bool;
 extern operator '>=' macro UintPtrGreaterThanOrEqual(uintptr, uintptr): bool;
 extern operator '~' macro WordNot(intptr): intptr;
 extern operator '~' macro WordNot(uintptr): uintptr;
+extern operator '~' macro Word32BitwiseNot(int32): int32;
 extern operator '~' macro Word64Not(uint64): uint64;
 extern operator '~' macro Word64Not(int64): int64;
 extern operator '~' macro ConstexprWordNot(constexpr intptr): constexpr intptr;
@@ -932,11 +945,12 @@ macro Float64IsNaN(n: float64): bool {
 
 // The type of all tagged values that can safely be compared with TaggedEqual.
 @if(V8_ENABLE_WEBASSEMBLY)
-type TaggedWithIdentity = JSReceiver | FixedArrayBase | Oddball | Map |
-    WeakCell | Context | EmptyString | Symbol | WasmInternalFunction;
+type TaggedWithIdentity =
+    JSReceiver | FixedArrayBase | Oddball | TheHole | Map | WeakCell | Context |
+    EmptyString | Symbol | WasmInternalFunction | WasmNull;
 @ifnot(V8_ENABLE_WEBASSEMBLY)
-type TaggedWithIdentity = JSReceiver | FixedArrayBase | Oddball | Map |
-    WeakCell | Context | EmptyString | Symbol;
+type TaggedWithIdentity = JSReceiver | FixedArrayBase | Oddball | TheHole |
+    Map | WeakCell | Context | EmptyString | Symbol;
 
 extern operator '==' macro TaggedEqual(TaggedWithIdentity, Object): bool;
 extern operator '==' macro TaggedEqual(Object, TaggedWithIdentity): bool;
@@ -1005,7 +1019,9 @@ extern operator '-' macro Uint32Sub(uint32, uint32): uint32;
 extern operator '*' macro Int32Mul(int32, int32): int32;
 extern operator '*' macro Uint32Mul(uint32, uint32): uint32;
 extern operator '/' macro Int32Div(int32, int32): int32;
+extern operator '/' macro Uint32Div(uint32, uint32): uint32;
 extern operator '%' macro Int32Mod(int32, int32): int32;
+extern operator '%' macro Uint32Mod(uint32, uint32): uint32;
 extern operator '&' macro Word32And(int32, int32): int32;
 extern operator '&' macro Word32And(uint32, uint32): uint32;
 extern operator '==' macro
@@ -1031,6 +1047,8 @@ extern macro ConstexprIntegerLiteralToInt32(constexpr IntegerLiteral):
     constexpr int32;
 extern macro ConstexprIntegerLiteralToUint32(constexpr IntegerLiteral):
     constexpr uint32;
+extern macro ConstexprIntegerLiteralToInt64(constexpr IntegerLiteral):
+    constexpr int64;
 extern macro ConstexprIntegerLiteralToUint64(constexpr IntegerLiteral):
     constexpr uint64;
 extern macro ConstexprIntegerLiteralToIntptr(constexpr IntegerLiteral):
@@ -1230,7 +1248,7 @@ extern macro ChangeBoolToInt32(bool): int32;
 extern macro ChangeInt32ToFloat64(int32): float64;
 extern macro ChangeInt32ToIntPtr(int32): intptr;    // Sign-extends.
 extern macro ChangeUint32ToWord(uint32): uintptr;   // Doesn't sign-extend.
-extern macro ChangeInt32ToInt64(int32): intptr;     // Sign-extends.
+extern macro ChangeInt32ToInt64(int32): int64;      // Sign-extends.
 extern macro ChangeUint32ToUint64(uint32): uint64;  // Doesn't sign-extend.
 extern macro LoadNativeContext(Context): NativeContext;
 extern macro TruncateFloat64ToFloat32(float64): float32;
@@ -1388,6 +1406,9 @@ macro GetArrayBufferFunction(implicit context: Context)(): Constructor {
 }
 macro GetArrayBufferNoInitFunction(implicit context: Context)(): JSFunction {
   return *NativeContextSlot(ContextSlot::ARRAY_BUFFER_NOINIT_FUN_INDEX);
+}
+macro GetIteratorFunction(implicit context: Context)(): JSFunction {
+  return *NativeContextSlot(ContextSlot::ITERATOR_FUNCTION_INDEX);
 }
 macro GetFastPackedElementsJSArrayMap(implicit context: Context)(): Map {
   return *NativeContextSlot(ContextSlot::JS_ARRAY_PACKED_ELEMENTS_MAP_INDEX);
@@ -1944,6 +1965,17 @@ macro IsIntegerOrSomeInfinity(o: Object): bool {
   }
 }
 
+macro NumberIsSomeInfinity(n: Number): bool {
+  typeswitch (n) {
+    case (Smi): {
+      return false;
+    }
+    case (hn: HeapNumber): {
+      return Float64IsSomeInfinity(Convert<float64>(hn));
+    }
+  }
+}
+
 // Assert that the objects satisfy SameValue or are both the hole.
 builtin CheckSameObject(implicit context: Context)(
     lhs: Object, rhs: Object): Undefined {
@@ -2000,6 +2032,7 @@ extern operator '[]' macro LoadWeakFixedArrayElement(
     WeakFixedArray, intptr): MaybeObject;
 
 extern operator '[]' macro LoadUint8Ptr(RawPtr<uint8>, intptr): uint8;
+extern operator '[]' macro LoadUint64Ptr(RawPtr<uint64>, intptr): uint64;
 
 extern enum HashFieldType extends uint32 constexpr 'Name::HashFieldType' {
   kHash,

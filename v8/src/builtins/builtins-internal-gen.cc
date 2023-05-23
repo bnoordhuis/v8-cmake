@@ -150,15 +150,12 @@ class WriteBarrierCodeStubAssembler : public CodeStubAssembler {
                         IntPtrConstant(0));
   }
 
-  TNode<BoolT> IsWhite(TNode<IntPtrT> object) {
-    DCHECK_EQ(strcmp(Marking::kWhiteBitPattern, "00"), 0);
+  TNode<BoolT> IsUnmarked(TNode<IntPtrT> object) {
     TNode<IntPtrT> cell;
     TNode<IntPtrT> mask;
     GetMarkBit(object, &cell, &mask);
-    TNode<Int32T> mask32 = TruncateIntPtrToInt32(mask);
-    // Non-white has 1 for the first bit, so we only need to check for the first
-    // bit.
-    return Word32Equal(Word32And(Load<Int32T>(cell), mask32), Int32Constant(0));
+    // Marked only requires checking a single bit here.
+    return WordEqual(WordAnd(Load<IntPtrT>(cell), mask), IntPtrConstant(0));
   }
 
   void GetMarkBit(TNode<IntPtrT> object, TNode<IntPtrT>* cell,
@@ -170,18 +167,19 @@ class WriteBarrierCodeStubAssembler : public CodeStubAssembler {
     {
       // Temp variable to calculate cell offset in bitmap.
       TNode<WordT> r0;
-      int shift = Bitmap::kBitsPerCellLog2 + kTaggedSizeLog2 -
-                  Bitmap::kBytesPerCellLog2;
+      int shift = MarkingBitmap::kBitsPerCellLog2 + kTaggedSizeLog2 -
+                  MarkingBitmap::kBytesPerCellLog2;
       r0 = WordShr(object, IntPtrConstant(shift));
       r0 = WordAnd(r0, IntPtrConstant((kPageAlignmentMask >> shift) &
-                                      ~(Bitmap::kBytesPerCell - 1)));
+                                      ~(MarkingBitmap::kBytesPerCell - 1)));
       *cell = IntPtrAdd(bitmap, Signed(r0));
     }
     {
       // Temp variable to calculate bit offset in cell.
       TNode<WordT> r1;
       r1 = WordShr(object, IntPtrConstant(kTaggedSizeLog2));
-      r1 = WordAnd(r1, IntPtrConstant((1 << Bitmap::kBitsPerCellLog2) - 1));
+      r1 = WordAnd(r1,
+                   IntPtrConstant((1 << MarkingBitmap::kBitsPerCellLog2) - 1));
       // It seems that LSB(e.g. cl) is automatically used, so no manual masking
       // is needed. Uncomment the following line otherwise.
       // WordAnd(r1, IntPtrConstant((1 << kBitsPerByte) - 1)));
@@ -381,12 +379,12 @@ class WriteBarrierCodeStubAssembler : public CodeStubAssembler {
 
   void IncrementalWriteBarrierMinor(TNode<IntPtrT> slot, TNode<IntPtrT> value,
                                     SaveFPRegsMode fp_mode, Label* next) {
-    Label check_is_white(this);
+    Label check_is_unmarked(this);
 
-    InYoungGeneration(value, &check_is_white, next);
+    InYoungGeneration(value, &check_is_unmarked, next);
 
-    BIND(&check_is_white);
-    GotoIfNot(IsWhite(value), next);
+    BIND(&check_is_unmarked);
+    GotoIfNot(IsUnmarked(value), next);
 
     {
       TNode<ExternalReference> function = ExternalConstant(
@@ -424,12 +422,12 @@ class WriteBarrierCodeStubAssembler : public CodeStubAssembler {
   void IsValueUnmarkedOrRecordSlot(TNode<IntPtrT> value, Label* true_label,
                                    Label* false_label) {
     // This code implements the following condition:
-    // IsWhite(value) ||
+    // IsUnmarked(value) ||
     //   OnEvacuationCandidate(value) &&
     //   !SkipEvacuationCandidateRecording(value)
 
-    // 1) IsWhite(value) || ....
-    GotoIf(IsWhite(value), true_label);
+    // 1) IsUnmarked(value) || ....
+    GotoIf(IsUnmarked(value), true_label);
 
     // 2) OnEvacuationCandidate(value) &&
     //    !SkipEvacuationCandidateRecording(value)
@@ -763,7 +761,7 @@ class DeletePropertyBaseAssembler : public AccessorAssembler {
                                 TNode<IntPtrT> key_index,
                                 TNode<Context> context) {
     // Overwrite the entry itself (see NameDictionary::SetEntry).
-    TNode<Oddball> filler = TheHoleConstant();
+    TNode<Hole> filler = TheHoleConstant();
     DCHECK(RootsTable::IsImmortalImmovable(RootIndex::kTheHoleValue));
     StoreFixedArrayElement(properties, key_index, filler, SKIP_WRITE_BARRIER);
     StoreValueByKeyIndex<NameDictionary>(properties, key_index, filler,
@@ -1373,12 +1371,6 @@ void Builtins::Generate_MaglevOnStackReplacement(MacroAssembler* masm) {
   static_assert(D::kParameterCount == 1);
   masm->Trap();
 }
-void Builtins::Generate_MaglevOutOfLinePrologue(MacroAssembler* masm) {
-  using D =
-      i::CallInterfaceDescriptorFor<Builtin::kMaglevOutOfLinePrologue>::type;
-  static_assert(D::kParameterCount == 0);
-  masm->Trap();
-}
 #endif  // V8_TARGET_ARCH_X64
 
 // ES6 [[Get]] operation.
@@ -1397,9 +1389,12 @@ TF_BUILTIN(GetProperty, CodeStubAssembler) {
           TNode<Name> unique_name, Label* next_holder, Label* if_bailout) {
         TVARIABLE(Object, var_value);
         Label if_found(this);
+        // If we get here then it's guaranteed that |object| (and thus the
+        // |receiver|) is a JSReceiver.
         TryGetOwnProperty(context, receiver, CAST(holder), holder_map,
                           holder_instance_type, unique_name, &if_found,
-                          &var_value, next_holder, if_bailout);
+                          &var_value, next_holder, if_bailout,
+                          kExpectingJSReceiver);
         BIND(&if_found);
         Return(var_value.value());
       };
@@ -1454,7 +1449,8 @@ TF_BUILTIN(GetPropertyWithReceiver, CodeStubAssembler) {
         Label if_found(this);
         TryGetOwnProperty(context, receiver, CAST(holder), holder_map,
                           holder_instance_type, unique_name, &if_found,
-                          &var_value, next_holder, if_bailout);
+                          &var_value, next_holder, if_bailout,
+                          kExpectingAnyReceiver);
         BIND(&if_found);
         Return(var_value.value());
       };
@@ -1581,9 +1577,8 @@ TF_BUILTIN(FindNonDefaultConstructorOrConstruct, CodeStubAssembler) {
   Label found_default_base_ctor(this, &constructor),
       found_something_else(this, &constructor);
 
-  FindNonDefaultConstructorOrConstruct(context, this_function, constructor,
-                                       &found_default_base_ctor,
-                                       &found_something_else);
+  FindNonDefaultConstructor(this_function, constructor,
+                            &found_default_base_ctor, &found_something_else);
 
   BIND(&found_default_base_ctor);
   {

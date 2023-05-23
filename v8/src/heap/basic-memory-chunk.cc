@@ -8,6 +8,7 @@
 
 #include "src/heap/heap-write-barrier-inl.h"
 #include "src/heap/incremental-marking.h"
+#include "src/heap/marking-inl.h"
 #include "src/objects/heap-object.h"
 #include "src/utils/allocation.h"
 
@@ -17,8 +18,8 @@ namespace internal {
 // Verify write barrier offsets match the the real offsets.
 static_assert(BasicMemoryChunk::Flag::IS_EXECUTABLE ==
               heap_internals::MemoryChunk::kIsExecutableBit);
-static_assert(BasicMemoryChunk::Flag::IN_SHARED_HEAP ==
-              heap_internals::MemoryChunk::kInSharedHeapBit);
+static_assert(BasicMemoryChunk::Flag::IN_WRITABLE_SHARED_SPACE ==
+              heap_internals::MemoryChunk::kInWritableSharedSpaceBit);
 static_assert(BasicMemoryChunk::Flag::INCREMENTAL_MARKING ==
               heap_internals::MemoryChunk::kMarkingBit);
 static_assert(BasicMemoryChunk::Flag::FROM_PAGE ==
@@ -60,12 +61,9 @@ BasicMemoryChunk::BasicMemoryChunk(Heap* heap, BaseSpace* space,
       area_start_(area_start),
       area_end_(area_end),
       allocated_bytes_(area_end - area_start),
-      wasted_memory_(0),
       high_water_mark_(area_start - reinterpret_cast<Address>(this)),
       owner_(space),
-      reservation_(std::move(reservation)) {
-  marking_bitmap<AccessMode::NON_ATOMIC>()->Clear();
-}
+      reservation_(std::move(reservation)) {}
 
 bool BasicMemoryChunk::InOldSpace() const {
   return owner()->identity() == OLD_SPACE;
@@ -80,22 +78,9 @@ void BasicMemoryChunk::SynchronizedHeapLoad() const {
   CHECK(reinterpret_cast<Heap*>(
             base::Acquire_Load(reinterpret_cast<base::AtomicWord*>(
                 &(const_cast<BasicMemoryChunk*>(this)->heap_)))) != nullptr ||
-        InReadOnlySpaceRaw());
+        IsFlagSet(READ_ONLY_HEAP));
 }
 #endif
-
-// static
-MarkBit BasicMemoryChunk::ComputeMarkBit(HeapObject object) {
-  return BasicMemoryChunk::ComputeMarkBit(object.address());
-}
-
-// static
-MarkBit BasicMemoryChunk::ComputeMarkBit(Address address) {
-  BasicMemoryChunk* chunk = BasicMemoryChunk::FromAddress(address);
-  int index = chunk->AddressToMarkbitIndex(address);
-  return chunk->marking_bitmap<AccessMode::NON_ATOMIC>()->MarkBitFromIndex(
-      index);
-}
 
 class BasicMemoryChunkValidator {
   // Computed offsets should match the compiler generated ones.

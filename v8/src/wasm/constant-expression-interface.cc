@@ -36,10 +36,37 @@ void ConstantExpressionInterface::F64Const(FullDecoder* decoder, Value* result,
 }
 
 void ConstantExpressionInterface::S128Const(FullDecoder* decoder,
-                                            Simd128Immediate& imm,
+                                            const Simd128Immediate& imm,
                                             Value* result) {
   if (!generate_value()) return;
   result->runtime_value = WasmValue(imm.value, kWasmS128);
+}
+
+void ConstantExpressionInterface::UnOp(FullDecoder* decoder, WasmOpcode opcode,
+                                       const Value& input, Value* result) {
+  if (!generate_value()) return;
+  switch (opcode) {
+    case kExprExternExternalize: {
+      const char* error_message = nullptr;
+      result->runtime_value = WasmValue(
+          WasmToJSObject(isolate_, input.runtime_value.to_ref(),
+                         input.type.heap_type(), &error_message)
+              .ToHandleChecked(),
+          ValueType::RefMaybeNull(HeapType::kExtern, input.type.nullability()));
+      break;
+    }
+    case kExprExternInternalize: {
+      const char* error_message = nullptr;
+      result->runtime_value = WasmValue(
+          JSToWasmObject(isolate_, input.runtime_value.to_ref(), kWasmAnyRef,
+                         &error_message)
+              .ToHandleChecked(),
+          ValueType::RefMaybeNull(HeapType::kAny, input.type.nullability()));
+      break;
+    }
+    default:
+      UNREACHABLE();
+  }
 }
 
 void ConstantExpressionInterface::BinOp(FullDecoder* decoder, WasmOpcode opcode,
@@ -79,7 +106,11 @@ void ConstantExpressionInterface::BinOp(FullDecoder* decoder, WasmOpcode opcode,
 void ConstantExpressionInterface::RefNull(FullDecoder* decoder, ValueType type,
                                           Value* result) {
   if (!generate_value()) return;
-  result->runtime_value = WasmValue(isolate_->factory()->null_value(), type);
+  result->runtime_value =
+      WasmValue(type == kWasmExternRef || type == kWasmNullExternRef
+                    ? Handle<Object>::cast(isolate_->factory()->null_value())
+                    : Handle<Object>::cast(isolate_->factory()->wasm_null()),
+                type);
 }
 
 void ConstantExpressionInterface::RefFunc(FullDecoder* decoder,
@@ -105,7 +136,7 @@ void ConstantExpressionInterface::GlobalGet(FullDecoder* decoder, Value* result,
   result->runtime_value =
       global.type.is_numeric()
           ? WasmValue(
-                reinterpret_cast<byte*>(
+                reinterpret_cast<uint8_t*>(
                     instance_->untagged_globals_buffer().backing_store()) +
                     global.offset,
                 global.type)
@@ -224,16 +255,19 @@ void ConstantExpressionInterface::ArrayNewDefault(
 }
 
 void ConstantExpressionInterface::ArrayNewFixed(
-    FullDecoder* decoder, const ArrayIndexImmediate& imm,
-    const base::Vector<Value>& elements, const Value& rtt, Value* result) {
+    FullDecoder* decoder, const ArrayIndexImmediate& array_imm,
+    const IndexImmediate& length_imm, const Value elements[], const Value& rtt,
+    Value* result) {
   if (!generate_value()) return;
   std::vector<WasmValue> element_values;
-  for (Value elem : elements) element_values.push_back(elem.runtime_value);
+  for (Value elem : base::VectorOf(elements, length_imm.index)) {
+    element_values.push_back(elem.runtime_value);
+  }
   result->runtime_value =
       WasmValue(isolate_->factory()->NewWasmArrayFromElements(
-                    imm.array_type, element_values,
+                    array_imm.array_type, element_values,
                     Handle<Map>::cast(rtt.runtime_value.to_ref())),
-                ValueType::Ref(HeapType(imm.index)));
+                ValueType::Ref(HeapType(array_imm.index)));
 }
 
 // TODO(7748): These expressions are non-constant for now. There are plans to
@@ -279,7 +313,7 @@ void ConstantExpressionInterface::ArrayNewSegment(
     if (!base::IsInBounds<size_t>(
             offset, length,
             elem_segment->status == WasmElemSegment::kStatusPassive
-                ? elem_segment->entries.size()
+                ? elem_segment->element_count
                 : 0)) {
       error_ = MessageTemplate::kWasmTrapElementSegmentOutOfBounds;
       return;
@@ -287,7 +321,7 @@ void ConstantExpressionInterface::ArrayNewSegment(
 
     Handle<Object> array_object =
         isolate_->factory()->NewWasmArrayFromElementSegment(
-            instance_, elem_segment, offset, length,
+            instance_, segment_imm.index, offset, length,
             Handle<Map>::cast(rtt.runtime_value.to_ref()));
     if (array_object->IsSmi()) {
       // A smi result stands for an error code.
@@ -323,7 +357,8 @@ void ConstantExpressionInterface::I31New(FullDecoder* decoder,
 void ConstantExpressionInterface::DoReturn(FullDecoder* decoder,
                                            uint32_t /*drop_values*/) {
   end_found_ = true;
-  // End decoding on "end".
+  // End decoding on "end". Note: We need this because we do not know the length
+  // of a constant expression while decoding it.
   decoder->set_end(decoder->pc() + 1);
   if (generate_value()) {
     computed_value_ = decoder->stack_value(1)->runtime_value;

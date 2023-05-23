@@ -90,9 +90,9 @@ inline MemOperand CFunctionArgumentOperand(int index) {
   return MemOperand(sp, offset);
 }
 
-class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
  public:
-  using TurboAssemblerBase::TurboAssemblerBase;
+  using MacroAssemblerBase::MacroAssemblerBase;
 
   // Activation support.
   void EnterFrame(StackFrame::Type type);
@@ -136,6 +136,9 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
   // Use --debug_code to enable.
   void Assert(Condition cc, AbortReason reason, Register rs,
               Operand rt) NOOP_UNLESS_DEBUG_CODE;
+
+  void AssertJSAny(Register object, Register map_tmp, Register tmp,
+                   AbortReason abort_reason) NOOP_UNLESS_DEBUG_CODE;
 
   // Like Assert(), but always enabled.
   void Check(Condition cc, AbortReason reason, Register rs, Operand rt);
@@ -253,24 +256,18 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
   void Call(Label* target);
   void LoadAddress(Register dst, Label* target);
 
-  // Load the builtin given by the Smi in |builtin_index| into the same
-  // register.
-  void LoadEntryFromBuiltinIndex(Register builtin);
+  // Load the builtin given by the Smi in |builtin_index| into |target|.
+  void LoadEntryFromBuiltinIndex(Register builtin_index, Register target);
   void LoadEntryFromBuiltin(Builtin builtin, Register destination);
   MemOperand EntryFromBuiltinAsOperand(Builtin builtin);
 
-  void CallBuiltinByIndex(Register builtin);
+  void CallBuiltinByIndex(Register builtin_index, Register target);
   void CallBuiltin(Builtin builtin);
   void TailCallBuiltin(Builtin builtin);
 
   // Load the code entry point from the Code object.
-  void LoadCodeEntry(Register destination, Register code_data_container_object);
-  // Load code entry point from the Code object and compute
-  // InstructionStream object pointer out of it. Must not be used for
-  // Codes corresponding to builtins, because their entry points
-  // values point to the embedded instruction stream in .text section.
-  void LoadCodeInstructionStreamNonBuiltin(Register destination,
-                                           Register code_data_container_object);
+  void LoadCodeInstructionStart(Register destination,
+                                Register code_data_container_object);
   void CallCodeObject(Register code_data_container_object);
   void JumpCodeObject(Register code_data_container_object,
                       JumpMode jump_mode = JumpMode::kJump);
@@ -571,12 +568,23 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
   // garbage collection, since that might move the code and invalidate the
   // return address (unless this is somehow accounted for by the called
   // function).
-  void CallCFunction(ExternalReference function, int num_arguments);
-  void CallCFunction(Register function, int num_arguments);
-  void CallCFunction(ExternalReference function, int num_reg_arguments,
-                     int num_double_arguments);
-  void CallCFunction(Register function, int num_reg_arguments,
-                     int num_double_arguments);
+  enum class SetIsolateDataSlots {
+    kNo,
+    kYes,
+  };
+  void CallCFunction(
+      ExternalReference function, int num_arguments,
+      SetIsolateDataSlots set_isolate_data_slots = SetIsolateDataSlots::kYes);
+  void CallCFunction(
+      Register function, int num_arguments,
+      SetIsolateDataSlots set_isolate_data_slots = SetIsolateDataSlots::kYes);
+  void CallCFunction(
+      ExternalReference function, int num_reg_arguments,
+      int num_double_arguments,
+      SetIsolateDataSlots set_isolate_data_slots = SetIsolateDataSlots::kYes);
+  void CallCFunction(
+      Register function, int num_reg_arguments, int num_double_arguments,
+      SetIsolateDataSlots set_isolate_data_slots = SetIsolateDataSlots::kYes);
   void MovFromFloatResult(DoubleRegister dst);
   void MovFromFloatParameter(DoubleRegister dst);
 
@@ -913,79 +921,6 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
   // Define an exception handler and bind a label.
   void BindExceptionHandler(Label* label) { bind(label); }
 
- protected:
-  inline Register GetRtAsRegisterHelper(const Operand& rt, Register scratch);
-  inline int32_t GetOffset(int32_t offset, Label* L, OffsetSize bits);
-
- private:
-  bool has_double_zero_reg_set_ = false;
-
-  // Performs a truncating conversion of a floating point number as used by
-  // the JS bitwise operations. See ECMA-262 9.5: ToInt32. Goes to 'done' if it
-  // succeeds, otherwise falls through if result is saturated. On return
-  // 'result' either holds answer, or is clobbered on fall through.
-  void TryInlineTruncateDoubleToI(Register result, DoubleRegister input,
-                                  Label* done);
-
-  void CompareF(SecondaryField sizeField, FPUCondition cc, FPURegister cmp1,
-                FPURegister cmp2);
-
-  void CompareIsNanF(SecondaryField sizeField, FPURegister cmp1,
-                     FPURegister cmp2);
-
-  void BranchShortMSA(MSABranchDF df, Label* target, MSABranchCondition cond,
-                      MSARegister wt, BranchDelaySlot bd = PROTECT);
-
-  void CallCFunctionHelper(Register function, int num_reg_arguments,
-                           int num_double_arguments);
-
-  // TODO(mips) Reorder parameters so out parameters come last.
-  bool CalculateOffset(Label* L, int32_t* offset, OffsetSize bits);
-  bool CalculateOffset(Label* L, int32_t* offset, OffsetSize bits,
-                       Register* scratch, const Operand& rt);
-
-  void BranchShortHelperR6(int32_t offset, Label* L);
-  void BranchShortHelper(int16_t offset, Label* L, BranchDelaySlot bdslot);
-  bool BranchShortHelperR6(int32_t offset, Label* L, Condition cond,
-                           Register rs, const Operand& rt);
-  bool BranchShortHelper(int16_t offset, Label* L, Condition cond, Register rs,
-                         const Operand& rt, BranchDelaySlot bdslot);
-  bool BranchShortCheck(int32_t offset, Label* L, Condition cond, Register rs,
-                        const Operand& rt, BranchDelaySlot bdslot);
-
-  void BranchAndLinkShortHelperR6(int32_t offset, Label* L);
-  void BranchAndLinkShortHelper(int16_t offset, Label* L,
-                                BranchDelaySlot bdslot);
-  void BranchAndLinkShort(int32_t offset, BranchDelaySlot bdslot = PROTECT);
-  void BranchAndLinkShort(Label* L, BranchDelaySlot bdslot = PROTECT);
-  bool BranchAndLinkShortHelperR6(int32_t offset, Label* L, Condition cond,
-                                  Register rs, const Operand& rt);
-  bool BranchAndLinkShortHelper(int16_t offset, Label* L, Condition cond,
-                                Register rs, const Operand& rt,
-                                BranchDelaySlot bdslot);
-  bool BranchAndLinkShortCheck(int32_t offset, Label* L, Condition cond,
-                               Register rs, const Operand& rt,
-                               BranchDelaySlot bdslot);
-  void BranchLong(Label* L, BranchDelaySlot bdslot);
-  void BranchAndLinkLong(Label* L, BranchDelaySlot bdslot);
-
-  template <typename RoundFunc>
-  void RoundDouble(FPURegister dst, FPURegister src, FPURoundingMode mode,
-                   RoundFunc round);
-
-  template <typename RoundFunc>
-  void RoundFloat(FPURegister dst, FPURegister src, FPURoundingMode mode,
-                  RoundFunc round);
-
-  // Push a fixed frame, consisting of ra, fp.
-  void PushCommonFrame(Register marker_reg = no_reg);
-};
-
-// MacroAssembler implements a collection of frequently used macros.
-class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
- public:
-  using TurboAssembler::TurboAssembler;
-
   // It assumes that the arguments are located below the stack pointer.
   // argc is the number of arguments not including the receiver.
   // TODO(victorgomes): Remove this function once we stick with the reversed
@@ -1087,9 +1022,6 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
   void Msub_d(FPURegister fd, FPURegister fr, FPURegister fs, FPURegister ft,
               FPURegister scratch);
 
-  void BranchShortMSA(MSABranchDF df, Label* target, MSABranchCondition cond,
-                      MSARegister wt, BranchDelaySlot bd = PROTECT);
-
   // Enter exit frame.
   // argc - argument count to be dropped by LeaveExitFrame.
   // stack_space - extra stack space.
@@ -1176,9 +1108,6 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
   void JumpToExternalReference(const ExternalReference& builtin,
                                BranchDelaySlot bd = PROTECT,
                                bool builtin_exit_frame = false);
-
-  // Generates a trampoline to jump to the off-heap instruction stream.
-  void JumpToOffHeapInstructionStream(Address entry);
 
   // ---------------------------------------------------------------------------
   // In-place weak references.
@@ -1269,17 +1198,84 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
     DecodeField<Field>(reg, reg);
   }
 
+ protected:
+  inline Register GetRtAsRegisterHelper(const Operand& rt, Register scratch);
+  inline int32_t GetOffset(int32_t offset, Label* L, OffsetSize bits);
+
  private:
+  bool has_double_zero_reg_set_ = false;
+
   // Helper functions for generating invokes.
   void InvokePrologue(Register expected_parameter_count,
                       Register actual_parameter_count, Label* done,
                       InvokeType type);
 
+  // Performs a truncating conversion of a floating point number as used by
+  // the JS bitwise operations. See ECMA-262 9.5: ToInt32. Goes to 'done' if it
+  // succeeds, otherwise falls through if result is saturated. On return
+  // 'result' either holds answer, or is clobbered on fall through.
+  void TryInlineTruncateDoubleToI(Register result, DoubleRegister input,
+                                  Label* done);
+
+  void CompareF(SecondaryField sizeField, FPUCondition cc, FPURegister cmp1,
+                FPURegister cmp2);
+
+  void CompareIsNanF(SecondaryField sizeField, FPURegister cmp1,
+                     FPURegister cmp2);
+
+  void BranchShortMSA(MSABranchDF df, Label* target, MSABranchCondition cond,
+                      MSARegister wt, BranchDelaySlot bd = PROTECT);
+
+  void CallCFunctionHelper(
+      Register function, int num_reg_arguments, int num_double_arguments,
+      SetIsolateDataSlots set_isolate_data_slots = SetIsolateDataSlots::kYes);
+
+  // TODO(mips) Reorder parameters so out parameters come last.
+  bool CalculateOffset(Label* L, int32_t* offset, OffsetSize bits);
+  bool CalculateOffset(Label* L, int32_t* offset, OffsetSize bits,
+                       Register* scratch, const Operand& rt);
+
+  void BranchShortHelperR6(int32_t offset, Label* L);
+  void BranchShortHelper(int16_t offset, Label* L, BranchDelaySlot bdslot);
+  bool BranchShortHelperR6(int32_t offset, Label* L, Condition cond,
+                           Register rs, const Operand& rt);
+  bool BranchShortHelper(int16_t offset, Label* L, Condition cond, Register rs,
+                         const Operand& rt, BranchDelaySlot bdslot);
+  bool BranchShortCheck(int32_t offset, Label* L, Condition cond, Register rs,
+                        const Operand& rt, BranchDelaySlot bdslot);
+
+  void BranchAndLinkShortHelperR6(int32_t offset, Label* L);
+  void BranchAndLinkShortHelper(int16_t offset, Label* L,
+                                BranchDelaySlot bdslot);
+  void BranchAndLinkShort(int32_t offset, BranchDelaySlot bdslot = PROTECT);
+  void BranchAndLinkShort(Label* L, BranchDelaySlot bdslot = PROTECT);
+  bool BranchAndLinkShortHelperR6(int32_t offset, Label* L, Condition cond,
+                                  Register rs, const Operand& rt);
+  bool BranchAndLinkShortHelper(int16_t offset, Label* L, Condition cond,
+                                Register rs, const Operand& rt,
+                                BranchDelaySlot bdslot);
+  bool BranchAndLinkShortCheck(int32_t offset, Label* L, Condition cond,
+                               Register rs, const Operand& rt,
+                               BranchDelaySlot bdslot);
+  void BranchLong(Label* L, BranchDelaySlot bdslot);
+  void BranchAndLinkLong(Label* L, BranchDelaySlot bdslot);
+
+  template <typename RoundFunc>
+  void RoundDouble(FPURegister dst, FPURegister src, FPURoundingMode mode,
+                   RoundFunc round);
+
+  template <typename RoundFunc>
+  void RoundFloat(FPURegister dst, FPURegister src, FPURoundingMode mode,
+                  RoundFunc round);
+
+  // Push a fixed frame, consisting of ra, fp.
+  void PushCommonFrame(Register marker_reg = no_reg);
+
   DISALLOW_IMPLICIT_CONSTRUCTORS(MacroAssembler);
 };
 
 template <typename Func>
-void TurboAssembler::GenerateSwitchTable(Register index, size_t case_count,
+void MacroAssembler::GenerateSwitchTable(Register index, size_t case_count,
                                          Func GetLabelFunction) {
   // Ensure that dd-ed labels following this instruction use 8 bytes aligned
   // addresses.

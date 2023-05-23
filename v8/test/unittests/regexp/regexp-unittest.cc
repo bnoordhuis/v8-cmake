@@ -641,8 +641,7 @@ class ContextInitializer {
 
 // Create new JSRegExp object with only necessary fields (for this tests)
 // initialized.
-static Handle<JSRegExp> CreateJSRegExp(Handle<String> source,
-                                       Handle<InstructionStream> code,
+static Handle<JSRegExp> CreateJSRegExp(Handle<String> source, Handle<Code> code,
                                        bool is_unicode = false) {
   Isolate* isolate = reinterpret_cast<i::Isolate*>(v8::Isolate::GetCurrent());
   Factory* factory = isolate->factory();
@@ -665,8 +664,8 @@ static ArchRegExpMacroAssembler::Result Execute(JSRegExp regexp, String input,
                                                 int* captures) {
   return static_cast<NativeRegExpMacroAssembler::Result>(
       NativeRegExpMacroAssembler::ExecuteForTesting(
-          input, start_offset, reinterpret_cast<byte*>(input_start),
-          reinterpret_cast<byte*>(input_end), captures, 0,
+          input, start_offset, reinterpret_cast<uint8_t*>(input_start),
+          reinterpret_cast<uint8_t*>(input_end), captures, 0,
           reinterpret_cast<i::Isolate*>(v8::Isolate::GetCurrent()), regexp));
 }
 
@@ -682,7 +681,7 @@ TEST_F(RegExpTest, MacroAssemblerNativeSuccess) {
 
   Handle<String> source = factory->NewStringFromStaticChars("");
   Handle<Object> code_object = m.GetCode(source);
-  Handle<InstructionStream> code = Handle<InstructionStream>::cast(code_object);
+  Handle<Code> code = Handle<Code>::cast(code_object);
   Handle<JSRegExp> regexp = CreateJSRegExp(source, code);
 
   int captures[4] = {42, 37, 87, 117};
@@ -729,7 +728,7 @@ TEST_F(RegExpTest, MacroAssemblerNativeSimple) {
 
   Handle<String> source = factory->NewStringFromStaticChars("^foo");
   Handle<Object> code_object = m.GetCode(source);
-  Handle<InstructionStream> code = Handle<InstructionStream>::cast(code_object);
+  Handle<Code> code = Handle<Code>::cast(code_object);
   Handle<JSRegExp> regexp = CreateJSRegExp(source, code);
 
   int captures[4] = {42, 37, 87, 117};
@@ -785,7 +784,7 @@ TEST_F(RegExpTest, MacroAssemblerNativeSimpleUC16) {
 
   Handle<String> source = factory->NewStringFromStaticChars("^foo");
   Handle<Object> code_object = m.GetCode(source);
-  Handle<InstructionStream> code = Handle<InstructionStream>::cast(code_object);
+  Handle<Code> code = Handle<Code>::cast(code_object);
   Handle<JSRegExp> regexp = CreateJSRegExp(source, code, true);
 
   int captures[4] = {42, 37, 87, 117};
@@ -843,7 +842,7 @@ TEST_F(RegExpTest, MacroAssemblerNativeBacktrack) {
 
   Handle<String> source = factory->NewStringFromStaticChars("..........");
   Handle<Object> code_object = m.GetCode(source);
-  Handle<InstructionStream> code = Handle<InstructionStream>::cast(code_object);
+  Handle<Code> code = Handle<Code>::cast(code_object);
   Handle<JSRegExp> regexp = CreateJSRegExp(source, code);
 
   Handle<String> input = factory->NewStringFromStaticChars("foofoo");
@@ -881,7 +880,7 @@ TEST_F(RegExpTest, MacroAssemblerNativeBackReferenceLATIN1) {
 
   Handle<String> source = factory->NewStringFromStaticChars("^(..)..\1");
   Handle<Object> code_object = m.GetCode(source);
-  Handle<InstructionStream> code = Handle<InstructionStream>::cast(code_object);
+  Handle<Code> code = Handle<Code>::cast(code_object);
   Handle<JSRegExp> regexp = CreateJSRegExp(source, code);
 
   Handle<String> input = factory->NewStringFromStaticChars("fooofo");
@@ -924,7 +923,7 @@ TEST_F(RegExpTest, MacroAssemblerNativeBackReferenceUC16) {
 
   Handle<String> source = factory->NewStringFromStaticChars("^(..)..\1");
   Handle<Object> code_object = m.GetCode(source);
-  Handle<InstructionStream> code = Handle<InstructionStream>::cast(code_object);
+  Handle<Code> code = Handle<Code>::cast(code_object);
   Handle<JSRegExp> regexp = CreateJSRegExp(source, code, true);
 
   const base::uc16 input_data[6] = {'f', 0x2028, 'o', 'o', 'f', 0x2028};
@@ -977,7 +976,7 @@ TEST_F(RegExpTest, MacroAssemblernativeAtStart) {
 
   Handle<String> source = factory->NewStringFromStaticChars("(^f|ob)");
   Handle<Object> code_object = m.GetCode(source);
-  Handle<InstructionStream> code = Handle<InstructionStream>::cast(code_object);
+  Handle<Code> code = Handle<Code>::cast(code_object);
   Handle<JSRegExp> regexp = CreateJSRegExp(source, code);
 
   Handle<String> input = factory->NewStringFromStaticChars("foobar");
@@ -1028,7 +1027,7 @@ TEST_F(RegExpTest, MacroAssemblerNativeBackRefNoCase) {
   Handle<String> source =
       factory->NewStringFromStaticChars("^(abc)\1\1(?!\1)...(?!\1)");
   Handle<Object> code_object = m.GetCode(source);
-  Handle<InstructionStream> code = Handle<InstructionStream>::cast(code_object);
+  Handle<Code> code = Handle<Code>::cast(code_object);
   Handle<JSRegExp> regexp = CreateJSRegExp(source, code);
 
   Handle<String> input = factory->NewStringFromStaticChars("aBcAbCABCxYzab");
@@ -1120,7 +1119,7 @@ TEST_F(RegExpTest, MacroAssemblerNativeRegisters) {
 
   Handle<String> source = factory->NewStringFromStaticChars("<loop test>");
   Handle<Object> code_object = m.GetCode(source);
-  Handle<InstructionStream> code = Handle<InstructionStream>::cast(code_object);
+  Handle<Code> code = Handle<Code>::cast(code_object);
   Handle<JSRegExp> regexp = CreateJSRegExp(source, code);
 
   // String long enough for test (content doesn't matter).
@@ -1157,7 +1156,7 @@ TEST_F(RegExpTest, MacroAssemblerStackOverflow) {
   Handle<String> source =
       factory->NewStringFromStaticChars("<stack overflow test>");
   Handle<Object> code_object = m.GetCode(source);
-  Handle<InstructionStream> code = Handle<InstructionStream>::cast(code_object);
+  Handle<Code> code = Handle<Code>::cast(code_object);
   Handle<JSRegExp> regexp = CreateJSRegExp(source, code);
 
   // String long enough for test (content doesn't matter).
@@ -1197,7 +1196,7 @@ TEST_F(RegExpTest, MacroAssemblerNativeLotsOfRegisters) {
   Handle<String> source =
       factory->NewStringFromStaticChars("<huge register space test>");
   Handle<Object> code_object = m.GetCode(source);
-  Handle<InstructionStream> code = Handle<InstructionStream>::cast(code_object);
+  Handle<Code> code = Handle<Code>::cast(code_object);
   Handle<JSRegExp> regexp = CreateJSRegExp(source, code);
 
   // String long enough for test (content doesn't matter).
@@ -1654,6 +1653,7 @@ void MockUseCounterCallback(v8::Isolate* isolate,
                             v8::Isolate::UseCounterFeature feature) {
   ++global_use_counts[feature];
 }
+
 }  // namespace
 
 using RegExpTestWithContext = TestWithContext;
@@ -1787,12 +1787,12 @@ TEST_F(RegExpTest, PeepholeNoChange) {
   v8_flags.regexp_peephole_optimization = false;
   Handle<ByteArray> array = Handle<ByteArray>::cast(orig.GetCode(source));
   int length = array->length();
-  byte* byte_array = array->GetDataStartAddress();
+  uint8_t* byte_array = array->GetDataStartAddress();
 
   v8_flags.regexp_peephole_optimization = true;
   Handle<ByteArray> array_optimized =
       Handle<ByteArray>::cast(opt.GetCode(source));
-  byte* byte_array_optimized = array_optimized->GetDataStartAddress();
+  uint8_t* byte_array_optimized = array_optimized->GetDataStartAddress();
 
   CHECK_EQ(0, memcmp(byte_array, byte_array_optimized, length));
 }
@@ -2317,8 +2317,8 @@ TEST_F(RegExpTestWithContext, UnicodePropertyEscapeCodeSize) {
     CHECK_LT(ByteArray::cast(maybe_bytecode).Size(), kMaxSize);
   } else if (maybe_code.IsCode()) {
     // On x64, excessive inlining produced >360KB.
-    CHECK_LT(FromCode(Code::cast(maybe_code)).Size(), kMaxSize);
-    CHECK_EQ(FromCode(Code::cast(maybe_code)).kind(), CodeKind::REGEXP);
+    CHECK_LT(Code::cast(maybe_code).Size(), kMaxSize);
+    CHECK_EQ(Code::cast(maybe_code).kind(), CodeKind::REGEXP);
   } else {
     UNREACHABLE();
   }

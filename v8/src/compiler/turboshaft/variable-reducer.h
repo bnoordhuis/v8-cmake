@@ -55,18 +55,10 @@ class VariableReducer : public Next {
       SnapshotTable<OpIndex, base::Optional<RegisterRepresentation>>::Snapshot;
 
  public:
-  using Next::Asm;
+  TURBOSHAFT_REDUCER_BOILERPLATE()
 
-  template <class... Args>
-  explicit VariableReducer(const std::tuple<Args...>& args)
-      : Next(args),
-        table_(Asm().phase_zone()),
-        block_to_snapshot_mapping_(Asm().input_graph().block_count(),
-                                   base::nullopt, Asm().phase_zone()),
-        predecessors_(Asm().phase_zone()) {}
-
-  void Bind(Block* new_block, const Block* origin = nullptr) {
-    Next::Bind(new_block, origin);
+  void Bind(Block* new_block) {
+    Next::Bind(new_block);
 
     SealAndSave();
 
@@ -81,8 +73,8 @@ class VariableReducer : public Next {
     }
     std::reverse(predecessors_.begin(), predecessors_.end());
 
-    auto merge_variables = [&](Variable var,
-                               base::Vector<OpIndex> predecessors) -> OpIndex {
+    auto merge_variables =
+        [&](Variable var, base::Vector<const OpIndex> predecessors) -> OpIndex {
       ConstantOp* first_constant = nullptr;
       if (predecessors[0].valid()) {
         first_constant = Asm()
@@ -135,7 +127,16 @@ class VariableReducer : public Next {
     return table_.GetPredecessorValue(var, predecessor_index);
   }
 
-  void Set(Variable var, OpIndex new_index) { table_.Set(var, new_index); }
+  void Set(Variable var, OpIndex new_index) {
+    if (V8_UNLIKELY(Asm().generating_unreachable_operations())) return;
+    table_.Set(var, new_index);
+  }
+  template <typename Rep>
+  void Set(Variable var, V<Rep> value) {
+    if (V8_UNLIKELY(Asm().generating_unreachable_operations())) return;
+    DCHECK(Rep::allows_representation(*var.data()));
+    table_.Set(var, value);
+  }
 
   Variable NewFreshVariable(base::Optional<RegisterRepresentation> rep) {
     return table_.NewKey(rep, OpIndex::Invalid());
@@ -170,7 +171,7 @@ class VariableReducer : public Next {
     current_block_ = nullptr;
   }
 
-  OpIndex MergeOpIndices(base::Vector<OpIndex> inputs,
+  OpIndex MergeOpIndices(base::Vector<const OpIndex> inputs,
                          base::Optional<RegisterRepresentation> maybe_rep) {
     if (maybe_rep.has_value()) {
       // Every Operation that has a RegisterRepresentation can be merged with a
@@ -219,7 +220,7 @@ class VariableReducer : public Next {
     }
   }
 
-  OpIndex MergeFrameState(base::Vector<OpIndex> frame_states_indices) {
+  OpIndex MergeFrameState(base::Vector<const OpIndex> frame_states_indices) {
     base::SmallVector<const FrameStateOp*, 32> frame_states;
     for (OpIndex idx : frame_states_indices) {
       frame_states.push_back(
@@ -285,13 +286,15 @@ class VariableReducer : public Next {
                             first_frame->data);
   }
 
-  SnapshotTable<OpIndex, base::Optional<RegisterRepresentation>> table_;
+  SnapshotTable<OpIndex, base::Optional<RegisterRepresentation>> table_{
+      Asm().phase_zone()};
   const Block* current_block_ = nullptr;
-  ZoneVector<base::Optional<Snapshot>> block_to_snapshot_mapping_;
+  ZoneVector<base::Optional<Snapshot>> block_to_snapshot_mapping_{
+      Asm().input_graph().block_count(), base::nullopt, Asm().phase_zone()};
 
   // {predecessors_} is used during merging, but we use an instance variable for
   // it, in order to save memory and not reallocate it for each merge.
-  ZoneVector<Snapshot> predecessors_;
+  ZoneVector<Snapshot> predecessors_{Asm().phase_zone()};
 };
 
 }  // namespace v8::internal::compiler::turboshaft

@@ -11,6 +11,7 @@
 #include "src/common/globals.h"
 #include "src/handles/handles-inl.h"
 #include "src/heap/heap-write-barrier-inl.h"
+#include "src/objects/abstract-code-inl.h"
 #include "src/objects/debug-objects-inl.h"
 #include "src/objects/feedback-vector-inl.h"
 #include "src/objects/scope-info-inl.h"
@@ -49,21 +50,21 @@ void PreparseData::clear_padding() {
   memset(reinterpret_cast<void*>(address() + data_end_offset), 0, padding_size);
 }
 
-byte PreparseData::get(int index) const {
+uint8_t PreparseData::get(int index) const {
   DCHECK_LE(0, index);
   DCHECK_LT(index, data_length());
   int offset = kDataStartOffset + index * kByteSize;
-  return ReadField<byte>(offset);
+  return ReadField<uint8_t>(offset);
 }
 
-void PreparseData::set(int index, byte value) {
+void PreparseData::set(int index, uint8_t value) {
   DCHECK_LE(0, index);
   DCHECK_LT(index, data_length());
   int offset = kDataStartOffset + index * kByteSize;
-  WriteField<byte>(offset, value);
+  WriteField<uint8_t>(offset, value);
 }
 
-void PreparseData::copy_in(int index, const byte* buffer, int length) {
+void PreparseData::copy_in(int index, const uint8_t* buffer, int length) {
   DCHECK(index >= 0 && length >= 0 && length <= kMaxInt - index &&
          index + length <= this->data_length());
   Address dst_addr = field_address(kDataStartOffset + index * kByteSize);
@@ -98,7 +99,6 @@ TQ_OBJECT_CONSTRUCTORS_IMPL(UncompiledDataWithPreparseDataAndJob)
 
 TQ_OBJECT_CONSTRUCTORS_IMPL(InterpreterData)
 TQ_OBJECT_CONSTRUCTORS_IMPL(SharedFunctionInfo)
-NEVER_READ_ONLY_SPACE_IMPL(SharedFunctionInfo)
 DEFINE_DEOPT_ELEMENT_ACCESSORS(SharedFunctionInfo, Object)
 
 RELEASE_ACQUIRE_ACCESSORS(SharedFunctionInfo, function_data, Object,
@@ -186,21 +186,20 @@ void SharedFunctionInfo::SetName(String name) {
 bool SharedFunctionInfo::is_script() const {
   return scope_info(kAcquireLoad).is_script_scope() &&
          Script::cast(script()).compilation_type() ==
-             Script::COMPILATION_TYPE_HOST;
+             Script::CompilationType::kHost;
 }
 
 bool SharedFunctionInfo::needs_script_context() const {
   return is_script() && scope_info(kAcquireLoad).ContextLocalCount() > 0;
 }
 
-template <typename IsolateT>
-AbstractCode SharedFunctionInfo::abstract_code(IsolateT* isolate) {
+AbstractCode SharedFunctionInfo::abstract_code(Isolate* isolate) {
   // TODO(v8:11429): Decide if this return bytecode or baseline code, when the
   // latter is present.
   if (HasBytecodeArray(isolate)) {
     return AbstractCode::cast(GetBytecodeArray(isolate));
   } else {
-    return AbstractCode::cast(GetCode());
+    return AbstractCode::cast(GetCode(isolate));
   }
 }
 
@@ -227,7 +226,7 @@ SharedFunctionInfo::Inlineability SharedFunctionInfo::GetInlineability(
     IsolateT* isolate) const {
   if (!script().IsScript()) return kHasNoScript;
 
-  if (GetIsolate()->is_precise_binary_code_coverage() &&
+  if (isolate->is_precise_binary_code_coverage() &&
       !has_reported_binary_coverage()) {
     // We may miss invocations if this function is inlined.
     return kNeedsBinaryCoverage;
@@ -383,8 +382,9 @@ void SharedFunctionInfo::set_function_map_index(int index) {
 }
 
 void SharedFunctionInfo::clear_padding() {
-  memset(reinterpret_cast<void*>(this->address() + kSize), 0,
-         kAlignedSize - kSize);
+#if V8_SFI_NEEDS_PADDING
+  set_optional_padding(0);
+#endif  // V8_SFI_NEEDS_PADDING
 }
 
 void SharedFunctionInfo::UpdateFunctionMapIndex() {
@@ -564,9 +564,8 @@ DEF_GETTER(SharedFunctionInfo, HasBytecodeArray, bool) {
 
 template <typename IsolateT>
 BytecodeArray SharedFunctionInfo::GetBytecodeArray(IsolateT* isolate) const {
-  // TODO(ishell): access shared_function_info_access() via IsolateT.
   SharedMutexGuardIfOffThread<IsolateT, base::kShared> mutex_guard(
-      GetIsolate()->shared_function_info_access(), isolate);
+      isolate->shared_function_info_access(), isolate);
 
   DCHECK(HasBytecodeArray());
   if (HasDebugInfo() && GetDebugInfo().HasInstrumentedBytecodeArray()) {
@@ -755,6 +754,15 @@ const wasm::FunctionSig* SharedFunctionInfo::wasm_function_signature() const {
   DCHECK_LT(function_data.function_index(), module->functions.size());
   return module->functions[function_data.function_index()].sig;
 }
+
+int SharedFunctionInfo::wasm_function_index() const {
+  if (!HasWasmExportedFunctionData()) return -1;
+  const WasmExportedFunctionData& function_data = wasm_exported_function_data();
+  DCHECK_GE(function_data.function_index(), 0);
+  DCHECK_LT(function_data.function_index(), wasm_module()->functions.size());
+  return function_data.function_index();
+}
+
 #endif  // V8_ENABLE_WEBASSEMBLY
 
 bool SharedFunctionInfo::HasBuiltinId() const {

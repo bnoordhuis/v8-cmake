@@ -29,6 +29,10 @@
   /* V8 side owner: jkummerow */                                               \
   V(gc, "garbage collection", false)                                           \
                                                                                \
+  /* Inlining of small wasm GC functions into JavaScript */                    \
+  /* V8 side owner: mliedtke */                                                \
+  V(js_inlining, "inline small wasm functions into JS", false)                 \
+                                                                               \
   /* Non-specified, V8-only experimental additions to the GC proposal */       \
   /* V8 side owner: jkummerow */                                               \
   V(assume_ref_cast_succeeds,                                                  \
@@ -46,16 +50,6 @@
   /* V8 side owner: manoskouk */                                               \
   V(typed_funcref, "typed function references", false)                         \
                                                                                \
-  /* Memory64 proposal. */                                                     \
-  /* https://github.com/WebAssembly/memory64 */                                \
-  /* V8 side owner: clemensb */                                                \
-  V(memory64, "memory64", false)                                               \
-                                                                               \
-  /* Relaxed SIMD proposal. */                                                 \
-  /* https://github.com/WebAssembly/relaxed-simd */                            \
-  /* V8 side owner: zhin */                                                    \
-  V(relaxed_simd, "relaxed simd", false)                                       \
-                                                                               \
   /* Branch Hinting proposal. */                                               \
   /* https://github.com/WebAssembly/branch-hinting */                          \
   /* V8 side owner: jkummerow */                                               \
@@ -65,11 +59,6 @@
   /* https://github.com/WebAssembly/stack-switching */                         \
   /* V8 side owner: thibaudm, fgm */                                           \
   V(stack_switching, "stack switching", false)                                 \
-                                                                               \
-  /* Extended Constant Expressions Proposal. */                                \
-  /* https://github.com/WebAssembly/extended-const */                          \
-  /* V8 side owner: manoskouk */                                               \
-  V(extended_const, "extended constant expressions", false)                    \
                                                                                \
   /* Reference-Typed Strings Proposal. */                                      \
   /* https://github.com/WebAssembly/stringref */                               \
@@ -85,27 +74,67 @@
 // be shipped with enough lead time to the next branch to allow for
 // stabilization.
 #define FOREACH_WASM_STAGING_FEATURE_FLAG(V) /*          (force 80 columns) */ \
-  /* Tail call / return call proposal. */                                      \
-  /* https://github.com/webassembly/tail-call */                               \
-  /* V8 side owner: thibaudm */                                                \
-  /* Staged in v8.7 * */                                                       \
-  V(return_call, "return call opcodes", false)                                 \
-                                                                               \
   /* Type reflection proposal. */                                              \
   /* https://github.com/webassembly/js-types */                                \
   /* V8 side owner: ahaas */                                                   \
   /* Staged in v7.8. */                                                        \
-  V(type_reflection, "wasm type reflection in JS", false)
+  V(type_reflection, "wasm type reflection in JS", false)                      \
+                                                                               \
+  /* Memory64 proposal. */                                                     \
+  /* https://github.com/WebAssembly/memory64 */                                \
+  /* V8 side owner: clemensb */                                                \
+  V(memory64, "memory64", false)                                               \
+                                                                               \
+  /* Not user-visible, defined here so an Origin Trial can control it. */      \
+  /* V8 side owner: manoskouk, clemensb */                                     \
+  /* Staged in v11.3 */                                                        \
+  /* Launch bug: https://crbug.com/1424350 */                                  \
+  V(inlining, "wasm-into-wasm inlining", false)
 
 // #############################################################################
 // Shipped features (enabled by default). Remove the feature flag once they hit
 // stable and are expected to stay enabled.
-#define FOREACH_WASM_SHIPPED_FEATURE_FLAG(V) /*          (force 80 columns) */
+#define FOREACH_WASM_SHIPPED_FEATURE_FLAG(V) /*          (force 80 columns) */ \
+  /* Tail call / return call proposal. */                                      \
+  /* https://github.com/webassembly/tail-call */                               \
+  /* V8 side owner: thibaudm */                                                \
+  /* Staged in v8.7 * */                                                       \
+  /* Shipped in v11.2 * */                                                     \
+  /* ITS: https://groups.google.com/a/chromium.org/g/blink-dev/c/6VEOK4WZ7Wk   \
+  */                                                                           \
+  V(return_call, "return call opcodes", true)                                  \
+                                                                               \
+  /* Extended Constant Expressions Proposal. */                                \
+  /* https://github.com/WebAssembly/extended-const */                          \
+  /* V8 side owner: manoskouk */                                               \
+  /* Staged in v11.3. */                                                       \
+  /* Shipped in v11.4. */                                                      \
+  V(extended_const, "extended constant expressions", true)                     \
+                                                                               \
+  /* Relaxed SIMD proposal. */                                                 \
+  /* https://github.com/WebAssembly/relaxed-simd */                            \
+  /* V8 side owner: gdeepti */                                                 \
+  /* Staged in v11.2. */                                                       \
+  /* Shipped in v11.4. */                                                      \
+  /* ITS: https://groups.google.com/a/chromium.org/g/blink-dev/c/dX61V0HAAz4   \
+  */                                                                           \
+  V(relaxed_simd, "relaxed simd", true)
 
 // Combination of all available wasm feature flags.
 #define FOREACH_WASM_FEATURE_FLAG(V)        \
   FOREACH_WASM_EXPERIMENTAL_FEATURE_FLAG(V) \
   FOREACH_WASM_STAGING_FEATURE_FLAG(V)      \
   FOREACH_WASM_SHIPPED_FEATURE_FLAG(V)
+
+// Consistency check: Experimental and staged features are off by default.
+#define CHECK_WASM_FEATURE_OFF_BY_DEFAULT(name, desc, enabled) \
+  static_assert(enabled == false);
+#define CHECK_WASM_FEATURE_ON_BY_DEFAULT(name, desc, enabled) \
+  static_assert(enabled == true);
+FOREACH_WASM_EXPERIMENTAL_FEATURE_FLAG(CHECK_WASM_FEATURE_OFF_BY_DEFAULT)
+FOREACH_WASM_STAGING_FEATURE_FLAG(CHECK_WASM_FEATURE_OFF_BY_DEFAULT)
+FOREACH_WASM_SHIPPED_FEATURE_FLAG(CHECK_WASM_FEATURE_ON_BY_DEFAULT)
+#undef CHECK_WASM_FEATURE_OFF_BY_DEFAULT
+#undef CHECK_WASM_FEATURE_ON_BY_DEFAULT
 
 #endif  // V8_WASM_WASM_FEATURE_FLAGS_H_

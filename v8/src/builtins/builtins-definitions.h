@@ -161,10 +161,11 @@ namespace internal {
   /* String helpers */                                                         \
   TFC(StringFromCodePointAt, StringAtAsString)                                 \
   TFC(StringEqual, StringEqual)                                                \
-  TFC(StringGreaterThan, Compare)                                              \
-  TFC(StringGreaterThanOrEqual, Compare)                                       \
-  TFC(StringLessThan, Compare)                                                 \
-  TFC(StringLessThanOrEqual, Compare)                                          \
+  TFC(StringGreaterThan, CompareNoContext)                                     \
+  TFC(StringGreaterThanOrEqual, CompareNoContext)                              \
+  TFC(StringLessThan, CompareNoContext)                                        \
+  TFC(StringLessThanOrEqual, CompareNoContext)                                 \
+  TFC(StringCompare, CompareNoContext)                                         \
   TFC(StringSubstring, StringSubstring)                                        \
                                                                                \
   /* OrderedHashTable helpers */                                               \
@@ -198,7 +199,6 @@ namespace internal {
                                                                                \
   /* Maglev Compiler */                                                        \
   ASM(MaglevOnStackReplacement, OnStackReplacement)                            \
-  ASM(MaglevOutOfLinePrologue, NoContext)                                      \
                                                                                \
   /* Code life-cycle */                                                        \
   TFC(CompileLazy, JSTrampoline)                                               \
@@ -271,6 +271,9 @@ namespace internal {
                                                                                \
   /* Type conversions continuations */                                         \
   TFC(ToBooleanLazyDeoptContinuation, SingleParameterOnStack)                  \
+  TFC(MathCeilContinuation, SingleParameterOnStack)                            \
+  TFC(MathFloorContinuation, SingleParameterOnStack)                           \
+  TFC(MathRoundContinuation, SingleParameterOnStack)                           \
                                                                                \
   /* Handlers */                                                               \
   TFH(KeyedLoadIC_PolymorphicName, LoadWithVector)                             \
@@ -399,6 +402,7 @@ namespace internal {
   CPP(ArrayShift)                                                              \
   /* ES6 #sec-array.prototype.unshift */                                       \
   CPP(ArrayUnshift)                                                            \
+  CPP(ArrayFromAsync)                                                          \
   /* Support for Array.from and other array-copying idioms */                  \
   TFS(CloneFastJSArray, kSource)                                               \
   TFS(CloneFastJSArrayFillingHoles, kSource)                                   \
@@ -427,8 +431,9 @@ namespace internal {
   CPP(ArrayBufferPrototypeSlice)                                               \
   /* https://tc39.es/proposal-resizablearraybuffer/ */                         \
   CPP(ArrayBufferPrototypeResize)                                              \
-  /* proposal-resizablearraybuffer/#sec-arraybuffer.prototype.transfer */      \
+  /* https://tc39.es/proposal-arraybuffer-transfer/ */                         \
   CPP(ArrayBufferPrototypeTransfer)                                            \
+  CPP(ArrayBufferPrototypeTransferToFixedLength)                               \
                                                                                \
   /* AsyncFunction */                                                          \
   TFS(AsyncFunctionEnter, kClosure, kReceiver)                                 \
@@ -502,7 +507,6 @@ namespace internal {
   /* DataView */                                                               \
   /* ES #sec-dataview-constructor */                                           \
   CPP(DataViewConstructor)                                                     \
-  TFC(DataViewGetVariableLength, DataViewGetVariableLength)                    \
                                                                                \
   /* Date */                                                                   \
   /* ES #sec-date-constructor */                                               \
@@ -626,10 +630,6 @@ namespace internal {
   CPP(JsonRawJson)                                                             \
   CPP(JsonIsRawJson)                                                           \
                                                                                \
-  /* Web snapshots */                                                          \
-  CPP(WebSnapshotSerialize)                                                    \
-  CPP(WebSnapshotDeserialize)                                                  \
-                                                                               \
   /* ICs */                                                                    \
   TFH(LoadIC, LoadWithVector)                                                  \
   TFH(LoadIC_Megamorphic, LoadWithVector)                                      \
@@ -641,9 +641,11 @@ namespace internal {
   TFH(LoadSuperICBaseline, LoadWithReceiverBaseline)                           \
   TFH(KeyedLoadIC, KeyedLoadWithVector)                                        \
   TFH(KeyedLoadIC_Megamorphic, KeyedLoadWithVector)                            \
+  TFH(KeyedLoadIC_MegamorphicStringKey, KeyedLoadWithVector)                   \
   TFH(KeyedLoadICTrampoline, KeyedLoad)                                        \
   TFH(KeyedLoadICBaseline, KeyedLoadBaseline)                                  \
   TFH(KeyedLoadICTrampoline_Megamorphic, KeyedLoad)                            \
+  TFH(KeyedLoadICTrampoline_MegamorphicStringKey, KeyedLoad)                   \
   TFH(StoreGlobalIC, StoreGlobalWithVector)                                    \
   TFH(StoreGlobalICTrampoline, StoreGlobal)                                    \
   TFH(StoreGlobalICBaseline, StoreGlobalBaseline)                              \
@@ -671,8 +673,10 @@ namespace internal {
   TFH(LoadGlobalICBaseline, LoadGlobalBaseline)                                \
   TFH(LoadGlobalICInsideTypeofTrampoline, LoadGlobal)                          \
   TFH(LoadGlobalICInsideTypeofBaseline, LoadGlobalBaseline)                    \
+  TFH(LookupGlobalIC, LookupWithVector)                                        \
   TFH(LookupGlobalICTrampoline, LookupTrampoline)                              \
   TFH(LookupGlobalICBaseline, LookupBaseline)                                  \
+  TFH(LookupGlobalICInsideTypeof, LookupWithVector)                            \
   TFH(LookupGlobalICInsideTypeofTrampoline, LookupTrampoline)                  \
   TFH(LookupGlobalICInsideTypeofBaseline, LookupBaseline)                      \
   TFH(CloneObjectIC, CloneObjectWithVector)                                    \
@@ -721,8 +725,8 @@ namespace internal {
   CPP(NumberPrototypeToFixed)                                                  \
   CPP(NumberPrototypeToLocaleString)                                           \
   CPP(NumberPrototypeToPrecision)                                              \
-  TFC(SameValue, Compare)                                                      \
-  TFC(SameValueNumbersOnly, Compare)                                           \
+  TFC(SameValue, CompareNoContext)                                             \
+  TFC(SameValueNumbersOnly, CompareNoContext)                                  \
                                                                                \
   /* Binary ops with feedback collection */                                    \
   TFC(Add_Baseline, BinaryOp_Baseline)                                         \
@@ -990,7 +994,8 @@ namespace internal {
   IF_WASM(ASM, WasmDebugBreak, WasmDummy)                                      \
   IF_WASM(ASM, WasmOnStackReplace, WasmDummy)                                  \
   IF_WASM(TFC, WasmFloat32ToNumber, WasmFloat32ToNumber)                       \
-  IF_WASM(TFC, WasmFloat64ToNumber, WasmFloat64ToNumber)                       \
+  IF_WASM(TFC, WasmFloat64ToNumber, WasmFloat64ToTagged)                       \
+  IF_WASM(TFC, WasmFloat64ToString, WasmFloat64ToTagged)                       \
   IF_WASM(TFC, JSToWasmLazyDeoptContinuation, SingleParameterOnStack)          \
                                                                                \
   /* WeakMap */                                                                \
@@ -1012,13 +1017,18 @@ namespace internal {
   TFS(WeakCollectionSet, kCollection, kKey, kValue)                            \
                                                                                \
   /* JS Structs and friends */                                                 \
+  CPP(SharedSpaceJSObjectHasInstance)                                          \
   CPP(SharedStructTypeConstructor)                                             \
+  CPP(SharedStructTypeIsSharedStruct)                                          \
   CPP(SharedStructConstructor)                                                 \
   CPP(SharedArrayConstructor)                                                  \
+  CPP(SharedArrayIsSharedArray)                                                \
   CPP(AtomicsMutexConstructor)                                                 \
+  CPP(AtomicsMutexIsMutex)                                                     \
   CPP(AtomicsMutexLock)                                                        \
   CPP(AtomicsMutexTryLock)                                                     \
   CPP(AtomicsConditionConstructor)                                             \
+  CPP(AtomicsConditionIsCondition)                                             \
   CPP(AtomicsConditionWait)                                                    \
   CPP(AtomicsConditionNotify)                                                  \
                                                                                \
@@ -1791,6 +1801,20 @@ namespace internal {
   CPP(LocalePrototypeCollation)                                        \
   /* ecma402 #sec-Intl.Locale.prototype.collations */                  \
   CPP(LocalePrototypeCollations)                                       \
+  /* ecma402 #sec-Intl.Locale.prototype.getCalendars */                \
+  CPP(LocalePrototypeGetCalendars)                                     \
+  /* ecma402 #sec-Intl.Locale.prototype.getCollations */               \
+  CPP(LocalePrototypeGetCollations)                                    \
+  /* ecma402 #sec-Intl.Locale.prototype.getHourCycles */               \
+  CPP(LocalePrototypeGetHourCycles)                                    \
+  /* ecma402 #sec-Intl.Locale.prototype.getNumberingSystems */         \
+  CPP(LocalePrototypeGetNumberingSystems)                              \
+  /* ecma402 #sec-Intl.Locale.prototype.getTimeZones */                \
+  CPP(LocalePrototypeGetTimeZones)                                     \
+  /* ecma402 #sec-Intl.Locale.prototype.getTextInfo */                 \
+  CPP(LocalePrototypeGetTextInfo)                                      \
+  /* ecma402 #sec-Intl.Locale.prototype.getWeekInfo */                 \
+  CPP(LocalePrototypeGetWeekInfo)                                      \
   /* ecma402 #sec-Intl.Locale.prototype.hourCycle */                   \
   CPP(LocalePrototypeHourCycle)                                        \
   /* ecma402 #sec-Intl.Locale.prototype.hourCycles */                  \
