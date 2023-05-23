@@ -781,7 +781,6 @@ add_library(v8_libbase STATIC
   $<${is-aix}:v8/src/base/debug/stack_trace_posix.cc>
   $<${is-aix}:v8/src/base/platform/platform-aix.cc>
   $<${is-darwin}:v8/src/base/debug/stack_trace_posix.cc>
-  $<${is-darwin}:v8/src/base/platform/platform-macos.cc>
   $<${is-darwin}:v8/src/base/platform/platform-darwin.cc>
   $<${is-linux}:v8/src/base/debug/stack_trace_posix.cc>
   $<${is-linux}:v8/src/base/platform/platform-linux.cc>
