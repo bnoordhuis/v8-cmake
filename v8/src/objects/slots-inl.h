@@ -27,12 +27,12 @@ namespace internal {
 FullObjectSlot::FullObjectSlot(Object* object)
     : SlotBase(reinterpret_cast<Address>(&object->ptr_)) {}
 
-bool FullObjectSlot::contains_value(Address raw_value) const {
-  return base::AsAtomicPointer::Relaxed_Load(location()) == raw_value;
-}
-
 bool FullObjectSlot::contains_map_value(Address raw_value) const {
   return load_map().ptr() == raw_value;
+}
+
+bool FullObjectSlot::Relaxed_ContainsMapValue(Address raw_value) const {
+  return base::AsAtomicPointer::Relaxed_Load(location()) == raw_value;
 }
 
 Object FullObjectSlot::operator*() const { return Object(*location()); }
@@ -265,7 +265,8 @@ inline void CopyTagged(Address dst, const Address src, size_t num_tagged) {
 // Sets |counter| number of kTaggedSize-sized values starting at |start| slot.
 inline void MemsetTagged(Tagged_t* start, Object value, size_t counter) {
 #ifdef V8_COMPRESS_POINTERS
-  Tagged_t raw_value = V8HeapCompressionScheme::CompressTagged(value.ptr());
+  // CompressAny since many callers pass values which are not valid objects.
+  Tagged_t raw_value = V8HeapCompressionScheme::CompressAny(value.ptr());
   MemsetUint32(start, raw_value, counter);
 #else
   Address raw_value = value.ptr();

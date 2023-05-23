@@ -28,6 +28,7 @@ export class ScheduleView extends TextView {
   public initializeContent(schedule: SchedulePhase, rememberedSelection: SelectionStorage): void {
     this.divNode.innerHTML = "";
     this.schedule = schedule;
+    this.clearSelectionMaps();
     this.addBlocks(schedule.data.blocksRpo);
     this.show();
     if (rememberedSelection) {
@@ -37,8 +38,8 @@ export class ScheduleView extends TextView {
   }
 
   public detachSelection(): SelectionStorage {
-    return new SelectionStorage(this.nodeSelection.detachSelection(),
-      this.blockSelection.detachSelection());
+    return new SelectionStorage(this.nodeSelections.current.detachSelection(),
+      this.blockSelections.current.detachSelection());
   }
 
   public adaptSelection(selection: SelectionStorage): SelectionStorage {
@@ -62,7 +63,7 @@ export class ScheduleView extends TextView {
         select.push(node.id);
       }
     }
-    this.nodeSelectionHandler.select(select, true);
+    this.nodeSelectionHandler.select(select, true, false);
   }
 
   private addBlocks(blocks: Array<ScheduleBlock>) {
@@ -74,10 +75,11 @@ export class ScheduleView extends TextView {
 
   private attachSelection(adaptedSelection: SelectionStorage): void {
     if (!(adaptedSelection instanceof SelectionStorage)) return;
-    this.nodeSelectionHandler.clear();
     this.blockSelectionHandler.clear();
-    this.nodeSelectionHandler.select(adaptedSelection.adaptedNodes, true);
-    this.blockSelectionHandler.select(adaptedSelection.adaptedBocks, true);
+    this.nodeSelectionHandler.clear();
+    this.blockSelectionHandler.select(
+                Array.from(adaptedSelection.adaptedBocks).map(block => Number(block)), true, true);
+    this.nodeSelectionHandler.select(adaptedSelection.adaptedNodes, true, true);
   }
 
   private createElementForBlock(block: ScheduleBlock): HTMLElement {
@@ -91,7 +93,9 @@ export class ScheduleView extends TextView {
     instrMarker.onclick = this.mkBlockLinkHandler(block.rpo);
     scheduleBlock.appendChild(instrMarker);
 
-    const blocksRpoId = this.createElement("div", "block-id com clickable", String(block.rpo) + " Id:" + String(block.id));
+    let displayStr = String(block.rpo) + " Id:" + String(block.id);
+    if(block.count != -1) displayStr += " Count:" + String(block.count);
+    const blocksRpoId = this.createElement("div", "block-id com clickable", displayStr);
     blocksRpoId.onclick = this.mkBlockLinkHandler(block.rpo);
     scheduleBlock.appendChild(blocksRpoId);
     const blockPred = this.createElement("div", "predecessor-list block-list comma-sep-list");
@@ -156,7 +160,7 @@ export class ScheduleView extends TextView {
       if (!e.shiftKey) {
         view.blockSelectionHandler.clear();
       }
-      view.blockSelectionHandler.select([blockId], true);
+      view.blockSelectionHandler.select([blockId], true, false);
     };
   }
 
@@ -167,7 +171,7 @@ export class ScheduleView extends TextView {
       if (!e.shiftKey) {
         view.nodeSelectionHandler.clear();
       }
-      view.nodeSelectionHandler.select([nodeId], true);
+      view.nodeSelectionHandler.select([nodeId], true, false);
     };
   }
 

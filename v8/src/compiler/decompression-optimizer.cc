@@ -16,6 +16,7 @@ namespace {
 bool IsMachineLoad(Node* const node) {
   const IrOpcode::Value opcode = node->opcode();
   return opcode == IrOpcode::kLoad || opcode == IrOpcode::kProtectedLoad ||
+         opcode == IrOpcode::kLoadTrapOnNull ||
          opcode == IrOpcode::kUnalignedLoad ||
          opcode == IrOpcode::kLoadImmutable;
 }
@@ -100,6 +101,7 @@ void DecompressionOptimizer::MarkNodeInputs(Node* node) {
     // SPECIAL CASES - Load.
     case IrOpcode::kLoad:
     case IrOpcode::kProtectedLoad:
+    case IrOpcode::kLoadTrapOnNull:
     case IrOpcode::kUnalignedLoad:
     case IrOpcode::kLoadImmutable:
       DCHECK_EQ(node->op()->ValueInputCount(), 2);
@@ -118,9 +120,13 @@ void DecompressionOptimizer::MarkNodeInputs(Node* node) {
       break;
     // SPECIAL CASES - Store.
     case IrOpcode::kStore:
+    case IrOpcode::kStorePair:
     case IrOpcode::kProtectedStore:
+    case IrOpcode::kStoreTrapOnNull:
     case IrOpcode::kUnalignedStore: {
-      DCHECK_EQ(node->op()->ValueInputCount(), 3);
+      DCHECK(node->op()->ValueInputCount() == 3 ||
+             (node->opcode() == IrOpcode::kStorePair &&
+              node->op()->ValueInputCount() == 4));
       MaybeMarkAndQueueForRevisit(node->InputAt(0),
                                   State::kEverythingObserved);  // base pointer
       MaybeMarkAndQueueForRevisit(node->InputAt(1),
@@ -128,14 +134,22 @@ void DecompressionOptimizer::MarkNodeInputs(Node* node) {
       // TODO(v8:7703): When the implementation is done, check if this ternary
       // operator is too restrictive, since we only mark Tagged stores as 32
       // bits.
-      MachineRepresentation representation =
-          node->opcode() == IrOpcode::kUnalignedStore
-              ? UnalignedStoreRepresentationOf(node->op())
-              : StoreRepresentationOf(node->op()).representation();
-      MaybeMarkAndQueueForRevisit(node->InputAt(2),
-                                  IsAnyTagged(representation)
-                                      ? State::kOnly32BitsObserved
-                                      : State::kEverythingObserved);  // value
+      MachineRepresentation representation;
+      if (node->opcode() == IrOpcode::kUnalignedStore) {
+        representation = UnalignedStoreRepresentationOf(node->op());
+      } else if (node->opcode() == IrOpcode::kStorePair) {
+        representation =
+            StorePairRepresentationOf(node->op()).first.representation();
+      } else {
+        representation = StoreRepresentationOf(node->op()).representation();
+      }
+      State observed = ElementSizeLog2Of(representation) <= 2
+                           ? State::kOnly32BitsObserved
+                           : State::kEverythingObserved;
+      MaybeMarkAndQueueForRevisit(node->InputAt(2), observed);  // value
+      if (node->opcode() == IrOpcode::kStorePair) {
+        MaybeMarkAndQueueForRevisit(node->InputAt(3), observed);  // value 2
+      }
     } break;
     // SPECIAL CASES - Variable inputs.
     // The deopt code knows how to handle Compressed inputs, both
@@ -264,6 +278,10 @@ void DecompressionOptimizer::ChangeLoad(Node* const node) {
     case IrOpcode::kProtectedLoad:
       NodeProperties::ChangeOp(node,
                                machine()->ProtectedLoad(compressed_load_rep));
+      break;
+    case IrOpcode::kLoadTrapOnNull:
+      NodeProperties::ChangeOp(node,
+                               machine()->LoadTrapOnNull(compressed_load_rep));
       break;
     case IrOpcode::kUnalignedLoad:
       NodeProperties::ChangeOp(node,

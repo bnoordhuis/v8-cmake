@@ -106,19 +106,25 @@ class JsonParseInternalizer {
   static MaybeHandle<Object> Internalize(Isolate* isolate,
                                          Handle<Object> result,
                                          Handle<Object> reviver,
-                                         Handle<String> source);
+                                         Handle<String> source,
+                                         MaybeHandle<Object> val_node);
 
  private:
   JsonParseInternalizer(Isolate* isolate, Handle<JSReceiver> reviver,
                         Handle<String> source)
       : isolate_(isolate), reviver_(reviver), source_(source) {}
 
+  enum WithOrWithoutSource { kWithoutSource, kWithSource };
+
+  template <WithOrWithoutSource with_source>
   MaybeHandle<Object> InternalizeJsonProperty(Handle<JSReceiver> holder,
                                               Handle<String> key,
-                                              Handle<Object> val_node);
+                                              Handle<Object> val_node,
+                                              Handle<Object> snapshot);
 
+  template <WithOrWithoutSource with_source>
   bool RecurseAndApply(Handle<JSReceiver> holder, Handle<String> name,
-                       Handle<Object> val_node);
+                       Handle<Object> val_node, Handle<Object> snapshot);
 
   Isolate* isolate_;
   Handle<JSReceiver> reviver_;
@@ -159,12 +165,16 @@ class JsonParser final {
     HighAllocationThroughputScope high_throughput_scope(
         V8::GetCurrentPlatform());
     Handle<Object> result;
-    ASSIGN_RETURN_ON_EXCEPTION(isolate, result,
-                               JsonParser(isolate, source).ParseJson(reviver),
-                               Object);
+    MaybeHandle<Object> val_node;
+    {
+      JsonParser parser(isolate, source);
+      ASSIGN_RETURN_ON_EXCEPTION(isolate, result, parser.ParseJson(reviver),
+                                 Object);
+      val_node = parser.parsed_val_node_;
+    }
     if (reviver->IsCallable()) {
       return JsonParseInternalizer::Internalize(isolate, result, reviver,
-                                                source);
+                                                source, val_node);
     }
     return result;
   }
@@ -379,6 +389,9 @@ class JsonParser final {
   Handle<JSFunction> object_constructor_;
   const Handle<String> original_source_;
   Handle<String> source_;
+  // The parsed value's source to be passed to the reviver, if the reviver is
+  // callable.
+  MaybeHandle<Object> parsed_val_node_;
 
   // Cached pointer to the raw chars in source. In case source is on-heap, we
   // register an UpdatePointers callback. For this reason, chars_, cursor_ and

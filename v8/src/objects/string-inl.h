@@ -262,8 +262,7 @@ inline TResult StringShape::DispatchToSpecificTypeWithoutCast(TArgs&&... args) {
     case kSlicedStringTag | kOneByteStringTag:
     case kSlicedStringTag | kTwoByteStringTag:
       return TDispatcher::HandleSlicedString(std::forward<TArgs>(args)...);
-    case kThinStringTag | kOneByteStringTag:
-    case kThinStringTag | kTwoByteStringTag:
+    case kThinStringTag:
       return TDispatcher::HandleThinString(std::forward<TArgs>(args)...);
     default:
       return TDispatcher::HandleInvalidString(std::forward<TArgs>(args)...);
@@ -303,12 +302,14 @@ inline TResult StringShape::DispatchToSpecificType(String str,
 }
 
 DEF_GETTER(String, IsOneByteRepresentation, bool) {
-  uint32_t type = map(cage_base).instance_type();
+  String string = IsThinString() ? ThinString::cast(*this).actual() : *this;
+  uint32_t type = string.map(cage_base).instance_type();
   return (type & kStringEncodingMask) == kOneByteStringTag;
 }
 
 DEF_GETTER(String, IsTwoByteRepresentation, bool) {
-  uint32_t type = map(cage_base).instance_type();
+  String string = IsThinString() ? ThinString::cast(*this).actual() : *this;
+  uint32_t type = string.map(cage_base).instance_type();
   return (type & kStringEncodingMask) == kTwoByteStringTag;
 }
 
@@ -352,13 +353,13 @@ Char FlatStringReader::Get(int index) const {
 template <typename Char>
 class SequentialStringKey final : public StringTableKey {
  public:
-  SequentialStringKey(const base::Vector<const Char>& chars, uint64_t seed,
+  SequentialStringKey(base::Vector<const Char> chars, uint64_t seed,
                       bool convert = false)
       : SequentialStringKey(StringHasher::HashSequentialString<Char>(
                                 chars.begin(), chars.length(), seed),
                             chars, convert) {}
 
-  SequentialStringKey(int raw_hash_field, const base::Vector<const Char>& chars,
+  SequentialStringKey(int raw_hash_field, base::Vector<const Char> chars,
                       bool convert = false)
       : StringTableKey(raw_hash_field, chars.length()),
         chars_(chars),
@@ -449,14 +450,15 @@ class SeqSubStringKey final : public StringTableKey {
       CopyChars(result->GetChars(no_gc), string_->GetChars(no_gc) + from_,
                 length());
       internalized_string_ = result;
+    } else {
+      Handle<SeqTwoByteString> result =
+          isolate->factory()->AllocateRawTwoByteInternalizedString(
+              length(), raw_hash_field());
+      DisallowGarbageCollection no_gc;
+      CopyChars(result->GetChars(no_gc), string_->GetChars(no_gc) + from_,
+                length());
+      internalized_string_ = result;
     }
-    Handle<SeqTwoByteString> result =
-        isolate->factory()->AllocateRawTwoByteInternalizedString(
-            length(), raw_hash_field());
-    DisallowGarbageCollection no_gc;
-    CopyChars(result->GetChars(no_gc), string_->GetChars(no_gc) + from_,
-              length());
-    internalized_string_ = result;
   }
 
   Handle<String> GetHandleForInsertion() {
@@ -577,8 +579,7 @@ bool String::IsEqualToImpl(
                                              cage_base, access_guard);
       }
 
-      case kThinStringTag | kOneByteStringTag:
-      case kThinStringTag | kTwoByteStringTag:
+      case kThinStringTag:
         string = ThinString::cast(string).actual(cage_base);
         continue;
 
@@ -717,19 +718,6 @@ base::Optional<String::FlatContent> String::TryGetFlatContentFromDirectString(
 
 String::FlatContent String::GetFlatContent(
     const DisallowGarbageCollection& no_gc) {
-#if DEBUG
-  // Check that this method is called only from the main thread.
-  {
-    Isolate* isolate;
-    // We don't have to check read only strings as those won't move.
-    //
-    // TODO(v8:12007): Currently character data is never overwritten for
-    // shared strings.
-    DCHECK_IMPLIES(GetIsolateFromHeapObject(*this, &isolate) && !InSharedHeap(),
-                   ThreadId::Current() == isolate->thread_id());
-  }
-#endif
-
   return GetFlatContent(no_gc, SharedStringAccessGuardIfNeeded::NotNeeded());
 }
 
@@ -953,8 +941,7 @@ ConsString String::VisitFlat(
       case kConsStringTag | kTwoByteStringTag:
         return ConsString::cast(string);
 
-      case kThinStringTag | kOneByteStringTag:
-      case kThinStringTag | kTwoByteStringTag:
+      case kThinStringTag:
         string = ThinString::cast(string).actual(cage_base);
         continue;
 
@@ -967,12 +954,21 @@ ConsString String::VisitFlat(
 bool String::IsWellFormedUnicode(Isolate* isolate, Handle<String> string) {
   // One-byte strings are definitionally well formed and cannot have unpaired
   // surrogates.
+  //
+  // Note that an indirect string's 1-byte flag can differ from their underlying
+  // string's 1-byte flag, because the underlying string may have been
+  // externalized from 1-byte to 2-byte. That is, the 1-byte flag is the
+  // 1-byteness at time of creation. However, this is sufficient to determine
+  // well-formedness. String::MakeExternal requires that the external resource's
+  // content is equal to the original string's content, even if 1-byteness
+  // differs.
   if (string->IsOneByteRepresentation()) return true;
 
   // TODO(v8:13557): The two-byte case can be optimized by extending the
   // InstanceType. See
   // https://docs.google.com/document/d/15f-1c_Ysw3lvjy_Gx0SmmD9qeO8UuXuAbWIpWCnTDO8/
   string = Flatten(isolate, string);
+  if (String::IsOneByteRepresentationUnderneath(*string)) return true;
   DisallowGarbageCollection no_gc;
   String::FlatContent flat = string->GetFlatContent(no_gc);
   DCHECK(flat.IsFlat());
@@ -1007,14 +1003,15 @@ uint8_t SeqOneByteString::Get(
     const SharedStringAccessGuardIfNeeded& access_guard) const {
   USE(access_guard);
   DCHECK(index >= 0 && index < length());
-  return ReadField<byte>(kHeaderSize + index * kCharSize);
+  return ReadField<uint8_t>(kHeaderSize + index * kCharSize);
 }
 
 void SeqOneByteString::SeqOneByteStringSet(int index, uint16_t value) {
   DCHECK_GE(index, 0);
   DCHECK_LT(index, length());
   DCHECK_LE(value, kMaxOneByteCharCode);
-  WriteField<byte>(kHeaderSize + index * kCharSize, static_cast<byte>(value));
+  WriteField<uint8_t>(kHeaderSize + index * kCharSize,
+                      static_cast<uint8_t>(value));
 }
 
 void SeqOneByteString::SeqOneByteStringSetChars(int index,

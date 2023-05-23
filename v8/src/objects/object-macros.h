@@ -74,6 +74,9 @@
 #define DECL_RELAXED_INT32_ACCESSORS(name) \
   DECL_RELAXED_PRIMITIVE_ACCESSORS(name, int32_t)
 
+#define DECL_RELAXED_UINT32_ACCESSORS(name) \
+  DECL_RELAXED_PRIMITIVE_ACCESSORS(name, uint32_t)
+
 #define DECL_RELAXED_UINT16_ACCESSORS(name) \
   DECL_RELAXED_PRIMITIVE_ACCESSORS(name, uint16_t)
 
@@ -183,6 +186,14 @@
   }                                                         \
   void holder::set_##name(int32_t value, RelaxedStoreTag) { \
     RELAXED_WRITE_INT32_FIELD(*this, offset, value);        \
+  }
+
+#define RELAXED_UINT32_ACCESSORS(holder, name, offset)       \
+  uint32_t holder::name(RelaxedLoadTag) const {              \
+    return RELAXED_READ_UINT32_FIELD(*this, offset);         \
+  }                                                          \
+  void holder::set_##name(uint32_t value, RelaxedStoreTag) { \
+    RELAXED_WRITE_UINT32_FIELD(*this, offset, value);        \
   }
 
 #define RELAXED_UINT16_ACCESSORS(holder, name, offset)       \
@@ -627,6 +638,12 @@
   static_cast<int32_t>(base::Relaxed_Load(  \
       reinterpret_cast<const base::Atomic32*>(FIELD_ADDR(p, offset))))
 
+#if defined(V8_HOST_ARCH_64_BIT)
+#define RELAXED_READ_INT64_FIELD(p, offset) \
+  static_cast<int64_t>(base::Relaxed_Load(  \
+      reinterpret_cast<const base::Atomic64*>(FIELD_ADDR(p, offset))))
+#endif
+
 #define RELEASE_WRITE_INT32_FIELD(p, offset, value)             \
   base::Release_Store(                                          \
       reinterpret_cast<base::Atomic32*>(FIELD_ADDR(p, offset)), \
@@ -654,11 +671,11 @@ static_assert(sizeof(unsigned) == sizeof(uint32_t),
   RELAXED_WRITE_UINT32_FIELD(p, offset, value)
 
 #define RELAXED_READ_BYTE_FIELD(p, offset) \
-  static_cast<byte>(base::Relaxed_Load(    \
+  static_cast<uint8_t>(base::Relaxed_Load( \
       reinterpret_cast<const base::Atomic8*>(FIELD_ADDR(p, offset))))
 
 #define ACQUIRE_READ_BYTE_FIELD(p, offset) \
-  static_cast<byte>(base::Acquire_Load(    \
+  static_cast<uint8_t>(base::Acquire_Load( \
       reinterpret_cast<const base::Atomic8*>(FIELD_ADDR(p, offset))))
 
 #define RELAXED_WRITE_BYTE_FIELD(p, offset, value)                             \

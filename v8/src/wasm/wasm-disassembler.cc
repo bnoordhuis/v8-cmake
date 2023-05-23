@@ -145,6 +145,18 @@ void PrintSignatureOneLine(StringBuilder& out, const FunctionSig* sig,
   }
 }
 
+void PrintStringRaw(StringBuilder& out, const uint8_t* start,
+                    const uint8_t* end) {
+  for (const uint8_t* ptr = start; ptr < end; ptr++) {
+    uint8_t b = *ptr;
+    if (b < 32 || b >= 127 || b == '"' || b == '\\') {
+      out << '\\' << kHexChars[b >> 4] << kHexChars[b & 0xF];
+    } else {
+      out << static_cast<char>(b);
+    }
+  }
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // FunctionBodyDisassembler.
 
@@ -167,8 +179,7 @@ void FunctionBodyDisassembler::DecodeAsWat(MultiLineStringBuilder& out,
   indentation.increase();
 
   // Decode and print locals.
-  uint32_t locals_length;
-  DecodeLocals(pc_, &locals_length);
+  uint32_t locals_length = DecodeLocals(pc_);
   if (failed()) {
     // TODO(jkummerow): Improve error handling.
     out << "Failed to decode locals\n";
@@ -258,8 +269,7 @@ void FunctionBodyDisassembler::DecodeGlobalInitializer(StringBuilder& out) {
 WasmOpcode FunctionBodyDisassembler::GetOpcode() {
   WasmOpcode opcode = static_cast<WasmOpcode>(*pc_);
   if (!WasmOpcodes::IsPrefixOpcode(opcode)) return opcode;
-  uint32_t opcode_length;
-  return read_prefixed_opcode<ValidationTag>(pc_, &opcode_length);
+  return read_prefixed_opcode<ValidationTag>(pc_).first;
 }
 
 void FunctionBodyDisassembler::PrintHexNumber(StringBuilder& out,
@@ -294,7 +304,7 @@ class ImmediatesPrinter {
     int depth = imm_depth;
     if (owner_->current_opcode_ == kExprDelegate) depth++;
     // Be robust: if the module is invalid, print what we got.
-    if (depth >= static_cast<int>(owner_->label_stack_.size())) {
+    if (depth < 0 || depth >= static_cast<int>(owner_->label_stack_.size())) {
       out_ << imm_depth;
       return;
     }
@@ -336,13 +346,20 @@ class ImmediatesPrinter {
     if (imm.type.is_index()) use_type(imm.type.ref_index());
   }
 
+  void ValueType(HeapTypeImmediate& imm, bool is_nullable) {
+    out_ << " ";
+    names()->PrintValueType(
+        out_, ValueType::RefMaybeNull(imm.type,
+                                      is_nullable ? kNullable : kNonNullable));
+    if (imm.type.is_index()) use_type(imm.type.ref_index());
+  }
+
   void BranchDepth(BranchDepthImmediate& imm) { PrintDepthAsLabel(imm.depth); }
 
   void BranchTable(BranchTableImmediate& imm) {
-    const byte* pc = imm.table;
+    const uint8_t* pc = imm.table;
     for (uint32_t i = 0; i <= imm.table_count; i++) {
-      uint32_t length;
-      uint32_t target = owner_->read_u32v<ValidationTag>(pc, &length);
+      auto [target, length] = owner_->read_u32v<ValidationTag>(pc);
       PrintDepthAsLabel(target);
       pc += length;
     }
@@ -508,8 +525,26 @@ class ImmediatesPrinter {
   }
 
   void StringConst(StringConstImmediate& imm) {
-    // TODO(jkummerow): Print (a prefix of) the string?
-    out_ << " " << imm.index;
+    if (imm.index >= owner_->module_->stringref_literals.size()) {
+      out_ << " " << imm.index << " INVALID";
+      return;
+    }
+    out_ << " \"";
+    const WasmStringRefLiteral& lit =
+        owner_->module_->stringref_literals[imm.index];
+    const uint8_t* start = owner_->wire_bytes_.start() + lit.source.offset();
+    static constexpr uint32_t kMaxCharsPrinted = 40;
+    if (lit.source.length() <= kMaxCharsPrinted) {
+      const uint8_t* end =
+          owner_->wire_bytes_.start() + lit.source.end_offset();
+      PrintStringRaw(out_, start, end);
+    } else {
+      const uint8_t* end = start + kMaxCharsPrinted - 1;
+      PrintStringRaw(out_, start, end);
+      out_ << "…";
+    }
+    out_ << '"';
+    if (kIndicesAsComments) out_ << " (;" << imm.index << ";)";
   }
 
   void MemoryInit(MemoryInitImmediate& imm) {
@@ -583,7 +618,7 @@ class OffsetsProvider : public ITracer {
     element_offsets_.reserve(module->elem_segments.size());
     data_offsets_.reserve(module->data_segments.size());
 
-    ModuleDecoderBase decoder{WasmFeatures::All(), wire_bytes, kWasmOrigin,
+    ModuleDecoderImpl decoder{WasmFeatures::All(), wire_bytes, kWasmOrigin,
                               this};
     constexpr bool kNoVerifyFunctions = false;
     decoder.DecodeModule(kNoVerifyFunctions);
@@ -617,9 +652,13 @@ class OffsetsProvider : public ITracer {
 
   void DataOffset(uint32_t offset) override { data_offsets_.push_back(offset); }
 
+  void StringOffset(uint32_t offset) override {
+    string_offsets_.push_back(offset);
+  }
+
   // Unused by this tracer:
   void ImportsDone() override {}
-  void Bytes(const byte* start, uint32_t count) override {}
+  void Bytes(const uint8_t* start, uint32_t count) override {}
   void Description(const char* desc) override {}
   void Description(const char* desc, size_t length) override {}
   void Description(uint32_t number) override {}
@@ -629,11 +668,11 @@ class OffsetsProvider : public ITracer {
   void NextLine() override {}
   void NextLineIfFull() override {}
   void NextLineIfNonEmpty() override {}
-  void InitializerExpression(const byte* start, const byte* end,
+  void InitializerExpression(const uint8_t* start, const uint8_t* end,
                              ValueType expected_type) override {}
-  void FunctionBody(const WasmFunction* func, const byte* start) override {}
+  void FunctionBody(const WasmFunction* func, const uint8_t* start) override {}
   void FunctionName(uint32_t func_index) override {}
-  void NameSection(const byte* start, const byte* end,
+  void NameSection(const uint8_t* start, const uint8_t* end,
                    uint32_t offset) override {}
 
 #define GETTER(name)                       \
@@ -645,6 +684,7 @@ class OffsetsProvider : public ITracer {
   GETTER(import)
   GETTER(element)
   GETTER(data)
+  GETTER(string)
 #undef GETTER
 
 #define IMPORT_ADJUSTED_GETTER(name)                                  \
@@ -675,6 +715,7 @@ class OffsetsProvider : public ITracer {
   std::vector<uint32_t> global_offsets_;
   std::vector<uint32_t> element_offsets_;
   std::vector<uint32_t> data_offsets_;
+  std::vector<uint32_t> string_offsets_;
   uint32_t memory_offset_{0};
   uint32_t start_offset_{0};
 };
@@ -777,14 +818,16 @@ void ModuleDisassembler::PrintModule(Indentation indentation, size_t max_mb) {
   out_ << indentation << "(module";
   if (module_->name.is_set()) {
     out_ << " $";
-    const byte* name_start = start_ + module_->name.offset();
+    const uint8_t* name_start = start_ + module_->name.offset();
     out_.write(name_start, module_->name.length());
   }
   indentation.increase();
 
   // II. Types
   // TODO(jkummerow): If we want to support binary -> WAT -> binary round
-  // trips, then we need to print rec groups.
+  // trips, then we need to print rec groups. The difficulty is that we
+  // don't store that information, so we'd either have to make {WasmModule}
+  // bigger, or re-decode the type section here.
   for (uint32_t i = 0; i < module_->types.size(); i++) {
     if (kSkipFunctionTypesInTypeSection && module_->has_signature(i)) {
       continue;
@@ -887,7 +930,16 @@ void ModuleDisassembler::PrintModule(Indentation indentation, size_t max_mb) {
   }
 
   // VII. String literals
-  // TODO(jkummerow/12868): Implement.
+  size_t num_strings = module_->stringref_literals.size();
+  for (uint32_t i = 0; i < num_strings; i++) {
+    const WasmStringRefLiteral lit = module_->stringref_literals[i];
+    out_.NextLine(offsets_->string_offset(i));
+    out_ << indentation << "(string \"";
+    PrintString(lit.source);
+    out_ << '"';
+    if (kIndicesAsComments) out_ << " (;" << i << ";)";
+    out_ << ")";
+  }
 
   // VIII. Globals
   for (uint32_t i = module_->num_imported_globals; i < module_->globals.size();
@@ -930,7 +982,13 @@ void ModuleDisassembler::PrintModule(Indentation indentation, size_t max_mb) {
     }
     out_ << " ";
     names_->PrintValueType(out_, elem.type);
-    for (const ConstantExpression& entry : elem.entries) {
+
+    ModuleDecoderImpl decoder(WasmFeatures::All(), wire_bytes_.module_bytes(),
+                              ModuleOrigin::kWasmOrigin);
+    decoder.consume_bytes(elem.elements_wire_bytes_offset);
+    for (size_t i = 0; i < elem.element_count; i++) {
+      ConstantExpression entry = decoder.consume_element_segment_entry(
+          const_cast<WasmModule*>(module_), elem);
       PrintInitExpression(entry, elem.type);
     }
     out_ << ")";
@@ -957,10 +1015,10 @@ void ModuleDisassembler::PrintModule(Indentation indentation, size_t max_mb) {
     PrintSignatureOneLine(out_, func->sig, i, names_, true, kIndicesAsComments);
     out_.NextLine(func->code.offset());
     WasmFeatures detected;
-    base::Vector<const byte> code = wire_bytes_.GetFunctionBytes(func);
+    base::Vector<const uint8_t> code = wire_bytes_.GetFunctionBytes(func);
     FunctionBodyDisassembler d(&zone_, module_, i, &detected, func->sig,
                                code.begin(), code.end(), func->code.offset(),
-                               names_);
+                               wire_bytes_, names_);
     uint32_t first_instruction_offset;
     d.DecodeAsWat(out_, indentation, FunctionBodyDisassembler::kSkipHeader,
                   &first_instruction_offset);
@@ -1066,13 +1124,13 @@ void ModuleDisassembler::PrintInitExpression(const ConstantExpression& init,
       break;
     case ConstantExpression::kWireBytesRef:
       WireBytesRef ref = init.wire_bytes_ref();
-      const byte* start = start_ + ref.offset();
-      const byte* end = start_ + ref.end_offset();
+      const uint8_t* start = start_ + ref.offset();
+      const uint8_t* end = start_ + ref.end_offset();
 
       auto sig = FixedSizeSignature<ValueType>::Returns(expected_type);
       WasmFeatures detected;
       FunctionBodyDisassembler d(&zone_, module_, 0, &detected, &sig, start,
-                                 end, ref.offset(), names_);
+                                 end, ref.offset(), wire_bytes_, names_);
       d.DecodeGlobalInitializer(out_);
       break;
   }
@@ -1087,23 +1145,15 @@ void ModuleDisassembler::PrintTagSignature(const FunctionSig* sig) {
 }
 
 void ModuleDisassembler::PrintString(WireBytesRef ref) {
-  for (const byte* ptr = start_ + ref.offset(); ptr < start_ + ref.end_offset();
-       ptr++) {
-    byte b = *ptr;
-    if (b < 32 || b >= 127 || b == '"' || b == '\\') {
-      out_ << '\\' << kHexChars[b >> 4] << kHexChars[b & 0xF];
-    } else {
-      out_ << static_cast<char>(b);
-    }
-  }
+  PrintStringRaw(out_, start_ + ref.offset(), start_ + ref.end_offset());
 }
 
 // This mimics legacy wasmparser behavior. It might be a questionable choice,
 // but we'll follow suit for now.
 void ModuleDisassembler::PrintStringAsJSON(WireBytesRef ref) {
-  for (const byte* ptr = start_ + ref.offset(); ptr < start_ + ref.end_offset();
-       ptr++) {
-    byte b = *ptr;
+  for (const uint8_t* ptr = start_ + ref.offset();
+       ptr < start_ + ref.end_offset(); ptr++) {
+    uint8_t b = *ptr;
     if (b <= 34) {
       switch (b) {
         // clang-format off

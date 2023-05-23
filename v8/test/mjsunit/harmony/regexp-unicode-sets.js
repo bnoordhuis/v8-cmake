@@ -49,16 +49,16 @@ assertEarlyError('/[a&&&]/v');
 assertEarlyError('/[&&&a]/v');
 
 // Unterminated string disjunction.
-assertEarlyError('/[\q{foo]/v');
-assertEarlyError('/[\q{foo|]/v');
+assertEarlyError('/[\\q{foo]/v');
+assertEarlyError('/[\\q{foo|]/v');
 
 // Negating classes containing strings is not allowed.
-assertEarlyError('/[^\q{foo}]/v');
-assertEarlyError('/[^\q{}]/v');  // Empty string counts as string.
-assertEarlyError('/[^[\q{foo}]]/v');
-assertEarlyError('/[^[\p{Basic_Emoji}]/v');
-assertEarlyError('/[^\q{foo}&&\q{bar}]/v');
-assertEarlyError('/[^\q{foo}--\q{bar}]/v');
+assertEarlyError('/[^\\q{foo}]/v');
+assertEarlyError('/[^\\q{}]/v');  // Empty string counts as string.
+assertEarlyError('/[^[\\q{foo}]]/v');
+assertEarlyError('/[^[\\p{Basic_Emoji}]/v');
+assertEarlyError('/[^\\q{foo}&&\\q{bar}]/v');
+assertEarlyError('/[^\\q{foo}--\\q{bar}]/v');
 // Exceptions when negating the class is allowed:
 // The "string" contains only single characters.
 /[^\q{a|b|c}]/v;
@@ -68,13 +68,16 @@ assertEarlyError('/[^\q{foo}--\q{bar}]/v');
 /[^a--\q{foo}--\q{bar}]/v;
 
 // Negated properties of strings are not allowed.
-assertEarlyError('/\P{Basic_Emoji}/v');
-assertEarlyError('/\P{Emoji_Keycap_Sequence}/v');
-assertEarlyError('/\P{RGI_Emoji_Modifier_Sequence}/v');
-assertEarlyError('/\P{RGI_Emoji_Flag_Sequence}/v');
-assertEarlyError('/\P{RGI_Emoji_Tag_Sequence}/v');
-assertEarlyError('/\P{RGI_Emoji_ZWJ_Sequence}/v');
-assertEarlyError('/\P{RGI_Emoji}/v');
+assertEarlyError('/\\P{Basic_Emoji}/v');
+assertEarlyError('/\\P{Emoji_Keycap_Sequence}/v');
+assertEarlyError('/\\P{RGI_Emoji_Modifier_Sequence}/v');
+assertEarlyError('/\\P{RGI_Emoji_Flag_Sequence}/v');
+assertEarlyError('/\\P{RGI_Emoji_Tag_Sequence}/v');
+assertEarlyError('/\\P{RGI_Emoji_ZWJ_Sequence}/v');
+assertEarlyError('/\\P{RGI_Emoji}/v');
+
+// Invalid identity escape in string disjunciton.
+assertEarlyError('/[\\q{\\w}]/v');
 
 const allAscii = Array.from(
     {length: 127}, (v, i) => { return String.fromCharCode(i); });
@@ -95,7 +98,7 @@ function check(re, expectMatch, expectNoMatch = [], negationValid = true) {
     // Negation of classes containing strings is an error.
     const negated = `[^${re.source}]`;
     assertThrows(() => { new RegExp(negated, `${re.flags}`); }, SyntaxError,
-        `Invalid regular expression: /${negated}/: ` +
+        `Invalid regular expression: /${negated}/${re.flags}: ` +
         `Negated character class may contain strings`);
   } else {
     // Nest the current RegExp in a negated class and check expectations are
@@ -163,26 +166,38 @@ check(/[ĀĂĄĆ]/vi, Array.from('ĀāĂăĄąĆć'), Array.from('abc'));
 check(/[āăąć]/vi, Array.from('ĀāĂăĄąĆć'), Array.from('abc'));
 
 // String disjunctions
-check(/[\q{foo|bar|0|5}]/v, ['foo', 'bar', 0, 5], ['fo', 'baz'], false)
-check(/[\q{foo|bar}[05]]/v, ['foo', 'bar', 0, 5], ['fo', 'baz'], false)
-check(/[\q{foo|bar|0|5}&&\q{bar}]/v, ['bar'], ['foo', 0, 5, 'fo', 'baz'], false)
+check(/[\q{foo|bar|0|5}]/v, ['foo', 'bar', 0, 5], ['fo', 'baz'], false);
+check(/[\q{foo|bar}[05]]/v, ['foo', 'bar', 0, 5], ['fo', 'baz'], false);
+check(
+    /[\q{foo|bar|0|5}&&\q{bar}]/v, ['bar'], ['foo', 0, 5, 'fo', 'baz'], false);
 // The second operand of the intersection doesn't contain strings, so the result
 // will not contain strings and therefore negation is valid.
-check(/[\q{foo|bar|0|5}&&\d]/v, [0, 5], ['foo', 'bar', 'fo', 'baz'], true)
-check(/[\q{foo|bar|0|5}--\q{foo}]/v, ['bar', 0, 5], ['foo', 'fo', 'baz'], false)
-check(/[\q{foo|bar|0|5}--\d]/v, ['foo', 'bar'], [0, 5, 'fo', 'baz'], false)
+check(/[\q{foo|bar|0|5}&&\d]/v, [0, 5], ['foo', 'bar', 'fo', 'baz'], true);
+check(
+    /[\q{foo|bar|0|5}--\q{foo}]/v, ['bar', 0, 5], ['foo', 'fo', 'baz'], false);
+check(/[\q{foo|bar|0|5}--\d]/v, ['foo', 'bar'], [0, 5, 'fo', 'baz'], false);
+check(
+    /[\q{foo|bar|3|2|0}--\d]/v, ['foo', 'bar'], [0, 1, 2, 3, 4, 5, 'fo', 'baz'],
+    false);
 
 check(
     /[\q{foo|bar|0|5}&&\q{bAr}]/vi, ['bar', 'bAr', 'BAR'],
-    ['foo', 0, 5, 'fo', 'baz'], false)
+    ['foo', 0, 5, 'fo', 'baz'], false);
 check(
     /[\q{foo|bar|0|5}--\q{FoO}]/vi, ['bar', 'bAr', 'BAR', 0, 5],
-    ['foo', 'FOO', 'fo', 'baz'], false)
+    ['foo', 'FOO', 'fo', 'baz'], false);
 
 check(/[\q{ĀĂĄĆ|AaAc}&&\q{āăąć}]/vi, ['ĀĂĄĆ', 'āăąć'], ['AaAc'], false);
 check(
     /[\q{ĀĂĄĆ|AaAc}--\q{āăąć}]/vi, ['AaAc', 'aAaC'], ['ĀĂĄĆ', 'āăąć'],
     false);
+
+// Empty nested classes.
+check(/[a-c\q{foo|bar}[]]/v, ['a','b','c','foo','bar'], [], false);
+check(/[[a-c\q{foo|bar}]&&[]]/v, [], ['a','b','c','foo','bar'], true);
+check(/[[a-c\q{foo|bar}]--[]]/v, ['a','b','c','foo','bar'], [], false);
+check(/[[]&&[a-c\q{foo|bar}]]/v, [], ['a','b','c','foo','bar'], true);
+check(/[[]--[a-c\q{foo|bar}]]/v, [], ['a','b','c','foo','bar'], true);
 
 // Empty string disjunctions matches nothing, but succeeds.
 let res = /[\q{}]/v.exec('foo');
@@ -191,11 +206,11 @@ assertEquals(1, res.length);
 assertEquals('', res[0]);
 
 // Ensure longest strings are matched first.
-assertEquals(['xyz'], /[a-c\q{W|xy|xyz}]/v.exec('xyzabc'))
-assertEquals(['xyz'], /[a-c\q{W|xyz|xy}]/v.exec('xyzabc'))
-assertEquals(['xyz'], /[\q{W|xyz|xy}a-c]/v.exec('xyzabc'))
+assertEquals(['xyz'], /[a-c\q{W|xy|xyz}]/v.exec('xyzabc'));
+assertEquals(['xyz'], /[a-c\q{W|xyz|xy}]/v.exec('xyzabc'));
+assertEquals(['xyz'], /[\q{W|xyz|xy}a-c]/v.exec('xyzabc'));
 // Empty string is last.
-assertEquals(['a'], /[\q{W|}a-c]/v.exec('abc'))
+assertEquals(['a'], /[\q{W|}a-c]/v.exec('abc'));
 
 // Some more sophisticated tests taken from
 // https://v8.dev/features/regexp-v-flag

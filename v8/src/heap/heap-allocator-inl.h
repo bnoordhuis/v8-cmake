@@ -15,10 +15,6 @@
 #include "src/heap/read-only-spaces.h"
 #include "src/heap/third-party/heap-api.h"
 
-#ifdef V8_ENABLE_INNER_POINTER_RESOLUTION_OSB
-#include "src/heap/object-start-bitmap-inl.h"
-#endif  // V8_ENABLE_INNER_POINTER_RESOLUTION_OSB
-
 namespace v8 {
 namespace internal {
 
@@ -109,12 +105,15 @@ V8_WARN_UNUSED_RESULT V8_INLINE AllocationResult HeapAllocator::AllocateRaw(
           allocation =
               old_space()->AllocateRaw(size_in_bytes, alignment, origin);
           break;
-        case AllocationType::kCode:
+        case AllocationType::kCode: {
           DCHECK_EQ(alignment, AllocationAlignment::kTaggedAligned);
           DCHECK(AllowCodeAllocation::IsAllowed());
+          CodePageHeaderModificationScope header_modification_scope(
+              "Code allocation needs header access.");
           allocation = code_space()->AllocateRaw(
               size_in_bytes, AllocationAlignment::kTaggedAligned);
           break;
+        }
         case AllocationType::kReadOnly:
           DCHECK(read_only_space()->writable());
           DCHECK_EQ(AllocationOrigin::kRuntime, origin);
@@ -131,10 +130,6 @@ V8_WARN_UNUSED_RESULT V8_INLINE AllocationResult HeapAllocator::AllocateRaw(
 
   if (allocation.To(&object)) {
     if (AllocationType::kCode == type && !V8_ENABLE_THIRD_PARTY_HEAP_BOOL) {
-      // Unprotect the memory chunk of the object if it was not unprotected
-      // already.
-      heap_->UnprotectAndRegisterMemoryChunk(
-          object, UnprotectMemoryOrigin::kMainThread);
       heap_->ZapCodeObject(object.address(), size_in_bytes);
       if (!large_object) {
         MemoryChunk::FromHeapObject(object)
@@ -142,14 +137,6 @@ V8_WARN_UNUSED_RESULT V8_INLINE AllocationResult HeapAllocator::AllocateRaw(
             ->RegisterNewlyAllocatedCodeObject(object.address());
       }
     }
-
-#ifdef V8_ENABLE_INNER_POINTER_RESOLUTION_OSB
-    if (AllocationType::kReadOnly != type) {
-      DCHECK_TAG_ALIGNED(object.address());
-      Page::FromHeapObject(object)->object_start_bitmap()->SetBit(
-          object.address());
-    }
-#endif  // V8_ENABLE_INNER_POINTER_RESOLUTION_OSB
 
     for (auto& tracker : heap_->allocation_trackers_) {
       tracker->AllocationEvent(object.address(), size_in_bytes);

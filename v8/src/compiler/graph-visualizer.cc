@@ -62,30 +62,6 @@ std::ostream& operator<<(std::ostream& out, const NodeOriginAsJSON& asJSON) {
   return out;
 }
 
-class JSONEscaped {
- public:
-  explicit JSONEscaped(const std::ostringstream& os) : str_(os.str()) {}
-
-  friend std::ostream& operator<<(std::ostream& os, const JSONEscaped& e) {
-    for (char c : e.str_) PipeCharacter(os, c);
-    return os;
-  }
-
- private:
-  static std::ostream& PipeCharacter(std::ostream& os, char c) {
-    if (c == '"') return os << "\\\"";
-    if (c == '\\') return os << "\\\\";
-    if (c == '\b') return os << "\\b";
-    if (c == '\f') return os << "\\f";
-    if (c == '\n') return os << "\\n";
-    if (c == '\r') return os << "\\r";
-    if (c == '\t') return os << "\\t";
-    return os << c;
-  }
-
-  const std::string str_;
-};
-
 void JsonPrintBytecodeSource(std::ostream& os, int source_id,
                              std::unique_ptr<char[]> function_name,
                              Handle<BytecodeArray> bytecode_array) {
@@ -123,10 +99,13 @@ void JsonPrintFunctionSource(std::ostream& os, int source_id,
       start = shared->StartPosition();
       end = shared->EndPosition();
       os << ", \"sourceText\": \"";
-      int len = shared->EndPosition() - start;
-      SubStringRange source(String::cast(script->source()), no_gc, start, len);
-      for (auto c : source) {
-        os << AsEscapedUC16ForJSON(c);
+      if (!script->source().IsUndefined()) {
+        int len = shared->EndPosition() - start;
+        SubStringRange source(String::cast(script->source()), no_gc, start,
+                              len);
+        for (auto c : source) {
+          os << AsEscapedUC16ForJSON(c);
+        }
       }
       os << "\"";
     }
@@ -180,8 +159,13 @@ void JsonPrintAllBytecodeSources(std::ostream& os,
   SourceIdAssigner id_assigner(info->inlined_functions().size());
 
   for (unsigned id = 0; id < inlined.size(); id++) {
-    os << ", ";
     Handle<SharedFunctionInfo> shared_info = inlined[id].shared_info;
+#if V8_ENABLE_WEBASSEMBLY
+    if (shared_info->HasWasmFunctionData()) {
+      continue;
+    }
+#endif  // V8_ENABLE_WEBASSEMBLY
+    os << ", ";
     const int source_id = id_assigner.GetIdFor(shared_info);
     JsonPrintBytecodeSource(os, source_id, shared_info->DebugNameCStr(),
                             inlined[id].bytecode_array);
@@ -235,6 +219,11 @@ std::unique_ptr<char[]> GetVisualizerLogFileName(OptimizedCompilationInfo* info,
   const char* file_prefix = v8_flags.trace_turbo_file_prefix.value();
   int optimization_id = info->IsOptimizing() ? info->optimization_id() : 0;
   if (strlen(debug_name.get()) > 0) {
+    if (strcmp(debug_name.get(), "WasmJSFastApiCall") == 0) {
+      // Don't clobber one wrapper's output with another's.
+      static int fast_call_wrappers_count = 0;
+      optimization_id = ++fast_call_wrappers_count;
+    }
     SNPrintF(filename, "%s-%s-%i", file_prefix, debug_name.get(),
              optimization_id);
   } else if (info->has_shared_info()) {
@@ -541,9 +530,8 @@ void GraphC1Visualizer::PrintCompilation(const OptimizedCompilationInfo* info) {
     PrintStringProperty("name", name.get());
     PrintStringProperty("method", "stub");
   }
-  PrintLongProperty(
-      "date",
-      static_cast<int64_t>(V8::GetCurrentPlatform()->CurrentClockTimeMillis()));
+  PrintLongProperty("date",
+                    V8::GetCurrentPlatform()->CurrentClockTimeMilliseconds());
 }
 
 
@@ -877,7 +865,7 @@ std::ostream& operator<<(std::ostream& os, const AsRPO& ar) {
   // the node itself, if there are no cycles. Any cycles are broken
   // arbitrarily.
 
-  ZoneVector<byte> state(ar.graph.NodeCount(), kUnvisited, &local_zone);
+  ZoneVector<uint8_t> state(ar.graph.NodeCount(), kUnvisited, &local_zone);
   ZoneStack<Node*> stack(&local_zone);
 
   stack.push(ar.graph.end());

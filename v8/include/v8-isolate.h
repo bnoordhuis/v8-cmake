@@ -333,12 +333,9 @@ class V8_EXPORT Isolate {
         const DisallowJavascriptExecutionScope&) = delete;
 
    private:
-    OnFailure on_failure_;
-    v8::Isolate* v8_isolate_;
-
-    bool was_execution_allowed_assert_;
-    bool was_execution_allowed_throws_;
-    bool was_execution_allowed_dump_;
+    v8::Isolate* const v8_isolate_;
+    const OnFailure on_failure_;
+    bool was_execution_allowed_;
   };
 
   /**
@@ -356,7 +353,7 @@ class V8_EXPORT Isolate {
         const AllowJavascriptExecutionScope&) = delete;
 
    private:
-    Isolate* v8_isolate_;
+    Isolate* const v8_isolate_;
     bool was_execution_allowed_assert_;
     bool was_execution_allowed_throws_;
     bool was_execution_allowed_dump_;
@@ -537,7 +534,12 @@ class V8_EXPORT Isolate {
     kTurboFanOsrCompileStarted = 115,
     kAsyncStackTaggingCreateTaskCall = 116,
     kDurationFormat = 117,
-    kInvalidatedNumberStringPrototypeNoReplaceProtector = 118,
+    kInvalidatedNumberStringNotRegexpLikeProtector = 118,
+    kRegExpUnicodeSetIncompatibilitiesWithUnicodeMode = 119,  // Unused.
+    kImportAssertionDeprecatedSyntax = 120,
+    kLocaleInfoObsoletedGetters = 121,
+    kLocaleInfoFunctions = 122,
+    kCompileHintsMagicAll = 123,
 
     // If you add new values here, you'll also need to update Chromium's:
     // web_feature.mojom, use_counter_callback.cc, and enums.xml. V8 changes to
@@ -1125,9 +1127,8 @@ class V8_EXPORT Isolate {
    *
    * This should only be used for testing purposes and not to enforce a garbage
    * collection schedule. It has strong negative impact on the garbage
-   * collection performance. Use IdleNotificationDeadline() or
-   * LowMemoryNotification() instead to influence the garbage collection
-   * schedule.
+   * collection performance. Use MemoryPressureNotification() instead to
+   * influence the garbage collection schedule.
    */
   void RequestGarbageCollectionForTesting(GarbageCollectionType type);
 
@@ -1138,9 +1139,8 @@ class V8_EXPORT Isolate {
    *
    * This should only be used for testing purposes and not to enforce a garbage
    * collection schedule. It has strong negative impact on the garbage
-   * collection performance. Use IdleNotificationDeadline() or
-   * LowMemoryNotification() instead to influence the garbage collection
-   * schedule.
+   * collection performance. Use MemoryPressureNotification() instead to
+   * influence the garbage collection schedule.
    */
   void RequestGarbageCollectionForTesting(GarbageCollectionType type,
                                           StackState stack_state);
@@ -1292,6 +1292,8 @@ class V8_EXPORT Isolate {
    * that function. There is no guarantee that the actual work will be done
    * within the time limit.
    */
+  V8_DEPRECATE_SOON(
+      "Use MemoryPressureNotification() to influence the GC schedule.")
   bool IdleNotificationDeadline(double deadline_in_seconds);
 
   /**
@@ -1508,12 +1510,6 @@ class V8_EXPORT Isolate {
 
   void SetWasmLoadSourceMapCallback(WasmLoadSourceMapCallback callback);
 
-  V8_DEPRECATED("Wasm SIMD is always enabled")
-  void SetWasmSimdEnabledCallback(WasmSimdEnabledCallback callback);
-
-  V8_DEPRECATED("Wasm exceptions are always enabled")
-  void SetWasmExceptionsEnabledCallback(WasmExceptionsEnabledCallback callback);
-
   /**
    * Register callback to control whehter Wasm GC is enabled.
    * The callback overwrites the value of the flag.
@@ -1675,9 +1671,11 @@ uint32_t Isolate::GetNumberOfDataSlots() {
 
 template <class T>
 MaybeLocal<T> Isolate::GetDataFromSnapshotOnce(size_t index) {
-  T* data = reinterpret_cast<T*>(GetDataFromSnapshotOnce(index));
-  if (data) internal::PerformCastCheck(data);
-  return Local<T>(data);
+  auto slot = GetDataFromSnapshotOnce(index);
+  if (slot) {
+    internal::PerformCastCheck(internal::ValueHelper::SlotAsValue<T>(slot));
+  }
+  return Local<T>::FromSlot(slot);
 }
 
 }  // namespace v8

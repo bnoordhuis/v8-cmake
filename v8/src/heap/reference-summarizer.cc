@@ -47,14 +47,9 @@ class ReferenceSummarizerMarkingState final {
   }
 
   // Standard marking visitor functions:
-
-  bool IsWhite(HeapObject obj) const { return true; }
-
-  bool IsBlackOrGrey(HeapObject obj) const { return false; }
-
-  bool WhiteToGrey(HeapObject obj) { return true; }
-
-  bool GreyToBlack(HeapObject obj) { return true; }
+  bool TryMark(HeapObject obj) { return true; }
+  bool IsUnmarked(HeapObject obj) const { return true; }
+  bool IsMarked(HeapObject obj) const { return false; }
 
   // Adds a retaining relationship found by the marking visitor.
   void AddStrongReferenceForReferenceSummarizer(HeapObject host,
@@ -105,7 +100,7 @@ ReferenceSummary ReferenceSummary::SummarizeReferencesFrom(Heap* heap,
       &marking_state, marking_state.local_marking_worklists(),
       marking_state.local_weak_objects(), heap, 0 /*mark_compact_epoch*/,
       {} /*code_flush_mode*/, false /*embedder_tracing_enabled*/,
-      true /*should_keep_ages_unchanged*/);
+      true /*should_keep_ages_unchanged*/, 0 /*code_flushing_increase*/);
   visitor.Visit(obj.map(heap->isolate()), obj);
 
   return marking_state.DestructivelyRetrieveReferences();

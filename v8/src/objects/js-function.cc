@@ -229,9 +229,9 @@ void JSFunction::MarkForOptimization(Isolate* isolate, CodeKind target_kind,
   set_tiering_state(TieringStateFor(target_kind, mode));
 }
 
-void JSFunction::SetInterruptBudget(Isolate* isolate) {
+void JSFunction::SetInterruptBudget(Isolate* isolate, bool deoptimize) {
   raw_feedback_cell().set_interrupt_budget(
-      TieringManager::InterruptBudgetFor(isolate, *this));
+      TieringManager::InterruptBudgetFor(isolate, *this, deoptimize));
 }
 
 // static
@@ -538,7 +538,7 @@ void JSFunction::EnsureClosureFeedbackCellArray(
       ClosureFeedbackCellArray::New(isolate, shared);
   // Many closure cell is used as a way to specify that there is no
   // feedback cell for this function and a new feedback cell has to be
-  // allocated for this funciton. For ex: for eval functions, we have to create
+  // allocated for this function. For ex: for eval functions, we have to create
   // a feedback cell and cache it along with the code. It is safe to use
   // many_closure_cell to indicate this because in regular cases, it should
   // already have a feedback_vector / feedback cell array allocated.
@@ -719,8 +719,15 @@ void JSFunction::SetPrototype(Handle<JSFunction> function,
     Handle<Map> new_map =
         Map::Copy(isolate, handle(function->map(), isolate), "SetPrototype");
 
-    new_map->SetConstructor(*value);
+    // Create a new {constructor, non-instance_prototype} tuple and store it
+    // in Map::constructor field.
+    Handle<Object> constructor(new_map->GetConstructor(), isolate);
+    Handle<Tuple2> non_instance_prototype_constructor_tuple =
+        isolate->factory()->NewTuple2(constructor, value, AllocationType::kOld);
+
     new_map->set_has_non_instance_prototype(true);
+    new_map->SetConstructor(*non_instance_prototype_constructor_tuple);
+
     JSObject::MigrateToMap(isolate, function, new_map);
 
     FunctionKind kind = function->shared().kind();
@@ -758,7 +765,7 @@ void JSFunction::SetInitialMap(Isolate* isolate, Handle<JSFunction> function,
   if (v8_flags.log_maps) {
     LOG(isolate, MapEvent("InitialMap", Handle<Map>(), map, "",
                           SharedFunctionInfo::DebugName(
-                              handle(function->shared(), isolate))));
+                              isolate, handle(function->shared(), isolate))));
   }
 }
 
@@ -824,6 +831,7 @@ bool CanSubclassHaveInobjectProperties(InstanceType instance_type) {
     case JS_ASYNC_FROM_SYNC_ITERATOR_TYPE:
     case JS_CONTEXT_EXTENSION_OBJECT_TYPE:
     case JS_DATA_VIEW_TYPE:
+    case JS_RAB_GSAB_DATA_VIEW_TYPE:
     case JS_DATE_TYPE:
     case JS_GENERATOR_OBJECT_TYPE:
     case JS_FUNCTION_TYPE:
@@ -1107,7 +1115,7 @@ int TypedArrayElementsKindToRabGsabCtorIndex(ElementsKind elements_kind) {
 
 }  // namespace
 
-MaybeHandle<Map> JSFunction::GetDerivedRabGsabMap(
+MaybeHandle<Map> JSFunction::GetDerivedRabGsabTypedArrayMap(
     Isolate* isolate, Handle<JSFunction> constructor,
     Handle<JSReceiver> new_target) {
   MaybeHandle<Map> maybe_map = GetDerivedMap(isolate, constructor, new_target);
@@ -1133,6 +1141,28 @@ MaybeHandle<Map> JSFunction::GetDerivedRabGsabMap(
   Handle<Map> rab_gsab_map = Map::Copy(isolate, map, "RAB / GSAB");
   rab_gsab_map->set_elements_kind(
       GetCorrespondingRabGsabElementsKind(map->elements_kind()));
+  return rab_gsab_map;
+}
+
+MaybeHandle<Map> JSFunction::GetDerivedRabGsabDataViewMap(
+    Isolate* isolate, Handle<JSReceiver> new_target) {
+  Handle<Context> context =
+      handle(isolate->context().native_context(), isolate);
+  Handle<JSFunction> constructor = handle(context->data_view_fun(), isolate);
+  MaybeHandle<Map> maybe_map = GetDerivedMap(isolate, constructor, new_target);
+  Handle<Map> map;
+  if (!maybe_map.ToHandle(&map)) {
+    return MaybeHandle<Map>();
+  }
+  if (*map == constructor->initial_map()) {
+    return handle(Map::cast(context->js_rab_gsab_data_view_map()), isolate);
+  }
+
+  // This only happens when subclassing DataViews. Create a new map with the
+  // JS_RAB_GSAB_DATA_VIEW instance type. Note: the map is not cached and
+  // reused -> every data view gets a unique map, making ICs slow.
+  Handle<Map> rab_gsab_map = Map::Copy(isolate, map, "RAB / GSAB");
+  rab_gsab_map->set_instance_type(JS_RAB_GSAB_DATA_VIEW_TYPE);
   return rab_gsab_map;
 }
 
@@ -1196,7 +1226,8 @@ Handle<String> JSFunction::GetDebugName(Handle<JSFunction> function) {
         GetDataProperty(isolate, function, isolate->factory()->name_string());
     if (name->IsString()) return Handle<String>::cast(name);
   }
-  return SharedFunctionInfo::DebugName(handle(function->shared(), isolate));
+  return SharedFunctionInfo::DebugName(isolate,
+                                       handle(function->shared(), isolate));
 }
 
 bool JSFunction::SetName(Handle<JSFunction> function, Handle<Name> name,
@@ -1225,8 +1256,7 @@ bool JSFunction::SetName(Handle<JSFunction> function, Handle<Name> name,
 namespace {
 
 Handle<String> NativeCodeFunctionSourceString(
-    Handle<SharedFunctionInfo> shared_info) {
-  Isolate* const isolate = shared_info->GetIsolate();
+    Isolate* isolate, Handle<SharedFunctionInfo> shared_info) {
   IncrementalStringBuilder builder(isolate);
   builder.AppendCStringLiteral("function ");
   builder.AppendString(handle(shared_info->Name(), isolate));
@@ -1243,26 +1273,28 @@ Handle<String> JSFunction::ToString(Handle<JSFunction> function) {
 
   // Check if {function} should hide its source code.
   if (!shared_info->IsUserJavaScript()) {
-    return NativeCodeFunctionSourceString(shared_info);
+    return NativeCodeFunctionSourceString(isolate, shared_info);
   }
 
-  // Check if we should print {function} as a class.
-  Handle<Object> maybe_class_positions = JSReceiver::GetDataProperty(
-      isolate, function, isolate->factory()->class_positions_symbol());
-  if (maybe_class_positions->IsClassPositions()) {
-    ClassPositions class_positions =
-        ClassPositions::cast(*maybe_class_positions);
-    int start_position = class_positions.start();
-    int end_position = class_positions.end();
-    Handle<String> script_source(
-        String::cast(Script::cast(shared_info->script()).source()), isolate);
-    return isolate->factory()->NewSubString(script_source, start_position,
-                                            end_position);
+  if (IsClassConstructor(shared_info->kind())) {
+    // Check if we should print {function} as a class.
+    Handle<Object> maybe_class_positions = JSReceiver::GetDataProperty(
+        isolate, function, isolate->factory()->class_positions_symbol());
+    if (maybe_class_positions->IsClassPositions()) {
+      ClassPositions class_positions =
+          ClassPositions::cast(*maybe_class_positions);
+      int start_position = class_positions.start();
+      int end_position = class_positions.end();
+      Handle<String> script_source(
+          String::cast(Script::cast(shared_info->script()).source()), isolate);
+      return isolate->factory()->NewSubString(script_source, start_position,
+                                              end_position);
+    }
   }
 
   // Check if we have source code for the {function}.
   if (!shared_info->HasSourceCode()) {
-    return NativeCodeFunctionSourceString(shared_info);
+    return NativeCodeFunctionSourceString(isolate, shared_info);
   }
 
   // If this function was compiled from asm.js, use the recorded offset
@@ -1290,10 +1322,10 @@ Handle<String> JSFunction::ToString(Handle<JSFunction> function) {
     // giving inconsistent call behaviour.
     isolate->CountUsage(
         v8::Isolate::UseCounterFeature::kFunctionTokenOffsetTooLongForToString);
-    return NativeCodeFunctionSourceString(shared_info);
+    return NativeCodeFunctionSourceString(isolate, shared_info);
   }
   return Handle<String>::cast(
-      SharedFunctionInfo::GetSourceCodeHarmony(shared_info));
+      SharedFunctionInfo::GetSourceCodeHarmony(isolate, shared_info));
 }
 
 // static

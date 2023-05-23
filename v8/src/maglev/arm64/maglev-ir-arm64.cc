@@ -6,6 +6,7 @@
 #include "src/codegen/arm64/assembler-arm64-inl.h"
 #include "src/codegen/arm64/register-arm64.h"
 #include "src/codegen/interface-descriptors-inl.h"
+#include "src/maglev/arm64/maglev-assembler-arm64-inl.h"
 #include "src/maglev/maglev-assembler-inl.h"
 #include "src/maglev/maglev-graph-processor.h"
 #include "src/maglev/maglev-graph.h"
@@ -35,7 +36,7 @@ void Int32NegateWithOverflow::GenerateCode(MaglevAssembler* masm,
   __ RecordComment("-- Jump to eager deopt");
   __ Cbz(value, fail);
 
-  __ negs(out, value);
+  __ Negs(out, value);
   // Output register must not be a register input into the eager deopt info.
   DCHECK_REGLIST_EMPTY(RegList{out} &
                        GetGeneralRegistersUsedAsInputs(eager_deopt_info()));
@@ -74,155 +75,6 @@ void Int32DecrementWithOverflow::GenerateCode(MaglevAssembler* masm,
   __ EmitEagerDeoptIf(vs, DeoptimizeReason::kOverflow, this);
 }
 
-int ConvertReceiver::MaxCallStackArgs() const {
-  using D = CallInterfaceDescriptorFor<Builtin::kToObject>::type;
-  return D::GetStackParameterCount();
-}
-void ConvertReceiver::SetValueLocationConstraints() {
-  using D = CallInterfaceDescriptorFor<Builtin::kToObject>::type;
-  UseFixed(receiver_input(), D::GetRegisterParameter(D::kInput));
-  DefineAsFixed(this, kReturnRegister0);
-}
-void ConvertReceiver::GenerateCode(MaglevAssembler* masm,
-                                   const ProcessingState& state) {
-  Label convert_to_object, done;
-  Register receiver = ToRegister(receiver_input());
-  __ JumpIfSmi(receiver, &convert_to_object);
-  static_assert(LAST_JS_RECEIVER_TYPE == LAST_TYPE);
-  {
-    MaglevAssembler::ScratchRegisterScope temps(masm);
-    Register scratch = temps.Acquire();
-    __ JumpIfObjectType(receiver, scratch, scratch, FIRST_JS_RECEIVER_TYPE,
-                        &done, hs);
-  }
-
-  if (mode_ != ConvertReceiverMode::kNotNullOrUndefined) {
-    Label convert_global_proxy;
-    __ JumpIfRoot(receiver, RootIndex::kUndefinedValue, &convert_global_proxy);
-    __ JumpIfNotRoot(receiver, RootIndex::kNullValue, &convert_to_object);
-    __ bind(&convert_global_proxy);
-    {
-      // Patch receiver to global proxy.
-      __ Move(ToRegister(result()),
-              target_.native_context().global_proxy_object().object());
-    }
-    __ jmp(&done);
-  }
-
-  __ bind(&convert_to_object);
-  // ToObject needs to be ran with the target context installed.
-  __ Move(kContextRegister, target_.context().object());
-  __ CallBuiltin(Builtin::kToObject);
-  __ bind(&done);
-}
-
-int ToObject::MaxCallStackArgs() const {
-  using D = CallInterfaceDescriptorFor<Builtin::kToObject>::type;
-  return D::GetStackParameterCount();
-}
-void ToObject::SetValueLocationConstraints() {
-  using D = CallInterfaceDescriptorFor<Builtin::kToObject>::type;
-  UseFixed(context(), kContextRegister);
-  UseFixed(value_input(), D::GetRegisterParameter(D::kInput));
-  DefineAsFixed(this, kReturnRegister0);
-}
-void ToObject::GenerateCode(MaglevAssembler* masm,
-                            const ProcessingState& state) {
-#ifdef DEBUG
-  using D = CallInterfaceDescriptorFor<Builtin::kToObject>::type;
-  DCHECK_EQ(ToRegister(context()), kContextRegister);
-  DCHECK_EQ(ToRegister(value_input()), D::GetRegisterParameter(D::kInput));
-#endif  // DEBUG
-  Register value = ToRegister(value_input());
-  Label call_builtin, done;
-  // Avoid the builtin call if {value} is a JSReceiver.
-  __ JumpIfSmi(value, &call_builtin);
-  {
-    MaglevAssembler::ScratchRegisterScope temps(masm);
-    Register scratch = temps.Acquire();
-    __ LoadMap(scratch, value);
-    __ CompareInstanceType(scratch, scratch.W(), FIRST_JS_RECEIVER_TYPE);
-    __ B(&done, hs);
-  }
-  __ bind(&call_builtin);
-  __ CallBuiltin(Builtin::kToObject);
-  masm->DefineExceptionHandlerAndLazyDeoptPoint(this);
-  __ bind(&done);
-}
-
-int ToString::MaxCallStackArgs() const {
-  using D = CallInterfaceDescriptorFor<Builtin::kToString>::type;
-  return D::GetStackParameterCount();
-}
-void ToString::SetValueLocationConstraints() {
-  using D = CallInterfaceDescriptorFor<Builtin::kToString>::type;
-  UseFixed(context(), kContextRegister);
-  UseFixed(value_input(), D::GetRegisterParameter(D::kO));
-  DefineAsFixed(this, kReturnRegister0);
-}
-void ToString::GenerateCode(MaglevAssembler* masm,
-                            const ProcessingState& state) {
-#ifdef DEBUG
-  using D = CallInterfaceDescriptorFor<Builtin::kToString>::type;
-  DCHECK_EQ(ToRegister(context()), kContextRegister);
-  DCHECK_EQ(ToRegister(value_input()), D::GetRegisterParameter(D::kO));
-#endif  // DEBUG
-  Register value = ToRegister(value_input());
-  Label call_builtin, done;
-  // Avoid the builtin call if {value} is a string.
-  __ JumpIfSmi(value, &call_builtin);
-  {
-    MaglevAssembler::ScratchRegisterScope temps(masm);
-    Register scratch = temps.Acquire();
-    __ LoadMap(scratch, value);
-    __ CompareInstanceType(scratch, scratch.W(), FIRST_NONSTRING_TYPE);
-    __ B(&done, lo);
-  }
-  __ bind(&call_builtin);
-  __ CallBuiltin(Builtin::kToString);
-  masm->DefineExceptionHandlerAndLazyDeoptPoint(this);
-  __ bind(&done);
-}
-
-void AssertInt32::SetValueLocationConstraints() {
-  UseRegister(left_input());
-  UseRegister(right_input());
-}
-void AssertInt32::GenerateCode(MaglevAssembler* masm,
-                               const ProcessingState& state) {
-  __ Cmp(ToRegister(left_input()).W(), ToRegister(right_input()).W());
-  __ Check(ToCondition(condition_), reason_);
-}
-
-void CheckJSObjectElementsBounds::SetValueLocationConstraints() {
-  UseRegister(receiver_input());
-  set_temporaries_needed(1);
-  UseRegister(index_input());
-}
-void CheckJSObjectElementsBounds::GenerateCode(MaglevAssembler* masm,
-                                               const ProcessingState& state) {
-  MaglevAssembler::ScratchRegisterScope temps(masm);
-  Register scratch = temps.Acquire();
-  Register object = ToRegister(receiver_input());
-  Register index = ToRegister(index_input()).W();
-
-  __ AssertNotSmi(object);
-
-  if (v8_flags.debug_code) {
-    __ CompareObjectType(object, scratch, scratch, FIRST_JS_OBJECT_TYPE);
-    __ Assert(ge, AbortReason::kUnexpectedValue);
-  }
-  __ LoadAnyTaggedField(scratch,
-                        FieldMemOperand(object, JSObject::kElementsOffset));
-  if (v8_flags.debug_code) {
-    __ AssertNotSmi(scratch);
-  }
-  __ SmiUntagField(scratch,
-                   FieldMemOperand(scratch, FixedArray::kLengthOffset));
-  __ Cmp(index, scratch.W());
-  __ EmitEagerDeoptIf(hs, DeoptimizeReason::kOutOfBounds, this);
-}
-
 int BuiltinStringFromCharCode::MaxCallStackArgs() const {
   return AllocateDescriptor::GetStackParameterCount();
 }
@@ -232,7 +84,7 @@ void BuiltinStringFromCharCode::SetValueLocationConstraints() {
   } else {
     UseRegister(code_input());
   }
-  set_temporaries_needed(1);
+  set_temporaries_needed(2);
   DefineAsRegister(this);
 }
 void BuiltinStringFromCharCode::GenerateCode(MaglevAssembler* masm,
@@ -245,10 +97,20 @@ void BuiltinStringFromCharCode::GenerateCode(MaglevAssembler* masm,
     if (0 <= char_code && char_code < String::kMaxOneByteCharCode) {
       __ LoadSingleCharacterString(result_string, char_code);
     } else {
+      // Ensure that {result_string} never aliases {scratch}, otherwise the
+      // store will fail.
+      bool reallocate_result = scratch.Aliases(result_string);
+      if (reallocate_result) {
+        result_string = temps.Acquire();
+      }
+      DCHECK(!scratch.Aliases(result_string));
       __ AllocateTwoByteString(register_snapshot(), result_string, 1);
       __ Move(scratch, char_code & 0xFFFF);
       __ Strh(scratch.W(),
               FieldMemOperand(result_string, SeqTwoByteString::kHeaderSize));
+      if (reallocate_result) {
+        __ Move(ToRegister(result()), result_string);
+      }
     }
   } else {
     __ StringFromCharCode(register_snapshot(), nullptr, result_string,
@@ -256,52 +118,36 @@ void BuiltinStringFromCharCode::GenerateCode(MaglevAssembler* masm,
   }
 }
 
-int BuiltinStringPrototypeCharCodeAt::MaxCallStackArgs() const {
+int BuiltinStringPrototypeCharCodeOrCodePointAt::MaxCallStackArgs() const {
   DCHECK_EQ(Runtime::FunctionForId(Runtime::kStringCharCodeAt)->nargs, 2);
   return 2;
 }
-void BuiltinStringPrototypeCharCodeAt::SetValueLocationConstraints() {
+void BuiltinStringPrototypeCharCodeOrCodePointAt::
+    SetValueLocationConstraints() {
   UseAndClobberRegister(string_input());
   UseAndClobberRegister(index_input());
   DefineAsRegister(this);
 }
-void BuiltinStringPrototypeCharCodeAt::GenerateCode(
+void BuiltinStringPrototypeCharCodeOrCodePointAt::GenerateCode(
     MaglevAssembler* masm, const ProcessingState& state) {
   Label done;
   MaglevAssembler::ScratchRegisterScope temps(masm);
   Register scratch = temps.Acquire();
   RegisterSnapshot save_registers = register_snapshot();
-  __ StringCharCodeAt(save_registers, ToRegister(result()),
-                      ToRegister(string_input()), ToRegister(index_input()),
-                      scratch, &done);
-  __ bind(&done);
+  __ StringCharCodeOrCodePointAt(mode_, save_registers, ToRegister(result()),
+                                 ToRegister(string_input()),
+                                 ToRegister(index_input()), scratch, &done);
+  __ Bind(&done);
 }
 
-int CreateEmptyObjectLiteral::MaxCallStackArgs() const {
-  return AllocateDescriptor::GetStackParameterCount();
-}
-void CreateEmptyObjectLiteral::SetValueLocationConstraints() {
+void FoldedAllocation::SetValueLocationConstraints() {
+  UseRegister(raw_allocation());
   DefineAsRegister(this);
 }
-void CreateEmptyObjectLiteral::GenerateCode(MaglevAssembler* masm,
-                                            const ProcessingState& state) {
-  Register object = ToRegister(result());
-  RegisterSnapshot save_registers = register_snapshot();
-  __ Allocate(save_registers, object, map().instance_size());
-  MaglevAssembler::ScratchRegisterScope temps(masm);
-  Register scratch = temps.Acquire();
-  __ Move(scratch, map().object());
-  __ StoreTaggedField(scratch, FieldMemOperand(object, HeapObject::kMapOffset));
-  __ LoadRoot(scratch, RootIndex::kEmptyFixedArray);
-  __ StoreTaggedField(
-      scratch, FieldMemOperand(object, JSObject::kPropertiesOrHashOffset));
-  __ StoreTaggedField(scratch,
-                      FieldMemOperand(object, JSObject::kElementsOffset));
-  __ LoadRoot(scratch, RootIndex::kUndefinedValue);
-  for (int i = 0; i < map().GetInObjectProperties(); i++) {
-    int offset = map().GetInObjectPropertyOffset(i);
-    __ StoreTaggedField(scratch, FieldMemOperand(object, offset));
-  }
+
+void FoldedAllocation::GenerateCode(MaglevAssembler* masm,
+                                    const ProcessingState& state) {
+  __ Add(ToRegister(result()), ToRegister(raw_allocation()), offset());
 }
 
 void CheckedInt32ToUint32::SetValueLocationConstraints() {
@@ -313,44 +159,6 @@ void CheckedInt32ToUint32::GenerateCode(MaglevAssembler* masm,
   Register input_reg = ToRegister(input()).W();
   __ Tst(input_reg, input_reg);
   __ EmitEagerDeoptIf(mi, DeoptimizeReason::kNotUint32, this);
-}
-
-void CheckedUint32ToInt32::SetValueLocationConstraints() {
-  UseRegister(input());
-  DefineSameAsFirst(this);
-}
-void CheckedUint32ToInt32::GenerateCode(MaglevAssembler* masm,
-                                        const ProcessingState& state) {
-  Register input_reg = ToRegister(input()).W();
-  // Check if the top bit is set -- if it is, then this is not a valid int32,
-  // otherwise it is.
-  static_assert(CheckedUint32ToInt32::kProperties.can_eager_deopt());
-  Label* fail = __ GetDeoptLabel(this, DeoptimizeReason::kNotInt32);
-  __ RecordComment("-- Jump to eager deopt");
-  __ Tbnz(input_reg, 31, fail);
-}
-
-void CheckJSArrayBounds::SetValueLocationConstraints() {
-  UseRegister(receiver_input());
-  UseRegister(index_input());
-}
-void CheckJSArrayBounds::GenerateCode(MaglevAssembler* masm,
-                                      const ProcessingState& state) {
-  Register object = ToRegister(receiver_input());
-  Register index = ToRegister(index_input());
-  __ AssertNotSmi(object);
-
-  MaglevAssembler::ScratchRegisterScope temps(masm);
-  Register scratch = temps.Acquire();
-
-  if (v8_flags.debug_code) {
-    __ CompareObjectType(object, scratch, scratch, JS_ARRAY_TYPE);
-    __ Assert(eq, AbortReason::kUnexpectedValue);
-  }
-
-  __ SmiUntagField(scratch, FieldMemOperand(object, JSArray::kLengthOffset));
-  __ Cmp(index, scratch);
-  __ EmitEagerDeoptIf(hs, DeoptimizeReason::kOutOfBounds, this);
 }
 
 void ChangeInt32ToFloat64::SetValueLocationConstraints() {
@@ -369,41 +177,6 @@ void ChangeUint32ToFloat64::SetValueLocationConstraints() {
 void ChangeUint32ToFloat64::GenerateCode(MaglevAssembler* masm,
                                          const ProcessingState& state) {
   __ Ucvtf(ToDoubleRegister(result()), ToRegister(input()).W());
-}
-
-void CheckedTruncateFloat64ToInt32::SetValueLocationConstraints() {
-  UseRegister(input());
-  DefineAsRegister(this);
-}
-void CheckedTruncateFloat64ToInt32::GenerateCode(MaglevAssembler* masm,
-                                                 const ProcessingState& state) {
-  DoubleRegister input_reg = ToDoubleRegister(input());
-  Register result_reg = ToRegister(result()).W();
-
-  MaglevAssembler::ScratchRegisterScope temps(masm);
-  DoubleRegister converted_back = temps.AcquireDouble();
-
-  // Convert the input float64 value to int32.
-  __ Fcvtzs(result_reg, input_reg);
-  // Convert that int32 value back to float64.
-  __ Scvtf(converted_back, result_reg);
-  // Check that the result of the float64->int32->float64 is equal to the input
-  // (i.e. that the conversion didn't truncate.
-  __ Fcmp(input_reg, converted_back);
-  __ EmitEagerDeoptIf(ne, DeoptimizeReason::kNotInt32, this);
-
-  // Check if {input} is -0.
-  Label check_done;
-  __ Cmp(result_reg, wzr);
-  __ B(&check_done, ne);
-
-  // In case of 0, we need to check the high bits for the IEEE -0 pattern.
-  Register high_word32_of_input = temps.Acquire().W();
-  __ Umov(high_word32_of_input, input_reg.V2S(), 1);
-  __ Cmp(high_word32_of_input, wzr);
-  __ EmitEagerDeoptIf(lt, DeoptimizeReason::kNotInt32, this);
-
-  __ bind(&check_done);
 }
 
 void CheckedTruncateFloat64ToUint32::SetValueLocationConstraints() {
@@ -429,118 +202,31 @@ void CheckedTruncateFloat64ToUint32::GenerateCode(
 
   // Check if {input} is -0.
   Label check_done;
-  __ Cmp(result_reg, wzr);
-  __ B(&check_done, ne);
+  __ Cbnz(result_reg, &check_done);
 
-  // In case of 0, we need to check the high bits for the IEEE -0 pattern.
-  Register high_word32_of_input = temps.Acquire().W();
-  __ Umov(high_word32_of_input, input_reg.V2S(), 1);
-  __ Cmp(high_word32_of_input, wzr);
-  __ EmitEagerDeoptIf(lt, DeoptimizeReason::kNotUint32, this);
+  // In case of 0, we need to check for the IEEE 0 pattern (which is all zeros).
+  Register input_bits = temps.Acquire();
+  __ Fmov(input_bits, input_reg);
+  __ Cbnz(input_bits, __ GetDeoptLabel(this, DeoptimizeReason::kNotUint32));
 
-  __ bind(&check_done);
+  __ Bind(&check_done);
 }
 
-namespace {
+void CheckMaps::SetValueLocationConstraints() {
+  UseRegister(receiver_input());
+  set_temporaries_needed(2);
+}
 
-void EmitTruncateNumberToInt32(MaglevAssembler* masm, Register value,
-                               Register result_reg, Label* not_a_number) {
+void CheckMaps::MaybeGenerateMapLoad(MaglevAssembler* masm, Register object) {
+  register_for_map_compare_ = masm->scratch_register_scope()->Acquire();
+  __ LoadMap(register_for_map_compare_, object);
+}
+
+void CheckMaps::GenerateMapCompare(MaglevAssembler* masm, Handle<Map> map) {
   MaglevAssembler::ScratchRegisterScope temps(masm);
-  Label is_not_smi, done;
-  // Check if Smi.
-  __ JumpIfNotSmi(value, &is_not_smi);
-  // If Smi, convert to Int32.
-  __ SmiToInt32(result_reg, value);
-  __ B(&done);
-  __ bind(&is_not_smi);
-  if (not_a_number != nullptr) {
-    // Check if HeapNumber, deopt otherwise.
-    Register scratch = temps.Acquire().W();
-    __ Ldr(scratch, FieldMemOperand(value, HeapObject::kMapOffset));
-    __ CompareRoot(scratch, RootIndex::kHeapNumberMap);
-    __ RecordComment("-- Jump to eager deopt");
-    __ JumpIf(ne, not_a_number);
-  } else if (v8_flags.debug_code) {
-    Register scratch = temps.Acquire().W();
-    __ Ldr(scratch, FieldMemOperand(value, HeapObject::kMapOffset));
-    __ CompareRoot(scratch, RootIndex::kHeapNumberMap);
-    __ Assert(eq, AbortReason::kUnexpectedValue);
-  }
-  DoubleRegister double_value = temps.AcquireDouble();
-  __ Ldr(double_value, FieldMemOperand(value, HeapNumber::kValueOffset));
-  __ TruncateDoubleToInt32(result_reg, double_value);
-  __ bind(&done);
-}
-
-}  // namespace
-
-void CheckedTruncateNumberToInt32::SetValueLocationConstraints() {
-  UseRegister(input());
-  DefineAsRegister(this);
-}
-void CheckedTruncateNumberToInt32::GenerateCode(MaglevAssembler* masm,
-                                                const ProcessingState& state) {
-  MaglevAssembler::ScratchRegisterScope temps(masm);
-  Register value = ToRegister(input());
-  Register result_reg = ToRegister(result());
-  Label* deopt_label = __ GetDeoptLabel(this, DeoptimizeReason::kNotANumber);
-  EmitTruncateNumberToInt32(masm, value, result_reg, deopt_label);
-}
-
-void TruncateNumberToInt32::SetValueLocationConstraints() {
-  UseRegister(input());
-  DefineAsRegister(this);
-}
-void TruncateNumberToInt32::GenerateCode(MaglevAssembler* masm,
-                                         const ProcessingState& state) {
-  Register value = ToRegister(input());
-  Register result_reg = ToRegister(result());
-  EmitTruncateNumberToInt32(masm, value, result_reg, nullptr);
-}
-
-void CheckMaps::SetValueLocationConstraints() { UseRegister(receiver_input()); }
-void CheckMaps::GenerateCode(MaglevAssembler* masm,
-                             const ProcessingState& state) {
-  Register object = ToRegister(receiver_input());
-
-  // TODO(victorgomes): This can happen, because we do not emit an unconditional
-  // deopt when we intersect the map sets.
-  if (maps().is_empty()) {
-    __ EmitEagerDeopt(this, DeoptimizeReason::kWrongMap);
-    return;
-  }
-
-  bool maps_include_heap_number = AnyMapIsHeapNumber(maps());
-
-  Label done;
-  if (check_type_ == CheckType::kOmitHeapObjectCheck) {
-    __ AssertNotSmi(object);
-  } else {
-    Condition is_smi = __ CheckSmi(object);
-    if (maps_include_heap_number) {
-      // Smis count as matching the HeapNumber map, so we're done.
-      __ B(&done, is_smi);
-    } else {
-      __ EmitEagerDeoptIf(is_smi, DeoptimizeReason::kWrongMap, this);
-    }
-  }
-
-  MaglevAssembler::ScratchRegisterScope temps(masm);
-  Register object_map = temps.Acquire();
-  Register map = temps.Acquire();
-  __ LoadMap(object_map, object);
-  size_t map_count = maps().size();
-  for (size_t i = 0; i < map_count - 1; ++i) {
-    Handle<Map> map_handle = maps().at(i);
-    __ Move(map, map_handle);
-    __ CmpTagged(object_map, map);
-    __ B(&done, eq);
-  }
-  Handle<Map> last_map_handle = maps().at(map_count - 1);
-  __ Move(map, last_map_handle);
-  __ CmpTagged(object_map, map);
-  __ EmitEagerDeoptIf(ne, DeoptimizeReason::kWrongMap, this);
-  __ bind(&done);
+  Register temp = temps.Acquire();
+  __ Move(temp, map);
+  __ CmpTagged(register_for_map_compare_, temp);
 }
 
 int CheckMapsWithMigration::MaxCallStackArgs() const {
@@ -566,7 +252,7 @@ void CheckMapsWithMigration::GenerateCode(MaglevAssembler* masm,
   bool maps_include_heap_number = AnyMapIsHeapNumber(maps());
 
   ZoneLabelRef done(masm);
-  if (check_type_ == CheckType::kOmitHeapObjectCheck) {
+  if (check_type() == CheckType::kOmitHeapObjectCheck) {
     __ AssertNotSmi(object);
   } else {
     Condition is_smi = __ CheckSmi(object);
@@ -583,10 +269,23 @@ void CheckMapsWithMigration::GenerateCode(MaglevAssembler* masm,
   Register scratch = temps.Acquire();
   __ LoadMap(object_map, object);
 
+  RegisterSnapshot save_registers = register_snapshot();
+  // Make sure that object and object_map are not clobbered by the
+  // Runtime::kTryMigrateInstance runtime call.
+  save_registers.live_registers.set(object);
+  save_registers.live_tagged_registers.set(object);
+  save_registers.live_registers.set(object_map);
+  save_registers.live_tagged_registers.set(object_map);
+  // We can eager deopt after the snapshot, so make sure the nodes used by the
+  // deopt are included in it.
+  // TODO(leszeks): This is a bit of a footgun -- we likely want the snapshot to
+  // always include eager deopt input registers.
+  AddDeoptRegistersToSnapshot(&save_registers, eager_deopt_info());
+
   size_t map_count = maps().size();
   for (size_t i = 0; i < map_count; ++i) {
     ZoneLabelRef continue_label(masm);
-    Handle<Map> map_handle = maps().at(i);
+    Handle<Map> map_handle = maps().at(i).object();
     {
       Register map = scratch;
       __ Move(map, map_handle);
@@ -596,9 +295,10 @@ void CheckMapsWithMigration::GenerateCode(MaglevAssembler* masm,
     if (map_handle->is_migration_target()) {
       __ JumpToDeferredIf(
           ne,
-          [](MaglevAssembler* masm, ZoneLabelRef continue_label,
-             ZoneLabelRef done, Register object, Register object_map,
-             Register scratch, int map_index, CheckMapsWithMigration* node) {
+          [](MaglevAssembler* masm, RegisterSnapshot register_snapshot,
+             ZoneLabelRef continue_label, ZoneLabelRef done, Register object,
+             Register object_map, Register scratch, int map_index,
+             CheckMapsWithMigration* node) {
             // If the map is not deprecated, we fail the map check, continue to
             // the next one.
             __ Ldr(scratch.W(),
@@ -611,13 +311,6 @@ void CheckMapsWithMigration::GenerateCode(MaglevAssembler* masm,
             // returns Smi zero, then it failed the migration.
             Register return_val = Register::no_reg();
             {
-              RegisterSnapshot register_snapshot = node->register_snapshot();
-              // We can eager deopt after the snapshot, so make sure the nodes
-              // used by the deopt are included in it.
-              // TODO(leszeks): This is a bit of a footgun -- we likely want the
-              // snapshot to always include eager deopt input registers.
-              AddDeoptRegistersToSnapshot(&register_snapshot,
-                                          node->eager_deopt_info());
               SaveRegisterStateForCall save_register_state(masm,
                                                            register_snapshot);
 
@@ -642,11 +335,12 @@ void CheckMapsWithMigration::GenerateCode(MaglevAssembler* masm,
             // The migrated object is returned on success, retry the map check.
             __ Move(object, return_val);
             __ LoadMap(object_map, object);
-            __ Move(scratch, node->maps().at(map_index));
+            __ Move(scratch, node->maps().at(map_index).object());
             __ CmpTagged(object_map, scratch);
             __ B(*done, eq);
             __ B(*continue_label);
           },
+          save_registers,
           // If this is the last map to check, we should deopt if we fail.
           // This is safe to do, since {eager_deopt_info} is ZoneAllocated.
           (last_map ? ZoneLabelRef::UnsafeFromLabelPointer(masm->GetDeoptLabel(
@@ -660,13 +354,13 @@ void CheckMapsWithMigration::GenerateCode(MaglevAssembler* masm,
     }
 
     if (!last_map) {
-      // We don't need to bind the label for the last map.
+      // We don't need to Bind the label for the last map.
       __ B(*done, eq);
-      __ bind(*continue_label);
+      __ Bind(*continue_label);
     }
   }
 
-  __ bind(*done);
+  __ Bind(*done);
 }
 
 void CheckNumber::SetValueLocationConstraints() {
@@ -693,64 +387,7 @@ void CheckNumber::GenerateCode(MaglevAssembler* masm,
     __ CompareRoot(scratch, RootIndex::kHeapNumberMap);
   }
   __ EmitEagerDeoptIf(ne, DeoptimizeReason::kNotANumber, this);
-  __ bind(&done);
-}
-
-void CheckSymbol::SetValueLocationConstraints() {
-  UseRegister(receiver_input());
-}
-void CheckSymbol::GenerateCode(MaglevAssembler* masm,
-                               const ProcessingState& state) {
-  Register object = ToRegister(receiver_input());
-  if (check_type_ == CheckType::kOmitHeapObjectCheck) {
-    __ AssertNotSmi(object);
-  } else {
-    Condition is_smi = __ CheckSmi(object);
-    __ EmitEagerDeoptIf(is_smi, DeoptimizeReason::kNotASymbol, this);
-  }
-  MaglevAssembler::ScratchRegisterScope temps(masm);
-  Register scratch = temps.Acquire();
-  __ CompareObjectType(object, scratch, scratch, SYMBOL_TYPE);
-  __ EmitEagerDeoptIf(ne, DeoptimizeReason::kNotASymbol, this);
-}
-
-void CheckInstanceType::SetValueLocationConstraints() {
-  UseRegister(receiver_input());
-}
-void CheckInstanceType::GenerateCode(MaglevAssembler* masm,
-                                     const ProcessingState& state) {
-  MaglevAssembler::ScratchRegisterScope temps(masm);
-  Register scratch = temps.Acquire();
-  Register object = ToRegister(receiver_input());
-  if (check_type_ == CheckType::kOmitHeapObjectCheck) {
-    __ AssertNotSmi(object);
-  } else {
-    Condition is_smi = __ CheckSmi(object);
-    __ EmitEagerDeoptIf(is_smi, DeoptimizeReason::kWrongInstanceType, this);
-  }
-  __ LoadMap(scratch, object);
-  __ CompareInstanceType(scratch, scratch, instance_type());
-  __ EmitEagerDeoptIf(ne, DeoptimizeReason::kWrongInstanceType, this);
-}
-
-void CheckString::SetValueLocationConstraints() {
-  UseRegister(receiver_input());
-}
-void CheckString::GenerateCode(MaglevAssembler* masm,
-                               const ProcessingState& state) {
-  MaglevAssembler::ScratchRegisterScope temps(masm);
-  Register scratch = temps.Acquire();
-  Register object = ToRegister(receiver_input());
-  if (check_type_ == CheckType::kOmitHeapObjectCheck) {
-    __ AssertNotSmi(object);
-  } else {
-    Condition is_smi = __ CheckSmi(object);
-    __ EmitEagerDeoptIf(is_smi, DeoptimizeReason::kNotAString, this);
-  }
-  __ LoadMap(scratch, object);
-  __ CompareInstanceTypeRange(scratch, scratch, FIRST_STRING_TYPE,
-                              LAST_STRING_TYPE);
-  __ EmitEagerDeoptIf(hi, DeoptimizeReason::kNotAString, this);
+  __ Bind(&done);
 }
 
 int CheckedObjectToIndex::MaxCallStackArgs() const { return 0; }
@@ -770,18 +407,12 @@ void CheckedObjectToIndex::GenerateCode(MaglevAssembler* masm,
       NegateCondition(is_smi),
       [](MaglevAssembler* masm, Register object, Register result_reg,
          ZoneLabelRef done, CheckedObjectToIndex* node) {
-        Label is_string;
+        Label check_string;
         MaglevAssembler::ScratchRegisterScope temps(masm);
         Register scratch = temps.Acquire();
         __ LoadMap(scratch, object);
-        __ CompareInstanceTypeRange(scratch, scratch, FIRST_STRING_TYPE,
-                                    LAST_STRING_TYPE);
-        __ b(&is_string, ls);
-
-        __ Cmp(scratch, Immediate(HEAP_NUMBER_TYPE));
-        // The IC will go generic if it encounters something other than a
-        // Number or String key.
-        __ EmitEagerDeoptIf(ne, DeoptimizeReason::kNotInt32, node);
+        __ CompareRoot(scratch, RootIndex::kHeapNumberMap);
+        __ B(&check_string, ne);
 
         // Heap Number.
         {
@@ -801,8 +432,16 @@ void CheckedObjectToIndex::GenerateCode(MaglevAssembler* masm,
         }
 
         // String.
-        __ bind(&is_string);
+        __ Bind(&check_string);
+        __ CompareInstanceTypeRange(scratch, scratch, FIRST_STRING_TYPE,
+                                    LAST_STRING_TYPE);
+        // The IC will go generic if it encounters something other than a
+        // Number or String key.
+        __ EmitEagerDeoptIf(kUnsignedGreaterThan, DeoptimizeReason::kNotInt32,
+                            node);
+
         {
+          // TODO(verwaest): Load the cached number from the string hash.
           RegisterSnapshot snapshot = node->register_snapshot();
           snapshot.live_registers.clear(result_reg);
           DCHECK(!snapshot.live_tagged_registers.has(result_reg));
@@ -829,7 +468,7 @@ void CheckedObjectToIndex::GenerateCode(MaglevAssembler* masm,
     __ SmiToInt32(result_reg, object);
   }
 
-  __ bind(*done);
+  __ Bind(*done);
 }
 
 void Int32ToNumber::SetValueLocationConstraints() {
@@ -859,7 +498,7 @@ void Int32ToNumber::GenerateCode(MaglevAssembler* masm,
       },
       object, value, scratch, done, this);
   __ Mov(object, scratch);
-  __ bind(*done);
+  __ Bind(*done);
 }
 
 void Uint32ToNumber::SetValueLocationConstraints() {
@@ -884,7 +523,7 @@ void Uint32ToNumber::GenerateCode(MaglevAssembler* masm,
       },
       object, value, done, this);
   __ Add(object, value, value);
-  __ bind(*done);
+  __ Bind(*done);
 }
 
 void Int32AddWithOverflow::SetValueLocationConstraints() {
@@ -957,7 +596,7 @@ void Int32MultiplyWithOverflow::GenerateCode(MaglevAssembler* masm,
   {
     MaglevAssembler::ScratchRegisterScope temps(masm);
     Register temp = temps.Acquire().W();
-    __ orr(temp, left, right);
+    __ Orr(temp, left, right);
     __ Cmp(temp, Immediate(0));
     // If one of them is negative, we must have a -0 result, which is non-int32,
     // so deopt.
@@ -965,7 +604,7 @@ void Int32MultiplyWithOverflow::GenerateCode(MaglevAssembler* masm,
     // reasons. Otherwise, the reason has to match the above.
     __ EmitEagerDeoptIf(lt, DeoptimizeReason::kOverflow, this);
   }
-  __ bind(&end);
+  __ Bind(&end);
   if (out_alias_input) {
     __ Move(out, res.W());
   }
@@ -1021,7 +660,7 @@ void Int32DivideWithOverflow::GenerateCode(MaglevAssembler* masm,
         __ EmitEagerDeopt(node, DeoptimizeReason::kNotInt32);
       },
       done, left, right, this);
-  __ bind(*done);
+  __ Bind(*done);
 
   // Perform the actual integer division.
   MaglevAssembler::ScratchRegisterScope temps(masm);
@@ -1030,7 +669,7 @@ void Int32DivideWithOverflow::GenerateCode(MaglevAssembler* masm,
   if (out_alias_input) {
     res = temps.Acquire().W();
   }
-  __ sdiv(res, left, right);
+  __ Sdiv(res, left, right);
 
   // Check that the remainder is zero.
   Register temp = temps.Acquire().W();
@@ -1100,7 +739,7 @@ void Int32ModulusWithOverflow::GenerateCode(MaglevAssembler* masm,
         __ Jump(*rhs_checked);
       },
       rhs_checked, rhs, this);
-  __ bind(*rhs_checked);
+  __ Bind(*rhs_checked);
 
   __ Cmp(lhs, Immediate(0));
   __ JumpToDeferredIf(
@@ -1109,15 +748,15 @@ void Int32ModulusWithOverflow::GenerateCode(MaglevAssembler* masm,
          Register out, Int32ModulusWithOverflow* node) {
         MaglevAssembler::ScratchRegisterScope temps(masm);
         Register res = temps.Acquire().W();
-        __ neg(lhs, lhs);
-        __ udiv(res, lhs, rhs);
-        __ msub(out, res, rhs, lhs);
+        __ Neg(lhs, lhs);
+        __ Udiv(res, lhs, rhs);
+        __ Msub(out, res, rhs, lhs);
         __ Cmp(out, Immediate(0));
         // TODO(victorgomes): This ideally should be kMinusZero, but Maglev
         // only allows one deopt reason per IR.
         __ EmitEagerDeoptIf(eq, deopt_reason, node);
-        __ neg(out, out);
-        __ b(*done);
+        __ Neg(out, out);
+        __ B(*done);
       },
       done, lhs, rhs, out, this);
 
@@ -1132,7 +771,7 @@ void Int32ModulusWithOverflow::GenerateCode(MaglevAssembler* masm,
   __ And(out, mask, lhs);
   __ Jump(*done);
 
-  __ bind(&rhs_not_power_of_2);
+  __ Bind(&rhs_not_power_of_2);
 
   // We store the result of the Udiv in a temporary register in case {out} is
   // the same as {lhs} or {rhs}: we'll still need those 2 registers intact to
@@ -1141,7 +780,7 @@ void Int32ModulusWithOverflow::GenerateCode(MaglevAssembler* masm,
   __ Udiv(res, lhs, rhs);
   __ Msub(out, res, rhs, lhs);
 
-  __ bind(*done);
+  __ Bind(*done);
 }
 
 #define DEF_BITWISE_BINOP(Instruction, opcode)                   \
@@ -1175,51 +814,8 @@ void Int32BitwiseNot::GenerateCode(MaglevAssembler* masm,
                                    const ProcessingState& state) {
   Register value = ToRegister(value_input()).W();
   Register out = ToRegister(result()).W();
-  __ mvn(out, value);
+  __ Mvn(out, value);
 }
-
-template <class Derived, Operation kOperation>
-void Int32CompareNode<Derived, kOperation>::SetValueLocationConstraints() {
-  UseRegister(left_input());
-  UseRegister(right_input());
-  DefineAsRegister(this);
-}
-
-template <class Derived, Operation kOperation>
-void Int32CompareNode<Derived, kOperation>::GenerateCode(
-    MaglevAssembler* masm, const ProcessingState& state) {
-  Register left = ToRegister(left_input()).W();
-  Register right = ToRegister(right_input()).W();
-  Register result = ToRegister(this->result());
-  Label is_true, end;
-  // TODO(leszeks): Investigate using cmov here.
-  __ CompareAndBranch(left, right, ConditionFor(kOperation), &is_true);
-  // TODO(leszeks): Investigate loading existing materialisations of roots here,
-  // if available.
-  __ LoadRoot(result, RootIndex::kFalseValue);
-  __ Jump(&end);
-  {
-    __ bind(&is_true);
-    __ LoadRoot(result, RootIndex::kTrueValue);
-  }
-  __ bind(&end);
-}
-
-#define DEF_OPERATION(Name)                               \
-  void Name::SetValueLocationConstraints() {              \
-    Base::SetValueLocationConstraints();                  \
-  }                                                       \
-  void Name::GenerateCode(MaglevAssembler* masm,          \
-                          const ProcessingState& state) { \
-    Base::GenerateCode(masm, state);                      \
-  }
-DEF_OPERATION(Int32Equal)
-DEF_OPERATION(Int32StrictEqual)
-DEF_OPERATION(Int32LessThan)
-DEF_OPERATION(Int32LessThanOrEqual)
-DEF_OPERATION(Int32GreaterThan)
-DEF_OPERATION(Int32GreaterThanOrEqual)
-#undef DEF_OPERATION
 
 void Float64Add::SetValueLocationConstraints() {
   UseRegister(left_input());
@@ -1300,6 +896,35 @@ void Float64Negate::GenerateCode(MaglevAssembler* masm,
   __ Fneg(out, value);
 }
 
+void Float64Round::GenerateCode(MaglevAssembler* masm,
+                                const ProcessingState& state) {
+  DoubleRegister in = ToDoubleRegister(input());
+  DoubleRegister out = ToDoubleRegister(result());
+  if (kind_ == Kind::kNearest) {
+    MaglevAssembler::ScratchRegisterScope temps(masm);
+    DoubleRegister temp = temps.AcquireDouble();
+    DoubleRegister temp2 = temps.AcquireDouble();
+    __ Move(temp, in);
+    // Frintn rounds to even on tie, while JS expects it to round towards
+    // +Infinity. Fix the difference by checking if we rounded down by exactly
+    // 0.5, and if so, round to the other side.
+    __ Frintn(out, in);
+    __ Fsub(temp, temp, out);
+    __ Move(temp2, 0.5);
+    __ Fcmp(temp, temp2);
+    Label done;
+    __ JumpIf(ne, &done, Label::kNear);
+    // Fix wrong tie-to-even by adding 0.5 twice.
+    __ Fadd(out, out, temp2);
+    __ Fadd(out, out, temp2);
+    __ bind(&done);
+  } else if (kind_ == Kind::kCeil) {
+    __ Frintp(out, in);
+  } else if (kind_ == Kind::kFloor) {
+    __ Frintm(out, in);
+  }
+}
+
 int Float64Exponentiate::MaxCallStackArgs() const { return 0; }
 void Float64Exponentiate::SetValueLocationConstraints() {
   UseFixed(left_input(), v0);
@@ -1323,51 +948,6 @@ void Float64Ieee754Unary::GenerateCode(MaglevAssembler* masm,
   __ CallCFunction(ieee_function_, 1);
 }
 
-template <class Derived, Operation kOperation>
-void Float64CompareNode<Derived, kOperation>::SetValueLocationConstraints() {
-  UseRegister(left_input());
-  UseRegister(right_input());
-  DefineAsRegister(this);
-}
-
-template <class Derived, Operation kOperation>
-void Float64CompareNode<Derived, kOperation>::GenerateCode(
-    MaglevAssembler* masm, const ProcessingState& state) {
-  DoubleRegister left = ToDoubleRegister(left_input());
-  DoubleRegister right = ToDoubleRegister(right_input());
-  Register result = ToRegister(this->result());
-  Label is_false, end;
-  __ Fcmp(left, right);
-  // Check for NaN first.
-  __ JumpIf(vs, &is_false);
-  __ JumpIf(NegateCondition(ConditionFor(kOperation)), &is_false);
-  // TODO(leszeks): Investigate loading existing materialisations of roots here,
-  // if available.
-  __ LoadRoot(result, RootIndex::kTrueValue);
-  __ Jump(&end);
-  {
-    __ bind(&is_false);
-    __ LoadRoot(result, RootIndex::kFalseValue);
-  }
-  __ bind(&end);
-}
-
-#define DEF_OPERATION(Name)                               \
-  void Name::SetValueLocationConstraints() {              \
-    Base::SetValueLocationConstraints();                  \
-  }                                                       \
-  void Name::GenerateCode(MaglevAssembler* masm,          \
-                          const ProcessingState& state) { \
-    Base::GenerateCode(masm, state);                      \
-  }
-DEF_OPERATION(Float64Equal)
-DEF_OPERATION(Float64StrictEqual)
-DEF_OPERATION(Float64LessThan)
-DEF_OPERATION(Float64LessThanOrEqual)
-DEF_OPERATION(Float64GreaterThan)
-DEF_OPERATION(Float64GreaterThanOrEqual)
-#undef DEF_OPERATION
-
 void CheckInt32IsSmi::SetValueLocationConstraints() { UseRegister(input()); }
 void CheckInt32IsSmi::GenerateCode(MaglevAssembler* masm,
                                    const ProcessingState& state) {
@@ -1375,9 +955,27 @@ void CheckInt32IsSmi::GenerateCode(MaglevAssembler* masm,
   // Don't throw the result away if we want to actually use it.
   Register reg = ToRegister(input()).W();
   __ Adds(wzr, reg, reg);
-  DCHECK_REGLIST_EMPTY(RegList{reg} &
-                       GetGeneralRegistersUsedAsInputs(eager_deopt_info()));
   __ EmitEagerDeoptIf(vs, DeoptimizeReason::kNotASmi, this);
+}
+
+void CheckHoleyFloat64IsSmi::SetValueLocationConstraints() {
+  UseRegister(input());
+  set_temporaries_needed(1);
+}
+void CheckHoleyFloat64IsSmi::GenerateCode(MaglevAssembler* masm,
+                                          const ProcessingState& state) {
+  DoubleRegister value = ToDoubleRegister(input());
+  MaglevAssembler::ScratchRegisterScope temps(masm);
+  Register scratch = temps.Acquire();
+  Label not_a_smi, done;
+  __ TryTruncateDoubleToInt32(scratch.W(), value, &not_a_smi);
+  __ Adds(wzr, scratch.W(), scratch.W());
+  __ JumpIf(vc, &done);
+
+  __ bind(&not_a_smi);
+  __ EmitEagerDeopt(this, DeoptimizeReason::kNotASmi);
+
+  __ bind(&done);
 }
 
 void CheckedSmiTagInt32::SetValueLocationConstraints() {
@@ -1426,9 +1024,7 @@ void CheckJSTypedArrayBounds::GenerateCode(MaglevAssembler* masm,
 
   if (v8_flags.debug_code) {
     __ AssertNotSmi(object);
-    MaglevAssembler::ScratchRegisterScope temps(masm);
-    Register scratch = temps.Acquire();
-    __ CompareObjectType(object, scratch, scratch, JS_TYPED_ARRAY_TYPE);
+    __ IsObjectType(object, JS_TYPED_ARRAY_TYPE);
     __ Assert(eq, AbortReason::kUnexpectedValue);
   }
 
@@ -1444,9 +1040,9 @@ void CheckJSTypedArrayBounds::GenerateCode(MaglevAssembler* masm,
   } else {
     __ Cmp(byte_length, index);
   }
-  // We use {lo} which does an unsigned comparison to handle negative
-  // indices as well.
-  __ EmitEagerDeoptIf(lo, DeoptimizeReason::kOutOfBounds, this);
+  // We use an unsigned comparison to handle negative indices as well.
+  __ EmitEagerDeoptIf(kUnsignedLessThanEqual, DeoptimizeReason::kOutOfBounds,
+                      this);
 }
 
 int CheckJSDataViewBounds::MaxCallStackArgs() const { return 1; }
@@ -1458,51 +1054,22 @@ void CheckJSDataViewBounds::SetValueLocationConstraints() {
 void CheckJSDataViewBounds::GenerateCode(MaglevAssembler* masm,
                                          const ProcessingState& state) {
   MaglevAssembler::ScratchRegisterScope temps(masm);
-  Register scratch = temps.Acquire();
   Register object = ToRegister(receiver_input());
   Register index = ToRegister(index_input());
-  Register byte_length = scratch;
   if (v8_flags.debug_code) {
     __ AssertNotSmi(object);
-    __ CompareObjectType(object, scratch, scratch, JS_DATA_VIEW_TYPE);
+    __ IsObjectType(object, JS_DATA_VIEW_TYPE);
     __ Assert(eq, AbortReason::kUnexpectedValue);
   }
 
-  ZoneLabelRef done_byte_length(masm);
-  DeferredCodeInfo* deferred_get_byte_length = __ PushDeferredCode(
-      [](MaglevAssembler* masm, CheckJSDataViewBounds* node, ZoneLabelRef done,
-         Register object, Register index, Register byte_length) {
-        RegisterSnapshot snapshot = node->register_snapshot();
-        AddDeoptRegistersToSnapshot(&snapshot, node->eager_deopt_info());
-        snapshot.live_registers.set(index);  // Make sure index is saved.
-        DCHECK(!snapshot.live_registers.has(byte_length));
-        {
-          using D = CallInterfaceDescriptorFor<
-              Builtin::kDataViewGetVariableLength>::type;
-          SaveRegisterStateForCall save_register_state(masm, snapshot);
-          __ Move(D::GetRegisterParameter(D::kDataView), object);
-          __ Move(kContextRegister, masm->native_context().object());
-          __ CallBuiltin(Builtin::kDataViewGetVariableLength);
-          __ Move(byte_length, kReturnRegister0);
-        }
-        __ Cmp(byte_length, Immediate(0));
-        // The reason might not be OOB, but because array was detached.
-        // Unfortunately we can only add one reason type in Maglev.
-        __ EmitEagerDeoptIf(lt, DeoptimizeReason::kOutOfBounds, node);
-        __ B(*done);
-      },
-      this, done_byte_length, object, index, byte_length);
-  __ Ldr(scratch.W(), FieldMemOperand(object, JSDataView::kBitFieldOffset));
-  __ Cbnz(scratch.W(), &deferred_get_byte_length->deferred_code_label);
-
   // Normal DataView (backed by AB / SAB) or non-length tracking backed by GSAB.
+  Register byte_length = temps.Acquire();
   __ LoadBoundedSizeFromObject(byte_length, object,
                                JSDataView::kRawByteLengthOffset);
-  __ bind(*done_byte_length);
 
   int element_size = ExternalArrayElementSize(element_type_);
   if (element_size > 1) {
-    __ Cmp(byte_length, Immediate(element_size - 1));
+    __ Subs(byte_length, byte_length, Immediate(element_size - 1));
     __ EmitEagerDeoptIf(mi, DeoptimizeReason::kOutOfBounds, this);
   }
   __ Cmp(index, byte_length);
@@ -1520,7 +1087,7 @@ void CheckedInternalizedString::GenerateCode(MaglevAssembler* masm,
   Register scratch = temps.Acquire();
   Register object = ToRegister(object_input());
 
-  if (check_type_ == CheckType::kOmitHeapObjectCheck) {
+  if (check_type() == CheckType::kOmitHeapObjectCheck) {
     __ AssertNotSmi(object);
   } else {
     Condition is_smi = __ CheckSmi(object);
@@ -1540,15 +1107,11 @@ void CheckedInternalizedString::GenerateCode(MaglevAssembler* masm,
          CheckedInternalizedString* node, EagerDeoptInfo* deopt_info,
          Register instance_type) {
         __ RecordComment("Deferred Test IsThinString");
-        static_assert(kThinStringTagBit > 0);
-        // Deopt if this isn't a string.
-        __ Tst(instance_type.W(), Immediate(kIsNotStringMask));
-        __ EmitEagerDeoptIf(ne, DeoptimizeReason::kWrongMap, node);
         // Deopt if this isn't a thin string.
-        __ Tst(instance_type.W(), Immediate(kThinStringTagBit));
-        __ EmitEagerDeoptIf(eq, DeoptimizeReason::kWrongMap, node);
-        __ LoadTaggedPointerField(
-            object, FieldMemOperand(object, ThinString::kActualOffset));
+        __ Cmp(instance_type.W(), Immediate(THIN_STRING_TYPE));
+        __ EmitEagerDeoptIf(ne, DeoptimizeReason::kWrongMap, node);
+        __ LoadTaggedField(object,
+                           FieldMemOperand(object, ThinString::kActualOffset));
         if (v8_flags.debug_code) {
           __ RecordComment("DCHECK IsInternalizedString");
           Register scratch = instance_type;
@@ -1563,7 +1126,7 @@ void CheckedInternalizedString::GenerateCode(MaglevAssembler* masm,
         __ jmp(*done);
       },
       done, object, this, eager_deopt_info(), scratch);
-  __ bind(*done);
+  __ Bind(*done);
 }
 
 void UnsafeSmiTag::SetValueLocationConstraints() {
@@ -1587,182 +1150,165 @@ void UnsafeSmiTag::GenerateCode(MaglevAssembler* masm,
   }
 }
 
-void CheckedFloat64Unbox::SetValueLocationConstraints() {
-  UseRegister(input());
-  DefineAsRegister(this);
+namespace {
+
+void JumpToFailIfNotHeapNumberOrOddball(
+    MaglevAssembler* masm, Register value,
+    TaggedToFloat64ConversionType conversion_type, Label* fail) {
+  switch (conversion_type) {
+    case TaggedToFloat64ConversionType::kNumberOrOddball:
+      // Check if HeapNumber or Oddball, jump to fail otherwise.
+      static_assert(InstanceType::HEAP_NUMBER_TYPE + 1 ==
+                    InstanceType::ODDBALL_TYPE);
+      if (fail) {
+        __ CompareObjectTypeRange(value, InstanceType::HEAP_NUMBER_TYPE,
+                                  InstanceType::ODDBALL_TYPE);
+        __ JumpIf(kUnsignedGreaterThan, fail);
+      } else {
+        if (v8_flags.debug_code) {
+          __ CompareObjectTypeRange(value, InstanceType::HEAP_NUMBER_TYPE,
+                                    InstanceType::ODDBALL_TYPE);
+          __ Assert(kUnsignedLessThanEqual, AbortReason::kUnexpectedValue);
+        }
+      }
+      break;
+    case TaggedToFloat64ConversionType::kOnlyNumber:
+      // Check if HeapNumber, jump to fail otherwise.
+      if (fail) {
+        __ IsObjectType(value, InstanceType::HEAP_NUMBER_TYPE);
+        __ JumpIf(kNotEqual, fail);
+      } else {
+        if (v8_flags.debug_code) {
+          __ IsObjectType(value, InstanceType::HEAP_NUMBER_TYPE);
+          __ Assert(kEqual, AbortReason::kUnexpectedValue);
+        }
+      }
+      break;
+  }
 }
-void CheckedFloat64Unbox::GenerateCode(MaglevAssembler* masm,
-                                       const ProcessingState& state) {
-  Register value = ToRegister(input());
+
+void TryUnboxNumberOrOddball(MaglevAssembler* masm, DoubleRegister dst,
+                             Register src,
+                             TaggedToFloat64ConversionType conversion_type,
+                             Label* fail) {
   Label is_not_smi, done;
   // Check if Smi.
-  __ JumpIfNotSmi(value, &is_not_smi);
+  __ JumpIfNotSmi(src, &is_not_smi);
   // If Smi, convert to Float64.
-  MaglevAssembler::ScratchRegisterScope temps(masm);
-  Register temp = temps.Acquire();
-  __ SmiToInt32(temp, value);
-  __ sxtw(temp, temp.W());
-  __ scvtf(ToDoubleRegister(result()), temp);
+  {
+    MaglevAssembler::ScratchRegisterScope temps(masm);
+    Register temp = temps.Acquire();
+    __ SmiToInt32(temp, src);
+    __ Sxtw(temp, temp.W());
+    __ Scvtf(dst, temp);
+  }
   __ Jump(&done);
-  __ bind(&is_not_smi);
-  // Check if HeapNumber, deopt otherwise.
-  __ Move(temp, FieldMemOperand(value, HeapObject::kMapOffset));
-  __ CompareRoot(temp, RootIndex::kHeapNumberMap);
-  __ EmitEagerDeoptIf(ne, DeoptimizeReason::kNotANumber, this);
-  __ Move(temp, FieldMemOperand(value, HeapNumber::kValueOffset));
-  __ fmov(ToDoubleRegister(result()), temp);
-  __ bind(&done);
+  __ Bind(&is_not_smi);
+  JumpToFailIfNotHeapNumberOrOddball(masm, src, conversion_type, fail);
+  static_assert(HeapNumber::kValueOffset == Oddball::kToNumberRawOffset);
+  __ LoadHeapNumberValue(dst, src);
+  __ Bind(&done);
 }
 
-int GeneratorStore::MaxCallStackArgs() const {
-  return WriteBarrierDescriptor::GetStackParameterCount();
+}  // namespace
+
+void CheckedNumberOrOddballToFloat64::SetValueLocationConstraints() {
+  UseAndClobberRegister(input());
+  DefineAsRegister(this);
 }
-void GeneratorStore::SetValueLocationConstraints() {
-  UseAny(context_input());
-  UseRegister(generator_input());
-  for (int i = 0; i < num_parameters_and_registers(); i++) {
-    UseAny(parameters_and_registers(i));
-  }
-  RequireSpecificTemporary(WriteBarrierDescriptor::ObjectRegister());
-  RequireSpecificTemporary(WriteBarrierDescriptor::SlotAddressRegister());
-}
-void GeneratorStore::GenerateCode(MaglevAssembler* masm,
-                                  const ProcessingState& state) {
-  Register generator = ToRegister(generator_input());
-  Register array = WriteBarrierDescriptor::ObjectRegister();
-  __ LoadTaggedPointerField(
-      array, FieldMemOperand(generator,
-                             JSGeneratorObject::kParametersAndRegistersOffset));
-
-  for (int i = 0; i < num_parameters_and_registers(); i++) {
-    // Use WriteBarrierDescriptor::SlotAddressRegister() as the scratch
-    // register since it's a known temporary, and the write barrier slow path
-    // generates better code when value == scratch.
-    Register value =
-        __ FromAnyToRegister(parameters_and_registers(i),
-                             WriteBarrierDescriptor::SlotAddressRegister());
-
-    ZoneLabelRef done(masm);
-    DeferredCodeInfo* deferred_write_barrier = __ PushDeferredCode(
-        [](MaglevAssembler* masm, ZoneLabelRef done, Register value,
-           Register array, GeneratorStore* node, int32_t offset) {
-          ASM_CODE_COMMENT_STRING(masm, "Write barrier slow path");
-          __ CheckPageFlag(
-              value,
-              MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask, eq,
-              *done);
-
-          Register slot_reg = WriteBarrierDescriptor::SlotAddressRegister();
-          __ Add(slot_reg, array, offset - kHeapObjectTag);
-
-          // TODO(leszeks): Add an interface for flushing all double registers
-          // before this Node, to avoid needing to save them here.
-          SaveFPRegsMode const save_fp_mode =
-              !node->register_snapshot().live_double_registers.is_empty()
-                  ? SaveFPRegsMode::kSave
-                  : SaveFPRegsMode::kIgnore;
-
-          __ CallRecordWriteStub(array, slot_reg, save_fp_mode);
-
-          __ B(*done);
-        },
-        done, value, array, this, FixedArray::OffsetOfElementAt(i));
-
-    __ StoreTaggedField(
-        value, FieldMemOperand(array, FixedArray::OffsetOfElementAt(i)));
-    __ JumpIfSmi(value, *done);
-    // TODO(leszeks): This will stay either false or true throughout this loop.
-    // Consider hoisting the check out of the loop and duplicating the loop into
-    // with and without write barrier.
-    __ CheckPageFlag(array, MemoryChunk::kPointersFromHereAreInterestingMask,
-                     ne, &deferred_write_barrier->deferred_code_label);
-
-    __ bind(*done);
-  }
-
-  // Use WriteBarrierDescriptor::SlotAddressRegister() as the scratch
-  // register, see comment above.
-  Register context = __ FromAnyToRegister(
-      context_input(), WriteBarrierDescriptor::SlotAddressRegister());
-
-  ZoneLabelRef done(masm);
-  DeferredCodeInfo* deferred_context_write_barrier = __ PushDeferredCode(
-      [](MaglevAssembler* masm, ZoneLabelRef done, Register context,
-         Register generator, GeneratorStore* node) {
-        ASM_CODE_COMMENT_STRING(masm, "Write barrier slow path");
-        // TODO(leszeks): The context is almost always going to be in
-        // old-space, consider moving this check to the fast path, maybe even
-        // as the first bailout.
-        __ CheckPageFlag(
-            context,
-            MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask, eq,
-            *done);
-
-        __ Move(WriteBarrierDescriptor::ObjectRegister(), generator);
-        generator = WriteBarrierDescriptor::ObjectRegister();
-
-        Register slot_reg = WriteBarrierDescriptor::SlotAddressRegister();
-        __ Add(slot_reg, generator,
-               JSGeneratorObject::kContextOffset - kHeapObjectTag);
-
-        // TODO(leszeks): Add an interface for flushing all double registers
-        // before this Node, to avoid needing to save them here.
-        SaveFPRegsMode const save_fp_mode =
-            !node->register_snapshot().live_double_registers.is_empty()
-                ? SaveFPRegsMode::kSave
-                : SaveFPRegsMode::kIgnore;
-
-        __ CallRecordWriteStub(generator, slot_reg, save_fp_mode);
-
-        __ B(*done);
-      },
-      done, context, generator, this);
-  __ StoreTaggedField(
-      context, FieldMemOperand(generator, JSGeneratorObject::kContextOffset));
-  __ AssertNotSmi(context);
-  __ CheckPageFlag(generator, MemoryChunk::kPointersFromHereAreInterestingMask,
-                   ne, &deferred_context_write_barrier->deferred_code_label);
-  __ bind(*done);
-
-  MaglevAssembler::ScratchRegisterScope temps(masm);
-  Register scratch = temps.Acquire();
-  __ Mov(scratch, Smi::FromInt(suspend_id()));
-  __ StoreTaggedField(
-      scratch,
-      FieldMemOperand(generator, JSGeneratorObject::kContinuationOffset));
-  __ Mov(scratch, Smi::FromInt(bytecode_offset()));
-  __ StoreTaggedField(
-      scratch,
-      FieldMemOperand(generator, JSGeneratorObject::kInputOrDebugPosOffset));
+void CheckedNumberOrOddballToFloat64::GenerateCode(
+    MaglevAssembler* masm, const ProcessingState& state) {
+  Register value = ToRegister(input());
+  TryUnboxNumberOrOddball(
+      masm, ToDoubleRegister(result()), value, conversion_type(),
+      __ GetDeoptLabel(this, DeoptimizeReason::kNotANumberOrOddball));
 }
 
-void IncreaseInterruptBudget::SetValueLocationConstraints() {
-  set_temporaries_needed(1);
+void UncheckedNumberOrOddballToFloat64::SetValueLocationConstraints() {
+  UseAndClobberRegister(input());
+  DefineAsRegister(this);
 }
-void IncreaseInterruptBudget::GenerateCode(MaglevAssembler* masm,
-                                           const ProcessingState& state) {
-  MaglevAssembler::ScratchRegisterScope temps(masm);
-  Register feedback_cell = temps.Acquire();
-  Register budget = temps.Acquire().W();
-  __ Ldr(feedback_cell,
-         MemOperand(fp, StandardFrameConstants::kFunctionOffset));
-  __ LoadTaggedPointerField(
-      feedback_cell,
-      FieldMemOperand(feedback_cell, JSFunction::kFeedbackCellOffset));
-  __ Ldr(budget,
-         FieldMemOperand(feedback_cell, FeedbackCell::kInterruptBudgetOffset));
-  __ Add(budget, budget, Immediate(amount()));
-  __ Str(budget,
-         FieldMemOperand(feedback_cell, FeedbackCell::kInterruptBudgetOffset));
+void UncheckedNumberOrOddballToFloat64::GenerateCode(
+    MaglevAssembler* masm, const ProcessingState& state) {
+  Register value = ToRegister(input());
+  TryUnboxNumberOrOddball(masm, ToDoubleRegister(result()), value,
+                          conversion_type(), nullptr);
 }
 
 namespace {
 
+void EmitTruncateNumberOrOddballToInt32(
+    MaglevAssembler* masm, Register value, Register result_reg,
+    TaggedToFloat64ConversionType conversion_type, Label* not_a_number) {
+  Label is_not_smi, done;
+  // Check if Smi.
+  __ JumpIfNotSmi(value, &is_not_smi);
+  // If Smi, convert to Int32.
+  __ SmiToInt32(value);
+  __ B(&done);
+  __ Bind(&is_not_smi);
+  JumpToFailIfNotHeapNumberOrOddball(masm, value, conversion_type,
+                                     not_a_number);
+  static_assert(HeapNumber::kValueOffset == Oddball::kToNumberRawOffset);
+  MaglevAssembler::ScratchRegisterScope temps(masm);
+  DoubleRegister double_value = temps.AcquireDouble();
+  __ Ldr(double_value, FieldMemOperand(value, HeapNumber::kValueOffset));
+  __ TruncateDoubleToInt32(result_reg, double_value);
+  __ Bind(&done);
+}
+
+}  // namespace
+
+void CheckedTruncateNumberOrOddballToInt32::SetValueLocationConstraints() {
+  UseRegister(input());
+  DefineSameAsFirst(this);
+}
+void CheckedTruncateNumberOrOddballToInt32::GenerateCode(
+    MaglevAssembler* masm, const ProcessingState& state) {
+  Register value = ToRegister(input());
+  Register result_reg = ToRegister(result());
+  DCHECK_EQ(value, result_reg);
+  Label* deopt_label =
+      __ GetDeoptLabel(this, DeoptimizeReason::kNotANumberOrOddball);
+  EmitTruncateNumberOrOddballToInt32(masm, value, result_reg, conversion_type(),
+                                     deopt_label);
+}
+
+void TruncateNumberOrOddballToInt32::SetValueLocationConstraints() {
+  UseRegister(input());
+  DefineSameAsFirst(this);
+}
+void TruncateNumberOrOddballToInt32::GenerateCode(
+    MaglevAssembler* masm, const ProcessingState& state) {
+  Register value = ToRegister(input());
+  Register result_reg = ToRegister(result());
+  DCHECK_EQ(value, result_reg);
+  EmitTruncateNumberOrOddballToInt32(
+      masm, value, result_reg, TaggedToFloat64ConversionType::kNumberOrOddball,
+      nullptr);
+}
+
+void HoleyFloat64ToMaybeNanFloat64::SetValueLocationConstraints() {
+  UseRegister(input());
+  DefineAsRegister(this);
+}
+void HoleyFloat64ToMaybeNanFloat64::GenerateCode(MaglevAssembler* masm,
+                                                 const ProcessingState& state) {
+  // The hole value is a signalling NaN, so just silence it to get the float64
+  // value.
+  __ CanonicalizeNaN(ToDoubleRegister(result()), ToDoubleRegister(input()));
+}
+
+namespace {
+
+enum class ReduceInterruptBudgetType { kLoop, kReturn };
+
 void HandleInterruptsAndTiering(MaglevAssembler* masm, ZoneLabelRef done,
-                                ReduceInterruptBudget* node,
+                                Node* node, ReduceInterruptBudgetType type,
                                 Register scratch0) {
-  // First, check for interrupts.
-  {
+  // For loops, first check for interrupts. Don't do this for returns, as we
+  // can't lazy deopt to the end of a return.
+  if (type == ReduceInterruptBudgetType::kLoop) {
     Label next;
     // Here, we only care about interrupts since we've already guarded against
     // real stack overflows on function entry.
@@ -1794,117 +1340,63 @@ void HandleInterruptsAndTiering(MaglevAssembler* masm, ZoneLabelRef done,
 
   // No pending interrupts. Call into the TieringManager if needed.
   {
-    // Skip the runtime call if the tiering state is kInProgress. The runtime
-    // only performs simple bookkeeping in this case, which we can easily
-    // replicate here in generated code.
-    // TODO(jgruber): Use the correct feedback vector once Maglev inlining is
-    // enabled.
-    Label update_profiler_ticks_and_interrupt_budget;
-    {
-      MaglevAssembler::ScratchRegisterScope temps(masm);
-      Register scratch1 = temps.Acquire();
-      static_assert(kTieringStateInProgressBlocksTierup);
-      __ Move(scratch0, masm->compilation_info()
-                            ->toplevel_compilation_unit()
-                            ->feedback()
-                            .object());
-
-      // If tiering_state is kInProgress, skip the runtime call.
-      __ Ldrh(scratch1.W(),
-              FieldMemOperand(scratch0, FeedbackVector::kFlagsOffset));
-      __ DecodeField<FeedbackVector::TieringStateBits>(scratch1);
-      __ Cmp(scratch1.W(),
-             Immediate(static_cast<int>(TieringState::kInProgress)));
-      __ B(&update_profiler_ticks_and_interrupt_budget, eq);
-
-      // If osr_tiering_state is kInProgress, skip the runtime call.
-      __ Ldrh(scratch1.W(),
-              FieldMemOperand(scratch0, FeedbackVector::kFlagsOffset));
-      __ DecodeField<FeedbackVector::OsrTieringStateBit>(scratch1);
-      __ Cmp(scratch1.W(),
-             Immediate(static_cast<int>(TieringState::kInProgress)));
-      __ B(&update_profiler_ticks_and_interrupt_budget, eq);
-    }
-
-    {
-      SaveRegisterStateForCall save_register_state(masm,
-                                                   node->register_snapshot());
-      Register function = scratch0;
-      __ Ldr(function, MemOperand(fp, StandardFrameConstants::kFunctionOffset));
-      __ Push(function);
-      // Move into kContextRegister after the load into scratch0, just in case
-      // scratch0 happens to be kContextRegister.
-      __ Move(kContextRegister, masm->native_context().object());
-      // Note: must not cause a lazy deopt!
-      __ CallRuntime(Runtime::kBytecodeBudgetInterrupt_Maglev, 1);
-      save_register_state.DefineSafepoint();
-    }
-    __ B(*done);
-
-    __ Bind(&update_profiler_ticks_and_interrupt_budget);
-    {
-      MaglevAssembler::ScratchRegisterScope temps(masm);
-      Register feedback_vector = scratch0;
-      Register ticks = temps.Acquire().W();
-      // We are skipping the call to Runtime::kBytecodeBudgetInterrupt_Maglev
-      // since the tiering state is kInProgress. Perform bookkeeping that would
-      // have been done in the runtime function:
-      __ AssertFeedbackVector(feedback_vector);
-      // FeedbackVector::SaturatingIncrementProfilerTicks.
-      // TODO(jgruber): This isn't saturating and thus we may theoretically
-      // exceed Smi::kMaxValue. But, 1) this is very unlikely since it'd take
-      // quite some time to exhaust the budget that many times; and 2) even an
-      // overflow doesn't hurt us at all.
-      __ Ldr(ticks, FieldMemOperand(feedback_vector,
-                                    FeedbackVector::kProfilerTicksOffset));
-      __ Add(ticks, ticks, Immediate(1));
-      __ Str(ticks, FieldMemOperand(feedback_vector,
-                                    FeedbackVector::kProfilerTicksOffset));
-    }
-
-    // JSFunction::SetInterruptBudget.
-    {
-      MaglevAssembler::ScratchRegisterScope temps(masm);
-      Register feedback_cell = scratch0;
-      Register budget = temps.Acquire().W();
-      __ Ldr(feedback_cell,
-             MemOperand(fp, StandardFrameConstants::kFunctionOffset));
-      __ LoadTaggedPointerField(
-          feedback_cell,
-          FieldMemOperand(feedback_cell, JSFunction::kFeedbackCellOffset));
-      __ Move(budget, v8_flags.interrupt_budget);
-      __ Str(budget, FieldMemOperand(feedback_cell,
-                                     FeedbackCell::kInterruptBudgetOffset));
-    }
-    __ B(*done);
+    SaveRegisterStateForCall save_register_state(masm,
+                                                 node->register_snapshot());
+    Register function = scratch0;
+    __ Ldr(function, MemOperand(fp, StandardFrameConstants::kFunctionOffset));
+    __ Push(function);
+    // Move into kContextRegister after the load into scratch0, just in case
+    // scratch0 happens to be kContextRegister.
+    __ Move(kContextRegister, masm->native_context().object());
+    // Note: must not cause a lazy deopt!
+    __ CallRuntime(Runtime::kBytecodeBudgetInterrupt_Maglev, 1);
+    save_register_state.DefineSafepoint();
   }
+  __ B(*done);
 }
 
-}  // namespace
-
-int ReduceInterruptBudget::MaxCallStackArgs() const { return 1; }
-void ReduceInterruptBudget::SetValueLocationConstraints() {
-  set_temporaries_needed(2);
-}
-void ReduceInterruptBudget::GenerateCode(MaglevAssembler* masm,
-                                         const ProcessingState& state) {
+void GenerateReduceInterruptBudget(MaglevAssembler* masm, Node* node,
+                                   ReduceInterruptBudgetType type, int amount) {
   MaglevAssembler::ScratchRegisterScope temps(masm);
   Register scratch = temps.Acquire();
   Register feedback_cell = scratch;
   Register budget = temps.Acquire().W();
   __ Ldr(feedback_cell,
          MemOperand(fp, StandardFrameConstants::kFunctionOffset));
-  __ LoadTaggedPointerField(
+  __ LoadTaggedField(
       feedback_cell,
       FieldMemOperand(feedback_cell, JSFunction::kFeedbackCellOffset));
   __ Ldr(budget,
          FieldMemOperand(feedback_cell, FeedbackCell::kInterruptBudgetOffset));
-  __ Subs(budget, budget, Immediate(amount()));
+  __ Subs(budget, budget, Immediate(amount));
   __ Str(budget,
          FieldMemOperand(feedback_cell, FeedbackCell::kInterruptBudgetOffset));
   ZoneLabelRef done(masm);
-  __ JumpToDeferredIf(lt, HandleInterruptsAndTiering, done, this, scratch);
-  __ bind(*done);
+  __ JumpToDeferredIf(lt, HandleInterruptsAndTiering, done, node, type,
+                      scratch);
+  __ Bind(*done);
+}
+
+}  // namespace
+
+int ReduceInterruptBudgetForLoop::MaxCallStackArgs() const { return 1; }
+void ReduceInterruptBudgetForLoop::SetValueLocationConstraints() {
+  set_temporaries_needed(2);
+}
+void ReduceInterruptBudgetForLoop::GenerateCode(MaglevAssembler* masm,
+                                                const ProcessingState& state) {
+  GenerateReduceInterruptBudget(masm, this, ReduceInterruptBudgetType::kLoop,
+                                amount());
+}
+
+int ReduceInterruptBudgetForReturn::MaxCallStackArgs() const { return 1; }
+void ReduceInterruptBudgetForReturn::SetValueLocationConstraints() {
+  set_temporaries_needed(2);
+}
+void ReduceInterruptBudgetForReturn::GenerateCode(
+    MaglevAssembler* masm, const ProcessingState& state) {
+  GenerateReduceInterruptBudget(masm, this, ReduceInterruptBudgetType::kReturn,
+                                amount());
 }
 
 namespace {
@@ -1916,8 +1408,7 @@ void GenerateTypedArrayLoad(MaglevAssembler* masm, NodeT* node, Register object,
   __ AssertNotSmi(object);
   if (v8_flags.debug_code) {
     MaglevAssembler::ScratchRegisterScope temps(masm);
-    Register scratch = temps.Acquire();
-    __ CompareObjectType(object, scratch, scratch, JS_TYPED_ARRAY_TYPE);
+    __ IsObjectType(object, JS_TYPED_ARRAY_TYPE);
     __ Assert(eq, AbortReason::kUnexpectedValue);
   }
 
@@ -1934,13 +1425,15 @@ void GenerateTypedArrayLoad(MaglevAssembler* masm, NodeT* node, Register object,
   if constexpr (std::is_same_v<ResultReg, Register>) {
     if (IsSignedIntTypedArrayElementsKind(kind)) {
       int element_size = ElementsKindSize(kind);
-      __ Add(data_pointer, data_pointer, Operand(index, LSL, element_size / 2));
+      __ Add(data_pointer, data_pointer,
+             Operand(index, LSL, ShiftFromScale(element_size)));
       __ LoadSignedField(result_reg.W(), MemOperand(data_pointer),
                          element_size);
     } else {
       DCHECK(IsUnsignedIntTypedArrayElementsKind(kind));
       int element_size = ElementsKindSize(kind);
-      __ Add(data_pointer, data_pointer, Operand(index, LSL, element_size / 2));
+      __ Add(data_pointer, data_pointer,
+             Operand(index, LSL, ShiftFromScale(element_size)));
       __ LoadUnsignedField(result_reg.W(), MemOperand(data_pointer),
                            element_size);
     }
@@ -1966,97 +1459,142 @@ void GenerateTypedArrayLoad(MaglevAssembler* masm, NodeT* node, Register object,
   }
 }
 
+template <bool check_detached, typename ValueReg, typename NodeT>
+void GenerateTypedArrayStore(MaglevAssembler* masm, NodeT* node,
+                             Register object, Register index, ValueReg value,
+                             ElementsKind kind) {
+  __ AssertNotSmi(object);
+  if (v8_flags.debug_code) {
+    MaglevAssembler::ScratchRegisterScope temps(masm);
+    __ IsObjectType(object, JS_TYPED_ARRAY_TYPE);
+    __ Assert(eq, AbortReason::kUnexpectedValue);
+  }
+
+  MaglevAssembler::ScratchRegisterScope temps(masm);
+  Register scratch = temps.Acquire();
+
+  if constexpr (check_detached) {
+    __ DeoptIfBufferDetached(object, scratch, node);
+  }
+
+  Register data_pointer = scratch;
+  __ BuildTypedArrayDataPointer(data_pointer, object);
+
+  if constexpr (std::is_same_v<ValueReg, Register>) {
+    int element_size = ElementsKindSize(kind);
+    __ Add(data_pointer, data_pointer,
+           Operand(index, LSL, ShiftFromScale(element_size)));
+    __ StoreField(MemOperand(data_pointer), value.W(), element_size);
+  } else {
+#ifdef DEBUG
+    bool value_is_double = std::is_same_v<ValueReg, DoubleRegister>;
+    DCHECK(value_is_double);
+    DCHECK(IsFloatTypedArrayElementsKind(kind));
+#endif
+    switch (kind) {
+      case FLOAT32_ELEMENTS: {
+        DoubleRegister double_scratch = temps.AcquireDouble();
+        __ Fcvt(double_scratch.S(), value);
+        __ Add(data_pointer, data_pointer, Operand(index, LSL, 2));
+        __ Str(double_scratch.S(), MemOperand(data_pointer));
+        break;
+      }
+      case FLOAT64_ELEMENTS:
+        __ Add(data_pointer, data_pointer, Operand(index, LSL, 3));
+        __ Str(value, MemOperand(data_pointer));
+        break;
+      default:
+        UNREACHABLE();
+    }
+  }
+}
+
 }  // namespace
 
-#define DEF_OPERATION(Name, ResultReg, ToResultReg, check_detached)     \
-  void Name::SetValueLocationConstraints() {                            \
-    UseRegister(object_input());                                        \
-    UseRegister(index_input());                                         \
-    DefineAsRegister(this);                                             \
-  }                                                                     \
-  void Name::GenerateCode(MaglevAssembler* masm,                        \
-                          const ProcessingState& state) {               \
-    Register object = ToRegister(object_input());                       \
-    Register index = ToRegister(index_input());                         \
-    ResultReg result_reg = ToResultReg(result());                       \
-                                                                        \
-    GenerateTypedArrayLoad<check_detached>(masm, this, object, index,   \
-                                           result_reg, elements_kind_); \
+#define DEF_LOAD_TYPED_ARRAY(Name, ResultReg, ToResultReg, check_detached) \
+  void Name::SetValueLocationConstraints() {                               \
+    UseRegister(object_input());                                           \
+    UseRegister(index_input());                                            \
+    DefineAsRegister(this);                                                \
+  }                                                                        \
+  void Name::GenerateCode(MaglevAssembler* masm,                           \
+                          const ProcessingState& state) {                  \
+    Register object = ToRegister(object_input());                          \
+    Register index = ToRegister(index_input());                            \
+    ResultReg result_reg = ToResultReg(result());                          \
+                                                                           \
+    GenerateTypedArrayLoad<check_detached>(masm, this, object, index,      \
+                                           result_reg, elements_kind_);    \
   }
 
-DEF_OPERATION(LoadSignedIntTypedArrayElement, Register, ToRegister,
-              /*check_detached*/ true)
-DEF_OPERATION(LoadSignedIntTypedArrayElementNoDeopt, Register, ToRegister,
-              /*check_detached*/ false)
+DEF_LOAD_TYPED_ARRAY(LoadSignedIntTypedArrayElement, Register, ToRegister,
+                     /*check_detached*/ true)
+DEF_LOAD_TYPED_ARRAY(LoadSignedIntTypedArrayElementNoDeopt, Register,
+                     ToRegister,
+                     /*check_detached*/ false)
 
-DEF_OPERATION(LoadUnsignedIntTypedArrayElement, Register, ToRegister,
-              /*check_detached*/ true)
-DEF_OPERATION(LoadUnsignedIntTypedArrayElementNoDeopt, Register, ToRegister,
-              /*check_detached*/ false)
+DEF_LOAD_TYPED_ARRAY(LoadUnsignedIntTypedArrayElement, Register, ToRegister,
+                     /*check_detached*/ true)
+DEF_LOAD_TYPED_ARRAY(LoadUnsignedIntTypedArrayElementNoDeopt, Register,
+                     ToRegister,
+                     /*check_detached*/ false)
 
-DEF_OPERATION(LoadDoubleTypedArrayElement, DoubleRegister, ToDoubleRegister,
-              /*check_detached*/ true)
-DEF_OPERATION(LoadDoubleTypedArrayElementNoDeopt, DoubleRegister,
-              ToDoubleRegister, /*check_detached*/ false)
-#undef DEF_OPERATION
+DEF_LOAD_TYPED_ARRAY(LoadDoubleTypedArrayElement, DoubleRegister,
+                     ToDoubleRegister,
+                     /*check_detached*/ true)
+DEF_LOAD_TYPED_ARRAY(LoadDoubleTypedArrayElementNoDeopt, DoubleRegister,
+                     ToDoubleRegister, /*check_detached*/ false)
+#undef DEF_LOAD_TYPED_ARRAY
 
-void LoadDoubleField::SetValueLocationConstraints() {
-  UseRegister(object_input());
-  DefineAsRegister(this);
-}
-void LoadDoubleField::GenerateCode(MaglevAssembler* masm,
-                                   const ProcessingState& state) {
-  MaglevAssembler::ScratchRegisterScope temps(masm);
-  Register tmp = temps.Acquire();
-  Register object = ToRegister(object_input());
-  __ AssertNotSmi(object);
-  __ DecompressAnyTagged(tmp, FieldMemOperand(object, offset()));
-  __ AssertNotSmi(tmp);
-  __ Ldr(ToDoubleRegister(result()),
-         FieldMemOperand(tmp, HeapNumber::kValueOffset));
-}
+#define DEF_STORE_TYPED_ARRAY(Name, ValueReg, ToValueReg, check_detached)     \
+  void Name::SetValueLocationConstraints() {                                  \
+    UseRegister(object_input());                                              \
+    UseRegister(index_input());                                               \
+    UseRegister(value_input());                                               \
+  }                                                                           \
+  void Name::GenerateCode(MaglevAssembler* masm,                              \
+                          const ProcessingState& state) {                     \
+    Register object = ToRegister(object_input());                             \
+    Register index = ToRegister(index_input());                               \
+    ValueReg value = ToValueReg(value_input());                               \
+                                                                              \
+    GenerateTypedArrayStore<check_detached>(masm, this, object, index, value, \
+                                            elements_kind_);                  \
+  }
 
-void LoadFixedArrayElement::SetValueLocationConstraints() {
+DEF_STORE_TYPED_ARRAY(StoreIntTypedArrayElement, Register, ToRegister,
+                      /*check_detached*/ true)
+DEF_STORE_TYPED_ARRAY(StoreIntTypedArrayElementNoDeopt, Register, ToRegister,
+                      /*check_detached*/ false)
+
+DEF_STORE_TYPED_ARRAY(StoreDoubleTypedArrayElement, DoubleRegister,
+                      ToDoubleRegister,
+                      /*check_detached*/ true)
+DEF_STORE_TYPED_ARRAY(StoreDoubleTypedArrayElementNoDeopt, DoubleRegister,
+                      ToDoubleRegister, /*check_detached*/ false)
+
+#undef DEF_STORE_TYPED_ARRAY
+
+void StoreFixedDoubleArrayElement::SetValueLocationConstraints() {
   UseRegister(elements_input());
   UseRegister(index_input());
-  DefineAsRegister(this);
+  UseRegister(value_input());
+  set_temporaries_needed(1);
 }
-void LoadFixedArrayElement::GenerateCode(MaglevAssembler* masm,
-                                         const ProcessingState& state) {
+void StoreFixedDoubleArrayElement::GenerateCode(MaglevAssembler* masm,
+                                                const ProcessingState& state) {
   Register elements = ToRegister(elements_input());
   Register index = ToRegister(index_input());
+  DoubleRegister value = ToDoubleRegister(value_input());
+  MaglevAssembler::ScratchRegisterScope temps(masm);
+  Register scratch = temps.Acquire();
   if (v8_flags.debug_code) {
-    MaglevAssembler::ScratchRegisterScope temps(masm);
-    Register scratch = temps.Acquire();
     __ AssertNotSmi(elements);
-    __ CompareObjectType(elements, scratch, scratch, FIXED_ARRAY_TYPE);
+    __ IsObjectType(elements, FIXED_DOUBLE_ARRAY_TYPE);
     __ Assert(eq, AbortReason::kUnexpectedValue);
   }
-  Register result_reg = ToRegister(result());
-  __ Add(result_reg, elements, Operand(index, LSL, kTaggedSizeLog2));
-  __ DecompressAnyTagged(result_reg,
-                         FieldMemOperand(result_reg, FixedArray::kHeaderSize));
-}
-
-void LoadFixedDoubleArrayElement::SetValueLocationConstraints() {
-  UseAndClobberRegister(elements_input());
-  UseRegister(index_input());
-  DefineAsRegister(this);
-}
-void LoadFixedDoubleArrayElement::GenerateCode(MaglevAssembler* masm,
-                                               const ProcessingState& state) {
-  Register elements = ToRegister(elements_input());
-  Register index = ToRegister(index_input());
-  if (v8_flags.debug_code) {
-    MaglevAssembler::ScratchRegisterScope temps(masm);
-    Register scratch = temps.Acquire();
-    __ AssertNotSmi(elements);
-    __ CompareObjectType(elements, scratch, scratch, FIXED_DOUBLE_ARRAY_TYPE);
-    __ Assert(eq, AbortReason::kUnexpectedValue);
-  }
-  __ Add(elements, elements, Operand(index, LSL, kDoubleSizeLog2));
-  __ Ldr(ToDoubleRegister(result()),
-         FieldMemOperand(elements, FixedArray::kHeaderSize));
+  __ Add(scratch, elements, Operand(index, LSL, kDoubleSizeLog2));
+  __ Str(value, FieldMemOperand(scratch, FixedArray::kHeaderSize));
 }
 
 void StoreDoubleField::SetValueLocationConstraints() {
@@ -2072,67 +1610,9 @@ void StoreDoubleField::GenerateCode(MaglevAssembler* masm,
   Register tmp = temps.Acquire();
 
   __ AssertNotSmi(object);
-  __ DecompressAnyTagged(tmp, FieldMemOperand(object, offset()));
+  __ DecompressTagged(tmp, FieldMemOperand(object, offset()));
   __ AssertNotSmi(tmp);
   __ Move(FieldMemOperand(tmp, HeapNumber::kValueOffset), value);
-}
-
-int StoreMap::MaxCallStackArgs() const {
-  return WriteBarrierDescriptor::GetStackParameterCount();
-}
-void StoreMap::SetValueLocationConstraints() {
-  UseFixed(object_input(), WriteBarrierDescriptor::ObjectRegister());
-  set_temporaries_needed(1);
-}
-void StoreMap::GenerateCode(MaglevAssembler* masm,
-                            const ProcessingState& state) {
-  // TODO(leszeks): Consider making this an arbitrary register and push/popping
-  // in the deferred path.
-  Register object = WriteBarrierDescriptor::ObjectRegister();
-  DCHECK_EQ(object, ToRegister(object_input()));
-
-  __ AssertNotSmi(object);
-  // Since {value} will be passed to deferred code, we have to use a general
-  // temporary for it, rather than the regular scratch registers.
-  MaglevAssembler::ScratchRegisterScope temps(masm);
-  Register value = temps.Acquire();
-  __ Move(value, map_.object());
-  __ StoreTaggedField(value, FieldMemOperand(object, HeapObject::kMapOffset));
-
-  ZoneLabelRef done(masm);
-  DeferredCodeInfo* deferred_write_barrier = __ PushDeferredCode(
-      [](MaglevAssembler* masm, ZoneLabelRef done, Register value,
-         Register object, StoreMap* node) {
-        ASM_CODE_COMMENT_STRING(masm, "Write barrier slow path");
-        __ CheckPageFlag(
-            value, MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
-            eq, *done);
-
-        Register slot_reg = WriteBarrierDescriptor::SlotAddressRegister();
-        RegList saved;
-        if (node->register_snapshot().live_registers.has(slot_reg)) {
-          saved.set(slot_reg);
-        }
-
-        __ PushAll(saved);
-        __ Add(slot_reg, object, HeapObject::kMapOffset - kHeapObjectTag);
-
-        SaveFPRegsMode const save_fp_mode =
-            !node->register_snapshot().live_double_registers.is_empty()
-                ? SaveFPRegsMode::kSave
-                : SaveFPRegsMode::kIgnore;
-
-        __ CallRecordWriteStub(object, slot_reg, save_fp_mode);
-
-        __ PopAll(saved);
-        __ B(*done);
-      },
-      done, value, object, this);
-
-  __ JumpIfSmi(value, *done);
-  __ CheckPageFlag(object, MemoryChunk::kPointersFromHereAreInterestingMask, ne,
-                   &deferred_write_barrier->deferred_code_label);
-  __ bind(*done);
 }
 
 void LoadSignedIntDataViewElement::SetValueLocationConstraints() {
@@ -2154,9 +1634,7 @@ void LoadSignedIntDataViewElement::GenerateCode(MaglevAssembler* masm,
 
   __ AssertNotSmi(object);
   if (v8_flags.debug_code) {
-    MaglevAssembler::ScratchRegisterScope temps(masm);
-    Register scratch = temps.Acquire();
-    __ CompareObjectType(object, scratch, scratch, JS_DATA_VIEW_TYPE);
+    __ CompareObjectType(object, JS_DATA_VIEW_TYPE);
     __ Assert(hs, AbortReason::kUnexpectedValue);
   }
 
@@ -2181,11 +1659,12 @@ void LoadSignedIntDataViewElement::GenerateCode(MaglevAssembler* masm,
       }
     } else {
       ZoneLabelRef is_little_endian(masm), is_big_endian(masm);
-      __ ToBoolean(ToRegister(is_little_endian_input()), is_little_endian,
-                   is_big_endian, false);
-      __ bind(*is_big_endian);
+      __ ToBoolean(ToRegister(is_little_endian_input()),
+                   CheckType::kCheckHeapObject, is_little_endian, is_big_endian,
+                   false);
+      __ Bind(*is_big_endian);
       __ ReverseByteOrder(result_reg, element_size);
-      __ bind(*is_little_endian);
+      __ Bind(*is_little_endian);
       // arm64 is little endian.
       static_assert(V8_TARGET_LITTLE_ENDIAN == 1);
     }
@@ -2215,9 +1694,7 @@ void StoreSignedIntDataViewElement::GenerateCode(MaglevAssembler* masm,
 
   __ AssertNotSmi(object);
   if (v8_flags.debug_code) {
-    MaglevAssembler::ScratchRegisterScope temps(masm);
-    Register scratch = temps.Acquire();
-    __ CompareObjectType(object, scratch, scratch, JS_DATA_VIEW_TYPE);
+    __ CompareObjectType(object, JS_DATA_VIEW_TYPE);
     __ Assert(hs, AbortReason::kUnexpectedValue);
   }
 
@@ -2231,11 +1708,12 @@ void StoreSignedIntDataViewElement::GenerateCode(MaglevAssembler* masm,
       }
     } else {
       ZoneLabelRef is_little_endian(masm), is_big_endian(masm);
-      __ ToBoolean(ToRegister(is_little_endian_input()), is_little_endian,
-                   is_big_endian, false);
-      __ bind(*is_big_endian);
+      __ ToBoolean(ToRegister(is_little_endian_input()),
+                   CheckType::kCheckHeapObject, is_little_endian, is_big_endian,
+                   false);
+      __ Bind(*is_big_endian);
       __ ReverseByteOrder(value, element_size);
-      __ bind(*is_little_endian);
+      __ Bind(*is_little_endian);
       // arm64 is little endian.
       static_assert(V8_TARGET_LITTLE_ENDIAN == 1);
     }
@@ -2269,9 +1747,7 @@ void LoadDoubleDataViewElement::GenerateCode(MaglevAssembler* masm,
 
   __ AssertNotSmi(object);
   if (v8_flags.debug_code) {
-    MaglevAssembler::ScratchRegisterScope temps(masm);
-    Register scratch = temps.Acquire();
-    __ CompareObjectType(object, scratch, scratch, JS_DATA_VIEW_TYPE);
+    __ CompareObjectType(object, JS_DATA_VIEW_TYPE);
     __ Assert(hs, AbortReason::kUnexpectedValue);
   }
 
@@ -2295,21 +1771,22 @@ void LoadDoubleDataViewElement::GenerateCode(MaglevAssembler* masm,
     // TODO(leszeks): We're likely to be calling this on an existing boolean --
     // maybe that's a case we should fast-path here and re-use that boolean
     // value?
-    __ ToBoolean(ToRegister(is_little_endian_input()), is_little_endian,
-                 is_big_endian, true);
+    __ ToBoolean(ToRegister(is_little_endian_input()),
+                 CheckType::kCheckHeapObject, is_little_endian, is_big_endian,
+                 true);
     // arm64 is little endian.
     static_assert(V8_TARGET_LITTLE_ENDIAN == 1);
-    __ bind(*is_little_endian);
+    __ Bind(*is_little_endian);
     __ Move(result_reg, MemOperand(data_pointer, index));
-    __ jmp(&done);
+    __ B(&done);
     // We should swap the bytes if big endian.
-    __ bind(*is_big_endian);
+    __ Bind(*is_big_endian);
     MaglevAssembler::ScratchRegisterScope temps(masm);
     Register scratch = temps.Acquire();
     __ Move(scratch, MemOperand(data_pointer, index));
     __ Rev(scratch, scratch);
     __ Fmov(result_reg, scratch);
-    __ bind(&done);
+    __ Bind(&done);
   }
 }
 
@@ -2334,9 +1811,7 @@ void StoreDoubleDataViewElement::GenerateCode(MaglevAssembler* masm,
 
   __ AssertNotSmi(object);
   if (v8_flags.debug_code) {
-    MaglevAssembler::ScratchRegisterScope temps(masm);
-    Register scratch = temps.Acquire();
-    __ CompareObjectType(object, scratch, scratch, JS_DATA_VIEW_TYPE);
+    __ CompareObjectType(object, JS_DATA_VIEW_TYPE);
     __ Assert(hs, AbortReason::kUnexpectedValue);
   }
 
@@ -2360,78 +1835,23 @@ void StoreDoubleDataViewElement::GenerateCode(MaglevAssembler* masm,
     // TODO(leszeks): We're likely to be calling this on an existing boolean --
     // maybe that's a case we should fast-path here and re-use that boolean
     // value?
-    __ ToBoolean(ToRegister(is_little_endian_input()), is_little_endian,
-                 is_big_endian, true);
+    __ ToBoolean(ToRegister(is_little_endian_input()),
+                 CheckType::kCheckHeapObject, is_little_endian, is_big_endian,
+                 true);
     // arm64 is little endian.
     static_assert(V8_TARGET_LITTLE_ENDIAN == 1);
-    __ bind(*is_little_endian);
+    __ Bind(*is_little_endian);
     __ Str(value, MemOperand(data_pointer, index));
-    __ jmp(&done);
+    __ B(&done);
     // We should swap the bytes if big endian.
-    __ bind(*is_big_endian);
+    __ Bind(*is_big_endian);
     MaglevAssembler::ScratchRegisterScope temps(masm);
     Register scratch = temps.Acquire();
     __ Fmov(scratch, value);
     __ Rev(scratch, scratch);
     __ Str(scratch, MemOperand(data_pointer, index));
-    __ bind(&done);
+    __ Bind(&done);
   }
-}
-
-int StoreTaggedFieldWithWriteBarrier::MaxCallStackArgs() const {
-  return WriteBarrierDescriptor::GetStackParameterCount();
-}
-void StoreTaggedFieldWithWriteBarrier::SetValueLocationConstraints() {
-  UseFixed(object_input(), WriteBarrierDescriptor::ObjectRegister());
-  UseRegister(value_input());
-}
-void StoreTaggedFieldWithWriteBarrier::GenerateCode(
-    MaglevAssembler* masm, const ProcessingState& state) {
-  // TODO(leszeks): Consider making this an arbitrary register and push/popping
-  // in the deferred path.
-  Register object = WriteBarrierDescriptor::ObjectRegister();
-  DCHECK_EQ(object, ToRegister(object_input()));
-
-  Register value = ToRegister(value_input());
-
-  __ AssertNotSmi(object);
-  __ StoreTaggedField(FieldMemOperand(object, offset()), value);
-
-  ZoneLabelRef done(masm);
-  DeferredCodeInfo* deferred_write_barrier = __ PushDeferredCode(
-      [](MaglevAssembler* masm, ZoneLabelRef done, Register value,
-         Register object, StoreTaggedFieldWithWriteBarrier* node) {
-        ASM_CODE_COMMENT_STRING(masm, "Write barrier slow path");
-        __ CheckPageFlag(
-            value, MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
-            eq, *done);
-
-        Register slot_reg = WriteBarrierDescriptor::SlotAddressRegister();
-        RegList saved;
-        if (node->register_snapshot().live_registers.has(slot_reg)) {
-          saved.set(slot_reg);
-        }
-
-        __ PushAll(saved);
-        __ Add(slot_reg, object, node->offset() - kHeapObjectTag);
-
-        SaveFPRegsMode const save_fp_mode =
-            !node->register_snapshot().live_double_registers.is_empty()
-                ? SaveFPRegsMode::kSave
-                : SaveFPRegsMode::kIgnore;
-
-        __ CallRecordWriteStub(object, slot_reg, save_fp_mode);
-
-        __ PopAll(saved);
-        __ B(*done);
-      },
-      done, value, object, this);
-
-  __ JumpIfSmi(value, *done);
-  __ CheckPageFlag(object, MemoryChunk::kPointersFromHereAreInterestingMask, ne,
-                   &deferred_write_barrier->deferred_code_label);
-
-  __ bind(*done);
 }
 
 void SetPendingMessage::SetValueLocationConstraints() {
@@ -2460,57 +1880,6 @@ void SetPendingMessage::GenerateCode(MaglevAssembler* masm,
   }
 }
 
-void StringLength::SetValueLocationConstraints() {
-  UseRegister(object_input());
-  DefineAsRegister(this);
-}
-void StringLength::GenerateCode(MaglevAssembler* masm,
-                                const ProcessingState& state) {
-  Register object = ToRegister(object_input());
-  if (v8_flags.debug_code) {
-    // Check if {object} is a string.
-    MaglevAssembler::ScratchRegisterScope temps(masm);
-    Register scratch = temps.Acquire();
-    __ AssertNotSmi(object);
-    __ LoadMap(scratch, object);
-    __ CompareInstanceTypeRange(scratch, scratch, FIRST_STRING_TYPE,
-                                LAST_STRING_TYPE);
-    __ Check(ls, AbortReason::kUnexpectedValue);
-  }
-  __ Ldr(ToRegister(result()).W(),
-         FieldMemOperand(object, String::kLengthOffset));
-}
-
-void TestUndetectable::SetValueLocationConstraints() {
-  UseRegister(value());
-  DefineAsRegister(this);
-}
-void TestUndetectable::GenerateCode(MaglevAssembler* masm,
-                                    const ProcessingState& state) {
-  Register object = ToRegister(value());
-  Register return_value = ToRegister(result());
-
-  Label return_false, done;
-  __ JumpIfSmi(object, &return_false);
-  {
-    // For heap objects, check the map's undetectable bit.
-    MaglevAssembler::ScratchRegisterScope temps(masm);
-    Register scratch = temps.Acquire();
-    __ LoadMap(scratch, object);
-    __ Ldr(scratch.W(), FieldMemOperand(scratch, Map::kBitFieldOffset));
-    __ TestAndBranchIfAllClear(
-        scratch.W(), Map::Bits1::IsUndetectableBit::kMask, &return_false);
-  }
-
-  __ LoadRoot(return_value, RootIndex::kTrueValue);
-  __ B(&done);
-
-  __ bind(&return_false);
-  __ LoadRoot(return_value, RootIndex::kFalseValue);
-
-  __ bind(&done);
-}
-
 int ThrowIfNotSuperConstructor::MaxCallStackArgs() const { return 2; }
 void ThrowIfNotSuperConstructor::SetValueLocationConstraints() {
   UseRegister(constructor());
@@ -2518,7 +1887,7 @@ void ThrowIfNotSuperConstructor::SetValueLocationConstraints() {
 }
 void ThrowIfNotSuperConstructor::GenerateCode(MaglevAssembler* masm,
                                               const ProcessingState& state) {
-  DeferredCodeInfo* deferred_abort = __ PushDeferredCode(
+  Label* deferred_abort = __ MakeDeferredCode(
       [](MaglevAssembler* masm, ThrowIfNotSuperConstructor* node) {
         __ Push(ToRegister(node->constructor()), ToRegister(node->function()));
         __ Move(kContextRegister, masm->native_context().object());
@@ -2532,7 +1901,51 @@ void ThrowIfNotSuperConstructor::GenerateCode(MaglevAssembler* masm,
   __ LoadMap(scratch, ToRegister(constructor()));
   __ Ldr(scratch, FieldMemOperand(scratch, Map::kBitFieldOffset));
   __ TestAndBranchIfAllClear(scratch, Map::Bits1::IsConstructorBit::kMask,
-                             &deferred_abort->deferred_code_label);
+                             deferred_abort);
+}
+
+int FunctionEntryStackCheck::MaxCallStackArgs() const { return 1; }
+void FunctionEntryStackCheck::SetValueLocationConstraints() {
+  set_temporaries_needed(2);
+}
+void FunctionEntryStackCheck::GenerateCode(MaglevAssembler* masm,
+                                           const ProcessingState& state) {
+  // Stack check. This folds the checks for both the interrupt stack limit
+  // check and the real stack limit into one by just checking for the
+  // interrupt limit. The interrupt limit is either equal to the real
+  // stack limit or tighter. By ensuring we have space until that limit
+  // after building the frame we can quickly precheck both at once.
+  MaglevAssembler::ScratchRegisterScope temps(masm);
+  const int stack_check_offset = masm->code_gen_state()->stack_check_offset();
+  Register stack_cmp_reg = sp;
+  if (stack_check_offset > kStackLimitSlackForDeoptimizationInBytes) {
+    stack_cmp_reg = temps.Acquire();
+    __ Sub(stack_cmp_reg, sp, stack_check_offset);
+  }
+  Register interrupt_stack_limit = temps.Acquire();
+  __ LoadStackLimit(interrupt_stack_limit,
+                    StackLimitKind::kInterruptStackLimit);
+  __ Cmp(stack_cmp_reg, interrupt_stack_limit);
+
+  ZoneLabelRef deferred_call_stack_guard_return(masm);
+  __ JumpToDeferredIf(
+      lo,
+      [](MaglevAssembler* masm, FunctionEntryStackCheck* node,
+         ZoneLabelRef done, int stack_check_offset) {
+        ASM_CODE_COMMENT_STRING(masm, "Stack/interrupt call");
+        {
+          SaveRegisterStateForCall save_register_state(
+              masm, node->register_snapshot());
+          // Push the frame size
+          __ Push(Smi::FromInt(stack_check_offset));
+          __ CallRuntime(Runtime::kStackGuardWithGap, 1);
+          save_register_state.DefineSafepointWithLazyDeopt(
+              node->lazy_deopt_info());
+        }
+        __ B(*done);
+      },
+      this, deferred_call_stack_guard_return, stack_check_offset);
+  __ bind(*deferred_call_stack_guard_return);
 }
 
 // ---
@@ -2568,42 +1981,14 @@ void Return::GenerateCode(MaglevAssembler* masm, const ProcessingState& state) {
   __ CompareAndBranch(params_size, actual_params_size, ge,
                       &corrected_args_count);
   __ Mov(params_size, actual_params_size);
-  __ bind(&corrected_args_count);
+  __ Bind(&corrected_args_count);
 
   // Leave the frame.
   __ LeaveFrame(StackFrame::MAGLEV);
 
   // Drop receiver + arguments according to dynamic arguments size.
-  __ DropArguments(params_size, TurboAssembler::kCountIncludesReceiver);
+  __ DropArguments(params_size, MacroAssembler::kCountIncludesReceiver);
   __ Ret();
-}
-
-void BranchIfJSReceiver::SetValueLocationConstraints() {
-  UseRegister(condition_input());
-}
-void BranchIfJSReceiver::GenerateCode(MaglevAssembler* masm,
-                                      const ProcessingState& state) {
-  MaglevAssembler::ScratchRegisterScope temps(masm);
-  Register scratch = temps.Acquire();
-  Register value = ToRegister(condition_input());
-  __ JumpIfSmi(value, if_false()->label());
-  __ LoadMap(scratch, value);
-  __ CompareInstanceType(scratch, scratch, FIRST_JS_RECEIVER_TYPE);
-  __ Branch(hs, if_true(), if_false(), state.next_block());
-}
-
-void BranchIfFloat64Compare::SetValueLocationConstraints() {
-  UseRegister(left_input());
-  UseRegister(right_input());
-}
-void BranchIfFloat64Compare::GenerateCode(MaglevAssembler* masm,
-                                          const ProcessingState& state) {
-  DoubleRegister left = ToDoubleRegister(left_input());
-  DoubleRegister right = ToDoubleRegister(right_input());
-  __ Fcmp(left, right);
-  __ JumpIf(vs, if_false()->label());  // NaN check
-  __ Branch(ConditionFor(operation_), if_true(), if_false(),
-            state.next_block());
 }
 
 }  // namespace maglev

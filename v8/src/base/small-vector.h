@@ -35,13 +35,19 @@ class SmallVector {
       : allocator_(allocator) {
     resize_no_init(size);
   }
-  SmallVector(const SmallVector& other,
-              const Allocator& allocator = Allocator()) V8_NOEXCEPT
+  SmallVector(const SmallVector& other) V8_NOEXCEPT
+      : allocator_(other.allocator_) {
+    *this = other;
+  }
+  SmallVector(const SmallVector& other, const Allocator& allocator) V8_NOEXCEPT
       : allocator_(allocator) {
     *this = other;
   }
-  SmallVector(SmallVector&& other,
-              const Allocator& allocator = Allocator()) V8_NOEXCEPT
+  SmallVector(SmallVector&& other) V8_NOEXCEPT
+      : allocator_(std::move(other.allocator_)) {
+    *this = std::move(other);
+  }
+  SmallVector(SmallVector&& other, const Allocator& allocator) V8_NOEXCEPT
       : allocator_(allocator) {
     *this = std::move(other);
   }
@@ -81,13 +87,13 @@ class SmallVector {
       begin_ = other.begin_;
       end_ = other.end_;
       end_of_storage_ = other.end_of_storage_;
-      other.reset_to_inline_storage();
     } else {
       DCHECK_GE(capacity(), other.size());  // Sanity check.
       size_t other_size = other.size();
       memcpy(begin_, other.begin_, sizeof(T) * other_size);
       end_ = begin_ + other_size;
     }
+    other.reset_to_inline_storage();
     return *this;
   }
 
@@ -159,10 +165,12 @@ class SmallVector {
   T* insert(T* pos, size_t count, const T& value) {
     DCHECK_LE(pos, end_);
     size_t offset = pos - begin_;
-    size_t elements_to_move = end_ - pos;
-    resize_no_init(size() + count);
+    size_t old_size = size();
+    resize_no_init(old_size + count);
     pos = begin_ + offset;
-    std::memmove(pos + count, pos, elements_to_move);
+    T* old_end = begin_ + old_size;
+    DCHECK_LT(old_end, end_);
+    std::move_backward(pos, old_end, end_);
     std::fill_n(pos, count, value);
     return pos;
   }
@@ -171,10 +179,12 @@ class SmallVector {
     DCHECK_LE(pos, end_);
     size_t offset = pos - begin_;
     size_t count = std::distance(begin, end);
-    size_t elements_to_move = end_ - pos;
-    resize_no_init(size() + count);
+    size_t old_size = size();
+    resize_no_init(old_size + count);
     pos = begin_ + offset;
-    std::memmove(pos + count, pos, elements_to_move);
+    T* old_end = begin_ + old_size;
+    DCHECK_LT(old_end, end_);
+    std::move_backward(pos, old_end, end_);
     std::copy(begin, end, pos);
     return pos;
   }
@@ -186,18 +196,18 @@ class SmallVector {
     end_ = begin_ + new_size;
   }
 
+  void reserve_no_init(size_t new_capacity) {
+    // Resizing without initialization is safe if T is trivially copyable.
+    ASSERT_TRIVIALLY_COPYABLE(T);
+    if (new_capacity > capacity()) Grow(new_capacity);
+  }
+
   // Clear without reverting back to inline storage.
   void clear() { end_ = begin_; }
 
+  Allocator get_allocator() const { return allocator_; }
+
  private:
-  V8_NO_UNIQUE_ADDRESS Allocator allocator_;
-
-  T* begin_ = inline_storage_begin();
-  T* end_ = begin_;
-  T* end_of_storage_ = begin_ + kInlineSize;
-  typename std::aligned_storage<sizeof(T) * kInlineSize, alignof(T)>::type
-      inline_storage_;
-
   // Grows the backing store by a factor of two. Returns the new end of the used
   // storage (this reduces binary size).
   V8_NOINLINE V8_PRESERVE_MOST void Grow() { Grow(0); }
@@ -245,6 +255,14 @@ class SmallVector {
   const T* inline_storage_begin() const {
     return reinterpret_cast<const T*>(&inline_storage_);
   }
+
+  V8_NO_UNIQUE_ADDRESS Allocator allocator_;
+
+  T* begin_ = inline_storage_begin();
+  T* end_ = begin_;
+  T* end_of_storage_ = begin_ + kInlineSize;
+  typename std::aligned_storage<sizeof(T) * kInlineSize, alignof(T)>::type
+      inline_storage_;
 };
 
 }  // namespace base

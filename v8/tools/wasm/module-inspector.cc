@@ -20,40 +20,44 @@
 #endif
 
 int PrintHelp(char** argv) {
-  std::cerr << "Usage: Specify an action and a module in any order.\n"
-            << "The action can be any of:\n"
+  std::cerr
+      << "Usage: Specify an action and a module in any order.\n"
+      << "The action can be any of:\n"
 
-            << " --help\n"
-            << "     Print this help and exit.\n"
+      << " --help\n"
+      << "     Print this help and exit.\n"
 
-            << " --list-functions\n"
-            << "     List functions in the given module\n"
+      << " --list-functions\n"
+      << "     List functions in the given module\n"
 
-            << " --section-stats\n"
-            << "     Show information about sections in the given module\n"
+      << " --list-signatures\n"
+      << "     List signatures with their use counts in the given module\n"
 
-            << " --instruction-stats\n"
-            << "     Show information about instructions in the given module\n"
+      << " --section-stats\n"
+      << "     Show information about sections in the given module\n"
 
-            << " --single-wat FUNC_INDEX\n"
-            << "     Print function FUNC_INDEX in .wat format\n"
+      << " --instruction-stats\n"
+      << "     Show information about instructions in the given module\n"
 
-            << " --full-wat\n"
-            << "     Print full module in .wat format\n"
+      << " --single-wat FUNC_INDEX\n"
+      << "     Print function FUNC_INDEX in .wat format\n"
 
-            << " --single-hexdump FUNC_INDEX\n"
-            << "     Print function FUNC_INDEX in annotated hex format\n"
+      << " --full-wat\n"
+      << "     Print full module in .wat format\n"
 
-            << " --full-hexdump\n"
-            << "     Print full module in annotated hex format\n"
+      << " --single-hexdump FUNC_INDEX\n"
+      << "     Print function FUNC_INDEX in annotated hex format\n"
 
-            << " --strip\n"
-            << "     Dump the module, in binary format, without its Name"
-            << " section (requires using -o as well)\n"
+      << " --full-hexdump\n"
+      << "     Print full module in annotated hex format\n"
 
-            << "\n"
-            << " -o OUTFILE or --output OUTFILE\n"
-            << "     Send output to OUTFILE instead of <stdout>\n";
+      << " --strip\n"
+      << "     Dump the module, in binary format, without its Name"
+      << " section (requires using -o as well)\n"
+
+      << "\n"
+      << " -o OUTFILE or --output OUTFILE\n"
+      << "     Send output to OUTFILE instead of <stdout>\n";
   return 1;
 }
 
@@ -214,9 +218,9 @@ class ExtendedFunctionDis : public FunctionBodyDisassembler {
   ExtendedFunctionDis(Zone* zone, const WasmModule* module, uint32_t func_index,
                       WasmFeatures* detected, const FunctionSig* sig,
                       const byte* start, const byte* end, uint32_t offset,
-                      NamesProvider* names)
+                      const ModuleWireBytes wire_bytes, NamesProvider* names)
       : FunctionBodyDisassembler(zone, module, func_index, detected, sig, start,
-                                 end, offset, names) {}
+                                 end, offset, wire_bytes, names) {}
 
   static constexpr uint32_t kWeDontCareAboutByteCodeOffsetsHere = 0;
 
@@ -233,28 +237,23 @@ class ExtendedFunctionDis : public FunctionBodyDisassembler {
     }
 
     // Decode and print locals.
-    uint32_t locals_length;
-    DecodeLocals(pc_, &locals_length);
+    uint32_t locals_length = DecodeLocals(pc_);
     if (failed()) {
       // TODO(jkummerow): Better error handling.
       out << "Failed to decode locals";
       return;
     }
     uint32_t total_length = 0;
-    uint32_t length;
-    uint32_t entries = read_u32v<ValidationTag>(pc_, &length);
+    auto [entries, length] = read_u32v<ValidationTag>(pc_);
     PrintHexBytes(out, length, pc_, 4);
     out << " // " << entries << " entries in locals list";
     out.NextLine(kWeDontCareAboutByteCodeOffsetsHere);
     total_length += length;
     while (entries-- > 0) {
-      uint32_t count_length;
-      uint32_t count =
-          read_u32v<ValidationTag>(pc_ + total_length, &count_length);
-      uint32_t type_length;
-      ValueType type = value_type_reader::read_value_type<ValidationTag>(
-          this, pc_ + total_length + count_length, &type_length,
-          WasmFeatures::All());
+      auto [count, count_length] = read_u32v<ValidationTag>(pc_ + total_length);
+      auto [type, type_length] =
+          value_type_reader::read_value_type<ValidationTag>(
+              this, pc_ + total_length + count_length, WasmFeatures::All());
       PrintHexBytes(out, count_length + type_length, pc_ + total_length, 4);
       out << " // " << count << (count != 1 ? " locals" : " local")
           << " of type ";
@@ -333,8 +332,7 @@ class ExtendedFunctionDis : public FunctionBodyDisassembler {
   }
 
   void CollectInstructionStats(InstructionStatistics& stats) {
-    uint32_t locals_length;
-    DecodeLocals(pc_, &locals_length);
+    uint32_t locals_length = DecodeLocals(pc_);
     if (failed()) return;
     stats.RecordLocals(num_locals(), locals_length);
     consume_bytes(locals_length);
@@ -358,7 +356,7 @@ class ExtendedFunctionDis : public FunctionBodyDisassembler {
 // e.g.:
 //     0x01, 0x70, 0x00,  // table count 1: funcref no maximum
 class HexDumpModuleDis;
-class DumpingModuleDecoder : public ModuleDecoderBase {
+class DumpingModuleDecoder : public ModuleDecoderImpl {
  public:
   DumpingModuleDecoder(ModuleWireBytes wire_bytes,
                        HexDumpModuleDis* module_dis);
@@ -560,6 +558,12 @@ class HexDumpModuleDis : public ITracer {
       NextLine();
     }
   }
+  void StringOffset(uint32_t offset) override {
+    if (!module_ || module_->stringref_literals.size() > 3) {
+      description_ << "string literal #" << next_string_index_++;
+      NextLine();
+    }
+  }
 
   // The following two hooks give us an opportunity to call the hex-dumping
   // function body disassembler for initializers and functions.
@@ -571,7 +575,7 @@ class HexDumpModuleDis : public ITracer {
     const WasmModule* module = module_;
     if (!module) module = decoder_->shared_module().get();
     ExtendedFunctionDis d(&zone_, module, 0, &detected, &sig, start, end,
-                          offset, names_);
+                          offset, wire_bytes_, names_);
     d.HexdumpConstantExpression(out_);
     total_bytes_ += static_cast<size_t>(end - start);
   }
@@ -583,7 +587,7 @@ class HexDumpModuleDis : public ITracer {
     const WasmModule* module = module_;
     if (!module) module = decoder_->shared_module().get();
     ExtendedFunctionDis d(&zone_, module, func->func_index, &detected,
-                          func->sig, start, end, offset, names_);
+                          func->sig, start, end, offset, wire_bytes_, names_);
     d.HexDump(out_, FunctionBodyDisassembler::kSkipHeader);
     total_bytes_ += func->code.length();
   }
@@ -715,6 +719,7 @@ class HexDumpModuleDis : public ITracer {
   uint32_t next_tag_index_{0};
   uint32_t next_segment_index_{0};
   uint32_t next_data_segment_index_{0};
+  uint32_t next_string_index_{0};
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -760,6 +765,54 @@ class FormatConverter {
       std::string name(sb.start(), sb.length());
       out_ << i << " " << name << "\n";
     }
+  }
+
+  static bool sig_uses_vector_comparison(std::pair<uint32_t, uint32_t> left,
+                                         std::pair<uint32_t, uint32_t> right) {
+    return left.second > right.second;
+  }
+
+  void SortAndPrintSigUses(std::map<uint32_t, uint32_t> uses,
+                           const WasmModule* module, const char* kind) {
+    std::vector<std::pair<uint32_t, uint32_t>> sig_uses_vector;
+    for (auto sig_use : uses) {
+      sig_uses_vector.push_back(sig_use);
+    }
+    std::sort(sig_uses_vector.begin(), sig_uses_vector.end(),
+              sig_uses_vector_comparison);
+
+    out_ << sig_uses_vector.size() << " different signatures get used by "
+         << kind << std::endl;
+    for (auto sig_use : sig_uses_vector) {
+      uint32_t sig_index = sig_use.first;
+      uint32_t uses = sig_use.second;
+
+      const FunctionSig* sig = module->signature(sig_index);
+
+      out_ << uses << " " << kind << " use the signature " << *sig << std::endl;
+    }
+  }
+
+  void ListSignatures() {
+    DCHECK_EQ(status_, kModuleReady);
+    const WasmModule* m = module();
+    uint32_t num_functions = static_cast<uint32_t>(m->functions.size());
+    std::map<uint32_t, uint32_t> sig_uses;
+    std::map<uint32_t, uint32_t> export_sig_uses;
+
+    for (uint32_t i = 0; i < num_functions; i++) {
+      const WasmFunction& f = m->functions[i];
+      sig_uses[f.sig_index]++;
+      if (f.exported) {
+        export_sig_uses[f.sig_index]++;
+      }
+    }
+
+    SortAndPrintSigUses(sig_uses, m, "functions");
+
+    out_ << std::endl;
+
+    SortAndPrintSigUses(export_sig_uses, m, "exported functions");
   }
 
   void SectionStats() {
@@ -814,7 +867,7 @@ class FormatConverter {
       base::Vector<const byte> code = wire_bytes_.GetFunctionBytes(func);
       ExtendedFunctionDis d(&zone, module(), i, &detected, func->sig,
                             code.begin(), code.end(), func->code.offset(),
-                            names());
+                            wire_bytes_, names());
       d.CollectInstructionStats(stats);
       stats.RecordCodeSize(code.size());
     }
@@ -839,7 +892,7 @@ class FormatConverter {
 
     ExtendedFunctionDis d(&zone, module(), func_index, &detected, func->sig,
                           code.begin(), code.end(), func->code.offset(),
-                          names());
+                          wire_bytes_, names());
     if (mode == OutputMode::kWat) {
       d.DecodeAsWat(sb, {0, 1});
     } else if (mode == OutputMode::kHexDump) {
@@ -1054,7 +1107,7 @@ class FormatConverter {
 
 DumpingModuleDecoder::DumpingModuleDecoder(ModuleWireBytes wire_bytes,
                                            HexDumpModuleDis* module_dis)
-    : ModuleDecoderBase(WasmFeatures::All(), wire_bytes.module_bytes(),
+    : ModuleDecoderImpl(WasmFeatures::All(), wire_bytes.module_bytes(),
                         kWasmOrigin, module_dis) {}
 
 }  // namespace wasm
@@ -1069,6 +1122,7 @@ enum class Action {
   kUnset,
   kHelp,
   kListFunctions,
+  kListSignatures,
   kSectionStats,
   kInstructionStats,
   kFullWat,
@@ -1105,6 +1159,8 @@ int ParseOptions(int argc, char** argv, Options* options) {
       options->action = Action::kHelp;
     } else if (strcmp(argv[i], "--list-functions") == 0) {
       options->action = Action::kListFunctions;
+    } else if (strcmp(argv[i], "--list-signatures") == 0) {
+      options->action = Action::kListSignatures;
     } else if (strcmp(argv[i], "--section-stats") == 0) {
       options->action = Action::kSectionStats;
     } else if (strcmp(argv[i], "--instruction-stats") == 0) {
@@ -1199,6 +1255,9 @@ int main(int argc, char** argv) {
   switch (options.action) {
     case Action::kListFunctions:
       fc.ListFunctions();
+      break;
+    case Action::kListSignatures:
+      fc.ListSignatures();
       break;
     case Action::kSectionStats:
       fc.SectionStats();

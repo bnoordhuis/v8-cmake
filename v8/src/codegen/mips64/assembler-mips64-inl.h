@@ -69,7 +69,7 @@ void RelocInfo::apply(intptr_t delta) {
 }
 
 Address RelocInfo::target_address() {
-  DCHECK(IsCodeTarget(rmode_) || IsWasmCall(rmode_));
+  DCHECK(IsCodeTarget(rmode_) || IsWasmCall(rmode_) || IsWasmStubCall(rmode_));
   return Assembler::target_address_at(pc_, constant_pool_);
 }
 
@@ -97,7 +97,7 @@ Address RelocInfo::constant_pool_entry_address() { UNREACHABLE(); }
 int RelocInfo::target_address_size() { return Assembler::kSpecialTargetSize; }
 
 void Assembler::deserialization_set_special_target_at(
-    Address instruction_payload, InstructionStream code, Address target) {
+    Address instruction_payload, Code code, Address target) {
   set_target_address_at(instruction_payload,
                         !code.is_null() ? code.constant_pool() : kNullAddress,
                         target);
@@ -147,15 +147,11 @@ Handle<HeapObject> RelocInfo::target_object_handle(Assembler* origin) {
       Assembler::target_address_at(pc_, constant_pool_)));
 }
 
-void RelocInfo::set_target_object(Heap* heap, HeapObject target,
-                                  WriteBarrierMode write_barrier_mode,
+void RelocInfo::set_target_object(HeapObject target,
                                   ICacheFlushMode icache_flush_mode) {
   DCHECK(IsCodeTarget(rmode_) || IsFullEmbeddedObject(rmode_));
   Assembler::set_target_address_at(pc_, constant_pool_, target.ptr(),
                                    icache_flush_mode);
-  if (!host().is_null() && !v8_flags.disable_write_barriers) {
-    WriteBarrierForCode(host(), this, target, write_barrier_mode);
-  }
 }
 
 Address RelocInfo::target_external_reference() {

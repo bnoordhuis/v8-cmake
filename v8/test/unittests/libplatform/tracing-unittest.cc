@@ -11,7 +11,8 @@
 #include "testing/gtest/include/gtest/gtest.h"
 
 #ifdef V8_USE_PERFETTO
-#include "perfetto/tracing.h"
+#include "perfetto/tracing/track_event.h"         // nogncheck
+#include "perfetto/tracing/track_event_legacy.h"  // nogncheck
 #include "protos/perfetto/trace/trace.pb.h"  // nogncheck
 #include "src/libplatform/tracing/trace-event-listener.h"
 #include "src/tracing/traced-value.h"
@@ -537,6 +538,22 @@ using TrackEvent = ::perfetto::protos::TrackEvent;
 
 class TestListener : public TraceEventListener {
  public:
+  void ParseFromArray(const std::vector<char>& array) {
+    perfetto::protos::Trace trace;
+    CHECK(trace.ParseFromArray(array.data(), static_cast<int>(array.size())));
+
+    for (int i = 0; i < trace.packet_size(); i++) {
+      // TODO(petermarshall): ChromeTracePacket instead.
+      const perfetto::protos::TracePacket& packet = trace.packet(i);
+      ProcessPacket(packet);
+    }
+  }
+
+  const std::string& get_event(size_t index) { return events_.at(index); }
+
+  size_t events_size() const { return events_.size(); }
+
+ private:
   void ProcessPacket(const ::perfetto::protos::TracePacket& packet) {
     if (packet.incremental_state_cleared()) {
       categories_.clear();
@@ -597,7 +614,12 @@ class TestListener : public TraceEventListener {
         if (!first_annotation) {
           slice += ",";
         }
-        slice += debug_annotation_names_[it.name_iid()] + "=";
+        if (!it.name().empty()) {
+          slice += it.name();
+        } else {
+          slice += debug_annotation_names_[it.name_iid()];
+        }
+        slice += "=";
         std::stringstream value;
         if (it.has_bool_value()) {
           value << "(bool)" << it.bool_value();
@@ -624,11 +646,6 @@ class TestListener : public TraceEventListener {
     events_.push_back(slice);
   }
 
-  const std::string& get_event(size_t index) { return events_.at(index); }
-
-  size_t events_size() const { return events_.size(); }
-
- private:
   std::vector<std::string> events_;
   std::map<uint64_t, std::string> categories_;
   std::map<uint64_t, std::string> event_names_;

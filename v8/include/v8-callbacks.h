@@ -7,6 +7,7 @@
 
 #include <stddef.h>
 
+#include <functional>
 #include <string>
 
 #include "cppgc/common.h"
@@ -322,12 +323,6 @@ using WasmAsyncResolvePromiseCallback = void (*)(
 using WasmLoadSourceMapCallback = Local<String> (*)(Isolate* isolate,
                                                     const char* name);
 
-// --- Callback for checking if WebAssembly Simd is enabled ---
-using WasmSimdEnabledCallback = bool (*)(Local<Context> context);
-
-// --- Callback for checking if WebAssembly exceptions are enabled ---
-using WasmExceptionsEnabledCallback = bool (*)(Local<Context> context);
-
 // --- Callback for checking if WebAssembly GC is enabled ---
 // If the callback returns true, it will also enable Wasm stringrefs.
 using WasmGCEnabledCallback = bool (*)(Local<Context> context);
@@ -371,6 +366,13 @@ using HostImportModuleDynamicallyCallback = MaybeLocal<Promise> (*)(
     Local<Context> context, Local<Data> host_defined_options,
     Local<Value> resource_name, Local<String> specifier,
     Local<FixedArray> import_assertions);
+
+/**
+ * Callback for requesting a compile hint for a function from the embedder. The
+ * first parameter is the position of the function in source code and the second
+ * parameter is embedder data to be passed back.
+ */
+using CompileHintCallback = bool (*)(int, void*);
 
 /**
  * HostInitializeImportMetaObjectCallback is called the first time import.meta

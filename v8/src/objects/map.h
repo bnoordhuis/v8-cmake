@@ -11,6 +11,7 @@
 #include "src/objects/heap-object.h"
 #include "src/objects/internal-index.h"
 #include "src/objects/objects.h"
+#include "src/objects/prototype-info.h"
 #include "torque-generated/bit-fields.h"
 #include "torque-generated/visitor-lists.h"
 
@@ -30,7 +31,8 @@ enum InstanceType : uint16_t;
   V(CoverageInfo)                    \
   V(DataObject)                      \
   V(FeedbackMetadata)                \
-  V(FixedDoubleArray)
+  V(FixedDoubleArray)                \
+  IF_WASM(V, WasmNull)
 
 #define POINTER_VISITOR_ID_LIST(V)      \
   V(AccessorInfo)                       \
@@ -43,11 +45,12 @@ enum InstanceType : uint16_t;
   V(DataHandler)                        \
   V(EmbedderDataArray)                  \
   V(EphemeronHashTable)                 \
+  V(ExternalString)                     \
   V(FeedbackCell)                       \
   V(FreeSpace)                          \
   V(JSApiObject)                        \
   V(JSArrayBuffer)                      \
-  V(JSDataView)                         \
+  V(JSDataViewOrRabGsabDataView)        \
   V(JSExternalObject)                   \
   V(JSFinalizationRegistry)             \
   V(JSFunction)                         \
@@ -60,11 +63,13 @@ enum InstanceType : uint16_t;
   V(Map)                                \
   V(NativeContext)                      \
   V(Oddball)                            \
+  V(Hole)                               \
   V(PreparseData)                       \
   V(PromiseOnStack)                     \
   V(PropertyArray)                      \
   V(PropertyCell)                       \
   V(PrototypeInfo)                      \
+  V(SharedFunctionInfo)                 \
   V(ShortcutCandidate)                  \
   V(SmallOrderedHashMap)                \
   V(SmallOrderedHashSet)                \
@@ -265,10 +270,10 @@ class Map : public TorqueGeneratedMap<Map, HeapObject> {
   // on, or performs the write non-atomically if it's off. The read is always
   // non-atomically. This is done to have wider TSAN coverage on the cases where
   // it's possible.
-  DECL_PRIMITIVE_ACCESSORS(bit_field, byte)
+  DECL_PRIMITIVE_ACCESSORS(bit_field, uint8_t)
 
   // Atomic accessors, used for allowlisting legitimate concurrent accesses.
-  DECL_PRIMITIVE_ACCESSORS(relaxed_bit_field, byte)
+  DECL_PRIMITIVE_ACCESSORS(relaxed_bit_field, uint8_t)
 
   // Bit positions for |bit_field|.
   struct Bits1 {
@@ -278,7 +283,7 @@ class Map : public TorqueGeneratedMap<Map, HeapObject> {
   //
   // Bit field 2.
   //
-  DECL_PRIMITIVE_ACCESSORS(bit_field2, byte)
+  DECL_PRIMITIVE_ACCESSORS(bit_field2, uint8_t)
 
   // Bit positions for |bit_field2|.
   struct Bits2 {
@@ -407,6 +412,8 @@ class Map : public TorqueGeneratedMap<Map, HeapObject> {
   DECL_BOOLEAN_ACCESSORS(is_extensible)
   DECL_BOOLEAN_ACCESSORS(is_prototype_map)
   inline bool is_abandoned_prototype_map() const;
+  inline bool has_prototype_info() const;
+  inline bool TryGetPrototypeInfo(PrototypeInfo* result) const;
 
   // Whether the instance has been added to the retained map list by
   // Heap::AddRetainedMap.
@@ -484,8 +491,8 @@ class Map : public TorqueGeneratedMap<Map, HeapObject> {
   // Return the map of the root of object's prototype chain.
   Map GetPrototypeChainRootMap(Isolate* isolate) const;
 
-  V8_EXPORT_PRIVATE Map FindRootMap(Isolate* isolate) const;
-  V8_EXPORT_PRIVATE Map FindFieldOwner(Isolate* isolate,
+  V8_EXPORT_PRIVATE Map FindRootMap(PtrComprCageBase cage_base) const;
+  V8_EXPORT_PRIVATE Map FindFieldOwner(PtrComprCageBase cage_base,
                                        InternalIndex descriptor) const;
 
   inline int GetInObjectPropertyOffset(int index) const;
@@ -587,6 +594,15 @@ class Map : public TorqueGeneratedMap<Map, HeapObject> {
   DECL_ACCESSORS(native_context, NativeContext)
   DECL_ACCESSORS(native_context_or_null, Object)
   DECL_ACCESSORS(wasm_type_info, WasmTypeInfo)
+
+  // Gets |constructor_or_back_pointer| field value from the root map.
+  // The result might be null, JSFunction, FunctionTemplateInfo or a Tuple2
+  // for JSFunctions with non-instance prototypes.
+  DECL_GETTER(GetConstructorRaw, Object)
+
+  // Gets constructor value from the root map. Unwraps Tuple2 in case of
+  // JSFunction map with non-instance prototype.
+  // The result returned might be null, JSFunction or FunctionTemplateInfo.
   DECL_GETTER(GetConstructor, Object)
   DECL_GETTER(GetFunctionTemplateInfo, FunctionTemplateInfo)
   inline void SetConstructor(Object constructor,
@@ -595,11 +611,18 @@ class Map : public TorqueGeneratedMap<Map, HeapObject> {
   // in the transition tree. Returns either the constructor or the map at
   // which the walk has stopped.
   inline Object TryGetConstructor(Isolate* isolate, int max_steps);
+
+  // Gets non-instance prototype value which is stored in Tuple2 in a
+  // root map's |constructor_or_back_pointer| field.
+  DECL_GETTER(GetNonInstancePrototype, Object)
+
   // [back pointer]: points back to the parent map from which a transition
   // leads to this map. The field overlaps with the constructor (see above).
   DECL_GETTER(GetBackPointer, HeapObject)
   inline void SetBackPointer(HeapObject value,
                              WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+  inline bool TryGetBackPointer(PtrComprCageBase cage_base,
+                                Map* back_pointer) const;
 
   // [instance descriptors]: describes the object.
   DECL_ACCESSORS(instance_descriptors, DescriptorArray)
@@ -795,7 +818,21 @@ class Map : public TorqueGeneratedMap<Map, HeapObject> {
 
   inline bool CanTransition() const;
 
-  static Map GetInstanceTypeMap(ReadOnlyRoots roots, InstanceType type);
+  static constexpr base::Optional<RootIndex> TryGetMapRootIdxFor(
+      InstanceType type) {
+    switch (type) {
+#define MAKE_CASE(TYPE, Name, name) \
+  case TYPE:                        \
+    return RootIndex::k##Name##Map;
+      STRUCT_LIST(MAKE_CASE)
+      TORQUE_DEFINED_INSTANCE_TYPE_LIST(MAKE_CASE)
+#undef MAKE_CASE
+      default:
+        break;
+    }
+    return {};
+  }
+  static inline Map GetMapFor(ReadOnlyRoots roots, InstanceType type);
 
 #define DECL_TESTER(Type, ...) inline bool Is##Type##Map() const;
   INSTANCE_TYPE_CHECKERS(DECL_TESTER)
@@ -818,7 +855,7 @@ class Map : public TorqueGeneratedMap<Map, HeapObject> {
 
   DECL_PRIMITIVE_ACCESSORS(visitor_id, VisitorId)
 
-  static ObjectFields ObjectFieldsFrom(VisitorId visitor_id) {
+  static constexpr ObjectFields ObjectFieldsFrom(VisitorId visitor_id) {
     return (visitor_id < kDataOnlyVisitorIdCount)
                ? ObjectFields::kDataOnly
                : ObjectFields::kMaybePointers;

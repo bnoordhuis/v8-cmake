@@ -181,7 +181,11 @@ class PersistentValueMapBase {
    * Get value stored in map.
    */
   Local<V> Get(const K& key) {
-    return Local<V>::New(isolate_, FromVal(Traits::Get(&impl_, key)));
+    V* p = FromVal(Traits::Get(&impl_, key));
+#ifdef V8_ENABLE_DIRECT_LOCAL
+    if (p == nullptr) return Local<V>();
+#endif
+    return Local<V>::New(isolate_, p);
   }
 
   /**
@@ -236,7 +240,8 @@ class PersistentValueMapBase {
         : value_(other.value_) { }
 
     Local<V> NewLocal(Isolate* isolate) const {
-      return Local<V>::New(isolate, FromVal(value_));
+      return Local<V>::New(
+          isolate, internal::ValueHelper::SlotAsValue<V>(FromVal(value_)));
     }
     bool IsEmpty() const {
       return value_ == kPersistentContainerNotFound;
@@ -297,13 +302,13 @@ class PersistentValueMapBase {
   }
 
   static PersistentContainerValue ClearAndLeak(Global<V>* persistent) {
-    V* v = persistent->val_;
-    persistent->val_ = nullptr;
+    V* v = persistent->template value<V>();
+    persistent->Clear();
     return reinterpret_cast<PersistentContainerValue>(v);
   }
 
   static PersistentContainerValue Leak(Global<V>* persistent) {
-    return reinterpret_cast<PersistentContainerValue>(persistent->val_);
+    return reinterpret_cast<PersistentContainerValue>(persistent->slot());
   }
 
   /**
@@ -313,7 +318,7 @@ class PersistentValueMapBase {
    */
   static Global<V> Release(PersistentContainerValue v) {
     Global<V> p;
-    p.val_ = FromVal(v);
+    p.slot() = reinterpret_cast<internal::Address*>(FromVal(v));
     if (Traits::kCallbackType != kNotWeak && p.IsWeak()) {
       Traits::DisposeCallbackData(
           p.template ClearWeak<typename Traits::WeakCallbackDataType>());
@@ -323,7 +328,8 @@ class PersistentValueMapBase {
 
   void RemoveWeak(const K& key) {
     Global<V> p;
-    p.val_ = FromVal(Traits::Remove(&impl_, key));
+    p.slot() = reinterpret_cast<internal::Address*>(
+        FromVal(Traits::Remove(&impl_, key)));
     p.Reset();
   }
 
@@ -391,7 +397,7 @@ class PersistentValueMap : public PersistentValueMapBase<K, V, Traits> {
           Traits::kCallbackType == kWeakWithInternalFields
               ? WeakCallbackType::kInternalFields
               : WeakCallbackType::kParameter;
-      Local<V> value(Local<V>::New(this->isolate(), *persistent));
+      auto value = Local<V>::New(this->isolate(), *persistent);
       persistent->template SetWeak<typename Traits::WeakCallbackDataType>(
           Traits::WeakCallbackParameter(this, key, value), WeakCallback,
           callback_type);
@@ -467,7 +473,7 @@ class GlobalValueMap : public PersistentValueMapBase<K, V, Traits> {
           Traits::kCallbackType == kWeakWithInternalFields
               ? WeakCallbackType::kInternalFields
               : WeakCallbackType::kParameter;
-      Local<V> value(Local<V>::New(this->isolate(), *persistent));
+      auto value = Local<V>::New(this->isolate(), *persistent);
       persistent->template SetWeak<typename Traits::WeakCallbackDataType>(
           Traits::WeakCallbackParameter(this, key, value), OnWeakCallback,
           callback_type);
@@ -613,7 +619,8 @@ class V8_DEPRECATE_SOON("Use std::vector<Global<V>>.") PersistentValueVector {
    * Retrieve the i-th value in the vector.
    */
   Local<V> Get(size_t index) const {
-    return Local<V>::New(isolate_, FromVal(Traits::Get(&impl_, index)));
+    return Local<V>::New(isolate_, internal::ValueHelper::SlotAsValue<V>(
+                                       FromVal(Traits::Get(&impl_, index))));
   }
 
   /**
@@ -623,7 +630,8 @@ class V8_DEPRECATE_SOON("Use std::vector<Global<V>>.") PersistentValueVector {
     size_t length = Traits::Size(&impl_);
     for (size_t i = 0; i < length; i++) {
       Global<V> p;
-      p.val_ = FromVal(Traits::Get(&impl_, i));
+      p.slot() =
+          reinterpret_cast<internal::Address>(FromVal(Traits::Get(&impl_, i)));
     }
     Traits::Clear(&impl_);
   }
@@ -638,9 +646,9 @@ class V8_DEPRECATE_SOON("Use std::vector<Global<V>>.") PersistentValueVector {
 
  private:
   static PersistentContainerValue ClearAndLeak(Global<V>* persistent) {
-    V* v = persistent->val_;
-    persistent->val_ = nullptr;
-    return reinterpret_cast<PersistentContainerValue>(v);
+    auto slot = persistent->slot();
+    persistent->Clear();
+    return reinterpret_cast<PersistentContainerValue>(slot);
   }
 
   static V* FromVal(PersistentContainerValue v) {

@@ -1085,6 +1085,17 @@ BytecodeArrayBuilder& BytecodeArrayBuilder::ToString() {
   return *this;
 }
 
+BytecodeArrayBuilder& BytecodeArrayBuilder::ToBoolean(ToBooleanMode mode) {
+  if (mode == ToBooleanMode::kAlreadyBoolean) {
+    // No-op, the accumulator is already a boolean and ToBoolean both reads and
+    // writes the accumulator.
+  } else {
+    DCHECK_EQ(mode, ToBooleanMode::kConvertToBoolean);
+    OutputToBoolean();
+  }
+  return *this;
+}
+
 BytecodeArrayBuilder& BytecodeArrayBuilder::ToNumber(int feedback_slot) {
   OutputToNumber(feedback_slot);
   return *this;
@@ -1605,8 +1616,9 @@ bool BytecodeArrayBuilder::RegisterListIsValid(RegisterList reg_list) const {
 
 template <Bytecode bytecode, ImplicitRegisterUse implicit_register_use>
 void BytecodeArrayBuilder::PrepareToOutputBytecode() {
-  if (register_optimizer_)
+  if (register_optimizer_) {
     register_optimizer_->PrepareForBytecode<bytecode, implicit_register_use>();
+  }
 }
 
 uint32_t BytecodeArrayBuilder::GetInputRegisterOperand(Register reg) {

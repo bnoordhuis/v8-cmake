@@ -6,8 +6,10 @@
 #define V8_COMPILER_JS_HEAP_BROKER_H_
 
 #include "src/base/compiler-specific.h"
+#include "src/base/macros.h"
 #include "src/base/optional.h"
 #include "src/base/platform/mutex.h"
+#include "src/codegen/optimized-compilation-info.h"
 #include "src/common/globals.h"
 #include "src/compiler/access-info.h"
 #include "src/compiler/feedback-source.h"
@@ -22,6 +24,7 @@
 #include "src/objects/code-kind.h"
 #include "src/objects/feedback-vector.h"
 #include "src/objects/objects.h"
+#include "src/roots/roots.h"
 #include "src/utils/address-map.h"
 #include "src/utils/identity-map.h"
 #include "src/utils/ostreams.h"
@@ -38,7 +41,7 @@ namespace compiler {
 
 class ObjectRef;
 
-std::ostream& operator<<(std::ostream& os, const ObjectRef& ref);
+std::ostream& operator<<(std::ostream& os, ObjectRef ref);
 
 #define TRACE_BROKER(broker, x)                                          \
   do {                                                                   \
@@ -113,7 +116,7 @@ class V8_EXPORT_PRIVATE JSHeapBroker {
   }
   void SetTargetNativeContextRef(Handle<NativeContext> native_context);
 
-  void InitializeAndStartSerializing();
+  void InitializeAndStartSerializing(Handle<NativeContext> native_context);
 
   Isolate* isolate() const { return isolate_; }
 
@@ -143,6 +146,11 @@ class V8_EXPORT_PRIVATE JSHeapBroker {
   void Retire();
   bool SerializingAllowed() const;
 
+#ifdef DEBUG
+  // Get the current heap broker for this thread. Only to be used for DCHECKs.
+  static JSHeapBroker* Current();
+#endif
+
   // Remember the local isolate and initialize its local heap with the
   // persistent and canonical handles provided by {info}.
   void AttachLocalIsolate(OptimizedCompilationInfo* info,
@@ -157,6 +165,13 @@ class V8_EXPORT_PRIVATE JSHeapBroker {
   void AttachLocalIsolateForMaglev(maglev::MaglevCompilationInfo* info,
                                    LocalIsolate* local_isolate);
   void DetachLocalIsolateForMaglev(maglev::MaglevCompilationInfo* info);
+
+  // Attaches the canonical handles map from the compilation info to the broker.
+  // Ownership of the map remains in the compilation info.
+  template <typename CompilationInfoT>
+  void AttachCompilationInfo(CompilationInfoT* info) {
+    set_canonical_handles(info->canonical_handles());
+  }
 
   bool StackHasOverflowed() const;
 
@@ -181,7 +196,7 @@ class V8_EXPORT_PRIVATE JSHeapBroker {
 
   // Check if {object} is any native context's %ArrayPrototype% or
   // %ObjectPrototype%.
-  bool IsArrayOrObjectPrototype(const JSObjectRef& object) const;
+  bool IsArrayOrObjectPrototype(JSObjectRef object) const;
   bool IsArrayOrObjectPrototype(Handle<JSObject> object) const;
 
   bool HasFeedback(FeedbackSource const& source) const;
@@ -214,7 +229,7 @@ class V8_EXPORT_PRIVATE JSHeapBroker {
       FeedbackSource const& source);
   ProcessedFeedback const& GetFeedbackForPropertyAccess(
       FeedbackSource const& source, AccessMode mode,
-      base::Optional<NameRef> static_name);
+      OptionalNameRef static_name);
 
   ProcessedFeedback const& ProcessFeedbackForBinaryOperation(
       FeedbackSource const& source);
@@ -225,11 +240,10 @@ class V8_EXPORT_PRIVATE JSHeapBroker {
 
   bool FeedbackIsInsufficient(FeedbackSource const& source) const;
 
-  base::Optional<NameRef> GetNameFeedback(FeedbackNexus const& nexus);
+  OptionalNameRef GetNameFeedback(FeedbackNexus const& nexus);
 
-  PropertyAccessInfo GetPropertyAccessInfo(
-      MapRef map, NameRef name, AccessMode access_mode,
-      CompilationDependencies* dependencies);
+  PropertyAccessInfo GetPropertyAccessInfo(MapRef map, NameRef name,
+                                           AccessMode access_mode);
 
   StringRef GetTypedArrayStringTag(ElementsKind kind);
 
@@ -247,7 +261,7 @@ class V8_EXPORT_PRIVATE JSHeapBroker {
                                       : isolate()->AsLocalIsolate();
   }
 
-  base::Optional<RootIndex> FindRootIndex(const HeapObjectRef& object) {
+  base::Optional<RootIndex> FindRootIndex(HeapObjectRef object) {
     // No root constant is a JSReceiver.
     if (object.IsJSReceiver()) return {};
     Address address = object.object()->ptr();
@@ -260,34 +274,35 @@ class V8_EXPORT_PRIVATE JSHeapBroker {
 
   // Return the corresponding canonical persistent handle for {object}. Create
   // one if it does not exist.
-  // If we have the canonical map, we can create the canonical & persistent
-  // handle through it. This commonly happens during the Execute phase.
+  // If a local isolate is attached, we can create the persistent handle through
+  // it. This commonly happens during the Execute phase.
   // If we don't, that means we are calling this method from serialization. If
-  // that happens, we should be inside a canonical and a persistent handle
-  // scope. Then, we would just use the regular handle creation.
+  // that happens, we should be inside a persistent handle scope. Then, we would
+  // just use the regular handle creation.
   template <typename T>
   Handle<T> CanonicalPersistentHandle(T object) {
-    if (canonical_handles_) {
-      Address address = object.ptr();
-      if (Internals::HasHeapObjectTag(address)) {
-        RootIndex root_index;
-        if (root_index_map_.Lookup(address, &root_index)) {
-          return Handle<T>(isolate_->root_handle(root_index).location());
-        }
+    DCHECK_NOT_NULL(canonical_handles_);
+    Address address = object.ptr();
+    if (Internals::HasHeapObjectTag(address)) {
+      RootIndex root_index;
+      if (root_index_map_.Lookup(address, &root_index)) {
+        return Handle<T>(isolate_->root_handle(root_index).location());
       }
-
-      Object obj(address);
-      auto find_result = canonical_handles_->FindOrInsert(obj);
-      if (!find_result.already_exists) {
-        // Allocate new PersistentHandle if one wasn't created before.
-        DCHECK_NOT_NULL(local_isolate());
-        *find_result.entry =
-            local_isolate()->heap()->NewPersistentHandle(obj).location();
-      }
-      return Handle<T>(*find_result.entry);
-    } else {
-      return Handle<T>(object, isolate());
     }
+
+    Object obj(address);
+    auto find_result = canonical_handles_->FindOrInsert(obj);
+    if (find_result.already_exists) return Handle<T>(*find_result.entry);
+
+    // Allocate new PersistentHandle if one wasn't created before.
+    if (local_isolate()) {
+      *find_result.entry =
+          local_isolate()->heap()->NewPersistentHandle(obj).location();
+    } else {
+      DCHECK(PersistentHandlesScope::IsActive(isolate()));
+      *find_result.entry = Handle<T>(object, isolate()).location();
+    }
+    return Handle<T>(*find_result.entry);
   }
 
   template <typename T>
@@ -296,19 +311,26 @@ class V8_EXPORT_PRIVATE JSHeapBroker {
     return CanonicalPersistentHandle<T>(*object);
   }
 
-  // Find the corresponding handle in the CanonicalHandlesMap. The entry must be
-  // found.
+  // Checks if a canonical persistent handle for {object} exists.
   template <typename T>
-  Handle<T> FindCanonicalPersistentHandleForTesting(Object object) {
-    Address** entry = canonical_handles_->Find(object);
-    return Handle<T>(*entry);
+  bool IsCanonicalHandle(Handle<T> handle) {
+    DCHECK_NOT_NULL(canonical_handles_);
+    Address* location = handle.location();
+    Address address = *location;
+    if (Internals::HasHeapObjectTag(address)) {
+      RootIndex root_index;
+      if (root_index_map_.Lookup(address, &root_index)) {
+        return true;
+      }
+      // Builtins use pseudo handles that are canonical and persistent by
+      // design.
+      if (isolate()->IsBuiltinTableHandleLocation(location)) {
+        return true;
+      }
+    }
+    return canonical_handles_->Find(Object(address)) != nullptr;
   }
 
-  // Set the persistent handles and copy the canonical handles over to the
-  // JSHeapBroker.
-  void SetPersistentAndCopyCanonicalHandlesForTesting(
-      std::unique_ptr<PersistentHandles> persistent_handles,
-      std::unique_ptr<CanonicalHandlesMap> canonical_handles);
   std::string Trace() const;
   void IncrementTracingIndentation();
   void DecrementTracingIndentation();
@@ -375,7 +397,12 @@ class V8_EXPORT_PRIVATE JSHeapBroker {
     return dependencies_;
   }
 
+#define V(Type, name, Name) inline typename ref_traits<Type>::ref_type name();
+  READ_ONLY_ROOT_LIST(V)
+#undef V
+
  private:
+  friend class JSHeapBrokerScopeForTesting;
   friend class HeapObjectRef;
   friend class ObjectRef;
   friend class ObjectData;
@@ -396,12 +423,12 @@ class V8_EXPORT_PRIVATE JSHeapBroker {
   ProcessedFeedback const& ReadFeedbackForForIn(
       FeedbackSource const& source) const;
   ProcessedFeedback const& ReadFeedbackForGlobalAccess(
-      FeedbackSource const& source);
+      JSHeapBroker* broker, FeedbackSource const& source);
   ProcessedFeedback const& ReadFeedbackForInstanceOf(
       FeedbackSource const& source);
   ProcessedFeedback const& ReadFeedbackForPropertyAccess(
       FeedbackSource const& source, AccessMode mode,
-      base::Optional<NameRef> static_name);
+      OptionalNameRef static_name);
   ProcessedFeedback const& ReadFeedbackForRegExpLiteral(
       FeedbackSource const& source);
   ProcessedFeedback const& ReadFeedbackForTemplateObject(
@@ -420,28 +447,20 @@ class V8_EXPORT_PRIVATE JSHeapBroker {
     return std::move(ph_);
   }
 
-  void set_canonical_handles(
-      std::unique_ptr<CanonicalHandlesMap> canonical_handles) {
-    DCHECK_NULL(canonical_handles_);
-    canonical_handles_ = std::move(canonical_handles);
-    DCHECK_NOT_NULL(canonical_handles_);
+  void set_canonical_handles(CanonicalHandlesMap* canonical_handles) {
+    canonical_handles_ = canonical_handles;
   }
 
-  std::unique_ptr<CanonicalHandlesMap> DetachCanonicalHandles() {
-    DCHECK_NOT_NULL(canonical_handles_);
-    return std::move(canonical_handles_);
-  }
-
-  // Copy the canonical handles over to the JSHeapBroker.
-  void CopyCanonicalHandlesForTesting(
-      std::unique_ptr<CanonicalHandlesMap> canonical_handles);
+#define V(Type, name, Name) void Init##Name();
+  READ_ONLY_ROOT_LIST(V)
+#undef V
 
   Isolate* const isolate_;
 #if V8_COMPRESS_POINTERS
   const PtrComprCageBase cage_base_;
 #endif  // V8_COMPRESS_POINTERS
   Zone* const zone_;
-  base::Optional<NativeContextRef> target_native_context_;
+  OptionalNativeContextRef target_native_context_;
   RefsMap* refs_;
   RootIndexMap root_index_map_;
   ZoneUnorderedSet<Handle<JSObject>, Handle<JSObject>::hash,
@@ -452,7 +471,8 @@ class V8_EXPORT_PRIVATE JSHeapBroker {
   CodeKind const code_kind_;
   std::unique_ptr<PersistentHandles> ph_;
   LocalIsolate* local_isolate_ = nullptr;
-  std::unique_ptr<CanonicalHandlesMap> canonical_handles_;
+  // The CanonicalHandlesMap is owned by the compilation info.
+  CanonicalHandlesMap* canonical_handles_;
   unsigned trace_indentation_ = 0;
   ZoneUnorderedMap<FeedbackSource, ProcessedFeedback const*,
                    FeedbackSource::Hash, FeedbackSource::Equal>
@@ -460,6 +480,12 @@ class V8_EXPORT_PRIVATE JSHeapBroker {
   ZoneUnorderedMap<PropertyAccessTarget, PropertyAccessInfo,
                    PropertyAccessTarget::Hash, PropertyAccessTarget::Equal>
       property_access_infos_;
+
+  // Cache read only roots to avoid needing to look them up via the map.
+#define V(Type, name, Name) \
+  OptionalRef<typename ref_traits<Type>::ref_type> name##_;
+  READ_ONLY_ROOT_LIST(V)
+#undef V
 
   CompilationDependencies* dependencies_ = nullptr;
 
@@ -478,6 +504,25 @@ class V8_EXPORT_PRIVATE JSHeapBroker {
   static constexpr uint32_t kInitialRefsBucketCount = 1024;
   static_assert(base::bits::IsPowerOfTwo(kInitialRefsBucketCount));
 };
+
+#ifdef DEBUG
+// In debug builds, store the current heap broker on a thread local, for
+// DCHECKs to access it via JSHeapBroker::Current();
+class V8_NODISCARD V8_EXPORT_PRIVATE CurrentHeapBrokerScope {
+ public:
+  explicit CurrentHeapBrokerScope(JSHeapBroker* broker);
+  ~CurrentHeapBrokerScope();
+
+ private:
+  JSHeapBroker* const prev_broker_;
+};
+#else
+class V8_NODISCARD V8_EXPORT_PRIVATE CurrentHeapBrokerScope {
+ public:
+  explicit CurrentHeapBrokerScope(JSHeapBroker* broker) {}
+  ~CurrentHeapBrokerScope() {}
+};
+#endif
 
 class V8_NODISCARD TraceScope {
  public:
@@ -522,17 +567,37 @@ class V8_NODISCARD UnparkedScopeIfNeeded {
   base::Optional<UnparkedScope> unparked_scope;
 };
 
+class V8_NODISCARD JSHeapBrokerScopeForTesting {
+ public:
+  JSHeapBrokerScopeForTesting(JSHeapBroker* broker, Isolate* isolate,
+                              Zone* zone)
+      : JSHeapBrokerScopeForTesting(
+            broker, std::make_unique<CanonicalHandlesMap>(
+                        isolate->heap(), ZoneAllocationPolicy(zone))) {}
+  JSHeapBrokerScopeForTesting(
+      JSHeapBroker* broker,
+      std::unique_ptr<CanonicalHandlesMap> canonical_handles)
+      : canonical_handles_(std::move(canonical_handles)), broker_(broker) {
+    broker_->set_canonical_handles(canonical_handles_.get());
+  }
+  ~JSHeapBrokerScopeForTesting() { broker_->set_canonical_handles(nullptr); }
+
+ private:
+  std::unique_ptr<CanonicalHandlesMap> canonical_handles_;
+  JSHeapBroker* const broker_;
+};
+
 template <class T,
           typename = std::enable_if_t<std::is_convertible<T*, Object*>::value>>
-base::Optional<typename ref_traits<T>::ref_type> TryMakeRef(
-    JSHeapBroker* broker, ObjectData* data) {
+OptionalRef<typename ref_traits<T>::ref_type> TryMakeRef(JSHeapBroker* broker,
+                                                         ObjectData* data) {
   if (data == nullptr) return {};
-  return {typename ref_traits<T>::ref_type(broker, data)};
+  return {typename ref_traits<T>::ref_type(data)};
 }
 
 // Usage:
 //
-//  base::Optional<FooRef> ref = TryMakeRef(broker, o);
+//  OptionalFooRef ref = TryMakeRef(broker, o);
 //  if (!ref.has_value()) return {};  // bailout
 //
 // or
@@ -540,7 +605,7 @@ base::Optional<typename ref_traits<T>::ref_type> TryMakeRef(
 //  FooRef ref = MakeRef(broker, o);
 template <class T,
           typename = std::enable_if_t<std::is_convertible<T*, Object*>::value>>
-base::Optional<typename ref_traits<T>::ref_type> TryMakeRef(
+OptionalRef<typename ref_traits<T>::ref_type> TryMakeRef(
     JSHeapBroker* broker, T object, GetOrCreateDataFlags flags = {}) {
   ObjectData* data = broker->TryGetOrCreateData(object, flags);
   if (data == nullptr) {
@@ -551,7 +616,7 @@ base::Optional<typename ref_traits<T>::ref_type> TryMakeRef(
 
 template <class T,
           typename = std::enable_if_t<std::is_convertible<T*, Object*>::value>>
-base::Optional<typename ref_traits<T>::ref_type> TryMakeRef(
+OptionalRef<typename ref_traits<T>::ref_type> TryMakeRef(
     JSHeapBroker* broker, Handle<T> object, GetOrCreateDataFlags flags = {}) {
   ObjectData* data = broker->TryGetOrCreateData(object, flags);
   if (data == nullptr) {
@@ -587,6 +652,16 @@ typename ref_traits<T>::ref_type MakeRefAssumeMemoryFence(JSHeapBroker* broker,
                                                           Handle<T> object) {
   return TryMakeRef(broker, object, kAssumeMemoryFence | kCrashOnError).value();
 }
+
+#define V(Type, name, Name)                                         \
+  inline typename ref_traits<Type>::ref_type JSHeapBroker::name() { \
+    if (!name##_) {                                                 \
+      Init##Name();                                                 \
+    }                                                               \
+    return name##_.value();                                         \
+  }
+READ_ONLY_ROOT_LIST(V)
+#undef V
 
 }  // namespace compiler
 }  // namespace internal

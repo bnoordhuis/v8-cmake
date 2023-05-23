@@ -548,7 +548,7 @@ int Assembler::deserialization_special_target_size(Address location) {
 }
 
 void Assembler::deserialization_set_special_target_at(Address location,
-                                                      InstructionStream code,
+                                                      Code code,
                                                       Address target) {
   Instruction* instr = reinterpret_cast<Instruction*>(location);
   if (instr->IsBranchAndLink() || instr->IsUnconditionalBranch()) {
@@ -620,7 +620,7 @@ int RelocInfo::target_address_size() {
 
 Address RelocInfo::target_address() {
   DCHECK(IsCodeTarget(rmode_) || IsNearBuiltinEntry(rmode_) ||
-         IsWasmCall(rmode_));
+         IsWasmCall(rmode_) || IsWasmStubCall(rmode_));
   return Assembler::target_address_at(pc_, constant_pool_);
 }
 
@@ -659,8 +659,8 @@ HeapObject RelocInfo::target_object(PtrComprCageBase cage_base) {
     Tagged_t compressed =
         Assembler::target_compressed_address_at(pc_, constant_pool_);
     DCHECK(!HAS_SMI_TAG(compressed));
-    Object obj(V8HeapCompressionScheme::DecompressTaggedPointer(cage_base,
-                                                                compressed));
+    Object obj(
+        V8HeapCompressionScheme::DecompressTagged(cage_base, compressed));
     // Embedding of compressed InstructionStream objects must not happen when
     // external code space is enabled, because Codes must be used
     // instead.
@@ -682,22 +682,18 @@ Handle<HeapObject> RelocInfo::target_object_handle(Assembler* origin) {
   }
 }
 
-void RelocInfo::set_target_object(Heap* heap, HeapObject target,
-                                  WriteBarrierMode write_barrier_mode,
+void RelocInfo::set_target_object(HeapObject target,
                                   ICacheFlushMode icache_flush_mode) {
   DCHECK(IsCodeTarget(rmode_) || IsEmbeddedObjectMode(rmode_));
   if (IsCompressedEmbeddedObject(rmode_)) {
     Assembler::set_target_compressed_address_at(
         pc_, constant_pool_,
-        V8HeapCompressionScheme::CompressTagged(target.ptr()),
+        V8HeapCompressionScheme::CompressObject(target.ptr()),
         icache_flush_mode);
   } else {
     DCHECK(IsFullEmbeddedObject(rmode_));
     Assembler::set_target_address_at(pc_, constant_pool_, target.ptr(),
                                      icache_flush_mode);
-  }
-  if (!host().is_null() && !v8_flags.disable_write_barriers) {
-    WriteBarrierForCode(host(), this, target, write_barrier_mode);
   }
 }
 

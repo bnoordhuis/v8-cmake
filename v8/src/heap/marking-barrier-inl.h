@@ -14,19 +14,10 @@ namespace v8 {
 namespace internal {
 
 void MarkingBarrier::MarkValue(HeapObject host, HeapObject value) {
+  if (value.InReadOnlySpace()) return;
+
   DCHECK(IsCurrentMarkingBarrier(host));
   DCHECK(is_activated_ || shared_heap_worklist_.has_value());
-
-  DCHECK_IMPLIES(!value.InSharedWritableHeap() || is_shared_space_isolate_,
-                 !marking_state_.IsImpossible(value));
-
-  // Host may have an impossible markbit pattern if manual allocation folding
-  // is performed and host happens to be the last word of an allocated region.
-  // In that case host has only one markbit and the second markbit belongs to
-  // another object. We can detect that case by checking if value is a one word
-  // filler map.
-  DCHECK(!marking_state_.IsImpossible(host) ||
-         value == ReadOnlyRoots(heap_->isolate()).one_pointer_filler_map());
 
   // When shared heap isn't enabled all objects are local, we can just run the
   // local marking barrier. Also from the point-of-view of the shared space
@@ -37,18 +28,18 @@ void MarkingBarrier::MarkValue(HeapObject host, HeapObject value) {
       return;
     }
 
-    if (host.InSharedWritableHeap()) {
+    if (host.InWritableSharedSpace()) {
       // Invoking shared marking barrier when storing into shared objects.
       MarkValueShared(value);
       return;
-    } else if (value.InSharedWritableHeap()) {
+    } else if (value.InWritableSharedSpace()) {
       // No marking needed when storing shared objects in local objects.
       return;
     }
   }
 
-  DCHECK_IMPLIES(host.InSharedWritableHeap(), is_shared_space_isolate_);
-  DCHECK_IMPLIES(value.InSharedWritableHeap(), is_shared_space_isolate_);
+  DCHECK_IMPLIES(host.InWritableSharedSpace(), is_shared_space_isolate_);
+  DCHECK_IMPLIES(value.InWritableSharedSpace(), is_shared_space_isolate_);
 
   DCHECK(is_activated_);
   MarkValueLocal(value);
@@ -56,20 +47,20 @@ void MarkingBarrier::MarkValue(HeapObject host, HeapObject value) {
 
 void MarkingBarrier::MarkValueShared(HeapObject value) {
   // Value is either in read-only space or shared heap.
-  DCHECK(value.InSharedHeap());
+  DCHECK(value.InAnySharedSpace());
 
   // We should only reach this on client isolates (= worker isolates).
-  DCHECK(v8_flags.shared_space);
   DCHECK(!is_shared_space_isolate_);
   DCHECK(shared_heap_worklist_.has_value());
 
   // Mark shared object and push it onto shared heap worklist.
-  if (marking_state_.WhiteToGrey(value)) {
+  if (marking_state_.TryMark(value)) {
     shared_heap_worklist_->Push(value);
   }
 }
 
 void MarkingBarrier::MarkValueLocal(HeapObject value) {
+  DCHECK(!value.InReadOnlySpace());
   if (is_minor()) {
     // We do not need to insert into RememberedSet<OLD_TO_NEW> here because the
     // C++ marking barrier already does this for us.
@@ -110,11 +101,11 @@ bool MarkingBarrier::IsCompacting(HeapObject object) const {
     return true;
   }
 
-  return shared_heap_worklist_.has_value() && object.InSharedWritableHeap();
+  return shared_heap_worklist_.has_value() && object.InWritableSharedSpace();
 }
 
 bool MarkingBarrier::WhiteToGreyAndPush(HeapObject obj) {
-  if (marking_state_.WhiteToGrey(obj)) {
+  if (marking_state_.TryMark(obj)) {
     current_worklist_->Push(obj);
     return true;
   }

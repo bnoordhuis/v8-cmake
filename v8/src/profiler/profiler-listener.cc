@@ -74,9 +74,6 @@ void ProfilerListener::CodeCreateEvent(CodeTag tag, Handle<AbstractCode> code,
                                        Handle<SharedFunctionInfo> shared,
                                        Handle<Name> script_name) {
   PtrComprCageBase cage_base(isolate_);
-  DCHECK(code->IsBytecodeArray(cage_base) ||
-         Builtins::IsBuiltinId(code->builtin_id(cage_base)) ||
-         code->kind(cage_base) == CodeKind::BASELINE);
   CodeEventsContainer evt_rec(CodeEventRecord::Type::kCodeCreation);
   CodeCreateEventRecord* rec = &evt_rec.CodeCreateEventRecord_;
   rec->instruction_start = code->InstructionStart(cage_base);
@@ -131,7 +128,7 @@ void ProfilerListener::CodeCreateEvent(CodeTag tag,
 
     bool is_baseline = abstract_code->kind(cage_base) == CodeKind::BASELINE;
     Handle<ByteArray> source_position_table(
-        abstract_code->SourcePositionTable(cage_base, *shared), isolate_);
+        abstract_code->SourcePositionTable(isolate_, *shared), isolate_);
     std::unique_ptr<baseline::BytecodeOffsetIterator> baseline_iterator;
     if (is_baseline) {
       Handle<BytecodeArray> bytecodes(shared->GetBytecodeArray(isolate_),
@@ -196,7 +193,7 @@ void ProfilerListener::CodeCreateEvent(CodeTag tag,
           // kLeafNodeLineNumbers mode. Creating a SourcePositionInfo is a handy
           // way of getting both easily.
           SourcePositionInfo start_pos_info(
-              SourcePosition(pos_info.shared->StartPosition()),
+              isolate_, SourcePosition(pos_info.shared->StartPosition()),
               pos_info.shared);
 
           CodeEntry* inline_entry = code_entries_.Create(
@@ -302,8 +299,8 @@ void ProfilerListener::CodeMoveEvent(InstructionStream from,
   DisallowGarbageCollection no_gc;
   CodeEventsContainer evt_rec(CodeEventRecord::Type::kCodeMove);
   CodeMoveEventRecord* rec = &evt_rec.CodeMoveEventRecord_;
-  rec->from_instruction_start = from.InstructionStart();
-  rec->to_instruction_start = to.InstructionStart();
+  rec->from_instruction_start = from.instruction_start();
+  rec->to_instruction_start = to.instruction_start();
   DispatchCodeEvent(evt_rec);
 }
 
@@ -334,13 +331,12 @@ void ProfilerListener::CodeDisableOptEvent(Handle<AbstractCode> code,
   DispatchCodeEvent(evt_rec);
 }
 
-void ProfilerListener::CodeDeoptEvent(Handle<InstructionStream> code,
-                                      DeoptimizeKind kind, Address pc,
-                                      int fp_to_sp_delta) {
+void ProfilerListener::CodeDeoptEvent(Handle<Code> code, DeoptimizeKind kind,
+                                      Address pc, int fp_to_sp_delta) {
   CodeEventsContainer evt_rec(CodeEventRecord::Type::kCodeDeopt);
   CodeDeoptEventRecord* rec = &evt_rec.CodeDeoptEventRecord_;
   Deoptimizer::DeoptInfo info = Deoptimizer::GetDeoptInfo(*code, pc);
-  rec->instruction_start = code->InstructionStart();
+  rec->instruction_start = code->instruction_start();
   rec->deopt_reason = DeoptimizeReasonToString(info.deopt_reason);
   rec->deopt_id = info.deopt_id;
   rec->pc = pc;
@@ -389,7 +385,7 @@ const char* ProfilerListener::GetFunctionName(SharedFunctionInfo shared) {
   }
 }
 
-void ProfilerListener::AttachDeoptInlinedFrames(Handle<InstructionStream> code,
+void ProfilerListener::AttachDeoptInlinedFrames(Handle<Code> code,
                                                 CodeDeoptEventRecord* rec) {
   int deopt_id = rec->deopt_id;
   SourcePosition last_position = SourcePosition::Unknown();
@@ -419,7 +415,7 @@ void ProfilerListener::AttachDeoptInlinedFrames(Handle<InstructionStream> code,
       // scope limits their lifetime.
       HandleScope scope(isolate_);
       std::vector<SourcePositionInfo> stack =
-          last_position.InliningStack(isolate_, code->code(kAcquireLoad));
+          last_position.InliningStack(isolate_, *code);
       CpuProfileDeoptFrame* deopt_frames =
           new CpuProfileDeoptFrame[stack.size()];
 

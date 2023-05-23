@@ -34,17 +34,14 @@ namespace compiler {
 
 class BytecodeGraphBuilder {
  public:
-  BytecodeGraphBuilder(JSHeapBroker* broker, Zone* local_zone,
-                       NativeContextRef const& native_context,
-                       SharedFunctionInfoRef const& shared_info,
-                       FeedbackCellRef const& feedback_cell,
-                       BytecodeOffset osr_offset, JSGraph* jsgraph,
-                       CallFrequency const& invocation_frequency,
-                       SourcePositionTable* source_positions,
-                       NodeOriginTable* node_origins, int inlining_id,
-                       CodeKind code_kind, BytecodeGraphBuilderFlags flags,
-                       TickCounter* tick_counter,
-                       ObserveNodeInfo const& observe_node_info);
+  BytecodeGraphBuilder(
+      JSHeapBroker* broker, Zone* local_zone, NativeContextRef native_context,
+      SharedFunctionInfoRef shared_info, FeedbackCellRef feedback_cell,
+      BytecodeOffset osr_offset, JSGraph* jsgraph,
+      CallFrequency const& invocation_frequency,
+      SourcePositionTable* source_positions, NodeOriginTable* node_origins,
+      int inlining_id, CodeKind code_kind, BytecodeGraphBuilderFlags flags,
+      TickCounter* tick_counter, ObserveNodeInfo const& observe_node_info);
 
   BytecodeGraphBuilder(const BytecodeGraphBuilder&) = delete;
   BytecodeGraphBuilder& operator=(const BytecodeGraphBuilder&) = delete;
@@ -293,7 +290,7 @@ class BytecodeGraphBuilder {
   // Slow path taken when we cannot figure out the current scope info.
   Environment* CheckContextExtensionsSlowPath(uint32_t depth);
   // Helper function that tries to get the current scope info.
-  base::Optional<ScopeInfoRef> TryGetScopeInfo();
+  OptionalScopeInfoRef TryGetScopeInfo();
   // Helper function to create a context extension check.
   Environment* CheckContextExtensionAtDepth(Environment* slow_environment,
                                             uint32_t depth);
@@ -400,7 +397,7 @@ class BytecodeGraphBuilder {
   }
   Zone* local_zone() const { return local_zone_; }
   BytecodeArrayRef bytecode_array() const { return bytecode_array_; }
-  FeedbackVectorRef const& feedback_vector() const { return feedback_vector_; }
+  FeedbackVectorRef feedback_vector() const { return feedback_vector_; }
   const JSTypeHintLowering& type_hint_lowering() const {
     return type_hint_lowering_;
   }
@@ -1040,11 +1037,10 @@ public GraphDecorator {
 };
 
 BytecodeGraphBuilder::BytecodeGraphBuilder(
-    JSHeapBroker* broker, Zone* local_zone,
-    NativeContextRef const& native_context,
-    SharedFunctionInfoRef const& shared_info,
-    FeedbackCellRef const& feedback_cell, BytecodeOffset osr_offset,
-    JSGraph* jsgraph, CallFrequency const& invocation_frequency,
+    JSHeapBroker* broker, Zone* local_zone, NativeContextRef native_context,
+    SharedFunctionInfoRef shared_info, FeedbackCellRef feedback_cell,
+    BytecodeOffset osr_offset, JSGraph* jsgraph,
+    CallFrequency const& invocation_frequency,
     SourcePositionTable* source_positions, NodeOriginTable* node_origins,
     int inlining_id, CodeKind code_kind, BytecodeGraphBuilderFlags flags,
     TickCounter* tick_counter, ObserveNodeInfo const& observe_node_info)
@@ -1056,9 +1052,9 @@ BytecodeGraphBuilder::BytecodeGraphBuilder(
       jsgraph_(jsgraph),
       native_context_(native_context),
       shared_info_(shared_info),
-      bytecode_array_(shared_info.GetBytecodeArray()),
+      bytecode_array_(shared_info.GetBytecodeArray(broker)),
       feedback_cell_(feedback_cell),
-      feedback_vector_(feedback_cell.feedback_vector().value()),
+      feedback_vector_(feedback_cell.feedback_vector(broker).value()),
       invocation_frequency_(invocation_frequency),
       type_hint_lowering_(
           broker, jsgraph, feedback_vector_,
@@ -1070,7 +1066,7 @@ BytecodeGraphBuilder::BytecodeGraphBuilder(
           bytecode_array().parameter_count(), bytecode_array().register_count(),
           shared_info.object())),
       source_position_iterator_(std::make_unique<SourcePositionTableIterator>(
-          bytecode_array().SourcePositionTable())),
+          bytecode_array().SourcePositionTable(broker))),
       bytecode_iterator_(bytecode_array().object()),
       bytecode_analysis_(
           bytecode_array().object(), local_zone, osr_offset,
@@ -1131,16 +1127,17 @@ Node* BytecodeGraphBuilder::GetParameter(int parameter_index,
 
 void BytecodeGraphBuilder::CreateFeedbackVectorNode() {
   DCHECK_NULL(feedback_vector_node_);
-  feedback_vector_node_ = jsgraph()->Constant(feedback_vector());
+  feedback_vector_node_ = jsgraph()->Constant(feedback_vector(), broker());
 }
 
 Node* BytecodeGraphBuilder::BuildLoadFeedbackCell(int index) {
-  return jsgraph()->Constant(feedback_vector().GetClosureFeedbackCell(index));
+  return jsgraph()->Constant(
+      feedback_vector().GetClosureFeedbackCell(broker(), index), broker());
 }
 
 void BytecodeGraphBuilder::CreateNativeContextNode() {
   DCHECK_NULL(native_context_node_);
-  native_context_node_ = jsgraph()->Constant(native_context());
+  native_context_node_ = jsgraph()->Constant(native_context(), broker());
 }
 
 Node* BytecodeGraphBuilder::BuildLoadNativeContextField(int index) {
@@ -1517,7 +1514,7 @@ void BytecodeGraphBuilder::VisitLdaSmi() {
 
 void BytecodeGraphBuilder::VisitLdaConstant() {
   ObjectRef object = MakeRefForConstantForIndexOperand(0);
-  Node* node = jsgraph()->Constant(object);
+  Node* node = jsgraph()->Constant(object, broker());
   environment()->BindAccumulator(node);
 }
 
@@ -1728,7 +1725,8 @@ void BytecodeGraphBuilder::VisitStaCurrentContextSlot() {
 
 void BytecodeGraphBuilder::BuildLdaLookupSlot(TypeofMode typeof_mode) {
   PrepareEagerCheckpoint();
-  Node* name = jsgraph()->Constant(MakeRefForConstantForIndexOperand(0));
+  Node* name =
+      jsgraph()->Constant(MakeRefForConstantForIndexOperand(0), broker());
   const Operator* op =
       javascript()->CallRuntime(typeof_mode == TypeofMode::kNotInside
                                     ? Runtime::kLoadLookupSlot
@@ -1774,20 +1772,19 @@ BytecodeGraphBuilder::CheckContextExtensionAtDepth(
   return slow_environment;
 }
 
-base::Optional<ScopeInfoRef> BytecodeGraphBuilder::TryGetScopeInfo() {
+OptionalScopeInfoRef BytecodeGraphBuilder::TryGetScopeInfo() {
   Node* context = environment()->Context();
   switch (context->opcode()) {
     case IrOpcode::kJSCreateFunctionContext:
-      return CreateFunctionContextParametersOf(context->op())
-          .scope_info(broker());
+      return CreateFunctionContextParametersOf(context->op()).scope_info();
     case IrOpcode::kJSCreateBlockContext:
     case IrOpcode::kJSCreateCatchContext:
     case IrOpcode::kJSCreateWithContext:
-      return ScopeInfoOf(broker(), context->op());
+      return ScopeInfoOf(context->op());
     case IrOpcode::kParameter: {
-      ScopeInfoRef scope_info = shared_info_.scope_info();
+      ScopeInfoRef scope_info = shared_info_.scope_info(broker());
       if (scope_info.HasOuterScopeInfo()) {
-        scope_info = scope_info.OuterScopeInfo();
+        scope_info = scope_info.OuterScopeInfo(broker());
       }
       return scope_info;
     }
@@ -1798,7 +1795,7 @@ base::Optional<ScopeInfoRef> BytecodeGraphBuilder::TryGetScopeInfo() {
 
 BytecodeGraphBuilder::Environment* BytecodeGraphBuilder::CheckContextExtensions(
     uint32_t depth) {
-  base::Optional<ScopeInfoRef> maybe_scope_info = TryGetScopeInfo();
+  OptionalScopeInfoRef maybe_scope_info = TryGetScopeInfo();
   if (!maybe_scope_info.has_value()) {
     return CheckContextExtensionsSlowPath(depth);
   }
@@ -1813,7 +1810,7 @@ BytecodeGraphBuilder::Environment* BytecodeGraphBuilder::CheckContextExtensions(
     }
     DCHECK_IMPLIES(!scope_info.HasOuterScopeInfo(), d + 1 == depth);
     if (scope_info.HasOuterScopeInfo()) {
-      scope_info = scope_info.OuterScopeInfo();
+      scope_info = scope_info.OuterScopeInfo(broker());
     }
   }
 
@@ -1877,7 +1874,8 @@ void BytecodeGraphBuilder::BuildLdaLookupContextSlot(TypeofMode typeof_mode) {
   // Slow path, do a runtime load lookup.
   set_environment(slow_environment);
   {
-    Node* name = jsgraph()->Constant(MakeRefForConstantForIndexOperand(0));
+    Node* name =
+        jsgraph()->Constant(MakeRefForConstantForIndexOperand(0), broker());
 
     const Operator* op =
         javascript()->CallRuntime(typeof_mode == TypeofMode::kNotInside
@@ -1924,8 +1922,8 @@ void BytecodeGraphBuilder::BuildLdaLookupGlobalSlot(TypeofMode typeof_mode) {
   // Slow path, do a runtime load lookup.
   set_environment(slow_environment);
   {
-    Node* name =
-        jsgraph()->Constant(MakeRefForConstantForIndexOperand<Name>(0));
+    Node* name = jsgraph()->Constant(MakeRefForConstantForIndexOperand<Name>(0),
+                                     broker());
 
     const Operator* op =
         javascript()->CallRuntime(typeof_mode == TypeofMode::kNotInside
@@ -1953,7 +1951,8 @@ void BytecodeGraphBuilder::VisitLdaLookupGlobalSlotInsideTypeof() {
 void BytecodeGraphBuilder::VisitStaLookupSlot() {
   PrepareEagerCheckpoint();
   Node* value = environment()->LookupAccumulator();
-  Node* name = jsgraph()->Constant(MakeRefForConstantForIndexOperand(0));
+  Node* name =
+      jsgraph()->Constant(MakeRefForConstantForIndexOperand(0), broker());
   int bytecode_flags = bytecode_iterator().GetFlag8Operand(1);
   LanguageMode language_mode = static_cast<LanguageMode>(
       interpreter::StoreLookupSlotFlags::LanguageModeBit::decode(
@@ -2838,7 +2837,8 @@ void BytecodeGraphBuilder::VisitThrowReferenceErrorIfHole() {
   Node* accumulator = environment()->LookupAccumulator();
   Node* check_for_hole = NewNode(simplified()->ReferenceEqual(), accumulator,
                                  jsgraph()->TheHoleConstant());
-  Node* name = jsgraph()->Constant(MakeRefForConstantForIndexOperand(0));
+  Node* name =
+      jsgraph()->Constant(MakeRefForConstantForIndexOperand(0), broker());
   BuildHoleCheckAndThrow(check_for_hole,
                          Runtime::kThrowAccessedUninitializedVariable, name);
 }
@@ -3418,6 +3418,12 @@ void BytecodeGraphBuilder::VisitToObject() {
 void BytecodeGraphBuilder::VisitToString() {
   Node* value =
       NewNode(javascript()->ToString(), environment()->LookupAccumulator());
+  environment()->BindAccumulator(value, Environment::kAttachFrameState);
+}
+
+void BytecodeGraphBuilder::VisitToBoolean() {
+  Node* value =
+      NewNode(simplified()->ToBoolean(), environment()->LookupAccumulator());
   environment()->BindAccumulator(value, Environment::kAttachFrameState);
 }
 
@@ -4456,16 +4462,13 @@ void BytecodeGraphBuilder::UpdateSourceAndBytecodePosition(int offset) {
   }
 }
 
-void BuildGraphFromBytecode(JSHeapBroker* broker, Zone* local_zone,
-                            SharedFunctionInfoRef const& shared_info,
-                            FeedbackCellRef const& feedback_cell,
-                            BytecodeOffset osr_offset, JSGraph* jsgraph,
-                            CallFrequency const& invocation_frequency,
-                            SourcePositionTable* source_positions,
-                            NodeOriginTable* node_origins, int inlining_id,
-                            CodeKind code_kind, BytecodeGraphBuilderFlags flags,
-                            TickCounter* tick_counter,
-                            ObserveNodeInfo const& observe_node_info) {
+void BuildGraphFromBytecode(
+    JSHeapBroker* broker, Zone* local_zone, SharedFunctionInfoRef shared_info,
+    FeedbackCellRef feedback_cell, BytecodeOffset osr_offset, JSGraph* jsgraph,
+    CallFrequency const& invocation_frequency,
+    SourcePositionTable* source_positions, NodeOriginTable* node_origins,
+    int inlining_id, CodeKind code_kind, BytecodeGraphBuilderFlags flags,
+    TickCounter* tick_counter, ObserveNodeInfo const& observe_node_info) {
   BytecodeGraphBuilder builder(
       broker, local_zone, broker->target_native_context(), shared_info,
       feedback_cell, osr_offset, jsgraph, invocation_frequency,

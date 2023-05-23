@@ -236,8 +236,6 @@ class ReadOnlySpace : public BaseSpace {
 
   Address FirstPageAddress() const { return pages_.front()->address(); }
 
-  void InitFromMemoryDump(Isolate* isolate, SnapshotByteSource* source);
-
   // Ensure the read only space has at least one allocated page
   void EnsurePage();
 
@@ -266,14 +264,19 @@ class ReadOnlySpace : public BaseSpace {
   AllocationResult AllocateRawUnaligned(int size_in_bytes);
   AllocationResult AllocateRawAligned(int size_in_bytes,
                                       AllocationAlignment alignment);
-
   HeapObject TryAllocateLinearlyAligned(int size_in_bytes,
                                         AllocationAlignment alignment);
+  void AllocateNextPageAt(Address pos);
+  void FinalizeExternallyInitializedPage();
   void EnsureSpaceForAllocation(int size_in_bytes);
   void FreeLinearAllocationArea();
 
   size_t capacity_;
   const size_t area_size_;
+
+  friend class Heap;
+  friend class ReadOnlySerializer;  // For Unseal.
+  friend class ReadOnlyHeapImageDeserializer;
 };
 
 class SharedReadOnlySpace : public ReadOnlySpace {

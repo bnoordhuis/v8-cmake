@@ -12,6 +12,9 @@
 #include "src/flags/flags.h"
 #include "src/heap/heap-inl.h"
 #include "src/utils/allocation.h"
+#if defined(V8_OS_WIN64)
+#include "src/diagnostics/unwinding-info-win64.h"
+#endif  // V8_OS_WIN64
 
 namespace v8 {
 namespace internal {
@@ -103,46 +106,36 @@ bool CodeRange::InitReservation(v8::PageAllocator* page_allocator,
     requested = kMinimumCodeRangeSize;
   }
 
+  const size_t kPageSize = MemoryChunk::kPageSize;
+  CHECK(IsAligned(kPageSize, page_allocator->AllocatePageSize()));
+
   // When V8_EXTERNAL_CODE_SPACE_BOOL is enabled the allocatable region must
   // not cross the 4Gb boundary and thus the default compression scheme of
   // truncating the InstructionStream pointers to 32-bits still works. It's
-  // achieved by specifying base_alignment parameter. Note that the alignment is
-  // calculated before adjusting the requested size for
-  // GetWritableReservedAreaSize(). The reasons are:
-  //  - this extra page is used by breakpad on Windows and it's allowed to cross
-  //    the 4Gb boundary,
-  //  - rounding up the adjusted size would result in requresting unnecessarily
-  //    big aligment.
-  const size_t base_alignment =
-      V8_EXTERNAL_CODE_SPACE_BOOL
-          ? base::bits::RoundUpToPowerOfTwo(requested)
-          : VirtualMemoryCage::ReservationParams::kAnyBaseAlignment;
+  // achieved by specifying base_alignment parameter.
+  const size_t base_alignment = V8_EXTERNAL_CODE_SPACE_BOOL
+                                    ? base::bits::RoundUpToPowerOfTwo(requested)
+                                    : kPageSize;
 
-  const size_t reserved_area = GetWritableReservedAreaSize();
-  if (requested < (kMaximalCodeRangeSize - reserved_area)) {
-    requested += RoundUp(reserved_area, MemoryChunk::kPageSize);
-    // Fulfilling both reserved pages requirement and huge code area
-    // alignments is not supported (requires re-implementation).
-    DCHECK_LE(kMinExpectedOSPageSize, page_allocator->AllocatePageSize());
-  }
   DCHECK_IMPLIES(kPlatformRequiresCodeRange,
                  requested <= kMaximalCodeRangeSize);
 
   VirtualMemoryCage::ReservationParams params;
   params.page_allocator = page_allocator;
   params.reservation_size = requested;
-  const size_t allocate_page_size = page_allocator->AllocatePageSize();
-  params.base_bias_size = RoundUp(reserved_area, allocate_page_size);
-  params.page_size = MemoryChunk::kPageSize;
+  params.page_size = kPageSize;
   params.jit =
       v8_flags.jitless ? JitPermission::kNoJit : JitPermission::kMapAsJittable;
 
+  const size_t allocate_page_size = page_allocator->AllocatePageSize();
+  // TODO(v8:11880): Use base_alignment here once ChromeOS issue is fixed.
   Address the_hint =
       GetCodeRangeAddressHint()->GetAddressHint(requested, allocate_page_size);
+  the_hint = RoundDown(the_hint, base_alignment);
 
   constexpr size_t kRadiusInMB =
       kMaxPCRelativeCodeRangeInMB > 1024 ? kMaxPCRelativeCodeRangeInMB : 4096;
-  auto preferred_region = GetPreferredRegion(kRadiusInMB, allocate_page_size);
+  auto preferred_region = GetPreferredRegion(kRadiusInMB, kPageSize);
 
   TRACE("=== Preferred region: [%p, %p)\n",
         reinterpret_cast<void*>(preferred_region.begin()),
@@ -158,52 +151,35 @@ bool CodeRange::InitReservation(v8::PageAllocator* page_allocator,
   if (kShouldTryHarder) {
     // Relax alignment requirement while trying to allocate code range inside
     // preferred region.
-    params.base_alignment =
-        VirtualMemoryCage::ReservationParams::kAnyBaseAlignment;
+    params.base_alignment = kPageSize;
 
     // TODO(v8:11880): consider using base::OS::GetFreeMemoryRangesWithin()
     // to avoid attempts that's going to fail anyway.
 
     VirtualMemoryCage candidate_cage;
 
-    // Most of the times using existing function as a hint might give us the
-    // best region from the first attempt.
-    params.requested_start_hint = the_hint;
-
-    if (candidate_cage.InitReservation(params)) {
-      TRACE("=== First attempt, hint=%p: [%p, %p)\n",
-            reinterpret_cast<void*>(params.requested_start_hint),
-            reinterpret_cast<void*>(candidate_cage.region().begin()),
-            reinterpret_cast<void*>(candidate_cage.region().end()));
-      if (!preferred_region.contains(candidate_cage.region())) {
-        // Keep trying.
+    // Try to allocate code range at the end of preferred region, by going
+    // towards the start in steps.
+    const int kAllocationTries = 16;
+    params.requested_start_hint =
+        RoundDown(preferred_region.end() - requested, kPageSize);
+    Address step =
+        RoundDown(preferred_region.size() / kAllocationTries, kPageSize);
+    for (int i = 0; i < kAllocationTries; i++) {
+      TRACE("=== Attempt #%d, hint=%p\n", i,
+            reinterpret_cast<void*>(params.requested_start_hint));
+      if (candidate_cage.InitReservation(params)) {
+        TRACE("=== Attempt #%d (%p): [%p, %p)\n", i,
+              reinterpret_cast<void*>(params.requested_start_hint),
+              reinterpret_cast<void*>(candidate_cage.region().begin()),
+              reinterpret_cast<void*>(candidate_cage.region().end()));
+        // Allocation succeeded, check if it's in the preferred range.
+        if (preferred_region.contains(candidate_cage.region())) break;
+        // This allocation is not the one we are searhing for.
         candidate_cage.Free();
       }
-    }
-    if (!candidate_cage.IsReserved()) {
-      // Try to allocate code range at the end of preferred region, by going
-      // towards the start in steps.
-      const int kAllocationTries = 16;
-      params.requested_start_hint =
-          RoundDown(preferred_region.end() - requested, allocate_page_size);
-      Address step = RoundDown(preferred_region.size() / kAllocationTries,
-                               allocate_page_size);
-      for (int i = 0; i < kAllocationTries; i++) {
-        TRACE("=== Attempt #%d, hint=%p\n", i,
-              reinterpret_cast<void*>(params.requested_start_hint));
-        if (candidate_cage.InitReservation(params)) {
-          TRACE("=== Attempt #%d (%p): [%p, %p)\n", i,
-                reinterpret_cast<void*>(params.requested_start_hint),
-                reinterpret_cast<void*>(candidate_cage.region().begin()),
-                reinterpret_cast<void*>(candidate_cage.region().end()));
-          // Allocation succeeded, check if it's in the preferred range.
-          if (preferred_region.contains(candidate_cage.region())) break;
-          // This allocation is not the one we are searhing for.
-          candidate_cage.Free();
-        }
-        if (step == 0) break;
-        params.requested_start_hint -= step;
-      }
+      if (step == 0) break;
+      params.requested_start_hint -= step;
     }
     if (candidate_cage.IsReserved()) {
       *static_cast<VirtualMemoryCage*>(this) = std::move(candidate_cage);
@@ -231,19 +207,37 @@ bool CodeRange::InitReservation(v8::PageAllocator* page_allocator,
   //   https://cs.chromium.org/chromium/src/components/crash/content/
   //     app/crashpad_win.cc?rcl=fd680447881449fba2edcf0589320e7253719212&l=204
   // for details.
+  const size_t reserved_area = GetWritableReservedAreaSize();
   if (reserved_area > 0) {
-    if (!reservation()->SetPermissions(reservation()->address(), reserved_area,
+    CHECK_LE(reserved_area, kPageSize);
+    // Exclude the reserved area from further allocations.
+    CHECK(page_allocator_->AllocatePagesAt(base(), kPageSize,
+                                           PageAllocator::kNoAccess));
+    // Commit required amount of writable memory.
+    if (!reservation()->SetPermissions(base(), reserved_area,
                                        PageAllocator::kReadWrite)) {
       return false;
     }
+#if defined(V8_OS_WIN64)
+    if (win64_unwindinfo::CanRegisterUnwindInfoForNonABICompliantCodeRange()) {
+      win64_unwindinfo::RegisterNonABICompliantCodeRange(
+          reinterpret_cast<void*>(base()), size());
+    }
+#endif  // V8_OS_WIN64
   }
+
   if (V8_HEAP_USE_PTHREAD_JIT_WRITE_PROTECT &&
       params.jit == JitPermission::kMapAsJittable) {
+    // Should the reserved area ever become non-empty we shouldn't mark it as
+    // RWX below.
+    CHECK_EQ(reserved_area, 0);
     void* base = reinterpret_cast<void*>(page_allocator_->begin());
     size_t size = page_allocator_->size();
-    CHECK(params.page_allocator->SetPermissions(
-        base, size, PageAllocator::kReadWriteExecute));
-    CHECK(params.page_allocator->DiscardSystemPages(base, size));
+    if (!params.page_allocator->SetPermissions(
+            base, size, PageAllocator::kReadWriteExecute)) {
+      return false;
+    }
+    if (!params.page_allocator->DiscardSystemPages(base, size)) return false;
   }
   return true;
 }
@@ -319,6 +313,12 @@ base::AddressRegion CodeRange::GetPreferredRegion(size_t radius_in_megabytes,
 
 void CodeRange::Free() {
   if (IsReserved()) {
+#if defined(V8_OS_WIN64)
+    if (win64_unwindinfo::CanRegisterUnwindInfoForNonABICompliantCodeRange()) {
+      win64_unwindinfo::UnregisterNonABICompliantCodeRange(
+          reinterpret_cast<void*>(base()));
+    }
+#endif  // V8_OS_WIN64
     GetCodeRangeAddressHint()->NotifyFreedCodeRange(
         reservation()->region().begin(), reservation()->region().size());
     VirtualMemoryCage::Free();

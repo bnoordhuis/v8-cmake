@@ -22,6 +22,8 @@ include_rules = [
   "+src/heap/factory-inl.h",
   # TODO(v8:10496): Don't expose so much (through transitive includes) outside
   # of heap/.
+  "+src/heap/gc-tracer.h",
+  "+src/heap/gc-tracer-inl.h",
   "+src/heap/heap.h",
   "+src/heap/heap-verifier.h",
   "+src/heap/heap-inl.h",
@@ -84,7 +86,8 @@ specific_include_rules = {
   "d8\.cc": [
     "+include/libplatform/libplatform.h",
     "+include/libplatform/v8-tracing.h",
-    "+perfetto/tracing.h"
+    "+perfetto/tracing/track_event.h",
+    "+perfetto/tracing/track_event_legacy.h"
   ],
   "d8-platforms\.cc": [
     "+include/libplatform/libplatform.h",
@@ -97,5 +100,10 @@ specific_include_rules = {
   ],
   "etw-jit-metadata-win\.h": [
     "+src/libplatform/etw/etw-provider-win.h",
-  ]
+  ],
+  "script\.h": [
+    "+src/heap/factory.h",
+    "+src/heap/factory-base.h",
+    "+src/heap/local-factory.h",
+  ],
 }

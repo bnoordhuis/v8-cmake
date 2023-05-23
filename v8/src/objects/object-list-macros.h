@@ -120,6 +120,7 @@ class ZoneForwardList;
   V(Foreign)                                    \
   V(FreeSpace)                                  \
   V(Function)                                   \
+  V(GcSafeCode)                                 \
   V(GlobalDictionary)                           \
   V(HandlerTable)                               \
   V(HeapNumber)                                 \
@@ -140,6 +141,7 @@ class ZoneForwardList;
   V(JSContextExtensionObject)                   \
   V(JSCustomElementsObject)                     \
   V(JSDataView)                                 \
+  V(JSDataViewOrRabGsabDataView)                \
   V(JSDate)                                     \
   V(JSError)                                    \
   V(JSExternalObject)                           \
@@ -149,6 +151,12 @@ class ZoneForwardList;
   V(JSGeneratorObject)                          \
   V(JSGlobalObject)                             \
   V(JSGlobalProxy)                              \
+  V(JSIteratorHelper)                           \
+  V(JSIteratorFilterHelper)                     \
+  V(JSIteratorMapHelper)                        \
+  V(JSIteratorTakeHelper)                       \
+  V(JSIteratorDropHelper)                       \
+  V(JSIteratorFlatMapHelper)                    \
   V(JSMap)                                      \
   V(JSMapIterator)                              \
   V(JSMessageObject)                            \
@@ -158,6 +166,7 @@ class ZoneForwardList;
   V(JSPrimitiveWrapper)                         \
   V(JSPromise)                                  \
   V(JSProxy)                                    \
+  V(JSRabGsabDataView)                          \
   V(JSRawJson)                                  \
   V(JSReceiver)                                 \
   V(JSRegExp)                                   \
@@ -181,6 +190,7 @@ class ZoneForwardList;
   V(JSTemporalTimeZone)                         \
   V(JSTemporalZonedDateTime)                    \
   V(JSTypedArray)                               \
+  V(JSValidIteratorWrapper)                     \
   V(JSWeakCollection)                           \
   V(JSWeakRef)                                  \
   V(JSWeakMap)                                  \
@@ -201,7 +211,9 @@ class ZoneForwardList;
   V(NumberWrapper)                              \
   V(ObjectHashSet)                              \
   V(ObjectHashTable)                            \
+  V(ObjectTwoHashTable)                         \
   V(Oddball)                                    \
+  V(Hole)                                       \
   V(OrderedHashMap)                             \
   V(OrderedHashSet)                             \
   V(OrderedNameDictionary)                      \
@@ -279,6 +291,7 @@ class ZoneForwardList;
   IF_WASM(V, WasmValueObject)                   \
   IF_WASM(V, WasmSuspenderObject)               \
   IF_WASM(V, WasmContinuationObject)            \
+  IF_WASM(V, WasmNull)                          \
   V(WeakFixedArray)                             \
   V(WeakArrayList)                              \
   V(WeakCell)                                   \
@@ -366,7 +379,6 @@ class ZoneForwardList;
 #define ODDBALL_LIST(V)                                     \
   V(Undefined, undefined_value, UndefinedValue)             \
   V(Null, null_value, NullValue)                            \
-  V(TheHole, the_hole_value, TheHoleValue)                  \
   V(Exception, exception, Exception)                        \
   V(Uninitialized, uninitialized_value, UninitializedValue) \
   V(True, true_value, TrueValue)                            \
@@ -374,6 +386,8 @@ class ZoneForwardList;
   V(ArgumentsMarker, arguments_marker, ArgumentsMarker)     \
   V(OptimizedOut, optimized_out, OptimizedOut)              \
   V(StaleRegister, stale_register, StaleRegister)
+
+#define HOLE_LIST(V) V(TheHole, the_hole_value, TheHoleValue)
 
 }  // namespace internal
 }  // namespace v8

@@ -14,121 +14,46 @@
 #include "src/compiler/frame.h"
 #include "src/compiler/turboshaft/assembler.h"
 #include "src/compiler/turboshaft/operations.h"
+#include "src/compiler/turboshaft/phase.h"
 #include "src/compiler/turboshaft/representations.h"
 #include "src/compiler/turboshaft/sidetable.h"
+#include "src/compiler/turboshaft/type-inference-reducer.h"
 #include "src/compiler/turboshaft/types.h"
+#include "src/compiler/turboshaft/uniform-reducer-adapter.h"
 #include "src/heap/parked-scope.h"
 
 namespace v8::internal::compiler::turboshaft {
 
-class DetectReentranceScope {
- public:
-  explicit DetectReentranceScope(bool* flag)
-      : is_reentrant_(*flag), flag_(flag) {
-    *flag_ = true;
-  }
-  ~DetectReentranceScope() { *flag_ = is_reentrant_; }
-  bool IsReentrant() const { return is_reentrant_; }
-
- private:
-  bool is_reentrant_;
-  bool* flag_;
-};
-
-struct AssertTypesReducerArgs {
-  Isolate* isolate;
-};
-
 template <class Next>
-class AssertTypesReducer : public Next {
- public:
-  using Next::Asm;
-  using ArgT =
-      base::append_tuple_type<typename Next::ArgT, AssertTypesReducerArgs>;
+class AssertTypesReducer
+    : public UniformReducerAdapter<AssertTypesReducer, Next> {
+#if defined(__clang__)
+  static_assert(next_contains_reducer<Next, TypeInferenceReducer>::value);
+#endif
 
-  template <typename... Args>
-  explicit AssertTypesReducer(const std::tuple<Args...>& args)
-      : Next(args), isolate_(std::get<AssertTypesReducerArgs>(args).isolate) {}
+ public:
+  TURBOSHAFT_REDUCER_BOILERPLATE()
+
+  using Adapter = UniformReducerAdapter<AssertTypesReducer, Next>;
 
   uint32_t NoContextConstant() { return IntToSmi(Context::kNoContext); }
 
-  OpIndex ReducePhi(base::Vector<const OpIndex> inputs,
-                    RegisterRepresentation rep) {
-    OpIndex index = Next::ReducePhi(inputs, rep);
-    if (!index.valid()) return index;
+  template <typename Op, typename Continuation>
+  OpIndex ReduceInputGraphOperation(OpIndex ig_index, const Op& operation) {
+    OpIndex og_index = Continuation{this}.ReduceInputGraph(ig_index, operation);
+    if (!og_index.valid()) return og_index;
+    if (!CanBeTyped(operation)) return og_index;
+    // Unfortunately, we cannot insert assertions after block terminators, so we
+    // skip them here.
+    if (operation.Properties().is_block_terminator) return og_index;
 
-    Type type = TypeOf(index);
-    if (type.IsInvalid()) return index;
-    // For now allow Type::Any().
-    // TODO(nicohartmann@): Remove this once all operations are supported.
-    if (type.IsAny()) return index;
-
-    DetectReentranceScope reentrance_scope(&emitting_asserts_);
-    DCHECK(!reentrance_scope.IsReentrant());
-
-    InsertTypeAssert(rep, index, type);
-    return index;
-  }
-
-  OpIndex ReduceConstant(ConstantOp::Kind kind, ConstantOp::Storage value) {
-    OpIndex index = Next::ReduceConstant(kind, value);
-    if (!index.valid()) return index;
-
-    Type type = TypeOf(index);
-    if (type.IsInvalid()) return index;
-
-    DetectReentranceScope reentrance_scope(&emitting_asserts_);
-    if (reentrance_scope.IsReentrant()) return index;
-
-    RegisterRepresentation rep = ConstantOp::Representation(kind);
-    switch (kind) {
-      case ConstantOp::Kind::kWord32:
-      case ConstantOp::Kind::kWord64:
-      case ConstantOp::Kind::kFloat32:
-      case ConstantOp::Kind::kFloat64:
-        InsertTypeAssert(rep, index, type);
-        break;
-      case ConstantOp::Kind::kNumber:
-      case ConstantOp::Kind::kTaggedIndex:
-      case ConstantOp::Kind::kExternal:
-      case ConstantOp::Kind::kHeapObject:
-      case ConstantOp::Kind::kCompressedHeapObject:
-      case ConstantOp::Kind::kRelocatableWasmCall:
-      case ConstantOp::Kind::kRelocatableWasmStubCall:
-        // TODO(nicohartmann@): Support remaining {kind}s.
-        UNIMPLEMENTED();
+    auto reps = operation.outputs_rep();
+    DCHECK_GT(reps.size(), 0);
+    if (reps.size() == 1) {
+      Type type = Asm().GetInputGraphType(ig_index);
+      InsertTypeAssert(reps[0], og_index, type);
     }
-    return index;
-  }
-
-  OpIndex ReduceWordBinop(OpIndex left, OpIndex right, WordBinopOp::Kind kind,
-                          WordRepresentation rep) {
-    OpIndex index = Next::ReduceWordBinop(left, right, kind, rep);
-    if (!index.valid()) return index;
-
-    Type type = TypeOf(index);
-    if (type.IsInvalid()) return index;
-
-    DetectReentranceScope reentrance_scope(&emitting_asserts_);
-    DCHECK(!reentrance_scope.IsReentrant());
-
-    InsertTypeAssert(rep, index, type);
-    return index;
-  }
-
-  OpIndex ReduceFloatBinop(OpIndex left, OpIndex right, FloatBinopOp::Kind kind,
-                           FloatRepresentation rep) {
-    OpIndex index = Next::ReduceFloatBinop(left, right, kind, rep);
-    if (!index.valid()) return index;
-
-    Type type = TypeOf(index);
-    if (type.IsInvalid()) return index;
-
-    DetectReentranceScope reentrance_scope(&emitting_asserts_);
-    DCHECK(!reentrance_scope.IsReentrant());
-
-    InsertTypeAssert(rep, index, type);
-    return index;
+    return og_index;
   }
 
   void InsertTypeAssert(RegisterRepresentation rep, OpIndex value,
@@ -136,6 +61,11 @@ class AssertTypesReducer : public Next {
     DCHECK(!type.IsInvalid());
     if (type.IsNone()) {
       Asm().Unreachable();
+      return;
+    }
+
+    if (type.IsAny()) {
+      // Ignore any typed for now.
       return;
     }
 
@@ -154,10 +84,14 @@ class AssertTypesReducer : public Next {
               builtin, OpIndex::Invalid(),
               {actual_value_indices.data(), actual_value_indices.size()},
               isolate_);
+#ifdef DEBUG
           // Used for debugging
-          // PrintF("Inserted assert for %3d:%-40s (%s)\n", original_value.id(),
-          //        Asm().output_graph().Get(original_value).ToString().c_str(),
-          //        type.ToString().c_str());
+          if (v8_flags.turboshaft_trace_typing) {
+            PrintF("Inserted assert for %3d:%-40s (%s)\n", original_value.id(),
+                   Asm().output_graph().Get(original_value).ToString().c_str(),
+                   type.ToString().c_str());
+          }
+#endif
         };
 
     switch (rep.value()) {
@@ -200,14 +134,9 @@ class AssertTypesReducer : public Next {
     }
   }
 
-  Type TypeOf(const OpIndex index) {
-    return Asm().output_graph().operation_types()[index];
-  }
-
  private:
   Factory* factory() { return isolate_->factory(); }
-  Isolate* isolate_;
-  bool emitting_asserts_ = false;
+  Isolate* isolate_ = PipelineData::Get().isolate();
 };
 
 }  // namespace v8::internal::compiler::turboshaft

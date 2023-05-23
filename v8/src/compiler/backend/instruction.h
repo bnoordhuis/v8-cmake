@@ -758,19 +758,38 @@ class V8_EXPORT_PRIVATE MoveOperands final
                const InstructionOperand& destination)
       : source_(source), destination_(destination) {
     DCHECK(!source.IsInvalid() && !destination.IsInvalid());
+    CheckPointerCompressionConsistency();
   }
 
   MoveOperands(const MoveOperands&) = delete;
   MoveOperands& operator=(const MoveOperands&) = delete;
 
+  void CheckPointerCompressionConsistency() {
+#if DEBUG && V8_COMPRESS_POINTERS
+    if (!source_.IsLocationOperand()) return;
+    if (!destination_.IsLocationOperand()) return;
+    using MR = MachineRepresentation;
+    MR dest_rep = LocationOperand::cast(&destination_)->representation();
+    if (dest_rep == MR::kTagged || dest_rep == MR::kTaggedPointer) {
+      MR src_rep = LocationOperand::cast(&source_)->representation();
+      DCHECK_NE(src_rep, MR::kCompressedPointer);
+      DCHECK_NE(src_rep, MR::kCompressed);
+    }
+#endif
+  }
+
   const InstructionOperand& source() const { return source_; }
   InstructionOperand& source() { return source_; }
-  void set_source(const InstructionOperand& operand) { source_ = operand; }
+  void set_source(const InstructionOperand& operand) {
+    source_ = operand;
+    CheckPointerCompressionConsistency();
+  }
 
   const InstructionOperand& destination() const { return destination_; }
   InstructionOperand& destination() { return destination_; }
   void set_destination(const InstructionOperand& operand) {
     destination_ = operand;
+    CheckPointerCompressionConsistency();
   }
 
   // The gap resolver marks moves as "in-progress" by clearing the
@@ -820,8 +839,7 @@ class V8_EXPORT_PRIVATE ParallelMove final
 
   MoveOperands* AddMove(const InstructionOperand& from,
                         const InstructionOperand& to) {
-    Zone* zone = get_allocator().zone();
-    return AddMove(from, to, zone);
+    return AddMove(from, to, zone());
   }
 
   MoveOperands* AddMove(const InstructionOperand& from,
@@ -1436,6 +1454,9 @@ class FrameStateDescriptor : public ZoneObject {
            type_ == FrameStateType::kBuiltinContinuation ||
 #if V8_ENABLE_WEBASSEMBLY
            type_ == FrameStateType::kJSToWasmBuiltinContinuation ||
+           // TODO(mliedtke): Should we skip the context for the FrameState of
+           // inlined wasm functions?
+           type_ == FrameStateType::kWasmInlinedIntoJS ||
 #endif  // V8_ENABLE_WEBASSEMBLY
            type_ == FrameStateType::kConstructStub;
   }
@@ -1600,6 +1621,9 @@ class V8_EXPORT_PRIVATE InstructionBlock final
   inline bool IsSwitchTarget() const { return switch_target_; }
   inline bool ShouldAlignCodeTarget() const { return code_target_alignment_; }
   inline bool ShouldAlignLoopHeader() const { return loop_header_alignment_; }
+  inline bool IsLoopHeaderInAssemblyOrder() const {
+    return loop_header_alignment_;
+  }
 
   using Predecessors = ZoneVector<RpoNumber>;
   Predecessors& predecessors() { return predecessors_; }

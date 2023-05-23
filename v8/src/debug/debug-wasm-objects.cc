@@ -276,10 +276,10 @@ struct FunctionsProxy : NamedDebugProxy<FunctionsProxy, kFunctionsProxy> {
   static Handle<Object> Get(Isolate* isolate,
                             Handle<WasmInstanceObject> instance,
                             uint32_t index) {
-    return handle(WasmInstanceObject::GetOrCreateWasmInternalFunction(
-                      isolate, instance, index)
-                      ->external(),
-                  isolate);
+    Handle<WasmInternalFunction> internal =
+        WasmInstanceObject::GetOrCreateWasmInternalFunction(isolate, instance,
+                                                            index);
+    return WasmInternalFunction::GetOrCreateExternal(internal);
   }
 
   static Handle<String> GetName(Isolate* isolate,
@@ -936,7 +936,7 @@ Handle<WasmValueObject> WasmValueObject::New(
         v = ArrayProxy::Create(isolate, Handle<WasmArray>::cast(ref), module);
       } else if (ref->IsWasmInternalFunction()) {
         auto internal_fct = Handle<WasmInternalFunction>::cast(ref);
-        v = handle(internal_fct->external(), isolate);
+        v = WasmInternalFunction::GetOrCreateExternal(internal_fct);
         // If the module is not provided by the caller, retrieve it from the
         // instance object. If the function was created in JavaScript using
         // `new WebAssembly.Function(...)`, a module for name resolution is not
@@ -947,6 +947,10 @@ Handle<WasmValueObject> WasmValueObject::New(
               WasmInstanceObject::cast(internal_fct->ref()).module_object(),
               isolate);
         }
+        t = GetRefTypeName(isolate, value.type(), module_object);
+      } else if (ref->IsWasmNull()) {
+        // TODO(manoskouk): Is this value correct?
+        v = isolate->factory()->null_value();
         t = GetRefTypeName(isolate, value.type(), module_object);
       } else if (ref->IsJSFunction() || ref->IsSmi() || ref->IsNull() ||
                  ref->IsString() ||

@@ -11,13 +11,12 @@
 #if ENABLE_SPARKPLUG
 
 #include "src/codegen/macro-assembler.h"
+#include "src/interpreter/bytecode-register.h"
 #include "src/objects/tagged-index.h"
 
 namespace v8 {
 namespace internal {
 namespace baseline {
-
-enum class Condition : uint32_t;
 
 class BaselineAssembler {
  public:
@@ -63,10 +62,20 @@ class BaselineAssembler {
 
   inline void JumpIf(Condition cc, Register lhs, const Operand& rhs,
                      Label* target, Label::Distance distance = Label::kFar);
+#if V8_STATIC_ROOTS_BOOL
+  // Fast JS_RECEIVER test which assumes to receive either a primitive object or
+  // a js receiver.
+  inline void JumpIfJSAnyIsPrimitive(Register heap_object, Label* target,
+                                     Label::Distance distance = Label::kFar);
+#endif
   inline void JumpIfObjectType(Condition cc, Register object,
                                InstanceType instance_type, Register map,
                                Label* target,
                                Label::Distance distance = Label::kFar);
+  // Might not load the map into the scratch register.
+  inline void JumpIfObjectTypeFast(Condition cc, Register object,
+                                   InstanceType instance_type, Label* target,
+                                   Label::Distance distance = Label::kFar);
   inline void JumpIfInstanceType(Condition cc, Register map,
                                  InstanceType instance_type, Label* target,
                                  Label::Distance distance = Label::kFar);
@@ -149,13 +158,11 @@ class BaselineAssembler {
   inline void TailCallBuiltin(Builtin builtin);
   inline void CallRuntime(Runtime::FunctionId function, int nargs);
 
-  inline void LoadTaggedPointerField(Register output, Register source,
-                                     int offset);
+  inline void LoadTaggedField(Register output, Register source, int offset);
   inline void LoadTaggedSignedField(Register output, Register source,
                                     int offset);
   inline void LoadTaggedSignedFieldAndUntag(Register output, Register source,
                                             int offset);
-  inline void LoadTaggedAnyField(Register output, Register source, int offset);
   inline void LoadWord16FieldZeroExtend(Register output, Register source,
                                         int offset);
   inline void LoadWord8Field(Register output, Register source, int offset);
@@ -172,16 +179,12 @@ class BaselineAssembler {
 // X64 supports complex addressing mode, pointer decompression can be done by
 // [%compressed_base + %r1 + K].
 #if V8_TARGET_ARCH_X64
-  inline void LoadTaggedPointerField(TaggedRegister output, Register source,
-                                     int offset);
-  inline void LoadTaggedPointerField(TaggedRegister output,
-                                     TaggedRegister source, int offset);
-  inline void LoadTaggedPointerField(Register output, TaggedRegister source,
-                                     int offset);
-  inline void LoadTaggedAnyField(Register output, TaggedRegister source,
-                                 int offset);
-  inline void LoadTaggedAnyField(TaggedRegister output, TaggedRegister source,
-                                 int offset);
+  inline void LoadTaggedField(TaggedRegister output, Register source,
+                              int offset);
+  inline void LoadTaggedField(TaggedRegister output, TaggedRegister source,
+                              int offset);
+  inline void LoadTaggedField(Register output, TaggedRegister source,
+                              int offset);
   inline void LoadFixedArrayElement(Register output, TaggedRegister array,
                                     int32_t index);
   inline void LoadFixedArrayElement(TaggedRegister output, TaggedRegister array,

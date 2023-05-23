@@ -196,6 +196,7 @@ let kSig_v_i = makeSig([kWasmI32], []);
 let kSig_v_ii = makeSig([kWasmI32, kWasmI32], []);
 let kSig_v_iii = makeSig([kWasmI32, kWasmI32, kWasmI32], []);
 let kSig_v_l = makeSig([kWasmI64], []);
+let kSig_v_li = makeSig([kWasmI64, kWasmI32], []);
 let kSig_v_d = makeSig([kWasmF64], []);
 let kSig_v_dd = makeSig([kWasmF64, kWasmF64], []);
 let kSig_v_ddi = makeSig([kWasmF64, kWasmF64, kWasmI32], []);
@@ -506,6 +507,9 @@ let kExprArrayNew = 0x1b;
 let kExprArrayNewDefault = 0x1c;
 let kExprArrayNewData = 0x1d;
 let kExprArrayNewElem = 0x1f;
+let kExprArrayInitData = 0x54;
+let kExprArrayInitElem = 0x55;
+let kExprArrayFill = 0x0f;
 let kExprI31New = 0x20;
 let kExprI31GetS = 0x21;
 let kExprI31GetU = 0x22;
@@ -520,6 +524,8 @@ let kExprBrOnCastNull = 0x4a;
 let kExprBrOnCastDeprecated = 0x46;
 let kExprBrOnCastFail = 0x43;
 let kExprBrOnCastFailNull = 0x4b;
+let kExprBrOnCastGeneric = 0x4e;
+let kExprBrOnCastFailGeneric = 0x4f;
 let kExprRefCastNop = 0x4c;
 let kExprRefIsData = 0x51;
 let kExprRefIsI31 = 0x52;
@@ -568,6 +574,8 @@ let kExprStringViewIterAdvance = 0xa2;
 let kExprStringViewIterRewind = 0xa3
 let kExprStringViewIterSlice = 0xa4;
 let kExprStringCompare = 0xa8;
+let kExprStringFromCodePoint = 0xa9;
+let kExprStringHash = 0xaa;
 let kExprStringNewUtf8Array = 0xb0;
 let kExprStringNewWtf16Array = 0xb1;
 let kExprStringEncodeUtf8Array = 0xb2;
@@ -1535,6 +1543,7 @@ class WasmModuleBuilder {
     return this;
   }
 
+  // TODO(manoskouk): Refactor this to use initializer expression for {addr}.
   addDataSegment(addr, data, is_global = false) {
     this.data_segments.push(
         {addr: addr, data: data, is_global: is_global, is_active: true});
@@ -1753,7 +1762,10 @@ class WasmModuleBuilder {
       binary.emit_section(kTableSectionCode, section => {
         section.emit_u32v(wasm.tables.length);
         for (let table of wasm.tables) {
-          if (table.has_init) section.emit_u8(0x40);
+          if (table.has_init) {
+            section.emit_u8(0x40);  // "has initializer"
+            section.emit_u8(0x00);  // Reserved byte.
+          }
           section.emit_type(table.type);
           section.emit_u8(table.has_max);
           section.emit_u32v(table.initial_size);
@@ -2097,6 +2109,7 @@ class WasmModuleBuilder {
 }
 
 function wasmSignedLeb(val, max_len = 5) {
+  if (val == null) throw new Error("Leb value many not be null/undefined");
   let res = [];
   for (let i = 0; i < max_len; ++i) {
     let v = val & 0x7f;
@@ -2112,7 +2125,31 @@ function wasmSignedLeb(val, max_len = 5) {
       'Leb value <' + val + '> exceeds maximum length of ' + max_len);
 }
 
+function wasmSignedLeb64(val, max_len = 10) {
+  if (val == null) throw new Error("Leb value many not be null/undefined");
+  if (typeof val != "bigint") {
+    if (val < Math.pow(2, 31)) {
+      return wasmSignedLeb(val, max_len);
+    }
+    val = BigInt(val);
+  }
+  let res = [];
+  for (let i = 0; i < max_len; ++i) {
+    let v = val & 0x7fn;
+    // If {v} sign-extended from 7 to 32 bits is equal to val, we are done.
+    if (((v << 25n) >> 25n) == val) {
+      res.push(Number(v));
+      return res;
+    }
+    res.push(Number(v) | 0x80);
+    val = val >> 7n;
+  }
+  throw new Error(
+      'Leb value <' + val + '> exceeds maximum length of ' + max_len);
+}
+
 function wasmUnsignedLeb(val, max_len = 5) {
+  if (val == null) throw new Error("Leb value many not be null/undefined");
   let res = [];
   for (let i = 0; i < max_len; ++i) {
     let v = val & 0x7f;
@@ -2134,7 +2171,7 @@ function wasmI32Const(val) {
 // Note: Since {val} is a JS number, the generated constant only has 53 bits of
 // precision.
 function wasmI64Const(val) {
-  return [kExprI64Const, ...wasmSignedLeb(val, 10)];
+  return [kExprI64Const, ...wasmSignedLeb64(val, 10)];
 }
 
 function wasmF32Const(f) {
@@ -2177,6 +2214,26 @@ function wasmS128Const(f) {
   }
   return result;
 }
+
+let [wasmBrOnCast, wasmBrOnCastFail] = (function() {
+  return [
+    (labelIdx, sourceType, targetType) =>
+      wasmBrOnCastImpl(labelIdx, sourceType, targetType, false),
+      (labelIdx, sourceType, targetType) =>
+      wasmBrOnCastImpl(labelIdx, sourceType, targetType, true),
+  ];
+  function wasmBrOnCastImpl(labelIdx, sourceType, targetType, brOnFail) {
+    labelIdx = wasmUnsignedLeb(labelIdx, kMaxVarInt32Size);
+    let srcHeap = wasmSignedLeb(sourceType.heap_type, kMaxVarInt32Size);
+    let tgtHeap = wasmSignedLeb(targetType.heap_type, kMaxVarInt32Size);
+    let srcIsNullable = sourceType.opcode == kWasmRefNull;
+    let tgtIsNullable = targetType.opcode == kWasmRefNull;
+    flags = (tgtIsNullable << 1) + srcIsNullable;
+    return [
+      kGCPrefix, brOnFail ? kExprBrOnCastFailGeneric : kExprBrOnCastGeneric,
+      flags, ...labelIdx, ...srcHeap, ...tgtHeap];
+  }
+})();
 
 function getOpcodeName(opcode) {
   return globalThis.kWasmOpcodeNames?.[opcode] ?? 'unknown';

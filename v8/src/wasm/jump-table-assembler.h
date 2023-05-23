@@ -57,7 +57,7 @@ namespace wasm {
 // execute the old code afterwards, which is no problem, since that code remains
 // available until it is garbage collected. Garbage collection itself is a
 // synchronization barrier though.
-class V8_EXPORT_PRIVATE JumpTableAssembler : public TurboAssembler {
+class V8_EXPORT_PRIVATE JumpTableAssembler : public MacroAssembler {
  public:
   // Translate an offset into the continuous jump table to a jump table index.
   static uint32_t SlotOffsetToIndex(uint32_t slot_offset) {
@@ -175,7 +175,7 @@ class V8_EXPORT_PRIVATE JumpTableAssembler : public TurboAssembler {
  private:
   // Instantiate a {JumpTableAssembler} for patching.
   explicit JumpTableAssembler(Address slot_addr, int size = 256)
-      : TurboAssembler(nullptr, JumpTableAssemblerOptions(),
+      : MacroAssembler(nullptr, JumpTableAssemblerOptions(),
                        CodeObjectRequired::kNo,
                        ExternalAssemblerBuffer(
                            reinterpret_cast<uint8_t*>(slot_addr), size)) {}
@@ -234,10 +234,10 @@ class V8_EXPORT_PRIVATE JumpTableAssembler : public TurboAssembler {
   static constexpr int kFarJumpTableSlotSize = 6 * kInstrSize;
   static constexpr int kLazyCompileTableSlotSize = 10 * kInstrSize;
 #elif V8_TARGET_ARCH_LOONG64
-  static constexpr int kJumpTableLineSize = 8 * kInstrSize;
-  static constexpr int kJumpTableSlotSize = 8 * kInstrSize;
-  static constexpr int kFarJumpTableSlotSize = 4 * kInstrSize;
-  static constexpr int kLazyCompileTableSlotSize = 8 * kInstrSize;
+  static constexpr int kJumpTableLineSize = 1 * kInstrSize;
+  static constexpr int kJumpTableSlotSize = 1 * kInstrSize;
+  static constexpr int kFarJumpTableSlotSize = 6 * kInstrSize;
+  static constexpr int kLazyCompileTableSlotSize = 3 * kInstrSize;
 #else
 #error Unknown architecture.
 #endif

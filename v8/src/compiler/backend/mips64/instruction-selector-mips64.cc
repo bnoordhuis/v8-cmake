@@ -359,6 +359,13 @@ void EmitLoad(InstructionSelector* selector, Node* node, InstructionCode opcode,
   Node* base = node->InputAt(0);
   Node* index = node->InputAt(1);
 
+  if (base != nullptr && base->opcode() == IrOpcode::kLoadRootRegister) {
+    selector->Emit(opcode | AddressingModeField::encode(kMode_Root),
+                   g.DefineAsRegister(output == nullptr ? node : output),
+                   g.UseImmediate(index));
+    return;
+  }
+
   if (g.CanBeImmediate(index, opcode)) {
     selector->Emit(opcode | AddressingModeField::encode(kMode_MRI),
                    g.DefineAsRegister(output == nullptr ? node : output),
@@ -518,6 +525,8 @@ void InstructionSelector::VisitProtectedLoad(Node* node) {
   UNIMPLEMENTED();
 }
 
+void InstructionSelector::VisitStorePair(Node* node) { UNREACHABLE(); }
+
 void InstructionSelector::VisitStore(Node* node) {
   Mips64OperandGenerator g(this);
   Node* base = node->InputAt(0);
@@ -583,6 +592,13 @@ void InstructionSelector::VisitStore(Node* node) {
       case MachineRepresentation::kMapWord:            // Fall through.
       case MachineRepresentation::kNone:
         UNREACHABLE();
+    }
+
+    if (base != nullptr && base->opcode() == IrOpcode::kLoadRootRegister) {
+      // This will only work if {index} is a constant.
+      Emit(opcode | AddressingModeField::encode(kMode_Root), g.NoOutput(),
+           g.UseImmediate(index), g.UseRegisterOrImmediateZero(value));
+      return;
     }
 
     if (g.CanBeImmediate(index, opcode)) {
@@ -2287,7 +2303,7 @@ void VisitAtomicStore(InstructionSelector* selector, Node* node,
     InstructionOperand temps[] = {g.TempRegister(), g.TempRegister()};
     size_t const temp_count = arraysize(temps);
     code = kArchAtomicStoreWithWriteBarrier;
-    code |= MiscField::encode(static_cast<int>(record_write_mode));
+    code |= RecordWriteModeField::encode(record_write_mode);
     selector->Emit(code, 0, nullptr, input_count, inputs, temp_count, temps);
   } else {
     switch (rep) {
@@ -3205,6 +3221,21 @@ SIMD_RELAXED_OP_LIST(SIMD_VISIT_RELAXED_OP)
 void InstructionSelector::VisitS128Select(Node* node) {
   VisitRRRR(this, kMips64S128Select, node);
 }
+
+#define SIMD_UNIMP_OP_LIST(V) \
+  V(F64x2Qfma)                \
+  V(F64x2Qfms)                \
+  V(F32x4Qfma)                \
+  V(F32x4Qfms)                \
+  V(I16x8DotI8x16I7x16S)      \
+  V(I32x4DotI8x16I7x16AddS)
+
+#define SIMD_VISIT_UNIMP_OP(Name) \
+  void InstructionSelector::Visit##Name(Node* node) { UNIMPLEMENTED(); }
+SIMD_UNIMP_OP_LIST(SIMD_VISIT_UNIMP_OP)
+
+#undef SIMD_VISIT_UNIMP_OP
+#undef SIMD_UNIMP_OP_LIST
 
 #if V8_ENABLE_WEBASSEMBLY
 namespace {

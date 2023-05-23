@@ -47,13 +47,15 @@ export class SequenceView extends TextView {
   }
 
   public detachSelection(): SelectionStorage {
-    return new SelectionStorage(this.nodeSelection.detachSelection(),
-      this.blockSelection.detachSelection());
+    return new SelectionStorage(this.nodeSelections.current.detachSelection(),
+                                this.blockSelections.current.detachSelection(),
+                                this.instructionSelections.current.detachSelection());
   }
 
   public adaptSelection(selection: SelectionStorage): SelectionStorage {
     for (const key of selection.nodes.keys()) selection.adaptedNodes.add(key);
     for (const key of selection.blocks.keys()) selection.adaptedBocks.add(key);
+    for (const key of selection.instructions.keys()) selection.adaptedInstructions.add(Number(key));
     return selection;
   }
 
@@ -87,6 +89,10 @@ export class SequenceView extends TextView {
 
   public initializeContent(sequence: SequencePhase, rememberedSelection: SelectionStorage): void {
     this.divNode.innerHTML = "";
+    const view = this;
+    this.divNode.onclick = (e: MouseEvent) => {
+      if (view.showRangeView) view.rangeView.focusHandler.clearCoordsInFocus();
+    };
     this.sequence = sequence;
     this.searchInfo = new Array<string>();
     this.phaseSelectEl = document.getElementById("phase-select") as HTMLSelectElement;
@@ -114,15 +120,19 @@ export class SequenceView extends TextView {
         select.push(item);
       }
     }
-    this.nodeSelectionHandler.select(select, true);
+    this.nodeSelectionHandler.select(select, true, false);
   }
 
   private attachSelection(adaptedSelection: SelectionStorage): void {
     if (!(adaptedSelection instanceof SelectionStorage)) return;
-    this.nodeSelectionHandler.clear();
     this.blockSelectionHandler.clear();
-    this.nodeSelectionHandler.select(adaptedSelection.adaptedNodes, true);
-    this.blockSelectionHandler.select(adaptedSelection.adaptedBocks, true);
+    this.nodeSelectionHandler.clear();
+    this.registerAllocationSelectionHandler.clear();
+    this.blockSelectionHandler.select(
+                Array.from(adaptedSelection.adaptedBocks).map(block => Number(block)), true, true);
+    this.nodeSelectionHandler.select(adaptedSelection.adaptedNodes, true, true);
+    this.registerAllocationSelectionHandler.select(Array.from(adaptedSelection.adaptedInstructions),
+                                                   true, true);
   }
 
   private addBlocks(blocks: Array<SequenceBlock>): void {
@@ -137,6 +147,9 @@ export class SequenceView extends TextView {
     sequenceBlock.classList.toggle("deferred", block.deferred);
 
     const blockIdEl = createElement("div", "block-id com clickable", String(block.id));
+    // Select just the block id when any of the block's instructions or positions
+    // are selected.
+    this.addHtmlElementForBlockId(this.getSubId(block.id), blockIdEl);
     blockIdEl.onclick = this.mkBlockLinkHandler(block.id);
     sequenceBlock.appendChild(blockIdEl);
 
@@ -213,7 +226,17 @@ export class SequenceView extends TextView {
   private elementForOperandWithSpan(span: HTMLSpanElement, text: string, isVirtual: boolean):
     HTMLElement {
     const selectionText = isVirtual ? `virt_${text}` : text;
-    span.onclick = this.mkOperandLinkHandler(selectionText);
+    const onclick = this.mkOperandLinkHandler(selectionText);
+    const view = this;
+    if (isVirtual) {
+      const row = parseInt(text.substring(1), 10);
+      span.onclick = function (e) {
+        onclick(e);
+        if (view.showRangeView) view.rangeView.focusHandler.setFocusVirtualRegister(row);
+      };
+    } else {
+      span.onclick = onclick;
+    }
     this.searchInfo.push(text);
     this.addHtmlElementForNodeId(selectionText, span);
     const container = createElement("div", "");
@@ -227,7 +250,10 @@ export class SequenceView extends TextView {
     const instId = createElement("div", "instruction-id", String(instruction.id));
     const offsets = this.sourceResolver.instructionsPhase.instructionToPcOffsets(instruction.id);
     instId.classList.add("clickable");
+    // Select instruction id for both when the instruction is selected and when any of its
+    // positions are selected.
     this.addHtmlElementForInstructionId(instruction.id, instId);
+    this.addHtmlElementForInstructionId(this.getSubId(instruction.id), instId);
     instId.onclick = this.mkInstructionLinkHandler(instruction.id);
     instId.dataset.instructionId = String(instruction.id);
     if (offsets) {
@@ -317,7 +343,7 @@ export class SequenceView extends TextView {
         this.preventRangeView("No live ranges to show");
       }
       if (this.showRangeView) {
-        this.rangeView.initializeContent(this.sequence.blocks);
+        this.rangeView.initializeContent(this.sequence.blocks, this.broker);
       }
     } else {
       this.preventRangeView("No live range data provided");
@@ -408,7 +434,7 @@ export class SequenceView extends TextView {
         this.rangeView = new RangeView(this, firstInstr, lastInstr);
         this.addRangeView();
       }
-      this.rangeView.initializeContent(this.sequence.blocks);
+      this.rangeView.initializeContent(this.sequence.blocks, this.broker);
       this.rangeView.show();
     } else {
       this.rangeView.hide();

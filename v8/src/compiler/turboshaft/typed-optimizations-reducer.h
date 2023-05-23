@@ -8,37 +8,70 @@
 #include "src/compiler/turboshaft/assembler.h"
 #include "src/compiler/turboshaft/index.h"
 #include "src/compiler/turboshaft/operations.h"
+#include "src/compiler/turboshaft/typer.h"
 #include "src/compiler/turboshaft/uniform-reducer-adapter.h"
 
 namespace v8::internal::compiler::turboshaft {
 
+template <typename>
+class TypeInferenceReducer;
+
 template <typename Next>
 class TypedOptimizationsReducer
     : public UniformReducerAdapter<TypedOptimizationsReducer, Next> {
- public:
-  using Adapter = UniformReducerAdapter<TypedOptimizationsReducer, Next>;
-  using Next::Asm;
+#if defined(__clang__)
+  // Typed optimizations require a typed graph.
+  static_assert(next_contains_reducer<Next, TypeInferenceReducer>::value);
+#endif
 
-  template <typename... Args>
-  explicit TypedOptimizationsReducer(const std::tuple<Args...>& args)
-      : Adapter(args), types_(Asm().output_graph().operation_types()) {}
+ public:
+  TURBOSHAFT_REDUCER_BOILERPLATE()
+
+  using Adapter = UniformReducerAdapter<TypedOptimizationsReducer, Next>;
+
+  OpIndex ReduceInputGraphBranch(OpIndex ig_index, const BranchOp& operation) {
+    Type condition_type = GetType(operation.condition());
+    if (!condition_type.IsInvalid()) {
+      if (condition_type.IsNone()) {
+        Asm().Unreachable();
+        return OpIndex::Invalid();
+      }
+      condition_type =
+          Typer::TruncateWord32Input(condition_type, true, Asm().graph_zone());
+      DCHECK(condition_type.IsWord32());
+      if (auto c = condition_type.AsWord32().try_get_constant()) {
+        Block* goto_target = *c == 0 ? operation.if_false : operation.if_true;
+        Asm().Goto(goto_target->MapToNextGraph());
+        return OpIndex::Invalid();
+      }
+    }
+    return Adapter::ReduceInputGraphBranch(ig_index, operation);
+  }
 
   template <typename Op, typename Continuation>
-  OpIndex ReduceInputGraphOperation(OpIndex ig_index, const Op& op) {
-    return Continuation{this}.ReduceInputGraph(ig_index, op);
+  OpIndex ReduceInputGraphOperation(OpIndex ig_index, const Op& operation) {
+    Type type = GetType(ig_index);
+    if (type.IsNone()) {
+      // This operation is dead. Remove it.
+      DCHECK(CanBeTyped(operation));
+      return OpIndex::Invalid();
+    } else if (!type.IsInvalid()) {
+      // See if we can replace the operation by a constant.
+      if (OpIndex constant = TryAssembleConstantForType(type);
+          constant.valid()) {
+        return constant;
+      }
+    }
+
+    // Otherwise just continue with reduction.
+    return Continuation{this}.ReduceInputGraph(ig_index, operation);
   }
 
-  OpIndex ReduceConstant(ConstantOp::Kind kind, ConstantOp::Storage storage) {
-    return Next::ReduceConstant(kind, storage);
-  }
-
-  template <Opcode opcode, typename Continuation, typename... Args>
-  OpIndex ReduceOperation(Args... args) {
-    OpIndex index = Continuation{this}.Reduce(args...);
-    if (!index.valid()) return index;
-    Type type = GetType(index);
-    if (type.IsInvalid()) return index;
-
+ private:
+  // If {type} is a single value that can be respresented by a constant, this
+  // function returns the index for a corresponding ConstantOp. It returns
+  // OpIndex::Invalid otherwise.
+  OpIndex TryAssembleConstantForType(const Type& type) {
     switch (type.kind()) {
       case Type::Kind::kWord32: {
         auto w32 = type.AsWord32();
@@ -58,8 +91,9 @@ class TypedOptimizationsReducer
         auto f32 = type.AsFloat32();
         if (f32.is_only_nan()) {
           return Asm().Float32Constant(nan_v<32>);
-        }
-        if (auto c = f32.try_get_constant()) {
+        } else if (f32.is_only_minus_zero()) {
+          return Asm().Float32Constant(-0.0f);
+        } else if (auto c = f32.try_get_constant()) {
           return Asm().Float32Constant(*c);
         }
         break;
@@ -68,8 +102,9 @@ class TypedOptimizationsReducer
         auto f64 = type.AsFloat64();
         if (f64.is_only_nan()) {
           return Asm().Float64Constant(nan_v<64>);
-        }
-        if (auto c = f64.try_get_constant()) {
+        } else if (f64.is_only_minus_zero()) {
+          return Asm().Float64Constant(-0.0);
+        } else if (auto c = f64.try_get_constant()) {
           return Asm().Float64Constant(*c);
         }
         break;
@@ -77,15 +112,13 @@ class TypedOptimizationsReducer
       default:
         break;
     }
-
-    // Keep unchanged.
-    return index;
+    return OpIndex::Invalid();
   }
 
-  Type GetType(const OpIndex index) { return types_[index]; }
-
- private:
-  GrowingSidetable<Type>& types_;
+  Type GetType(const OpIndex index) {
+    // Typed optimizations use the types of the input graph.
+    return Asm().GetInputGraphType(index);
+  }
 };
 
 }  // namespace v8::internal::compiler::turboshaft

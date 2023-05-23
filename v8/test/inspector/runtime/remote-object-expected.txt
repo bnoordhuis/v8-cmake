@@ -484,11 +484,31 @@ Running test: testRegExp
         type : object
     }
 }
+'/w+/v', returnByValue: false, generatePreview: false
+{
+    result : {
+        className : RegExp
+        description : /w+/v
+        objectId : <objectId>
+        subtype : regexp
+        type : object
+    }
+}
 '/w+/dgimsuy', returnByValue: false, generatePreview: false
 {
     result : {
         className : RegExp
         description : /w+/dgimsuy
+        objectId : <objectId>
+        subtype : regexp
+        type : object
+    }
+}
+'/w+/dgimsvy', returnByValue: false, generatePreview: false
+{
+    result : {
+        className : RegExp
+        description : /w+/dgimsvy
         objectId : <objectId>
         subtype : regexp
         type : object
@@ -521,6 +541,18 @@ Running test: testRegExp
     result : {
         className : RegExp
         description : /./dgimsuy
+        objectId : <objectId>
+        subtype : regexp
+        type : object
+    }
+}
+'var re = /./dgimsvy;
+        re.toString = () => 'foo';
+        re', returnByValue: false, generatePreview: false
+{
+    result : {
+        className : RegExp
+        description : /./dgimsvy
         objectId : <objectId>
         subtype : regexp
         type : object
@@ -2461,6 +2493,11 @@ Running test: testArrayBuffer
                     type : boolean
                     value : false
                 }
+                [3] : {
+                    name : detached
+                    type : boolean
+                    value : false
+                }
             ]
             subtype : arraybuffer
             type : object
@@ -2491,6 +2528,11 @@ Running test: testArrayBuffer
                 }
                 [2] : {
                     name : resizable
+                    type : boolean
+                    value : false
+                }
+                [3] : {
+                    name : detached
                     type : boolean
                     value : false
                 }

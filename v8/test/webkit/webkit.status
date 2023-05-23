@@ -45,7 +45,7 @@
   'dfg-double-vote-fuzz': [PASS, SLOW],
   'dfg-int-overflow-in-loop': [PASS, SLOW],
 }],  # ALWAYS
-['system == windows and not is_clang', {
+['system == windows and not clang', {
   # Exceeds call stack on windows after MSVS2017 switch.
   'fast/js/excessive-comma-usage': [SKIP],
   'run-json-stringify': [SKIP],
@@ -118,21 +118,14 @@
 }],  # variant in [nooptimization, stress, stress_js_bg_compile_wasm_code_gc] and (arch == arm or arch == arm64) and simulator_run
 
 ##############################################################################
-['gcov_coverage', {
-  # Tests taking too long or getting too large call stacks.
-  'fast/js/excessive-comma-usage': [SKIP],
-  'run-json-stringify': [SKIP],
-}],  # 'gcov_coverage'
-
-##############################################################################
 ['variant == no_wasm_traps', {
   '*': [SKIP],
 }],  # variant == no_wasm_traps
 
 ##############################################################################
-['no_i18n == True', {
+['not i18n', {
   'fast/js/string-capitalization': [FAIL],
-}],  # variant == no_wasm_traps
+}],  # not i18n
 
 ################################################################################
 ['variant == stress_snapshot', {

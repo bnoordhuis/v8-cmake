@@ -10,6 +10,7 @@ import os
 import filecmp
 import tempfile
 import shutil
+import platform
 from pathlib import Path
 
 # Detect if we have goma
@@ -57,11 +58,13 @@ STATIC_ROOT_CONFIGURATIONS = {
 is_debug = false
 use_goma = {USE_GOMA}
 v8_enable_static_roots = false
+v8_enable_static_roots_generation = true
 v8_enable_pointer_compression = true
 v8_enable_shared_ro_heap = true
 v8_enable_pointer_compression_shared_cage = true
 v8_enable_webassembly = true
 v8_enable_i18n_support = true
+dcheck_always_on = false
 """
     },
 }
@@ -100,8 +103,9 @@ def build(path, gn_args):
     path.mkdir(parents=True, exist_ok=True)
   with (path / "args.gn").open("w") as f:
     f.write(gn_args)
-  run(["gn", "gen", path])
-  run(["autoninja", "-C", path, "mksnapshot"])
+  suffix = ".bat" if platform.system() == "Windows" else ""
+  run(["gn" + suffix, "gen", path])
+  run(["autoninja" + suffix, "-C", path, "mksnapshot"])
   return path.absolute()
 
 

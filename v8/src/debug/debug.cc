@@ -428,7 +428,7 @@ char* Debug::RestoreDebug(char* storage) {
     int current_frame_count = CurrentFrameCount();
     int target_frame_count = thread_local_.target_frame_count_;
     DCHECK(current_frame_count >= target_frame_count);
-    StackTraceFrameIterator frames_it(isolate_);
+    DebuggableStackFrameIterator frames_it(isolate_);
     while (current_frame_count > target_frame_count) {
       current_frame_count -= frames_it.FrameFunctionCount();
       frames_it.Advance();
@@ -469,7 +469,6 @@ void Debug::Iterate(RootVisitor* v, ThreadLocal* thread_local_data) {
 
 DebugInfoListNode::DebugInfoListNode(Isolate* isolate, DebugInfo debug_info)
     : next_(nullptr) {
-  // Globalize the request debug info object and make it weak.
   GlobalHandles* global_handles = isolate->global_handles();
   debug_info_ = global_handles->Create(debug_info).location();
 }
@@ -759,13 +758,27 @@ bool Debug::CheckBreakPoint(Handle<BreakPoint> break_point,
                              condition, throw_on_side_effect);
   }
 
-  if (!maybe_result.ToHandle(&result)) {
-    if (isolate_->has_pending_exception()) {
-      isolate_->clear_pending_exception();
-    }
-    return false;
+  Handle<Object> maybe_exception;
+  bool exception_thrown = true;
+  if (maybe_result.ToHandle(&result)) {
+    exception_thrown = false;
+  } else if (isolate_->has_pending_exception()) {
+    maybe_exception = handle(isolate_->pending_exception(), isolate_);
+    isolate_->clear_pending_exception();
   }
-  return result->BooleanValue(isolate_);
+
+  CHECK(in_debug_scope());
+  DisableBreak no_recursive_break(this);
+
+  {
+    RCS_SCOPE(isolate_, RuntimeCallCounterId::kDebuggerCallback);
+    Handle<Context> native_context(isolate_->native_context());
+    debug_delegate_->BreakpointConditionEvaluated(
+        v8::Utils::ToLocal(native_context), break_point->id(), exception_thrown,
+        v8::Utils::ToLocal(maybe_exception));
+  }
+
+  return !result.is_null() ? result->BooleanValue(isolate_) : false;
 }
 
 bool Debug::SetBreakpoint(Handle<SharedFunctionInfo> shared,
@@ -803,7 +816,7 @@ bool Debug::SetBreakPointForScript(Handle<Script> script,
   Handle<BreakPoint> break_point =
       isolate_->factory()->NewBreakPoint(*id, condition);
 #if V8_ENABLE_WEBASSEMBLY
-  if (script->type() == Script::TYPE_WASM) {
+  if (script->type() == Script::Type::kWasm) {
     RecordWasmScriptWithBreakpoints(script);
     return WasmScript::SetBreakPoint(script, source_position, break_point);
   }
@@ -956,7 +969,7 @@ void Debug::RemoveBreakpoint(int id) {
 void Debug::SetInstrumentationBreakpointForWasmScript(Handle<Script> script,
                                                       int* id) {
   RCS_SCOPE(isolate_, RuntimeCallCounterId::kDebugger);
-  DCHECK_EQ(Script::TYPE_WASM, script->type());
+  DCHECK_EQ(Script::Type::kWasm, script->type());
   *id = kInstrumentationId;
 
   Handle<BreakPoint> break_point = isolate_->factory()->NewBreakPoint(
@@ -967,7 +980,7 @@ void Debug::SetInstrumentationBreakpointForWasmScript(Handle<Script> script,
 
 void Debug::RemoveBreakpointForWasmScript(Handle<Script> script, int id) {
   RCS_SCOPE(isolate_, RuntimeCallCounterId::kDebugger);
-  if (script->type() == Script::TYPE_WASM) {
+  if (script->type() == Script::Type::kWasm) {
     WasmScript::ClearBreakPointById(script, id);
   }
 }
@@ -1157,7 +1170,7 @@ void Debug::PrepareStepOnThrow() {
   int current_frame_count = CurrentFrameCount();
 
   // Iterate through the JavaScript stack looking for handlers.
-  JavaScriptFrameIterator it(isolate_);
+  JavaScriptStackFrameIterator it(isolate_);
   while (!it.done()) {
     JavaScriptFrame* frame = it.frame();
     if (frame->LookupExceptionHandlerInTable(nullptr, nullptr) > 0) break;
@@ -1235,7 +1248,7 @@ void Debug::PrepareStep(StepAction step_action) {
 
   thread_local_.last_step_action_ = step_action;
 
-  StackTraceFrameIterator frames_it(isolate_, frame_id);
+  DebuggableStackFrameIterator frames_it(isolate_, frame_id);
   CommonFrame* frame = frames_it.frame();
 
   BreakLocation location = BreakLocation::Invalid();
@@ -1324,14 +1337,24 @@ void Debug::PrepareStep(StepAction step_action) {
           // initial yield of async generators).
           Handle<JSReceiver> return_value(
               JSReceiver::cast(thread_local_.return_value_), isolate_);
-          Handle<Object> awaited_by = JSReceiver::GetDataProperty(
+          Handle<Object> awaited_by_holder = JSReceiver::GetDataProperty(
               isolate_, return_value,
               isolate_->factory()->promise_awaited_by_symbol());
-          if (awaited_by->IsJSGeneratorObject()) {
-            DCHECK(!has_suspended_generator());
-            thread_local_.suspended_generator_ = *awaited_by;
-            ClearStepping();
-            return;
+          if (awaited_by_holder->IsWeakFixedArray(isolate_)) {
+            Handle<WeakFixedArray> weak_fixed_array =
+                Handle<WeakFixedArray>::cast(awaited_by_holder);
+            if (weak_fixed_array->length() == 1 &&
+                weak_fixed_array->Get(0).IsWeak()) {
+              Handle<HeapObject> awaited_by(
+                  weak_fixed_array->Get(0).GetHeapObjectAssumeWeak(isolate_),
+                  isolate_);
+              if (awaited_by->IsJSGeneratorObject()) {
+                DCHECK(!has_suspended_generator());
+                thread_local_.suspended_generator_ = *awaited_by;
+                ClearStepping();
+                return;
+              }
+            }
           }
         }
       }
@@ -1459,7 +1482,8 @@ class DiscardBaselineCodeVisitor : public ThreadVisitor {
   void VisitThread(Isolate* isolate, ThreadLocalTop* top) override {
     DisallowGarbageCollection diallow_gc;
     bool deopt_all = shared_ == SharedFunctionInfo();
-    for (JavaScriptFrameIterator it(isolate, top); !it.done(); it.Advance()) {
+    for (JavaScriptStackFrameIterator it(isolate, top); !it.done();
+         it.Advance()) {
       if (!deopt_all && it.frame()->function().shared() != shared_) continue;
       if (it.frame()->type() == StackFrame::BASELINE) {
         BaselineFrame* frame = BaselineFrame::cast(it.frame());
@@ -1468,10 +1492,10 @@ class DiscardBaselineCodeVisitor : public ThreadVisitor {
         Address advance;
         if (bytecode_offset == kFunctionEntryBytecodeOffset) {
           advance = BUILTIN_CODE(isolate, BaselineOutOfLinePrologueDeopt)
-                        ->InstructionStart();
+                        ->instruction_start();
         } else {
           advance = BUILTIN_CODE(isolate, InterpreterEnterAtNextBytecode)
-                        ->InstructionStart();
+                        ->instruction_start();
         }
         PointerAuthentication::ReplacePC(pc_addr, advance, kSystemPointerSize);
         InterpretedFrame::cast(it.Reframe())
@@ -1492,7 +1516,7 @@ class DiscardBaselineCodeVisitor : public ThreadVisitor {
                   ? Builtin::kInterpreterEnterAtBytecode
                   : Builtin::kInterpreterEnterAtNextBytecode;
           Address advance_pc =
-              isolate->builtins()->code(advance).InstructionStart();
+              isolate->builtins()->code(advance).instruction_start();
           PointerAuthentication::ReplacePC(pc_addr, advance_pc,
                                            kSystemPointerSize);
         }
@@ -1508,13 +1532,12 @@ class DiscardBaselineCodeVisitor : public ThreadVisitor {
 void Debug::DiscardBaselineCode(SharedFunctionInfo shared) {
   RCS_SCOPE(isolate_, RuntimeCallCounterId::kDebugger);
   DCHECK(shared.HasBaselineCode());
-  Isolate* isolate = shared.GetIsolate();
   DiscardBaselineCodeVisitor visitor(shared);
-  visitor.VisitThread(isolate, isolate->thread_local_top());
-  isolate->thread_manager()->IterateArchivedThreads(&visitor);
+  visitor.VisitThread(isolate_, isolate_->thread_local_top());
+  isolate_->thread_manager()->IterateArchivedThreads(&visitor);
   // TODO(v8:11429): Avoid this heap walk somehow.
-  HeapObjectIterator iterator(isolate->heap());
-  auto trampoline = BUILTIN_CODE(isolate, InterpreterEntryTrampoline);
+  HeapObjectIterator iterator(isolate_->heap());
+  auto trampoline = BUILTIN_CODE(isolate_, InterpreterEntryTrampoline);
   shared.FlushBaselineCode();
   for (HeapObject obj = iterator.Next(); !obj.is_null();
        obj = iterator.Next()) {
@@ -1556,7 +1579,7 @@ void Debug::DeoptimizeFunction(Handle<SharedFunctionInfo> shared) {
   if (shared->HasBaselineCode()) {
     DiscardBaselineCode(*shared);
   }
-  Deoptimizer::DeoptimizeAllOptimizedCodeWithFunction(shared);
+  Deoptimizer::DeoptimizeAllOptimizedCodeWithFunction(isolate_, shared);
 }
 
 void Debug::PrepareFunctionForDebugExecution(
@@ -2179,7 +2202,7 @@ bool Debug::IsBreakAtReturn(JavaScriptFrame* frame) {
 
 Handle<FixedArray> Debug::GetLoadedScripts() {
   RCS_SCOPE(isolate_, RuntimeCallCounterId::kDebugger);
-  isolate_->heap()->CollectAllGarbage(Heap::kNoGCFlags,
+  isolate_->heap()->CollectAllGarbage(GCFlag::kNoFlags,
                                       GarbageCollectionReason::kDebugger);
   Factory* factory = isolate_->factory();
   if (!factory->script_list()->IsWeakArrayList()) {
@@ -2246,7 +2269,7 @@ bool Debug::IsExceptionBlackboxed(bool uncaught) {
   RCS_SCOPE(isolate_, RuntimeCallCounterId::kDebugger);
   // Uncaught exception is blackboxed if all current frames are blackboxed,
   // caught exception if top frame is blackboxed.
-  StackTraceFrameIterator it(isolate_);
+  DebuggableStackFrameIterator it(isolate_);
 #if V8_ENABLE_WEBASSEMBLY
   while (!it.done() && it.is_wasm()) it.Advance();
 #endif  // V8_ENABLE_WEBASSEMBLY
@@ -2315,7 +2338,7 @@ void Debug::OnException(Handle<Object> exception, Handle<Object> promise,
   }
 
   {
-    JavaScriptFrameIterator it(isolate_);
+    JavaScriptStackFrameIterator it(isolate_);
     // Check whether the top frame is blackboxed or the break location is muted.
     if (!it.done() && (IsMutedAtCurrentLocation(it.frame()) ||
                        IsExceptionBlackboxed(uncaught))) {
@@ -2383,7 +2406,7 @@ void Debug::OnDebugBreak(Handle<FixedArray> break_points_hit,
 namespace {
 debug::Location GetDebugLocation(Handle<Script> script, int source_position) {
   Script::PositionInfo info;
-  Script::GetPositionInfo(script, source_position, &info, Script::WITH_OFFSET);
+  Script::GetPositionInfo(script, source_position, &info);
   // V8 provides ScriptCompiler::CompileFunction method which takes
   // expression and compile it as anonymous function like (function() ..
   // expression ..). To produce correct locations for stmts inside of this
@@ -2429,7 +2452,7 @@ bool Debug::ShouldBeSkipped() {
   PostponeInterruptsScope no_interrupts(isolate_);
   DisableBreak no_recursive_break(this);
 
-  StackTraceFrameIterator iterator(isolate_);
+  DebuggableStackFrameIterator iterator(isolate_);
   FrameSummary summary = iterator.GetTopValidFrame();
   Handle<Object> script_obj = summary.script();
   if (!script_obj->IsScript()) return false;
@@ -2437,20 +2460,19 @@ bool Debug::ShouldBeSkipped() {
   Handle<Script> script = Handle<Script>::cast(script_obj);
   summary.EnsureSourcePositionsAvailable();
   int source_position = summary.SourcePosition();
-  int line = Script::GetLineNumber(script, source_position);
-  int column = Script::GetColumnNumber(script, source_position);
-
+  Script::PositionInfo info;
+  Script::GetPositionInfo(script, source_position, &info);
   {
     RCS_SCOPE(isolate_, RuntimeCallCounterId::kDebuggerCallback);
     return debug_delegate_->ShouldBeSkipped(ToApiHandle<debug::Script>(script),
-                                            line, column);
+                                            info.line, info.column);
   }
 }
 
 bool Debug::AllFramesOnStackAreBlackboxed() {
   RCS_SCOPE(isolate_, RuntimeCallCounterId::kDebugger);
   HandleScope scope(isolate_);
-  for (StackTraceFrameIterator it(isolate_); !it.done(); it.Advance()) {
+  for (DebuggableStackFrameIterator it(isolate_); !it.done(); it.Advance()) {
     if (!it.is_javascript()) continue;
     if (!IsFrameBlackboxed(it.javascript_frame())) return false;
   }
@@ -2500,13 +2522,7 @@ void Debug::ProcessCompileEvent(bool has_compile_error, Handle<Script> script) {
   // inspector to filter scripts by native context.
   script->set_context_data(isolate_->native_context()->debug_context_id());
   if (ignore_events()) return;
-#if V8_ENABLE_WEBASSEMBLY
-  if (!script->IsUserJavaScript() && script->type() != i::Script::TYPE_WASM) {
-    return;
-  }
-#else
-  if (!script->IsUserJavaScript()) return;
-#endif  // V8_ENABLE_WEBASSEMBLY
+  if (!script->IsSubjectToDebugging()) return;
   if (!debug_delegate_) return;
   SuppressDebug while_processing(this);
   DebugScope debug_scope(this);
@@ -2521,7 +2537,7 @@ void Debug::ProcessCompileEvent(bool has_compile_error, Handle<Script> script) {
 }
 
 int Debug::CurrentFrameCount() {
-  StackTraceFrameIterator it(isolate_);
+  DebuggableStackFrameIterator it(isolate_);
   if (break_frame_id() != StackFrameId::NO_ID) {
     // Skip to break frame.
     DCHECK(in_debug_scope());
@@ -2582,7 +2598,7 @@ void Debug::HandleDebugBreak(IgnoreBreakMode ignore_break_mode,
   HandleScope scope(isolate_);
   MaybeHandle<FixedArray> break_points;
   {
-    StackTraceFrameIterator it(isolate_);
+    DebuggableStackFrameIterator it(isolate_);
     DCHECK(!it.done());
     JavaScriptFrame* frame = it.frame()->is_java_script()
                                  ? JavaScriptFrame::cast(it.frame())
@@ -2654,7 +2670,7 @@ void Debug::PrintBreakLocation() {
   if (!v8_flags.print_break_location) return;
   RCS_SCOPE(isolate_, RuntimeCallCounterId::kDebugger);
   HandleScope scope(isolate_);
-  StackTraceFrameIterator iterator(isolate_);
+  DebuggableStackFrameIterator iterator(isolate_);
   if (iterator.done()) return;
   CommonFrame* frame = iterator.frame();
   std::vector<FrameSummary> frames;
@@ -2670,10 +2686,11 @@ void Debug::PrintBreakLocation() {
     Handle<Script> script = Handle<Script>::cast(script_obj);
     Handle<String> source(String::cast(script->source()), isolate_);
     Script::InitLineEnds(isolate_, script);
-    int line =
-        Script::GetLineNumber(script, source_position) - script->line_offset();
-    int column = Script::GetColumnNumber(script, source_position) -
-                 (line == 0 ? script->column_offset() : 0);
+    Script::PositionInfo info;
+    Script::GetPositionInfo(script, source_position, &info,
+                            Script::OffsetFlag::kNoOffset);
+    int line = info.line;
+    int column = info.column;
     Handle<FixedArray> line_ends(FixedArray::cast(script->line_ends()),
                                  isolate_);
     int line_start = line == 0 ? 0 : Smi::ToInt(line_ends->get(line - 1)) + 1;
@@ -2707,7 +2724,7 @@ DebugScope::DebugScope(Debug* debug)
 
   // Create the new break info. If there is no proper frames there is no break
   // frame id.
-  StackTraceFrameIterator it(isolate());
+  DebuggableStackFrameIterator it(isolate());
   bool has_frames = !it.done();
   debug_->thread_local_.break_frame_id_ =
       has_frames ? it.frame()->id() : StackFrameId::NO_ID;
@@ -2754,12 +2771,14 @@ void Debug::UpdateDebugInfosForExecutionMode() {
   // Walk all debug infos and update their execution mode if it is different
   // from the isolate execution mode.
   DebugInfoListNode* current = debug_info_list_;
+  DebugInfo::ExecutionMode current_debug_execution_mode =
+      isolate_->debug_execution_mode();
   while (current != nullptr) {
     Handle<DebugInfo> debug_info = current->debug_info();
     if (debug_info->HasInstrumentedBytecodeArray() &&
-        debug_info->DebugExecutionMode() != isolate_->debug_execution_mode()) {
+        debug_info->DebugExecutionMode() != current_debug_execution_mode) {
       DCHECK(debug_info->shared().HasBytecodeArray());
-      if (isolate_->debug_execution_mode() == DebugInfo::kBreakpoints) {
+      if (current_debug_execution_mode == DebugInfo::kBreakpoints) {
         ClearSideEffectChecks(debug_info);
         ApplyBreakPoints(debug_info);
       } else {
@@ -2781,7 +2800,7 @@ void Debug::SetTerminateOnResume() {
 
 void Debug::StartSideEffectCheckMode() {
   RCS_SCOPE(isolate_, RuntimeCallCounterId::kDebugger);
-  DCHECK(isolate_->debug_execution_mode() != DebugInfo::kSideEffects);
+  DCHECK_EQ(isolate_->debug_execution_mode(), DebugInfo::kBreakpoints);
   isolate_->set_debug_execution_mode(DebugInfo::kSideEffects);
   UpdateHookOnFunctionCall();
   side_effect_check_failed_ = false;
@@ -2800,10 +2819,11 @@ void Debug::StartSideEffectCheckMode() {
 
 void Debug::StopSideEffectCheckMode() {
   RCS_SCOPE(isolate_, RuntimeCallCounterId::kDebugger);
-  DCHECK(isolate_->debug_execution_mode() == DebugInfo::kSideEffects);
+  DCHECK_EQ(isolate_->debug_execution_mode(), DebugInfo::kSideEffects);
   if (side_effect_check_failed_) {
     DCHECK(isolate_->has_pending_exception());
-    DCHECK(isolate_->is_execution_termination_pending());
+    DCHECK_IMPLIES(v8_flags.strict_termination_checks,
+                   isolate_->is_execution_termination_pending());
     // Convert the termination exception into a regular exception.
     isolate_->CancelTerminateExecution();
     isolate_->Throw(*isolate_->factory()->NewEvalError(
@@ -2897,57 +2917,98 @@ Handle<Object> Debug::return_value_handle() {
   return handle(thread_local_.return_value_, isolate_);
 }
 
-bool Debug::PerformSideEffectCheckForCallback(
-    Handle<Object> callback_info, Handle<Object> receiver,
-    Debug::AccessorKind accessor_kind) {
+bool Debug::PerformSideEffectCheckForAccessor(
+    Handle<AccessorInfo> accessor_info, Handle<Object> receiver,
+    AccessorComponent component) {
   RCS_SCOPE(isolate_, RuntimeCallCounterId::kDebugger);
-  DCHECK_EQ(!receiver.is_null(), callback_info->IsAccessorInfo());
   DCHECK_EQ(isolate_->debug_execution_mode(), DebugInfo::kSideEffects);
-  if (!callback_info.is_null() && callback_info->IsCallHandlerInfo() &&
-      i::CallHandlerInfo::cast(*callback_info).NextCallHasNoSideEffect()) {
+
+  // List of allowlisted internal accessors can be found in accessors.h.
+  SideEffectType side_effect_type =
+      component == AccessorComponent::ACCESSOR_SETTER
+          ? accessor_info->setter_side_effect_type()
+          : accessor_info->getter_side_effect_type();
+
+  switch (side_effect_type) {
+    case SideEffectType::kHasNoSideEffect:
+      // We do not support setter accessors with no side effects, since
+      // calling set accessors go through a store bytecode. Store bytecodes
+      // are considered to cause side effects (to non-temporary objects).
+      DCHECK_NE(AccessorComponent::ACCESSOR_SETTER, component);
+      return true;
+
+    case SideEffectType::kHasSideEffectToReceiver:
+      DCHECK(!receiver.is_null());
+      if (PerformSideEffectCheckForObject(receiver)) return true;
+      isolate_->OptionalRescheduleException(false);
+      return false;
+
+    case SideEffectType::kHasSideEffect:
+      break;
+  }
+  if (v8_flags.trace_side_effect_free_debug_evaluate) {
+    PrintF("[debug-evaluate] API Callback '");
+    accessor_info->name().ShortPrint();
+    PrintF("' may cause side effect.\n");
+  }
+
+  side_effect_check_failed_ = true;
+  // Throw an uncatchable termination exception.
+  isolate_->TerminateExecution();
+  isolate_->OptionalRescheduleException(false);
+  return false;
+}
+
+void Debug::IgnoreSideEffectsOnNextCallTo(
+    Handle<CallHandlerInfo> call_handler_info) {
+  DCHECK(call_handler_info->IsSideEffectCallHandlerInfo());
+  // There must be only one such call handler info.
+  CHECK(ignore_side_effects_for_call_handler_info_.is_null());
+  ignore_side_effects_for_call_handler_info_ = call_handler_info;
+}
+
+bool Debug::PerformSideEffectCheckForCallback(
+    Handle<CallHandlerInfo> call_handler_info) {
+  RCS_SCOPE(isolate_, RuntimeCallCounterId::kDebugger);
+  DCHECK_EQ(isolate_->debug_execution_mode(), DebugInfo::kSideEffects);
+
+  CallHandlerInfo info = CallHandlerInfo::cast(*call_handler_info);
+  if (info.IsSideEffectFreeCallHandlerInfo()) {
     return true;
   }
-  // TODO(7515): always pass a valid callback info object.
-  if (!callback_info.is_null()) {
-    if (callback_info->IsAccessorInfo()) {
-      // List of allowlisted internal accessors can be found in accessors.h.
-      AccessorInfo info = AccessorInfo::cast(*callback_info);
-      DCHECK_NE(kNotAccessor, accessor_kind);
-      switch (accessor_kind == kSetter ? info.setter_side_effect_type()
-                                       : info.getter_side_effect_type()) {
-        case SideEffectType::kHasNoSideEffect:
-          // We do not support setter accessors with no side effects, since
-          // calling set accessors go through a store bytecode. Store bytecodes
-          // are considered to cause side effects (to non-temporary objects).
-          DCHECK_NE(kSetter, accessor_kind);
-          return true;
-        case SideEffectType::kHasSideEffectToReceiver:
-          DCHECK(!receiver.is_null());
-          if (PerformSideEffectCheckForObject(receiver)) return true;
-          isolate_->OptionalRescheduleException(false);
-          return false;
-        case SideEffectType::kHasSideEffect:
-          break;
-      }
-      if (v8_flags.trace_side_effect_free_debug_evaluate) {
-        PrintF("[debug-evaluate] API Callback '");
-        info.name().ShortPrint();
-        PrintF("' may cause side effect.\n");
-      }
-    } else if (callback_info->IsInterceptorInfo()) {
-      InterceptorInfo info = InterceptorInfo::cast(*callback_info);
-      if (info.has_no_side_effect()) return true;
-      if (v8_flags.trace_side_effect_free_debug_evaluate) {
-        PrintF("[debug-evaluate] API Interceptor may cause side effect.\n");
-      }
-    } else if (callback_info->IsCallHandlerInfo()) {
-      CallHandlerInfo info = CallHandlerInfo::cast(*callback_info);
-      if (info.IsSideEffectFreeCallHandlerInfo()) return true;
-      if (v8_flags.trace_side_effect_free_debug_evaluate) {
-        PrintF("[debug-evaluate] API CallHandlerInfo may cause side effect.\n");
-      }
-    }
+  if (!ignore_side_effects_for_call_handler_info_.is_null()) {
+    // If the |ignore_side_effects_for_call_handler_info_| is set then the next
+    // API callback call must be made to this function.
+    CHECK(ignore_side_effects_for_call_handler_info_.is_identical_to(
+        call_handler_info));
+    ignore_side_effects_for_call_handler_info_ = {};
+    return true;
   }
+
+  if (v8_flags.trace_side_effect_free_debug_evaluate) {
+    PrintF("[debug-evaluate] API CallHandlerInfo may cause side effect.\n");
+  }
+
+  side_effect_check_failed_ = true;
+  // Throw an uncatchable termination exception.
+  isolate_->TerminateExecution();
+  isolate_->OptionalRescheduleException(false);
+  return false;
+}
+
+bool Debug::PerformSideEffectCheckForInterceptor(
+    Handle<InterceptorInfo> interceptor_info) {
+  RCS_SCOPE(isolate_, RuntimeCallCounterId::kDebugger);
+  DCHECK_EQ(isolate_->debug_execution_mode(), DebugInfo::kSideEffects);
+
+  // Empty InterceptorInfo represents operations that do produce side effects.
+  if (!interceptor_info.is_null()) {
+    if (interceptor_info->has_no_side_effect()) return true;
+  }
+  if (v8_flags.trace_side_effect_free_debug_evaluate) {
+    PrintF("[debug-evaluate] API Interceptor may cause side effect.\n");
+  }
+
   side_effect_check_failed_ = true;
   // Throw an uncatchable termination exception.
   isolate_->TerminateExecution();

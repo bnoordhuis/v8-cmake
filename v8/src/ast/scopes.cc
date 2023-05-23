@@ -632,7 +632,8 @@ void DeclarationScope::HoistSloppyBlockFunctions(AstNodeFactory* factory) {
     // scope and we terminate the iteration there anyway.
     do {
       Variable* var = query_scope->LookupInScopeOrScopeInfo(name, query_scope);
-      if (var != nullptr && IsLexicalVariableMode(var->mode())) {
+      if (var != nullptr && IsLexicalVariableMode(var->mode()) &&
+          !var->is_sloppy_block_function()) {
         should_hoist = false;
         break;
       }
@@ -649,6 +650,19 @@ void DeclarationScope::HoistSloppyBlockFunctions(AstNodeFactory* factory) {
       auto declaration = factory->NewVariableDeclaration(pos);
       // Based on the preceding checks, it doesn't matter what we pass as
       // sloppy_mode_block_scope_function_redefinition.
+      //
+      // This synthesized var for Annex B functions-in-block (FiB) may be
+      // declared multiple times for the same var scope, such as in the case of
+      // shadowed functions-in-block like the following:
+      //
+      // {
+      //    function f() {}
+      //    { function f() {} }
+      // }
+      //
+      // Redeclarations for vars do not create new bindings, but the
+      // redeclarations' initializers are still run. That is, shadowed FiB will
+      // result in multiple assignments to the same synthesized var.
       Variable* var = DeclareVariable(
           declaration, name, pos, VariableMode::kVar, NORMAL_VARIABLE,
           Variable::DefaultInitializationFlag(VariableMode::kVar), &was_added,
@@ -1230,10 +1244,6 @@ Variable* DeclarationScope::DeclareDynamicGlobal(const AstRawString* name,
   // TODO(neis): Mark variable as maybe-assigned?
 }
 
-bool Scope::RemoveUnresolved(VariableProxy* var) {
-  return unresolved_list_.Remove(var);
-}
-
 void Scope::DeleteUnresolved(VariableProxy* var) {
   DCHECK(unresolved_list_.Contains(var));
   var->mark_removed_from_unresolved();
@@ -1587,50 +1597,18 @@ bool Scope::IsOuterScopeOf(Scope* other) const {
   return false;
 }
 
-void Scope::CollectNonLocals(DeclarationScope* max_outer_scope,
-                             Isolate* isolate, Handle<StringSet>* non_locals) {
-  this->ForEach([max_outer_scope, isolate, non_locals](Scope* scope) {
-    // Module variables must be allocated before variable resolution
-    // to ensure that UpdateNeedsHoleCheck() can detect import variables.
-    if (scope->is_module_scope()) {
-      scope->AsModuleScope()->AllocateModuleVariables();
-    }
-
-    // Lazy parsed declaration scopes are already partially analyzed. If there
-    // are unresolved references remaining, they just need to be resolved in
-    // outer scopes.
-    Scope* lookup = WasLazilyParsed(scope) ? scope->outer_scope() : scope;
-
-    for (VariableProxy* proxy : scope->unresolved_list_) {
-      DCHECK(!proxy->is_resolved());
-      Variable* var =
-          Lookup<kParsedScope>(proxy, lookup, max_outer_scope->outer_scope());
-      if (var == nullptr) {
-        *non_locals = StringSet::Add(isolate, *non_locals, proxy->name());
-      } else {
-        // In this case we need to leave scopes in a way that they can be
-        // allocated. If we resolved variables from lazy parsed scopes, we need
-        // to context allocate the var.
-        scope->ResolveTo(proxy, var);
-        if (!var->is_dynamic() && lookup != scope)
-          var->ForceContextAllocation();
-      }
-    }
-
-    // Clear unresolved_list_ as it's in an inconsistent state.
-    scope->unresolved_list_.Clear();
-    return Iteration::kDescend;
-  });
-}
-
 void Scope::AnalyzePartially(DeclarationScope* max_outer_scope,
                              AstNodeFactory* ast_node_factory,
                              UnresolvedList* new_unresolved_list,
                              bool maybe_in_arrowhead) {
   this->ForEach([max_outer_scope, ast_node_factory, new_unresolved_list,
                  maybe_in_arrowhead](Scope* scope) {
-    DCHECK_IMPLIES(scope->is_declaration_scope(),
-                   !scope->AsDeclarationScope()->was_lazily_parsed());
+    // Skip already lazily parsed scopes. This can only happen to functions
+    // inside arrowheads.
+    if (WasLazilyParsed(scope)) {
+      DCHECK(max_outer_scope->is_arrow_scope());
+      return Iteration::kContinue;
+    }
 
     for (VariableProxy* proxy = scope->unresolved_list_.first();
          proxy != nullptr; proxy = proxy->next_unresolved()) {
@@ -1657,12 +1635,6 @@ void Scope::AnalyzePartially(DeclarationScope* max_outer_scope,
     scope->unresolved_list_.Clear();
     return Iteration::kDescend;
   });
-}
-
-Handle<StringSet> DeclarationScope::CollectNonLocals(
-    Isolate* isolate, Handle<StringSet> non_locals) {
-  Scope::CollectNonLocals(this, isolate, &non_locals);
-  return non_locals;
 }
 
 void DeclarationScope::ResetAfterPreparsing(AstValueFactory* ast_value_factory,
@@ -1720,7 +1692,10 @@ bool Scope::IsSkippableFunctionScope() {
 
 void Scope::SavePreparseData(Parser* parser) {
   this->ForEach([parser](Scope* scope) {
-    if (scope->IsSkippableFunctionScope()) {
+    // Save preparse data for every skippable scope, unless it was already
+    // previously saved (this can happen with functions inside arrowheads).
+    if (scope->IsSkippableFunctionScope() &&
+        !scope->AsDeclarationScope()->was_lazily_parsed()) {
       scope->AsDeclarationScope()->SavePreparseDataForDeclarationScope(parser);
     }
     return Iteration::kDescend;
@@ -1737,10 +1712,28 @@ void DeclarationScope::AnalyzePartially(Parser* parser,
                                         bool maybe_in_arrowhead) {
   DCHECK(!force_eager_compilation_);
   UnresolvedList new_unresolved_list;
-  if (!IsArrowFunction(function_kind_) &&
-      (!outer_scope_->is_script_scope() || maybe_in_arrowhead ||
-       (preparse_data_builder_ != nullptr &&
-        preparse_data_builder_->HasInnerFunctions()))) {
+
+  // We don't need to do partial analysis for top level functions, since they
+  // can only access values in the global scope, and we can't track assignments
+  // for these since they're accessible across scripts.
+  //
+  // If the top level function has inner functions though, we do still want to
+  // analyze those to save their preparse data.
+  //
+  // Additionally, functions in potential arrowheads _need_ to be analyzed, in
+  // case they do end up being in an arrowhead and the arrow function needs to
+  // know about context acceses. For example, in
+  //
+  //     (a, b=function foo(){ a = 1 }) => { b(); return a}
+  //
+  // `function foo(){ a = 1 }` is "maybe_in_arrowhead" but still top-level when
+  // parsed, and is re-scoped to the arrow function when that one is parsed. The
+  // arrow function needs to know that `a` needs to be context allocated, so
+  // that the call to `b()` correctly updates the `a` parameter.
+  const bool is_top_level_function = outer_scope_->is_script_scope();
+  const bool has_inner_functions = preparse_data_builder_ != nullptr &&
+                                   preparse_data_builder_->HasInnerFunctions();
+  if (maybe_in_arrowhead || !is_top_level_function || has_inner_functions) {
     // Try to resolve unresolved variables for this Scope and migrate those
     // which cannot be resolved inside. It doesn't make sense to try to resolve
     // them in the outer Scopes here, because they are incomplete.
@@ -2310,7 +2303,8 @@ void UpdateNeedsHoleCheck(Variable* var, VariableProxy* proxy, Scope* scope) {
   // unknown at compilation time whether the binding referred to in the
   // exporting module itself requires hole checks.
   if (var->location() == VariableLocation::MODULE && !var->IsExport()) {
-    return SetNeedsHoleCheck(var, proxy);
+    SetNeedsHoleCheck(var, proxy);
+    return;
   }
 
   // Check if the binding really needs an initialization check. The check
@@ -2332,7 +2326,8 @@ void UpdateNeedsHoleCheck(Variable* var, VariableProxy* proxy, Scope* scope) {
   // The scope of the variable needs to be checked, in case the use is
   // in a sub-block which may be linear.
   if (var->scope()->GetClosureScope() != scope->GetClosureScope()) {
-    return SetNeedsHoleCheck(var, proxy);
+    SetNeedsHoleCheck(var, proxy);
+    return;
   }
 
   // We should always have valid source positions.
@@ -2341,7 +2336,8 @@ void UpdateNeedsHoleCheck(Variable* var, VariableProxy* proxy, Scope* scope) {
 
   if (var->scope()->is_nonlinear() ||
       var->initializer_position() >= proxy->position()) {
-    return SetNeedsHoleCheck(var, proxy);
+    SetNeedsHoleCheck(var, proxy);
+    return;
   }
 }
 

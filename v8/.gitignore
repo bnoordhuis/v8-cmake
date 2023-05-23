@@ -28,6 +28,7 @@
 .clangd
 .cpplint-cache
 .cproject
+.DS_Store
 .gclient_entries
 .gdb_history
 .idea
@@ -74,6 +75,7 @@
 !/third_party/test262-harness
 !/third_party/v8
 !/third_party/wasm-api
+/tools/builtins-pgo/profiles/*.profile
 /tools/clang
 /tools/gcmole/bootstrap
 /tools/gcmole/gcmole-tools

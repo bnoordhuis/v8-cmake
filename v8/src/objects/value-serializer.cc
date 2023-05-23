@@ -23,6 +23,7 @@
 #include "src/numbers/conversions.h"
 #include "src/objects/heap-number-inl.h"
 #include "src/objects/js-array-buffer-inl.h"
+#include "src/objects/js-array-buffer.h"
 #include "src/objects/js-array-inl.h"
 #include "src/objects/js-collection-inl.h"
 #include "src/objects/js-regexp-inl.h"
@@ -267,7 +268,12 @@ ValueSerializer::ValueSerializer(Isolate* isolate,
       zone_(isolate->allocator(), ZONE_NAME),
       id_map_(isolate->heap(), ZoneAllocationPolicy(&zone_)),
       array_buffer_transfer_map_(isolate->heap(),
-                                 ZoneAllocationPolicy(&zone_)) {}
+                                 ZoneAllocationPolicy(&zone_)) {
+  if (delegate_) {
+    v8::Isolate* v8_isolate = reinterpret_cast<v8::Isolate*>(isolate_);
+    has_custom_host_objects_ = delegate_->HasCustomHostObject(v8_isolate);
+  }
+}
 
 ValueSerializer::~ValueSerializer() {
   if (buffer_) {
@@ -453,7 +459,8 @@ Maybe<bool> ValueSerializer::WriteObject(Handle<Object> object) {
       WriteBigInt(BigInt::cast(*object));
       return ThrowIfOutOfMemory();
     case JS_TYPED_ARRAY_TYPE:
-    case JS_DATA_VIEW_TYPE: {
+    case JS_DATA_VIEW_TYPE:
+    case JS_RAB_GSAB_DATA_VIEW_TYPE: {
       // Despite being JSReceivers, these have their wrapped buffer serialized
       // first. That makes this logic a little quirky, because it needs to
       // happen before we assign object IDs.
@@ -580,7 +587,11 @@ Maybe<bool> ValueSerializer::WriteJSReceiver(Handle<JSReceiver> receiver) {
     case JS_TYPED_ARRAY_PROTOTYPE_TYPE:
     case JS_API_OBJECT_TYPE: {
       Handle<JSObject> js_object = Handle<JSObject>::cast(receiver);
-      if (JSObject::GetEmbedderFieldCount(js_object->map(isolate_))) {
+      Maybe<bool> is_host_object = IsHostObject(js_object);
+      if (is_host_object.IsNothing()) {
+        return is_host_object;
+      }
+      if (is_host_object.FromJust()) {
         return WriteHostObject(js_object);
       } else {
         return WriteJSObject(js_object);
@@ -605,6 +616,7 @@ Maybe<bool> ValueSerializer::WriteJSReceiver(Handle<JSReceiver> receiver) {
       return WriteJSArrayBuffer(Handle<JSArrayBuffer>::cast(receiver));
     case JS_TYPED_ARRAY_TYPE:
     case JS_DATA_VIEW_TYPE:
+    case JS_RAB_GSAB_DATA_VIEW_TYPE:
       return WriteJSArrayBufferView(JSArrayBufferView::cast(*receiver));
     case JS_ERROR_TYPE:
       return WriteJSError(Handle<JSObject>::cast(receiver));
@@ -853,7 +865,7 @@ Maybe<bool> ValueSerializer::WriteJSMap(Handle<JSMap> js_map) {
     DisallowGarbageCollection no_gc;
     OrderedHashMap raw_table = *table;
     FixedArray raw_entries = *entries;
-    Oddball the_hole = ReadOnlyRoots(isolate_).the_hole_value();
+    Hole the_hole = ReadOnlyRoots(isolate_).the_hole_value();
     int result_index = 0;
     for (InternalIndex entry : raw_table.IterateEntries()) {
       Object key = raw_table.KeyAt(entry);
@@ -885,7 +897,7 @@ Maybe<bool> ValueSerializer::WriteJSSet(Handle<JSSet> js_set) {
     DisallowGarbageCollection no_gc;
     OrderedHashSet raw_table = *table;
     FixedArray raw_entries = *entries;
-    Oddball the_hole = ReadOnlyRoots(isolate_).the_hole_value();
+    Hole the_hole = ReadOnlyRoots(isolate_).the_hole_value();
     int result_index = 0;
     for (InternalIndex entry : raw_table.IterateEntries()) {
       Object key = raw_table.KeyAt(entry);
@@ -979,8 +991,9 @@ Maybe<bool> ValueSerializer::WriteJSArrayBufferView(JSArrayBufferView view) {
 #undef TYPED_ARRAY_CASE
     }
   } else {
-    DCHECK(view.IsJSDataView());
-    if (JSDataView::cast(view).IsOutOfBounds()) {
+    DCHECK(view.IsJSDataViewOrRabGsabDataView());
+    if (view.IsJSRabGsabDataView() &&
+        JSRabGsabDataView::cast(view).IsOutOfBounds()) {
       DCHECK(v8_flags.harmony_rab_gsab);
       return ThrowDataCloneError(MessageTemplate::kDataCloneError,
                                  handle(view, isolate_));
@@ -1115,7 +1128,7 @@ Maybe<bool> ValueSerializer::WriteWasmMemory(Handle<WasmMemoryObject> object) {
 #endif  // V8_ENABLE_WEBASSEMBLY
 
 Maybe<bool> ValueSerializer::WriteSharedObject(Handle<HeapObject> object) {
-  if (!delegate_ || !isolate_->has_shared_heap()) {
+  if (!delegate_ || !isolate_->has_shared_space()) {
     return ThrowDataCloneError(MessageTemplate::kDataCloneError, object);
   }
 
@@ -1184,6 +1197,23 @@ Maybe<uint32_t> ValueSerializer::WriteJSObjectPropertiesSlow(
     properties_written++;
   }
   return Just(properties_written);
+}
+
+Maybe<bool> ValueSerializer::IsHostObject(Handle<JSObject> js_object) {
+  if (!has_custom_host_objects_) {
+    return Just<bool>(
+        JSObject::GetEmbedderFieldCount(js_object->map(isolate_)));
+  }
+  DCHECK_NOT_NULL(delegate_);
+
+  v8::Isolate* v8_isolate = reinterpret_cast<v8::Isolate*>(isolate_);
+  Maybe<bool> result =
+      delegate_->IsHostObject(v8_isolate, Utils::ToLocal(js_object));
+  RETURN_VALUE_IF_SCHEDULED_EXCEPTION(isolate_, Nothing<bool>());
+  DCHECK(!result.IsNothing());
+
+  if (V8_UNLIKELY(out_of_memory_)) return ThrowIfOutOfMemory();
+  return result;
 }
 
 Maybe<bool> ValueSerializer::ThrowIfOutOfMemory() {
@@ -1803,7 +1833,8 @@ MaybeHandle<JSArray> ValueDeserializer::ReadDenseJSArray() {
   uint32_t id = next_id_++;
   HandleScope scope(isolate_);
   Handle<JSArray> array = isolate_->factory()->NewJSArray(
-      HOLEY_ELEMENTS, length, length, INITIALIZE_ARRAY_ELEMENTS_WITH_HOLE);
+      HOLEY_ELEMENTS, length, length,
+      ArrayStorageAllocationMode::INITIALIZE_ARRAY_ELEMENTS_WITH_HOLE);
   AddObjectWithID(id, array);
 
   Handle<FixedArray> elements(FixedArray::cast(array->elements()), isolate_);
@@ -2118,8 +2149,9 @@ MaybeHandle<JSArrayBufferView> ValueDeserializer::ReadJSArrayBufferView(
                                           is_backed_by_rab)) {
         return MaybeHandle<JSArrayBufferView>();
       }
-      Handle<JSDataView> data_view = isolate_->factory()->NewJSDataView(
-          buffer, byte_offset, byte_length, is_length_tracking);
+      Handle<JSDataViewOrRabGsabDataView> data_view =
+          isolate_->factory()->NewJSDataViewOrRabGsabDataView(
+              buffer, byte_offset, byte_length, is_length_tracking);
       CHECK_EQ(is_backed_by_rab, data_view->is_backed_by_rab());
       CHECK_EQ(is_length_tracking, data_view->is_length_tracking());
       AddObjectWithID(id, data_view);
@@ -2296,24 +2328,17 @@ MaybeHandle<WasmMemoryObject> ValueDeserializer::ReadWasmMemory() {
   uint32_t id = next_id_++;
 
   int32_t maximum_pages;
-  if (!ReadZigZag<int32_t>().To(&maximum_pages)) {
-    return MaybeHandle<WasmMemoryObject>();
-  }
+  if (!ReadZigZag<int32_t>().To(&maximum_pages)) return {};
 
-  SerializationTag tag;
-  if (!ReadTag().To(&tag) || tag != SerializationTag::kSharedArrayBuffer) {
-    return MaybeHandle<WasmMemoryObject>();
-  }
+  Handle<Object> buffer_object;
+  if (!ReadObject().ToHandle(&buffer_object)) return {};
+  if (!buffer_object->IsJSArrayBuffer()) return {};
 
-  constexpr bool is_shared = true;
-  constexpr bool is_resizable = false;
-  Handle<JSArrayBuffer> buffer;
-  if (!ReadJSArrayBuffer(is_shared, is_resizable).ToHandle(&buffer)) {
-    return MaybeHandle<WasmMemoryObject>();
-  }
+  Handle<JSArrayBuffer> buffer = Handle<JSArrayBuffer>::cast(buffer_object);
+  if (!buffer->is_shared()) return {};
 
   Handle<WasmMemoryObject> result =
-      WasmMemoryObject::New(isolate_, buffer, maximum_pages).ToHandleChecked();
+      WasmMemoryObject::New(isolate_, buffer, maximum_pages);
 
   AddObjectWithID(id, result);
   return result;
@@ -2471,37 +2496,38 @@ Maybe<uint32_t> ValueDeserializer::ReadJSObjectProperties(
         // Deserializaton of |value| might have deprecated current |target|,
         // ensure we are working with the up-to-date version.
         target = Map::Update(isolate_, target);
-
-        InternalIndex descriptor(properties.size());
-        PropertyDetails details =
-            target->instance_descriptors(isolate_).GetDetails(descriptor);
-        Representation expected_representation = details.representation();
-        if (value->FitsRepresentation(expected_representation)) {
-          if (expected_representation.IsHeapObject() &&
-              !target->instance_descriptors(isolate_)
-                   .GetFieldType(descriptor)
-                   .NowContains(value)) {
-            Handle<FieldType> value_type =
-                value->OptimalType(isolate_, expected_representation);
-            MapUpdater::GeneralizeField(isolate_, target, descriptor,
-                                        details.constness(),
-                                        expected_representation, value_type);
-          }
-          DCHECK(target->instance_descriptors(isolate_)
+        if (!target->is_dictionary_map()) {
+          InternalIndex descriptor(properties.size());
+          PropertyDetails details =
+              target->instance_descriptors(isolate_).GetDetails(descriptor);
+          Representation expected_representation = details.representation();
+          if (value->FitsRepresentation(expected_representation)) {
+            if (expected_representation.IsHeapObject() &&
+                !target->instance_descriptors(isolate_)
                      .GetFieldType(descriptor)
-                     .NowContains(value));
-          properties.push_back(value);
-          map = target;
-          continue;
-        } else {
-          transitioning = false;
+                     .NowContains(value)) {
+              Handle<FieldType> value_type =
+                  value->OptimalType(isolate_, expected_representation);
+              MapUpdater::GeneralizeField(isolate_, target, descriptor,
+                                          details.constness(),
+                                          expected_representation, value_type);
+            }
+            DCHECK(target->instance_descriptors(isolate_)
+                       .GetFieldType(descriptor)
+                       .NowContains(value));
+            properties.push_back(value);
+            map = target;
+            continue;
+          }
         }
+        transitioning = false;
       }
 
       // Fell out of transitioning fast path. Commit the properties gathered so
       // far, and then start setting properties slowly instead.
       DCHECK(!transitioning);
       CHECK_LT(properties.size(), std::numeric_limits<uint32_t>::max());
+      CHECK(!map->is_dictionary_map());
       CommitProperties(object, map, properties);
       num_properties = static_cast<uint32_t>(properties.size());
 

@@ -1263,9 +1263,6 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
       CheckTypeIs(node, Type::Boolean());
       break;
     case IrOpcode::kNumberIsFinite:
-      CheckValueInputIs(node, 0, Type::Number());
-      CheckTypeIs(node, Type::Boolean());
-      break;
     case IrOpcode::kNumberIsMinusZero:
     case IrOpcode::kNumberIsNaN:
       CheckValueInputIs(node, 0, Type::Number());
@@ -1682,14 +1679,6 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
     case IrOpcode::kTypeGuard:
       CheckTypeIs(node, TypeGuardTypeOf(node->op()));
       break;
-    case IrOpcode::kFoldConstant:
-      if (typing == TYPED) {
-        Type type = NodeProperties::GetType(node);
-        CHECK(type.IsSingleton());
-        CHECK(type.Equals(NodeProperties::GetType(node->InputAt(0))));
-        CHECK(type.Equals(NodeProperties::GetType(node->InputAt(1))));
-      }
-      break;
     case IrOpcode::kDateNow:
       CHECK_EQ(0, value_count);
       CheckTypeIs(node, Type::Number());
@@ -1731,6 +1720,8 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
     case IrOpcode::kWasmArraySet:
     case IrOpcode::kWasmArrayLength:
     case IrOpcode::kWasmArrayInitializeLength:
+    case IrOpcode::kStringAsWtf16:
+    case IrOpcode::kStringPrepareForGetCodeunit:
       // TODO(manoskouk): What are the constraints here?
       break;
 #endif  // V8_ENABLE_WEBASSEMBLY
@@ -1741,7 +1732,10 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
     case IrOpcode::kLoadImmutable:
     case IrOpcode::kProtectedLoad:
     case IrOpcode::kProtectedStore:
+    case IrOpcode::kLoadTrapOnNull:
+    case IrOpcode::kStoreTrapOnNull:
     case IrOpcode::kStore:
+    case IrOpcode::kStorePair:
     case IrOpcode::kStackSlot:
     case IrOpcode::kWord32And:
     case IrOpcode::kWord32Or:
@@ -1922,6 +1916,7 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
     case IrOpcode::kLoadStackCheckOffset:
     case IrOpcode::kLoadFramePointer:
     case IrOpcode::kLoadParentFramePointer:
+    case IrOpcode::kLoadRootRegister:
     case IrOpcode::kUnalignedLoad:
     case IrOpcode::kUnalignedStore:
     case IrOpcode::kMemoryBarrier:
@@ -2101,34 +2096,34 @@ void ScheduleVerifier::Run(Schedule* schedule) {
   }
 
   // Verify that all blocks reachable from start are in the RPO.
-  BoolVector marked(static_cast<int>(count), false, zone);
+  BitVector marked(static_cast<int>(count), zone);
   {
     ZoneQueue<BasicBlock*> queue(zone);
     queue.push(start);
-    marked[start->id().ToSize()] = true;
+    marked.Add(start->id().ToInt());
     while (!queue.empty()) {
       BasicBlock* block = queue.front();
       queue.pop();
       for (size_t s = 0; s < block->SuccessorCount(); s++) {
         BasicBlock* succ = block->SuccessorAt(s);
-        if (!marked[succ->id().ToSize()]) {
-          marked[succ->id().ToSize()] = true;
+        if (!marked.Contains(succ->id().ToInt())) {
+          marked.Add(succ->id().ToInt());
           queue.push(succ);
         }
       }
     }
   }
   // Verify marked blocks are in the RPO.
-  for (size_t i = 0; i < count; i++) {
-    BasicBlock* block = schedule->GetBlockById(BasicBlock::Id::FromSize(i));
-    if (marked[i]) {
+  for (int i = 0; i < static_cast<int>(count); i++) {
+    BasicBlock* block = schedule->GetBlockById(BasicBlock::Id::FromInt(i));
+    if (marked.Contains(i)) {
       CHECK_GE(block->rpo_number(), 0);
       CHECK_EQ(block, rpo_order->at(block->rpo_number()));
     }
   }
   // Verify RPO blocks are marked.
   for (size_t b = 0; b < rpo_order->size(); b++) {
-    CHECK(marked[rpo_order->at(b)->id().ToSize()]);
+    CHECK(marked.Contains(rpo_order->at(b)->id().ToInt()));
   }
 
   {

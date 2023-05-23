@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Flags: --omit-default-ctors --allow-natives-syntax --maglev
+// Flags: --omit-default-ctors --allow-natives-syntax --maglev --no-maglev-inlining
 
 (function OmitDefaultBaseCtor() {
   class A {};  // default base ctor -> will be omitted
@@ -379,8 +379,7 @@
   new D();
   assertEquals(2, fooCallCount);
   assertEquals(1, ctorCallCount);
-  // No deopt (Maglev doesn't depend on the prototype chain not being mutated).
-  assertTrue(isMaglevved(D));
+  assertFalse(isMaglevved(D));
 })();
 
 // The same test as the previous one, but with a ctor with a non-final spread.
@@ -418,8 +417,7 @@
   new D();
   assertEquals(2, fooCallCount);
   assertEquals(1, ctorCallCount);
-  // No deopt (Maglev doesn't depend on the prototype chain not being mutated).
-  assertTrue(isMaglevved(D));
+  assertFalse(isMaglevved(D));
 })();
 
 (function BasePrivateField() {

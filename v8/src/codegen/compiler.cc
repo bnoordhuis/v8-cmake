@@ -35,6 +35,7 @@
 #include "src/execution/isolate.h"
 #include "src/execution/local-isolate.h"
 #include "src/execution/vm-state-inl.h"
+#include "src/flags/flags.h"
 #include "src/handles/handles.h"
 #include "src/handles/maybe-handles.h"
 #include "src/handles/persistent-handles.h"
@@ -62,7 +63,6 @@
 #include "src/parsing/scanner-character-streams.h"
 #include "src/snapshot/code-serializer.h"
 #include "src/utils/ostreams.h"
-#include "src/web-snapshot/web-snapshot.h"
 #include "src/zone/zone-list-inl.h"  // crbug.com/v8/8816
 
 #ifdef V8_ENABLE_MAGLEV
@@ -89,14 +89,6 @@ void SetTieringState(JSFunction function, BytecodeOffset osr_offset,
 void ResetTieringState(JSFunction function, BytecodeOffset osr_offset) {
   if (function.has_feedback_vector()) {
     SetTieringState(function, osr_offset, TieringState::kNone);
-  }
-}
-
-void ResetProfilerTicks(JSFunction function, BytecodeOffset osr_offset) {
-  if (!IsOSR(osr_offset)) {
-    // Reset profiler ticks, the function is no longer considered hot.
-    // TODO(v8:7700): Update for Maglev tiering.
-    function.feedback_vector().set_profiler_ticks(0);
   }
 }
 
@@ -181,7 +173,8 @@ class CompilerTracer : public AllStatic {
                                          double ms_creategraph,
                                          double ms_optimize,
                                          double ms_codegen) {
-    if (!v8_flags.trace_opt || !info->IsOptimizing()) return;
+    DCHECK(v8_flags.trace_opt);
+    DCHECK(info->IsOptimizing());
     CodeTracer::Scope scope(isolate->GetCodeTracer());
     PrintTracePrefix(scope, "completed compiling", info);
     if (info->is_osr()) PrintF(scope.file(), " OSR");
@@ -324,14 +317,12 @@ void Compiler::LogFunctionCompilation(Isolate* isolate,
   // Log the code generation. If source information is available include
   // script name and line number. Check explicitly whether logging is
   // enabled as finding the line number is not free.
-  if (!isolate->v8_file_logger()->is_listening_to_code_events() &&
-      !isolate->is_profiling() && !v8_flags.log_function_events &&
-      !isolate->logger()->is_listening_to_code_events()) {
-    return;
-  }
+  if (!isolate->IsLoggingCodeCreation()) return;
 
-  int line_num = Script::GetLineNumber(script, shared->StartPosition()) + 1;
-  int column_num = Script::GetColumnNumber(script, shared->StartPosition()) + 1;
+  Script::PositionInfo info;
+  Script::GetPositionInfo(script, shared->StartPosition(), &info);
+  int line_num = info.line + 1;
+  int column_num = info.column + 1;
   Handle<String> script_name(script->name().IsString()
                                  ? String::cast(script->name())
                                  : ReadOnlyRoots(isolate).empty_string(),
@@ -373,7 +364,7 @@ void Compiler::LogFunctionCompilation(Isolate* isolate,
       UNREACHABLE();
   }
 
-  Handle<String> debug_name = SharedFunctionInfo::DebugName(shared);
+  Handle<String> debug_name = SharedFunctionInfo::DebugName(isolate, shared);
   DisallowGarbageCollection no_gc;
   LOG(isolate, FunctionEvent(name.c_str(), script->id(), time_taken_ms,
                              shared->StartPosition(), shared->EndPosition(),
@@ -525,71 +516,77 @@ CompilationJob::Status TurbofanCompilationJob::AbortOptimization(
 void TurbofanCompilationJob::RecordCompilationStats(ConcurrencyMode mode,
                                                     Isolate* isolate) const {
   DCHECK(compilation_info()->IsOptimizing());
-  Handle<JSFunction> function = compilation_info()->closure();
-  double ms_creategraph = time_taken_to_prepare_.InMillisecondsF();
-  double ms_optimize = time_taken_to_execute_.InMillisecondsF();
-  double ms_codegen = time_taken_to_finalize_.InMillisecondsF();
-  CompilerTracer::TraceFinishTurbofanCompile(
-      isolate, compilation_info(), ms_creategraph, ms_optimize, ms_codegen);
-  if (v8_flags.trace_opt_stats) {
-    static double compilation_time = 0.0;
-    static int compiled_functions = 0;
-    static int code_size = 0;
+  if (v8_flags.trace_opt || v8_flags.trace_opt_stats) {
+    Handle<JSFunction> function = compilation_info()->closure();
+    double ms_creategraph = time_taken_to_prepare_.InMillisecondsF();
+    double ms_optimize = time_taken_to_execute_.InMillisecondsF();
+    double ms_codegen = time_taken_to_finalize_.InMillisecondsF();
+    if (v8_flags.trace_opt) {
+      CompilerTracer::TraceFinishTurbofanCompile(
+          isolate, compilation_info(), ms_creategraph, ms_optimize, ms_codegen);
+    }
+    if (v8_flags.trace_opt_stats) {
+      static double compilation_time = 0.0;
+      static int compiled_functions = 0;
+      static int code_size = 0;
 
-    compilation_time += (ms_creategraph + ms_optimize + ms_codegen);
-    compiled_functions++;
-    code_size += function->shared().SourceSize();
-    PrintF("Compiled: %d functions with %d byte source size in %fms.\n",
-           compiled_functions, code_size, compilation_time);
+      compilation_time += (ms_creategraph + ms_optimize + ms_codegen);
+      compiled_functions++;
+      code_size += function->shared().SourceSize();
+      PrintF("Compiled: %d functions with %d byte source size in %fms.\n",
+             compiled_functions, code_size, compilation_time);
+    }
   }
   // Don't record samples from machines without high-resolution timers,
   // as that can cause serious reporting issues. See the thread at
   // http://g/chrome-metrics-team/NwwJEyL8odU/discussion for more details.
-  if (base::TimeTicks::IsHighResolution()) {
-    Counters* const counters = isolate->counters();
-    if (compilation_info()->is_osr()) {
-      counters->turbofan_osr_prepare()->AddSample(
-          static_cast<int>(time_taken_to_prepare_.InMicroseconds()));
-      counters->turbofan_osr_execute()->AddSample(
-          static_cast<int>(time_taken_to_execute_.InMicroseconds()));
-      counters->turbofan_osr_finalize()->AddSample(
-          static_cast<int>(time_taken_to_finalize_.InMicroseconds()));
-      counters->turbofan_osr_total_time()->AddSample(
-          static_cast<int>(ElapsedTime().InMicroseconds()));
-    } else {
-      counters->turbofan_optimize_prepare()->AddSample(
-          static_cast<int>(time_taken_to_prepare_.InMicroseconds()));
-      counters->turbofan_optimize_execute()->AddSample(
-          static_cast<int>(time_taken_to_execute_.InMicroseconds()));
-      counters->turbofan_optimize_finalize()->AddSample(
-          static_cast<int>(time_taken_to_finalize_.InMicroseconds()));
-      counters->turbofan_optimize_total_time()->AddSample(
-          static_cast<int>(ElapsedTime().InMicroseconds()));
+  if (!base::TimeTicks::IsHighResolution()) return;
 
-      // Compute foreground / background time.
-      base::TimeDelta time_background;
-      base::TimeDelta time_foreground =
-          time_taken_to_prepare_ + time_taken_to_finalize_;
-      switch (mode) {
-        case ConcurrencyMode::kConcurrent:
-          time_background += time_taken_to_execute_;
-          counters->turbofan_optimize_concurrent_total_time()->AddSample(
-              static_cast<int>(ElapsedTime().InMicroseconds()));
-          break;
-        case ConcurrencyMode::kSynchronous:
-          counters->turbofan_optimize_non_concurrent_total_time()->AddSample(
-              static_cast<int>(ElapsedTime().InMicroseconds()));
-          time_foreground += time_taken_to_execute_;
-          break;
-      }
-      counters->turbofan_optimize_total_background()->AddSample(
-          static_cast<int>(time_background.InMicroseconds()));
-      counters->turbofan_optimize_total_foreground()->AddSample(
-          static_cast<int>(time_foreground.InMicroseconds()));
-    }
-    counters->turbofan_ticks()->AddSample(static_cast<int>(
-        compilation_info()->tick_counter().CurrentTicks() / 1000));
+  int elapsed_microseconds = static_cast<int>(ElapsedTime().InMicroseconds());
+  Counters* const counters = isolate->counters();
+  counters->turbofan_ticks()->AddSample(static_cast<int>(
+      compilation_info()->tick_counter().CurrentTicks() / 1000));
+
+  if (compilation_info()->is_osr()) {
+    counters->turbofan_osr_prepare()->AddSample(
+        static_cast<int>(time_taken_to_prepare_.InMicroseconds()));
+    counters->turbofan_osr_execute()->AddSample(
+        static_cast<int>(time_taken_to_execute_.InMicroseconds()));
+    counters->turbofan_osr_finalize()->AddSample(
+        static_cast<int>(time_taken_to_finalize_.InMicroseconds()));
+    counters->turbofan_osr_total_time()->AddSample(elapsed_microseconds);
+    return;
   }
+
+  DCHECK(!compilation_info()->is_osr());
+  counters->turbofan_optimize_prepare()->AddSample(
+      static_cast<int>(time_taken_to_prepare_.InMicroseconds()));
+  counters->turbofan_optimize_execute()->AddSample(
+      static_cast<int>(time_taken_to_execute_.InMicroseconds()));
+  counters->turbofan_optimize_finalize()->AddSample(
+      static_cast<int>(time_taken_to_finalize_.InMicroseconds()));
+  counters->turbofan_optimize_total_time()->AddSample(elapsed_microseconds);
+
+  // Compute foreground / background time.
+  base::TimeDelta time_background;
+  base::TimeDelta time_foreground =
+      time_taken_to_prepare_ + time_taken_to_finalize_;
+  switch (mode) {
+    case ConcurrencyMode::kConcurrent:
+      time_background += time_taken_to_execute_;
+      counters->turbofan_optimize_concurrent_total_time()->AddSample(
+          elapsed_microseconds);
+      break;
+    case ConcurrencyMode::kSynchronous:
+      counters->turbofan_optimize_non_concurrent_total_time()->AddSample(
+          elapsed_microseconds);
+      time_foreground += time_taken_to_execute_;
+      break;
+  }
+  counters->turbofan_optimize_total_background()->AddSample(
+      static_cast<int>(time_background.InMicroseconds()));
+  counters->turbofan_optimize_total_foreground()->AddSample(
+      static_cast<int>(time_foreground.InMicroseconds()));
 }
 
 void TurbofanCompilationJob::RecordFunctionCompilation(
@@ -658,10 +655,10 @@ void InstallInterpreterTrampolineCopy(Isolate* isolate,
 
   Handle<Script> script(Script::cast(shared_info->script()), isolate);
   Handle<AbstractCode> abstract_code = Handle<AbstractCode>::cast(code);
-  int line_num =
-      Script::GetLineNumber(script, shared_info->StartPosition()) + 1;
-  int column_num =
-      Script::GetColumnNumber(script, shared_info->StartPosition()) + 1;
+  Script::PositionInfo info;
+  Script::GetPositionInfo(script, shared_info->StartPosition(), &info);
+  int line_num = info.line + 1;
+  int column_num = info.column + 1;
   Handle<String> script_name =
       handle(script->name().IsString() ? String::cast(script->name())
                                        : ReadOnlyRoots(isolate).empty_string(),
@@ -943,7 +940,7 @@ class OptimizedCodeCache : public AllStatic {
       if (maybe_code.has_value()) code = maybe_code.value();
     } else {
       feedback_vector.EvictOptimizedCodeMarkedForDeoptimization(
-          shared, "OptimizedCodeCache::Get");
+          isolate, shared, "OptimizedCodeCache::Get");
       code = feedback_vector.optimized_code();
     }
 
@@ -996,16 +993,15 @@ class OptimizedCodeCache : public AllStatic {
   }
 };
 
-// Runs PrepareJob in the proper compilation & canonical scopes. Handles will be
-// allocated in a persistent handle scope that is detached and handed off to the
+// Runs PrepareJob in the proper compilation scopes. Handles will be allocated
+// in a persistent handle scope that is detached and handed off to the
 // {compilation_info} after PrepareJob.
 bool PrepareJobWithHandleScope(OptimizedCompilationJob* job, Isolate* isolate,
                                OptimizedCompilationInfo* compilation_info,
                                ConcurrencyMode mode) {
   CompilationHandleScope compilation(isolate, compilation_info);
-  CanonicalHandleScopeForTurbofan canonical(isolate, compilation_info);
   CompilerTracer::TracePrepareJob(isolate, compilation_info, mode);
-  compilation_info->ReopenHandlesInNewHandleScope(isolate);
+  compilation_info->ReopenAndCanonicalizeHandlesInNewScope(isolate);
   return job->PrepareJob(isolate) == CompilationJob::SUCCEEDED;
 }
 
@@ -1199,8 +1195,6 @@ MaybeHandle<Code> CompileMaglev(Isolate* isolate, Handle<JSFunction> function,
                                 CompileResultBehavior result_behavior) {
 #ifdef V8_ENABLE_MAGLEV
   DCHECK(v8_flags.maglev);
-  // TODO(v8:7700): Add missing support.
-  CHECK(!IsOSR(osr_offset));
   CHECK(result_behavior == CompileResultBehavior::kDefault);
 
   // TODO(v8:7700): Tracing, see CompileTurbofan.
@@ -1215,7 +1209,7 @@ MaybeHandle<Code> CompileMaglev(Isolate* isolate, Handle<JSFunction> function,
   // ...
 
   // Prepare the job.
-  auto job = maglev::MaglevCompilationJob::New(isolate, function);
+  auto job = maglev::MaglevCompilationJob::New(isolate, function, osr_offset);
 
   {
     TRACE_EVENT_WITH_FLOW0(
@@ -1241,11 +1235,7 @@ MaybeHandle<Code> CompileMaglev(Isolate* isolate, Handle<JSFunction> function,
       CHECK_EQ(status, CompilationJob::SUCCEEDED);
     }
 
-    {
-      // TODO(v8:7700): Support OSR in FinalizeMaglevCompilationJob.
-      DCHECK(osr_offset.IsNone());
-      Compiler::FinalizeMaglevCompilationJob(job.get(), isolate);
-    }
+    { Compiler::FinalizeMaglevCompilationJob(job.get(), isolate); }
 
     return handle(function->code(), isolate);
   }
@@ -1276,6 +1266,17 @@ MaybeHandle<Code> GetOrCompileOptimized(
   // re-optimize.
   if (!IsOSR(osr_offset)) {
     ResetTieringState(*function, osr_offset);
+    int invocation_count =
+        function->feedback_vector().invocation_count(kRelaxedLoad);
+    if (!(V8_UNLIKELY(v8_flags.testing_d8_test_runner ||
+                      v8_flags.allow_natives_syntax) &&
+          ManualOptimizationTable::IsMarkedForManualOptimization(isolate,
+                                                                 *function)) &&
+        invocation_count < v8_flags.minimum_invocations_before_optimization) {
+      function->feedback_vector().set_invocation_count(invocation_count + 1,
+                                                       kRelaxedStore);
+      return {};
+    }
   }
 
   // TODO(v8:7700): Distinguish between Maglev and Turbofan.
@@ -1301,8 +1302,6 @@ MaybeHandle<Code> GetOrCompileOptimized(
   }
 
   DCHECK(shared->is_compiled());
-
-  ResetProfilerTicks(*function, osr_offset);
 
   if (code_kind == CodeKind::TURBOFAN) {
     return CompileTurbofan(isolate, function, shared, mode, osr_offset,
@@ -1386,9 +1385,9 @@ void FinalizeUnoptimizedCompilation(
     compile_state->pending_error_handler()->ReportWarnings(isolate, script);
   }
 
-  bool need_source_positions = v8_flags.stress_lazy_source_positions ||
-                               (!flags.collect_source_positions() &&
-                                isolate->NeedsSourcePositionsForProfiling());
+  bool need_source_positions =
+      v8_flags.stress_lazy_source_positions ||
+      (!flags.collect_source_positions() && isolate->NeedsSourcePositions());
 
   for (const auto& finalize_data : finalize_unoptimized_compilation_data_list) {
     Handle<SharedFunctionInfo> shared_info = finalize_data.function_handle();
@@ -1432,17 +1431,13 @@ void FinalizeUnoptimizedScriptCompilation(
   FinalizeUnoptimizedCompilation(isolate, script, flags, compile_state,
                                  finalize_unoptimized_compilation_data_list);
 
-  script->set_compilation_state(Script::COMPILATION_STATE_COMPILED);
-
-  if (isolate->NeedsSourcePositionsForProfiling()) {
-    Script::InitLineEnds(isolate, script);
-  }
+  script->set_compilation_state(Script::CompilationState::kCompiled);
+  DCHECK_IMPLIES(isolate->NeedsSourcePositions(), script->has_line_ends());
 }
 
 void CompileAllWithBaseline(Isolate* isolate,
                             const FinalizeUnoptimizedCompilationDataList&
                                 finalize_unoptimized_compilation_data_list) {
-  CodePageCollectionMemoryModificationScope code_allocation(isolate->heap());
   for (const auto& finalize_data : finalize_unoptimized_compilation_data_list) {
     Handle<SharedFunctionInfo> shared_info = finalize_data.function_handle();
     IsCompiledScope is_compiled_scope(*shared_info, isolate);
@@ -1645,12 +1640,12 @@ void SetScriptFieldsFromDetails(Isolate* isolate, Script script,
     script.set_column_offset(script_details.column_offset);
   }
   // The API can provide a source map URL, but a source map URL could also have
-  // been inferred by the parser from a magic comment. The latter takes
-  // preference over the former, so we don't want to override the source mapping
-  // URL if it already exists.
+  // been inferred by the parser from a magic comment. The API source map URL
+  // takes precedence (as long as it is a non-empty string).
   Handle<Object> source_map_url;
   if (script_details.source_map_url.ToHandle(&source_map_url) &&
-      script.source_mapping_url(isolate).IsUndefined(isolate)) {
+      source_map_url->IsString() &&
+      String::cast(*source_map_url).length() > 0) {
     script.set_source_mapping_url(*source_map_url);
   }
   Handle<Object> host_defined_options;
@@ -1732,10 +1727,10 @@ class MergeAssumptionChecker final : public ObjectVisitor {
   }
 
   // The object graph for a newly compiled Script shouldn't yet contain any
-  // InstructionStream. If any of these functions are called, then that would
-  // indicate that the graph was not disjoint from the rest of the heap as
-  // expected.
-  void VisitCodePointer(HeapObject host, CodeObjectSlot slot) override {
+  // Code. If any of these functions are called, then that would indicate that
+  // the graph was not disjoint from the rest of the heap as expected.
+  void VisitInstructionStreamPointer(Code host,
+                                     InstructionStreamSlot slot) override {
     UNREACHABLE();
   }
   void VisitCodeTarget(InstructionStream host, RelocInfo* rinfo) override {
@@ -2164,6 +2159,11 @@ Handle<SharedFunctionInfo> BackgroundMergeTask::CompleteMergeInForeground(
 
   state_ = kDone;
 
+  if (isolate->NeedsSourcePositions()) {
+    Script::InitLineEnds(isolate, new_script);
+    SharedFunctionInfo::EnsureSourcePositionsAvailable(isolate, result);
+  }
+
   return handle_scope.CloseAndEscape(result);
 }
 
@@ -2203,7 +2203,7 @@ MaybeHandle<SharedFunctionInfo> BackgroundCompileTask::FinalizeScript(
     DCHECK(isolate->factory()->script_list()->Contains(
         MaybeObject::MakeWeak(MaybeObject::FromObject(*script))));
   } else {
-    script->set_source(*source);
+    Script::SetSource(isolate, script, source);
     script->set_origin_options(origin_options);
 
     // The one post-hoc fix-up: Add the script to the script list.
@@ -2583,7 +2583,7 @@ bool Compiler::Compile(Isolate* isolate, Handle<JSFunction> function,
   }
 
   DCHECK(is_compiled_scope->is_compiled());
-  Handle<Code> code = handle(shared_info->GetCode(), isolate);
+  Handle<Code> code = handle(shared_info->GetCode(isolate), isolate);
 
   // Initialize the feedback cell for this JSFunction and reset the interrupt
   // budget for feedback vector allocation even if there is a closure feedback
@@ -2620,7 +2620,7 @@ bool Compiler::Compile(Isolate* isolate, Handle<JSFunction> function,
   }
 
   // Install code on closure.
-  function->set_code(*code, kReleaseStore);
+  function->set_code(*code);
   // Install a feedback vector if necessary.
   if (code->kind() == CodeKind::BASELINE) {
     JSFunction::EnsureFeedbackVector(isolate, function, is_compiled_scope);
@@ -2740,7 +2740,7 @@ void Compiler::CompileOptimized(Isolate* isolate, Handle<JSFunction> function,
   Handle<Code> code;
   if (GetOrCompileOptimized(isolate, function, mode, code_kind)
           .ToHandle(&code)) {
-    function->set_code(*code, kReleaseStore);
+    function->set_code(*code);
   }
 
 #ifdef DEBUG
@@ -2830,7 +2830,7 @@ MaybeHandle<JSFunction> Compiler::GetFunctionFromEval(
       // If the position is missing, attempt to get the code offset by
       // walking the stack. Do not translate the code offset into source
       // position, but store it as negative value for lazy translation.
-      StackTraceFrameIterator it(isolate);
+      DebuggableStackFrameIterator it(isolate);
       if (!it.done() && it.is_javascript()) {
         FrameSummary summary = it.GetTopValidFrame();
         script->set_eval_from_shared(
@@ -3437,6 +3437,8 @@ MaybeHandle<SharedFunctionInfo> GetSharedFunctionInfoForScriptImpl(
     Isolate* isolate, Handle<String> source,
     const ScriptDetails& script_details, v8::Extension* extension,
     AlignedCachedData* cached_data, BackgroundDeserializeTask* deserialize_task,
+    v8::CompileHintCallback compile_hint_callback,
+    void* compile_hint_callback_data,
     ScriptCompiler::CompileOptions compile_options,
     ScriptCompiler::NoCacheReason no_cache_reason, NativesFlag natives) {
   ScriptCompileTimerScope compile_timer(isolate, no_cache_reason);
@@ -3451,27 +3453,9 @@ MaybeHandle<SharedFunctionInfo> GetSharedFunctionInfoForScriptImpl(
     DCHECK_NULL(deserialize_task);
   }
 
-  if (V8_UNLIKELY(
-          v8_flags.experimental_web_snapshots &&
-          (source->IsExternalOneByteString() || source->IsSeqOneByteString() ||
-           source->IsExternalTwoByteString() || source->IsSeqTwoByteString()) &&
-          source->length() > 4)) {
-    // Experimental: Treat the script as a web snapshot if it starts with the
-    // magic byte sequence. TODO(v8:11525): Remove this once proper embedder
-    // integration is done.
-    bool magic_matches = true;
-    for (size_t i = 0;
-         i < sizeof(WebSnapshotSerializerDeserializer::kMagicNumber); ++i) {
-      if (source->Get(static_cast<int>(i)) !=
-          WebSnapshotSerializerDeserializer::kMagicNumber[i]) {
-        magic_matches = false;
-        break;
-      }
-    }
-    if (magic_matches) {
-      return Compiler::GetSharedFunctionInfoForWebSnapshot(
-          isolate, source, script_details.name_obj);
-    }
+  if (compile_options == ScriptCompiler::kConsumeCompileHints) {
+    DCHECK_NOT_NULL(compile_hint_callback);
+    DCHECK_NOT_NULL(compile_hint_callback_data);
   }
 
   LanguageMode language_mode = construct_language_mode(v8_flags.use_strict);
@@ -3607,8 +3591,8 @@ MaybeHandle<SharedFunctionInfo> Compiler::GetSharedFunctionInfoForScript(
     ScriptCompiler::CompileOptions compile_options,
     ScriptCompiler::NoCacheReason no_cache_reason, NativesFlag natives) {
   return GetSharedFunctionInfoForScriptImpl(
-      isolate, source, script_details, nullptr, nullptr, nullptr,
-      compile_options, no_cache_reason, natives);
+      isolate, source, script_details, nullptr, nullptr, nullptr, nullptr,
+      nullptr, compile_options, no_cache_reason, natives);
 }
 
 MaybeHandle<SharedFunctionInfo>
@@ -3617,8 +3601,9 @@ Compiler::GetSharedFunctionInfoForScriptWithExtension(
     const ScriptDetails& script_details, v8::Extension* extension,
     ScriptCompiler::CompileOptions compile_options, NativesFlag natives) {
   return GetSharedFunctionInfoForScriptImpl(
-      isolate, source, script_details, extension, nullptr, nullptr,
-      compile_options, ScriptCompiler::kNoCacheBecauseV8Extension, natives);
+      isolate, source, script_details, extension, nullptr, nullptr, nullptr,
+      nullptr, compile_options, ScriptCompiler::kNoCacheBecauseV8Extension,
+      natives);
 }
 
 MaybeHandle<SharedFunctionInfo>
@@ -3628,8 +3613,8 @@ Compiler::GetSharedFunctionInfoForScriptWithCachedData(
     ScriptCompiler::CompileOptions compile_options,
     ScriptCompiler::NoCacheReason no_cache_reason, NativesFlag natives) {
   return GetSharedFunctionInfoForScriptImpl(
-      isolate, source, script_details, nullptr, cached_data, nullptr,
-      compile_options, no_cache_reason, natives);
+      isolate, source, script_details, nullptr, cached_data, nullptr, nullptr,
+      nullptr, compile_options, no_cache_reason, natives);
 }
 
 MaybeHandle<SharedFunctionInfo>
@@ -3641,7 +3626,21 @@ Compiler::GetSharedFunctionInfoForScriptWithDeserializeTask(
     ScriptCompiler::NoCacheReason no_cache_reason, NativesFlag natives) {
   return GetSharedFunctionInfoForScriptImpl(
       isolate, source, script_details, nullptr, nullptr, deserialize_task,
-      compile_options, no_cache_reason, natives);
+      nullptr, nullptr, compile_options, no_cache_reason, natives);
+}
+
+MaybeHandle<SharedFunctionInfo>
+Compiler::GetSharedFunctionInfoForScriptWithCompileHints(
+    Isolate* isolate, Handle<String> source,
+    const ScriptDetails& script_details,
+    v8::CompileHintCallback compile_hint_callback,
+    void* compile_hint_callback_data,
+    ScriptCompiler::CompileOptions compile_options,
+    ScriptCompiler::NoCacheReason no_cache_reason, NativesFlag natives) {
+  return GetSharedFunctionInfoForScriptImpl(
+      isolate, source, script_details, nullptr, nullptr, nullptr,
+      compile_hint_callback, compile_hint_callback_data, compile_options,
+      no_cache_reason, natives);
 }
 
 // static
@@ -3802,30 +3801,6 @@ Compiler::GetSharedFunctionInfoForStreamedScript(
 }  // namespace internal
 
 // static
-Handle<SharedFunctionInfo> Compiler::GetSharedFunctionInfoForWebSnapshot(
-    Isolate* isolate, Handle<String> source,
-    MaybeHandle<Object> maybe_script_name) {
-  // This script won't hold the functions created from the web snapshot;
-  // reserving space only for the top-level SharedFunctionInfo is enough.
-  Handle<WeakFixedArray> shared_function_infos =
-      isolate->factory()->NewWeakFixedArray(1, AllocationType::kOld);
-  Handle<Script> script = isolate->factory()->NewScript(source);
-  script->set_type(Script::TYPE_WEB_SNAPSHOT);
-  script->set_shared_function_infos(*shared_function_infos);
-  Handle<Object> script_name;
-  if (maybe_script_name.ToHandle(&script_name) && script_name->IsString()) {
-    script->set_name(String::cast(*script_name));
-  } else {
-    script->set_name(*isolate->factory()->empty_string());
-  }
-
-  Handle<SharedFunctionInfo> shared =
-      isolate->factory()->NewSharedFunctionInfoForWebSnapshot();
-  shared->SetScript(isolate->factory()->read_only_roots(), *script, 0, false);
-  return shared;
-}
-
-// static
 template <typename IsolateT>
 Handle<SharedFunctionInfo> Compiler::GetSharedFunctionInfo(
     FunctionLiteral* literal, Handle<Script> script, IsolateT* isolate) {
@@ -3880,7 +3855,8 @@ template Handle<SharedFunctionInfo> Compiler::GetSharedFunctionInfo(
 MaybeHandle<Code> Compiler::CompileOptimizedOSR(Isolate* isolate,
                                                 Handle<JSFunction> function,
                                                 BytecodeOffset osr_offset,
-                                                ConcurrencyMode mode) {
+                                                ConcurrencyMode mode,
+                                                CodeKind code_kind) {
   DCHECK(IsOSR(osr_offset));
 
   if (V8_UNLIKELY(isolate->serializer_enabled())) return {};
@@ -3903,8 +3879,8 @@ MaybeHandle<Code> Compiler::CompileOptimizedOSR(Isolate* isolate,
   function->feedback_vector().reset_osr_urgency();
 
   CompilerTracer::TraceOptimizeOSRStarted(isolate, function, osr_offset, mode);
-  MaybeHandle<Code> result = GetOrCompileOptimized(
-      isolate, function, mode, CodeKind::TURBOFAN, osr_offset);
+  MaybeHandle<Code> result =
+      GetOrCompileOptimized(isolate, function, mode, code_kind, osr_offset);
 
   if (result.is_null()) {
     CompilerTracer::TraceOptimizeOSRUnavailable(isolate, function, osr_offset,
@@ -3918,12 +3894,13 @@ MaybeHandle<Code> Compiler::CompileOptimizedOSR(Isolate* isolate,
 }
 
 // static
-void Compiler::DisposeTurbofanCompilationJob(TurbofanCompilationJob* job,
+void Compiler::DisposeTurbofanCompilationJob(Isolate* isolate,
+                                             TurbofanCompilationJob* job,
                                              bool restore_function_code) {
   Handle<JSFunction> function = job->compilation_info()->closure();
   ResetTieringState(*function, job->compilation_info()->osr_offset());
   if (restore_function_code) {
-    function->set_code(function->shared().GetCode(), kReleaseStore);
+    function->set_code(function->shared().GetCode(isolate));
   }
 }
 
@@ -3944,10 +3921,6 @@ void Compiler::FinalizeTurbofanCompilationJob(TurbofanCompilationJob* job,
 
   const bool use_result = !compilation_info->discard_result_for_testing();
   const BytecodeOffset osr_offset = compilation_info->osr_offset();
-
-  if (V8_LIKELY(use_result)) {
-    ResetProfilerTicks(*function, osr_offset);
-  }
 
   DCHECK(!shared->HasBreakInfo());
 
@@ -3974,7 +3947,7 @@ void Compiler::FinalizeTurbofanCompilationJob(TurbofanCompilationJob* job,
           CompilerTracer::TraceOptimizeOSRFinished(isolate, function,
                                                    osr_offset);
         } else {
-          function->set_code(*compilation_info->code(), kReleaseStore);
+          function->set_code(*compilation_info->code());
         }
       }
       return;
@@ -3988,7 +3961,7 @@ void Compiler::FinalizeTurbofanCompilationJob(TurbofanCompilationJob* job,
   if (V8_LIKELY(use_result)) {
     ResetTieringState(*function, osr_offset);
     if (!IsOSR(osr_offset)) {
-      function->set_code(shared->GetCode(), kReleaseStore);
+      function->set_code(shared->GetCode(isolate));
     }
   }
 }
@@ -4012,21 +3985,15 @@ void Compiler::FinalizeMaglevCompilationJob(maglev::MaglevCompilationJob* job,
   // when all the bytecodes are implemented.
   USE(status);
 
-  static constexpr BytecodeOffset osr_offset = BytecodeOffset::None();
+  BytecodeOffset osr_offset = job->osr_offset();
   ResetTieringState(*function, osr_offset);
 
   if (status == CompilationJob::SUCCEEDED) {
     // Note the finalized InstructionStream object has already been installed on
     // the function by MaglevCompilationJob::FinalizeJobImpl.
 
-    OptimizedCodeCache::Insert(isolate, *function, BytecodeOffset::None(),
-                               function->code(),
+    OptimizedCodeCache::Insert(isolate, *function, osr_offset, function->code(),
                                job->specialize_to_function_context());
-
-    // Reset ticks just after installation since ticks accumulated in lower
-    // tiers use a different (lower) budget than ticks collected in Maglev
-    // code.
-    ResetProfilerTicks(*function, osr_offset);
 
     RecordMaglevFunctionCompilation(isolate, function);
     job->RecordCompilationStats(isolate);
@@ -4056,17 +4023,13 @@ void Compiler::PostInstantiation(Handle<JSFunction> function) {
       // deoptimized the code on the feedback vector. So check for any
       // deoptimized code just before installing it on the funciton.
       function->feedback_vector().EvictOptimizedCodeMarkedForDeoptimization(
-          *shared, "new function from shared function info");
+          isolate, *shared, "new function from shared function info");
       Code code = function->feedback_vector().optimized_code();
       if (!code.is_null()) {
         // Caching of optimized code enabled and optimized code found.
         DCHECK(!code.marked_for_deoptimization());
         DCHECK(function->shared().is_compiled());
 
-        // We don't need a release store because the optimized code was
-        // stored with release semantics into the vector
-        static_assert(
-            FeedbackVector::kFeedbackVectorMaybeOptimizedCodeIsStoreRelease);
         function->set_code(code);
       }
     }

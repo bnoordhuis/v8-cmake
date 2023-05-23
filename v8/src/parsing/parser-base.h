@@ -63,7 +63,7 @@ struct FormalParametersBase {
   int num_parameters() const {
     // Don't include the rest parameter into the function's formal parameter
     // count (esp. the SharedFunctionInfo::internal_formal_parameter_count,
-    // which says whether we need to create an arguments adaptor frame).
+    // which says whether we need to create an inlined arguments frame).
     return arity - has_rest;
   }
 
@@ -1868,8 +1868,9 @@ typename ParserBase<Impl>::ExpressionT ParserBase<Impl>::ParseRegExpLiteral() {
     return impl()->FailureExpression();
   }
 
-  const AstRawString* js_pattern = GetNextSymbolForRegExpLiteral();
+  const AstRawString* pattern = GetNextSymbolForRegExpLiteral();
   base::Optional<RegExpFlags> flags = scanner()->ScanRegExpFlags();
+  const AstRawString* flags_as_ast_raw_string = GetNextSymbolForRegExpLiteral();
   if (!flags.has_value() || !ValidateRegExpFlags(flags.value())) {
     Next();
     ReportMessage(MessageTemplate::kMalformedRegExpFlags);
@@ -1877,13 +1878,13 @@ typename ParserBase<Impl>::ExpressionT ParserBase<Impl>::ParseRegExpLiteral() {
   }
   Next();
   RegExpError regexp_error;
-  if (!ValidateRegExpLiteral(js_pattern, flags.value(), &regexp_error)) {
+  if (!ValidateRegExpLiteral(pattern, flags.value(), &regexp_error)) {
     if (RegExpErrorIsStackOverflow(regexp_error)) set_stack_overflow();
-    ReportMessage(MessageTemplate::kMalformedRegExp, js_pattern,
-                  RegExpErrorString(regexp_error));
+    ReportMessage(MessageTemplate::kMalformedRegExp, pattern,
+                  flags_as_ast_raw_string, RegExpErrorString(regexp_error));
     return impl()->FailureExpression();
   }
-  return factory()->NewRegExpLiteral(js_pattern, flags.value(), pos);
+  return factory()->NewRegExpLiteral(pattern, flags.value(), pos);
 }
 
 template <typename Impl>
@@ -2863,8 +2864,7 @@ typename ParserBase<Impl>::ExpressionT ParserBase<Impl>::ParseObjectLiteral() {
   // this runtime function. Here, we make sure that the number of
   // properties is less than number of arguments allowed for a runtime
   // call.
-  if (has_rest_property &&
-      properties.length() > InstructionStream::kMaxArguments) {
+  if (has_rest_property && properties.length() > Code::kMaxArguments) {
     expression_scope()->RecordPatternError(Scanner::Location(pos, position()),
                                            MessageTemplate::kTooManyArguments);
   }
@@ -2920,7 +2920,7 @@ void ParserBase<Impl>::ParseArguments(
     if (!Check(Token::COMMA)) break;
   }
 
-  if (args->length() > InstructionStream::kMaxArguments) {
+  if (args->length() > Code::kMaxArguments) {
     ReportMessage(MessageTemplate::kTooManyArguments);
     return;
   }
@@ -3967,7 +3967,7 @@ void ParserBase<Impl>::ParseFormalParameterList(FormalParametersT* parameters) {
   if (peek() != Token::RPAREN) {
     while (true) {
       // Add one since we're going to be adding a parameter.
-      if (parameters->arity + 1 > InstructionStream::kMaxArguments) {
+      if (parameters->arity + 1 > Code::kMaxArguments) {
         ReportMessage(MessageTemplate::kTooManyParameters);
         return;
       }

@@ -99,6 +99,20 @@ class V8_EXPORT Visitor {
               &HandleWeak<WeakMember<T>>, &weak_member);
   }
 
+#if defined(CPPGC_POINTER_COMPRESSION)
+  /**
+   * Trace method for UncompressedMember.
+   *
+   * \param member UncompressedMember reference retaining an object.
+   */
+  template <typename T>
+  void Trace(const subtle::UncompressedMember<T>& member) {
+    const T* value = member.GetRawAtomic();
+    CPPGC_DCHECK(value != kSentinelPointer);
+    TraceImpl(value);
+  }
+#endif  // defined(CPPGC_POINTER_COMPRESSION)
+
   /**
    * Trace method for inlined objects that are not allocated themselves but
    * otherwise follow managed heap layout and have a Trace() method.
@@ -312,8 +326,7 @@ class V8_EXPORT Visitor {
   template <typename PointerType>
   static void HandleWeak(const LivenessBroker& info, const void* object) {
     const PointerType* weak = static_cast<const PointerType*>(object);
-    auto* raw_ptr = weak->GetFromGC();
-    if (!info.IsHeapObjectAlive(raw_ptr)) {
+    if (!info.IsHeapObjectAlive(weak->GetFromGC())) {
       weak->ClearFromGC();
     }
   }
@@ -399,8 +412,7 @@ class V8_EXPORT RootVisitor {
   template <typename PointerType>
   static void HandleWeak(const LivenessBroker& info, const void* object) {
     const PointerType* weak = static_cast<const PointerType*>(object);
-    auto* raw_ptr = weak->GetFromGC();
-    if (!info.IsHeapObjectAlive(raw_ptr)) {
+    if (!info.IsHeapObjectAlive(weak->GetFromGC())) {
       weak->ClearFromGC();
     }
   }

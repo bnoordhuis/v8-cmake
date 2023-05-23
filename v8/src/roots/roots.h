@@ -46,6 +46,15 @@ class Symbol;
   V(HeapNumber, smi_min_value, SmiMinValue)               \
   V(HeapNumber, smi_max_value_plus_one, SmiMaxValuePlusOne)
 
+// Adapts one INTERNALIZED_STRING_LIST_GENERATOR entry to
+// the ROOT_LIST-compatible entry
+#define INTERNALIZED_STRING_LIST_ADAPTER(V, name, ...) V(String, name, name)
+
+// Produces (String, name, CamelCase) entries
+#define EXTRA_IMPORTANT_INTERNALIZED_STRING_ROOT_LIST(V) \
+  EXTRA_IMPORTANT_INTERNALIZED_STRING_LIST_GENERATOR(    \
+      INTERNALIZED_STRING_LIST_ADAPTER, V)
+
 // Defines all the read-only roots in Heap.
 #define STRONG_READ_ONLY_ROOT_LIST(V)                                          \
   /* Cluster the most popular ones in a few cache lines here at the top.    */ \
@@ -56,15 +65,16 @@ class Symbol;
   V(Map, two_pointer_filler_map, TwoPointerFillerMap)                          \
   V(Oddball, uninitialized_value, UninitializedValue)                          \
   V(Oddball, undefined_value, UndefinedValue)                                  \
-  V(Oddball, the_hole_value, TheHoleValue)                                     \
+  V(Hole, the_hole_value, TheHoleValue)                                        \
   V(Oddball, null_value, NullValue)                                            \
   V(Oddball, true_value, TrueValue)                                            \
   V(Oddball, false_value, FalseValue)                                          \
-  V(String, empty_string, empty_string)                                        \
+  EXTRA_IMPORTANT_INTERNALIZED_STRING_ROOT_LIST(V)                             \
   V(Map, meta_map, MetaMap)                                                    \
   V(Map, byte_array_map, ByteArrayMap)                                         \
   V(Map, fixed_array_map, FixedArrayMap)                                       \
   V(Map, fixed_cow_array_map, FixedCOWArrayMap)                                \
+  V(Map, fixed_double_array_map, FixedDoubleArrayMap)                          \
   V(Map, hash_table_map, HashTableMap)                                         \
   V(Map, symbol_map, SymbolMap)                                                \
   V(Map, one_byte_string_map, OneByteStringMap)                                \
@@ -77,7 +87,6 @@ class Symbol;
   V(Map, foreign_map, ForeignMap)                                              \
   V(Map, heap_number_map, HeapNumberMap)                                       \
   V(Map, transition_array_map, TransitionArrayMap)                             \
-  V(Map, thin_one_byte_string_map, ThinOneByteStringMap)                       \
   /* TODO(mythria): Once lazy feedback lands, check if feedback vector map */  \
   /* is still a popular map */                                                 \
   V(Map, feedback_vector_map, FeedbackVectorMap)                               \
@@ -101,7 +110,6 @@ class Symbol;
   V(Map, bytecode_array_map, BytecodeArrayMap)                                 \
   V(Map, code_map, CodeMap)                                                    \
   V(Map, coverage_info_map, CoverageInfoMap)                                   \
-  V(Map, fixed_double_array_map, FixedDoubleArrayMap)                          \
   V(Map, global_dictionary_map, GlobalDictionaryMap)                           \
   V(Map, many_closures_cell_map, ManyClosuresCellMap)                          \
   V(Map, mega_dom_handler_map, MegaDomHandlerMap)                              \
@@ -121,8 +129,6 @@ class Symbol;
   V(Map, side_effect_call_handler_info_map, SideEffectCallHandlerInfoMap)      \
   V(Map, side_effect_free_call_handler_info_map,                               \
     SideEffectFreeCallHandlerInfoMap)                                          \
-  V(Map, next_call_side_effect_free_call_handler_info_map,                     \
-    NextCallSideEffectFreeCallHandlerInfoMap)                                  \
   V(Map, simple_number_dictionary_map, SimpleNumberDictionaryMap)              \
   V(Map, small_ordered_hash_map_map, SmallOrderedHashMapMap)                   \
   V(Map, small_ordered_hash_set_map, SmallOrderedHashSetMap)                   \
@@ -139,6 +145,7 @@ class Symbol;
   IF_WASM(V, Map, wasm_resume_data_map, WasmResumeDataMap)                     \
   IF_WASM(V, Map, wasm_type_info_map, WasmTypeInfoMap)                         \
   IF_WASM(V, Map, wasm_continuation_object_map, WasmContinuationObjectMap)     \
+  IF_WASM(V, Map, wasm_null_map, WasmNullMap)                                  \
   V(Map, weak_fixed_array_map, WeakFixedArrayMap)                              \
   V(Map, weak_array_list_map, WeakArrayListMap)                                \
   V(Map, ephemeron_hash_table_map, EphemeronHashTableMap)                      \
@@ -171,8 +178,6 @@ class Symbol;
   V(Map, shared_uncached_external_one_byte_string_map,                         \
     SharedUncachedExternalOneByteStringMap)                                    \
   V(Map, shared_uncached_external_string_map, SharedUncachedExternalStringMap) \
-  V(Map, shared_thin_one_byte_string_map, SharedThinOneByteStringMap)          \
-  V(Map, shared_thin_string_map, SharedThinStringMap)                          \
   /* Oddball maps */                                                           \
   V(Map, undefined_map, UndefinedMap)                                          \
   V(Map, the_hole_map, TheHoleMap)                                             \
@@ -225,7 +230,9 @@ class Symbol;
   V(ScopeInfo, shadow_realm_scope_info, ShadowRealmScopeInfo)                  \
   V(RegisteredSymbolTable, empty_symbol_table, EmptySymbolTable)               \
   /* Hash seed */                                                              \
-  V(ByteArray, hash_seed, HashSeed)
+  V(ByteArray, hash_seed, HashSeed)                                            \
+  IF_WASM(V, HeapObject, wasm_null_padding, WasmNullPadding)                   \
+  IF_WASM(V, WasmNull, wasm_null, WasmNull)
 
 // Mutable roots that are known to be immortal immovable, for which we can
 // safely skip write barriers.
@@ -256,8 +263,8 @@ class Symbol;
   V(PropertyCell, promise_then_protector, PromiseThenProtector)                \
   V(PropertyCell, set_iterator_protector, SetIteratorProtector)                \
   V(PropertyCell, string_iterator_protector, StringIteratorProtector)          \
-  V(PropertyCell, number_string_prototype_no_replace_protector,                \
-    NumberStringPrototypeNoReplaceProtector)                                   \
+  V(PropertyCell, number_string_not_regexp_like_protector,                     \
+    NumberStringNotRegexpLikeProtector)                                        \
   /* Caches */                                                                 \
   V(FixedArray, string_split_cache, StringSplitCache)                          \
   V(FixedArray, regexp_multiple_cache, RegExpMultipleCache)                    \
@@ -282,6 +289,10 @@ class Symbol;
     AsyncGeneratorReturnClosedResolveSharedFun)                                \
   V(SharedFunctionInfo, async_iterator_value_unwrap_shared_fun,                \
     AsyncIteratorValueUnwrapSharedFun)                                         \
+  V(FunctionTemplateInfo, error_stack_getter_fun_template,                     \
+    ErrorStackGetterSharedFun)                                                 \
+  V(FunctionTemplateInfo, error_stack_setter_fun_template,                     \
+    ErrorStackSetterSharedFun)                                                 \
   V(SharedFunctionInfo, promise_all_resolve_element_shared_fun,                \
     PromiseAllResolveElementSharedFun)                                         \
   V(SharedFunctionInfo, promise_all_settled_resolve_element_shared_fun,        \
@@ -358,13 +369,12 @@ class Symbol;
     ConstructStubInvokeDeoptPCOffset)                                          \
   V(Smi, interpreter_entry_return_pc_offset, InterpreterEntryReturnPCOffset)
 
-// Adapts one INTERNALIZED_STRING_LIST_GENERATOR entry to
-// the ROOT_LIST-compatible entry
-#define INTERNALIZED_STRING_LIST_ADAPTER(V, name, ...) V(String, name, name)
-
 // Produces (String, name, CamelCase) entries
-#define INTERNALIZED_STRING_ROOT_LIST(V) \
-  INTERNALIZED_STRING_LIST_GENERATOR(INTERNALIZED_STRING_LIST_ADAPTER, V)
+#define INTERNALIZED_STRING_ROOT_LIST(V)            \
+  IMPORTANT_INTERNALIZED_STRING_LIST_GENERATOR(     \
+      INTERNALIZED_STRING_LIST_ADAPTER, V)          \
+  NOT_IMPORTANT_INTERNALIZED_STRING_LIST_GENERATOR( \
+      INTERNALIZED_STRING_LIST_ADAPTER, V)
 
 // Adapts one XXX_SYMBOL_LIST_GENERATOR entry to the ROOT_LIST-compatible entry
 #define SYMBOL_ROOT_LIST_ADAPTER(V, name, ...) V(Symbol, name, name)
@@ -631,8 +641,9 @@ class ReadOnlyRoots {
   // handle otherwise.
   Handle<HeapNumber> FindHeapNumber(double value);
 
-  // Get the address of a given read-only root index, without type checks.
-  V8_INLINE Address at(RootIndex root_index) const;
+  V8_INLINE Address address_at(RootIndex root_index) const;
+  V8_INLINE Object object_at(RootIndex root_index) const;
+  V8_INLINE Handle<Object> handle_at(RootIndex root_index) const;
 
   // Check if a slot is initialized yet. Should only be neccessary for code
   // running during snapshot creation.

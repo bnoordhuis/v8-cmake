@@ -16,7 +16,23 @@ ALL_VARIANT_FLAGS = {
     "jitless": [["--jitless"]],
     "sparkplug": [["--sparkplug"]],
     "maglev": [["--maglev"]],
-    "stress_maglev": [["--maglev", "--stress-maglev"]],
+    "maglev_future": [["--maglev", "--maglev-future"]],
+    "maglev_no_turbofan": [[
+        "--maglev", "--no-turbofan",
+        "--optimize-on-next-call-optimizes-to-maglev"
+    ]],
+    "stress_maglev": [[
+        "--maglev", "--stress-maglev",
+        "--optimize-on-next-call-optimizes-to-maglev"
+    ]],
+    "stress_maglev_future": [[
+        "--maglev", "--maglev-future", "--stress-maglev",
+        "--optimize-on-next-call-optimizes-to-maglev"
+    ]],
+    "stress_maglev_no_turbofan": [[
+        "--maglev", "--no-turbofan", "--stress-maglev",
+        "--optimize-on-next-call-optimizes-to-maglev"
+    ]],
     "turboshaft": [["--turboshaft"]],
     "concurrent_sparkplug": [["--concurrent-sparkplug", "--sparkplug"]],
     "always_sparkplug": [["--always-sparkplug", "--sparkplug"]],
@@ -74,7 +90,7 @@ INCOMPATIBLE_FLAGS_PER_VARIANT = {
         kIncompatibleFlagsForNoTurbofan + [
             "--track-field-types", "--sparkplug", "--concurrent-sparkplug",
             "--always-sparkplug", "--regexp-tier-up",
-            "--no-regexp-interpret-all"
+            "--no-regexp-interpret-all", "--interpreted-frames-native-stack"
         ],
     "nooptimization": [
         "--turbofan", "--always-turbofan", "--stress-concurrent-inlining"
@@ -94,13 +110,25 @@ INCOMPATIBLE_FLAGS_PER_VARIANT = {
     # stress_snapshot.
     "stress_snapshot": ["--expose-fast-api"],
     "stress": [
-        "--liftoff-only", "--wasm-speculative-inlining",
+        # 'stress' disables Liftoff, which conflicts with flags that require
+        # Liftoff support.
+        "--liftoff-only",
         "--wasm-dynamic-tiering"
     ],
     "sparkplug": ["--jitless", "--no-sparkplug"],
     "concurrent_sparkplug": ["--jitless"],
     "maglev": ["--jitless", "--no-maglev"],
+    "maglev_future": ["--jitless", "--no-maglev", "--no-maglev-future"],
+    "maglev_no_turbofan": [
+        "--jitless", "--no-maglev", "--turbofan", "--always-turbofan",
+        "--stress-concurrent-inlining",
+    ],
     "stress_maglev": ["--jitless"],
+    "stress_maglev_future": ["--jitless", "--no-maglev", "--no-maglev-future"],
+    "stress_maglev_no_turbofan": [
+        "--jitless", "--no-maglev", "--turbofan", "--always-turbofan",
+        "--stress-concurrent-inlining",
+    ],
     "always_sparkplug": ["--jitless", "--no-sparkplug"],
     "code_serializer": [
         "--cache=after-execute", "--cache=full-code-cache", "--cache=none"
@@ -124,7 +152,7 @@ INCOMPATIBLE_FLAGS_PER_VARIANT = {
 # applies when the code_comments build variable is NOT set.
 INCOMPATIBLE_FLAGS_PER_BUILD_VARIABLE = {
     "!code_comments": ["--code-comments"],
-    "!is_DEBUG_defined": [
+    "!DEBUG_defined": [
         "--check_handle_count",
         "--code_stats",
         "--dump_wasm_module",
@@ -147,7 +175,6 @@ INCOMPATIBLE_FLAGS_PER_BUILD_VARIABLE = {
         "--trace_wasm_compiler",
         "--trace_wasm_decoder",
         "--trace_wasm_instances",
-        "--trace_wasm_interpreter",
         "--trace_wasm_lazy_compilation",
         "--trace_wasm_native_heap",
         "--trace_wasm_serialization",
@@ -166,9 +193,11 @@ INCOMPATIBLE_FLAGS_PER_BUILD_VARIABLE = {
     "!has_maglev": ["--maglev"],
     "!has_turbofan":
         kIncompatibleFlagsForNoTurbofan,
-    "lite_mode": ["--no-lazy-feedback-allocation", "--max-semi-space-size=*"] +
+    "has_jitless":
+        INCOMPATIBLE_FLAGS_PER_VARIANT["jitless"],
+    "lite_mode": ["--max-semi-space-size=*"] +
                  INCOMPATIBLE_FLAGS_PER_VARIANT["jitless"],
-    "predictable": [
+    "verify_predictable": [
         "--parallel-compile-tasks-for-eager-toplevel",
         "--parallel-compile-tasks-for-lazy", "--concurrent-recompilation",
         "--stress-concurrent-allocation", "--stress-concurrent-inlining"
@@ -219,6 +248,11 @@ def _variant_order_key(v):
 
 ALL_VARIANTS = sorted(ALL_VARIANT_FLAGS.keys(),
                       key=_variant_order_key)
+
+# For internal integrity checking.
+REQUIRED_BUILD_VARIABLES = [
+    var.lstrip('!') for var in INCOMPATIBLE_FLAGS_PER_BUILD_VARIABLE.keys()
+]
 
 # Check {SLOW,FAST}_VARIANTS entries
 for variants in [SLOW_VARIANTS, FAST_VARIANTS]:

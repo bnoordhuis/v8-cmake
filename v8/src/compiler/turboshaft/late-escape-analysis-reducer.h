@@ -46,12 +46,7 @@ class LateEscapeAnalysisAnalyzer {
 template <class Next>
 class LateEscapeAnalysisReducer : public Next {
  public:
-  using Next::Asm;
-
-  template <class... Args>
-  explicit LateEscapeAnalysisReducer(const std::tuple<Args...>& args)
-      : Next(args),
-        analyzer_(Asm().modifiable_input_graph(), Asm().phase_zone()) {}
+  TURBOSHAFT_REDUCER_BOILERPLATE()
 
   void Analyze() {
     analyzer_.Run();
@@ -59,7 +54,8 @@ class LateEscapeAnalysisReducer : public Next {
   }
 
  private:
-  LateEscapeAnalysisAnalyzer analyzer_;
+  LateEscapeAnalysisAnalyzer analyzer_{Asm().modifiable_input_graph(),
+                                       Asm().phase_zone()};
 };
 
 }  // namespace v8::internal::compiler::turboshaft

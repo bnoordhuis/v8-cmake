@@ -21,8 +21,6 @@ namespace v8 {
 namespace internal {
 namespace torque {
 
-DEFINE_CONTEXTUAL_VARIABLE(CurrentAst)
-
 using TypeList = std::vector<TypeExpression*>;
 
 struct ExpressionWithSource {
@@ -42,12 +40,18 @@ struct EnumEntry {
   base::Optional<TypeExpression*> type;
 };
 
-class BuildFlags : public ContextualClass<BuildFlags> {
+class BuildFlags : public base::ContextualClass<BuildFlags> {
  public:
   BuildFlags() {
     build_flags_["V8_SFI_HAS_UNIQUE_ID"] = V8_SFI_HAS_UNIQUE_ID;
+    build_flags_["V8_SFI_NEEDS_PADDING"] = V8_SFI_NEEDS_PADDING;
     build_flags_["V8_EXTERNAL_CODE_SPACE"] = V8_EXTERNAL_CODE_SPACE_BOOL;
     build_flags_["TAGGED_SIZE_8_BYTES"] = TAGGED_SIZE_8_BYTES;
+#ifdef V8_INTL_SUPPORT
+    build_flags_["V8_INTL_SUPPORT"] = true;
+#else
+    build_flags_["V8_INTL_SUPPORT"] = false;
+#endif
     build_flags_["V8_ENABLE_SWISS_NAME_DICTIONARY"] =
         V8_ENABLE_SWISS_NAME_DICTIONARY_BOOL;
 #ifdef V8_ENABLE_JAVASCRIPT_PROMISE_HOOKS
@@ -82,7 +86,6 @@ class BuildFlags : public ContextualClass<BuildFlags> {
  private:
   std::unordered_map<std::string, bool> build_flags_;
 };
-DEFINE_CONTEXTUAL_VARIABLE(BuildFlags)
 
 template <>
 V8_EXPORT_PRIVATE const ParseResultTypeId ParseResultHolder<std::string>::id =

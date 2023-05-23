@@ -137,9 +137,6 @@ class V8_EXPORT_PRIVATE NodeProperties {
       case IrOpcode::kTypeGuard:
         *out_value = GetValueInput(node, 0);
         return true;
-      case IrOpcode::kFoldConstant:
-        *out_value = GetValueInput(node, 1);
-        return true;
       default:
         return false;
     }
@@ -223,11 +220,10 @@ class V8_EXPORT_PRIVATE NodeProperties {
   // DO NOT USE InferMapsUnsafe IN NEW CODE. Use MapInference instead.
   static InferMapsResult InferMapsUnsafe(JSHeapBroker* broker, Node* receiver,
                                          Effect effect,
-                                         ZoneRefUnorderedSet<MapRef>* maps_out);
+                                         ZoneRefSet<Map>* maps_out);
 
   // Return the initial map of the new-target if the allocation can be inlined.
-  static base::Optional<MapRef> GetJSCreateMap(JSHeapBroker* broker,
-                                               Node* receiver);
+  static OptionalMapRef GetJSCreateMap(JSHeapBroker* broker, Node* receiver);
 
   // Walks up the {effect} chain to check that there's no observable side-effect
   // between the {effect} and it's {dominator}. Aborts the walk if there's join

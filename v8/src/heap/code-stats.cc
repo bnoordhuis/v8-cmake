@@ -199,14 +199,16 @@ void CodeStatistics::CollectCommentStatistics(Isolate* isolate,
 // Collects code comment statistics.
 void CodeStatistics::CollectCodeCommentStatistics(AbstractCode obj,
                                                   Isolate* isolate) {
-  // Bytecode objects do not contain RelocInfo. Off-heap builtins might contain
-  // comments but they are a part of binary so it doesn't make sense to account
-  // them in the stats.
-  // Only process code objects for code comment statistics.
-  PtrComprCageBase cage_base(isolate);
+  // Bytecode objects do not contain RelocInfo.
+  PtrComprCageBase cage_base{isolate};
   if (!obj.IsCode(cage_base)) return;
 
   Code code = Code::cast(obj);
+
+  // Off-heap builtins might contain comments but they are a part of binary so
+  // it doesn't make sense to account them in the stats.
+  if (!code.has_instruction_stream()) return;
+
   CodeCommentsIterator cit(code.code_comments(), code.code_comments_size());
   int delta = 0;
   int prev_pc_offset = 0;
@@ -217,8 +219,8 @@ void CodeStatistics::CollectCodeCommentStatistics(AbstractCode obj,
     cit.Next();
   }
 
-  DCHECK(0 <= prev_pc_offset && prev_pc_offset <= code.InstructionSize());
-  delta += static_cast<int>(code.InstructionSize() - prev_pc_offset);
+  DCHECK(0 <= prev_pc_offset && prev_pc_offset <= code.instruction_size());
+  delta += static_cast<int>(code.instruction_size() - prev_pc_offset);
   EnterComment(isolate, "NoComment", delta);
 }
 #endif

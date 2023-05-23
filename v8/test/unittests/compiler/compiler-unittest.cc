@@ -244,8 +244,7 @@ TEST_F(CompilerTest, Regression236) {
   Factory* factory = i_isolate()->factory();
   v8::HandleScope scope(isolate());
 
-  Handle<Script> script = factory->NewScript(factory->empty_string());
-  script->set_source(ReadOnlyRoots(i_isolate()->heap()).undefined_value());
+  Handle<Script> script = factory->NewScript(factory->undefined_value());
   EXPECT_EQ(-1, Script::GetLineNumber(script, 0));
   EXPECT_EQ(-1, Script::GetLineNumber(script, 100));
   EXPECT_EQ(-1, Script::GetLineNumber(script, -1));
@@ -613,10 +612,12 @@ TEST_F(CompilerTest, CompileFunctionScriptOrigin) {
       v8::ScriptCompiler::CompileFunction(context(), &script_source)
           .ToLocalChecked();
   EXPECT_TRUE(!fun.IsEmpty());
-  v8::Local<v8::UnboundScript> script =
-      fun->GetUnboundScript().ToLocalChecked();
-  EXPECT_TRUE(!script.IsEmpty());
-  EXPECT_TRUE(script->GetScriptName()->StrictEquals(NewString("test")));
+  auto fun_i = i::Handle<i::JSFunction>::cast(Utils::OpenHandle(*fun));
+  EXPECT_TRUE(fun_i->shared().IsSharedFunctionInfo());
+  EXPECT_TRUE(
+      Utils::ToLocal(i::handle(i::Script::cast(fun_i->shared().script()).name(),
+                               i_isolate()))
+          ->StrictEquals(NewString("test")));
   v8::TryCatch try_catch(isolate());
   isolate()->SetCaptureStackTraceForUncaughtExceptions(true);
   EXPECT_TRUE(fun->Call(context(), context()->Global(), 0, nullptr).IsEmpty());

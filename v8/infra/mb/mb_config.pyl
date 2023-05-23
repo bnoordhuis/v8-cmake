@@ -55,6 +55,8 @@
       # PGO
       'V8 Linux PGO instrumentation - builder' : 'builtins_profiling_x86',
       'V8 Linux64 PGO instrumentation - builder' : 'builtins_profiling_x64',
+      'V8 Win32 PGO instrumentation - builder' : 'builtins_profiling_x86',
+      'V8 Win64 PGO instrumentation - builder' : 'builtins_profiling_x64',
 
       # Linux.
       'V8 Linux - builder': 'release_x86_gcmole',
@@ -67,6 +69,7 @@
       'V8 Linux64 - builder (goma cache silo)': 'release_x64',
       'V8 Linux64 - builder (reclient)': 'release_x64_reclient',
       'V8 Linux64 - builder (reclient compare)': 'release_x64_reclient',
+      'V8 Linux64 - official - builder': 'official_x64',
       'V8 Linux64 - debug builder': 'debug_x64',
       'V8 Linux64 - external code space - debug - builder': 'debug_x64_external_code_space',
       'V8 Linux64 - custom snapshot - debug builder': 'debug_x64_custom',
@@ -83,6 +86,7 @@
       'V8 Win32 - builder (reclient)': 'release_x86_minimal_symbols_reclient',
       'V8 Win32 - builder (reclient compare)': 'release_x86_minimal_symbols_reclient',
       'V8 Win32 - debug builder': 'debug_x86_minimal_symbols',
+      'V8 Win32 - msvc - debug builder': 'debug_x86_msvc',
       # TODO(machenbach): Remove after switching to x64 on infra side.
       'V8 Win64 ASAN - builder': 'release_x64_asan_no_lsan',
       'V8 Win64 - builder': 'release_x64_minimal_symbols',
@@ -112,9 +116,12 @@
       'V8 Linux - arm64 - sim - MSAN - builder': 'release_simulate_arm64_msan',
       # FYI.
       'V8 iOS - sim - builder': 'release_x64_ios_simulator',
+      'V8 Linux64 - arm64 - builder': 'release_arm64',
+      'V8 Linux64 - arm64 - debug builder': 'debug_arm64',
       'V8 Linux64 - arm64 - sim - no pointer compression - builder':
           'release_simulate_arm64_no_pointer_compression',
       'V8 Linux64 - coverage': 'release_x64_coverage',
+      'V8 Linux64 - coverage - debug': 'debug_x64_coverage',
       'V8 Linux64 - cppgc-non-default - debug - builder': 'debug_x64_non_default_cppgc',
       'V8 Linux64 - debug - perfetto - builder': 'debug_x64_perfetto',
       'V8 Linux64 - disable runtime call stats - builder': 'release_x64_disable_runtime_call_stats',
@@ -129,9 +136,9 @@
       'V8 Linux64 - cfi - builder': 'release_x64_cfi',
       'V8 Linux64 UBSan - builder': 'release_x64_ubsan',
       'V8 Linux - vtunejit': 'debug_x86_vtunejit',
-      'V8 Linux64 - gcov coverage': 'release_x64_gcc_coverage',
       'V8 Linux64 - Fuzzilli - builder': 'release_x64_fuzzilli',
       'V8 Linux64 - predictable - builder': 'release_x64_predictable',
+      'V8 Linux64 - verify deterministic': 'release_x64_verify_deterministic',
       'V8 Linux - full debug builder': 'full_debug_x86',
       'V8 Mac64 - full debug builder': 'full_debug_x64',
       'V8 Random Deopt Fuzzer - debug': 'debug_x64',
@@ -176,11 +183,17 @@
     },
     'client.v8.perf' : {
       'V8 Arm - builder - perf': 'official_arm',
+      'V8 Arm - builder - pgo - perf': 'official_arm_pgo',
       'V8 Android Arm - builder - perf': 'official_android_arm',
+      'V8 Android Arm - builder - pgo - perf': 'official_android_arm_pgo',
       'V8 Android Arm64 - builder - perf': 'official_android_arm64',
+      'V8 Android Arm64 - builder - pgo - perf': 'official_android_arm64_pgo',
       'V8 Linux - builder - perf': 'official_x86',
+      'V8 Linux - builder - pgo - perf': 'official_x86_pgo',
       'V8 Linux64 - builder - perf': 'official_x64',
+      'V8 Linux64 - builder - pgo - perf': 'official_x64_pgo',
       'V8 Mac Arm64 - builder - perf': 'official_mac_arm64',
+      'V8 Mac Arm64 - builder - pgo - perf': 'official_mac_arm64_pgo',
     },
     'client.v8.ports': {
       # Arm.
@@ -213,6 +226,7 @@
       'v8_android_arm_compile_rel': 'release_android_arm',
       'v8_android_arm64_compile_dbg': 'debug_android_arm64',
       'v8_android_arm64_n5x_compile_rel': 'release_android_arm64',
+      'v8_android_arm64_d8_compile_rel': 'release_android_arm64',
       'v8_fuchsia_compile_rel': 'release_x64_fuchsia_trybot',
       'v8_ios_simulator': 'release_x64_ios_simulator',
       'v8_linux_compile_rel': 'release_x86_gcmole_trybot',
@@ -225,11 +239,14 @@
       'v8_linux_gc_stress_compile_dbg': 'debug_x86_trybot',
       'v8_linux_shared_compile_rel': 'release_x86_shared_verify_heap',
       'v8_linux_vtunejit': 'debug_x86_vtunejit',
+      'v8_linux64_arm64_compile_dbg': 'debug_arm64_trybot',
+      'v8_linux64_arm64_compile_rel': 'release_arm64_trybot',
       'v8_linux64_arm64_no_pointer_compression_compile_rel':
           'release_simulate_arm64_no_pointer_compression',
       'v8_linux64_cppgc_non_default_compile_dbg': 'debug_x64_non_default_cppgc',
       'v8_linux64_compile_dbg': 'debug_x64_trybot',
-      'v8_linux64_coverage': 'release_x64_coverage',
+      'v8_linux64_coverage_dbg': 'debug_x64_coverage',
+      'v8_linux64_coverage_rel': 'release_x64_coverage',
       'v8_linux64_no_sandbox_compile_dbg': 'debug_x64_no_sandbox',
       'v8_linux64_dict_tracking_compile_dbg': 'debug_x64_dict_tracking_trybot',
       'v8_linux64_disable_runtime_call_stats_compile_rel': 'release_x64_disable_runtime_call_stats',
@@ -240,7 +257,6 @@
       'v8_linux64_gcc_compile_dbg': 'debug_x64_gcc',
       'v8_linux64_gcc_light_compile_dbg': 'debug_x64_gcc',
       'v8_linux64_gcc_compile_rel': 'release_x64_gcc',
-      'v8_linux64_gcov_coverage': 'release_x64_gcc_coverage',
       'v8_linux64_header_includes_dbg': 'debug_x64_header_includes',
       'v8_linux64_minor_mc_compile_dbg': 'debug_x64_trybot',
       'v8_linux64_fyi_compile_rel': 'release_x64_test_features_trybot',
@@ -249,6 +265,7 @@
       'v8_linux64_no_pointer_compression_compile_rel': 'release_x64_no_pointer_compression',
       'v8_linux64_compile_rel': 'release_x64_test_features_gcmole_trybot',
       'v8_linux64_no_sandbox_compile_rel': 'release_x64_no_sandbox',
+      'v8_linux64_official_compile_rel': 'official_x64',
       'v8_linux64_predictable_compile_rel': 'release_x64_predictable',
       'v8_linux64_shared_compile_rel': 'release_x64_shared_verify_heap',
       'v8_linux64_single_generation_compile_dbg': 'debug_x64_single_generation',
@@ -267,11 +284,13 @@
       'v8_linux64_tsan_isolates_compile_rel':
           'release_x64_tsan_minimal_symbols',
       'v8_linux64_ubsan_compile_rel': 'release_x64_ubsan_minimal_symbols',
+      'v8_linux64_verify_deterministic_rel': 'release_x64_verify_deterministic',
       'v8_odroid_arm_compile_rel': 'release_arm',
       'v8_linux_torque_compare': 'torque_compare',
       # TODO(machenbach): Remove after switching to x64 on infra side.
       'v8_win_compile_dbg': 'debug_x86_trybot',
       'v8_win_compile_rel': 'release_x86_trybot',
+      'v8_win_msvc_light_compile_dbg': 'debug_x86_msvc',
       'v8_win64_asan_compile_rel': 'release_x64_asan_no_lsan',
       'v8_win64_msvc_light_compile_rel': 'release_x64_msvc',
       'v8_win64_compile_dbg': 'debug_x64_minimal_symbols',
@@ -454,6 +473,8 @@
       'debug_bot', 'arm', 'hard_float'],
     'debug_arm64': [
       'debug_bot', 'arm64'],
+    'debug_arm64_trybot': [
+      'debug_trybot', 'arm64'],
     'debug_arm64_no_pointer_compression': [
       'debug_bot', 'arm64', 'no_sandbox', 'dcheck_always_on', 'v8_enable_slow_dchecks', 'v8_enable_javascript_promise_hooks',
       'v8_disable_pointer_compression'],
@@ -465,6 +486,8 @@
       'release_bot', 'arm', 'hard_float'],
     'release_arm64': [
       'release_bot', 'arm64'],
+    'release_arm64_trybot': [
+      'release_trybot', 'arm64'],
     'release_arm64_hard_float': [
       'release_bot', 'arm64', 'hard_float'],
     'release_android_arm': [
@@ -476,15 +499,29 @@
 
     # Official configs for arm
     'official_arm': [
-      'release_bot', 'arm', 'hard_float', 'official', 'disable_pgo'],
+      'release_bot', 'arm', 'hard_float', 'official', 'disable_chrome_pgo'],
+    'official_arm_pgo': [
+      'release_bot', 'arm', 'hard_float', 'official', 'disable_chrome_pgo',
+      'builtins_optimization'],
     'official_android_arm': [
       'release_bot', 'arm', 'android', 'minimal_symbols',
-      'android_strip_outputs', 'official', 'disable_pgo'],
+      'android_strip_outputs', 'official', 'disable_chrome_pgo'],
+    'official_android_arm_pgo': [
+      'release_bot', 'arm', 'android', 'minimal_symbols',
+      'android_strip_outputs', 'official', 'disable_chrome_pgo',
+      'builtins_optimization'],
     'official_android_arm64': [
       'release_bot', 'arm64', 'android', 'minimal_symbols',
-      'android_strip_outputs', 'official', 'disable_pgo'],
+      'android_strip_outputs', 'official', 'disable_chrome_pgo'],
+    'official_android_arm64_pgo': [
+      'release_bot', 'arm64', 'android', 'minimal_symbols',
+      'android_strip_outputs', 'official', 'disable_chrome_pgo',
+      'builtins_optimization'],
     'official_mac_arm64': [
-      'release_bot', 'arm64', 'official', 'disable_pgo'],
+      'release_bot', 'arm64', 'official', 'disable_chrome_pgo'],
+    'official_mac_arm64_pgo': [
+      'release_bot', 'arm64', 'official', 'disable_chrome_pgo',
+      'builtins_optimization'],
 
     # Release configs for x64.
     'release_x64': [
@@ -531,9 +568,6 @@
       'release_trybot', 'x64', 'fuchsia'],
     'release_x64_gcc': [
       'release_bot_no_goma', 'x64', 'gcc', 'lld', 'no_custom_libcxx'],
-    'release_x64_gcc_coverage': [
-      'release_bot_no_goma', 'x64', 'coverage', 'gcc', 'lld',
-      'no_custom_libcxx', 'no_sysroot'],
     'release_x64_ios_simulator': [
       'release_bot', 'x64', 'ios_simulator'],
     'release_x64_internal': [
@@ -572,12 +606,17 @@
     'release_x64_verify_csa': [
       'release_bot', 'x64', 'dcheck_always_on',
       'v8_enable_slow_dchecks', 'v8_verify_csa'],
+    'release_x64_verify_deterministic': [
+      'release_bot', 'x64', 'v8_verify_deterministic'],
     'release_x64_webassembly_disabled': [
       'release_bot', 'x64', 'webassembly_disabled'],
 
     # Official configs for x64.
     'official_x64': [
-      'release_bot', 'x64', 'official', 'disable_pgo'],
+      'release_bot', 'x64', 'official', 'disable_chrome_pgo'],
+    'official_x64_pgo': [
+      'release_bot', 'x64', 'official', 'disable_chrome_pgo',
+      'builtins_optimization'],
 
     # Debug configs for x64.
     'debug_x64': [
@@ -589,6 +628,8 @@
       'x64', 'asan'],
     'debug_x64_conservative_stack_scanning': [
       'debug_bot', 'x64', 'conservative_stack_scanning'],
+    'debug_x64_coverage': [
+      'debug_bot', 'x64', 'clang_coverage'],
     'debug_x64_custom': [
       'debug_bot', 'x64', 'v8_snapshot_custom'],
     'debug_x64_external_code_space': [
@@ -628,6 +669,8 @@
       'debug_bot', 'x86', 'asan', 'lsan'],
     'debug_x86_minimal_symbols': [
       'debug_bot', 'x86', 'minimal_symbols'],
+    'debug_x86_msvc': [
+      'debug_bot_no_goma', 'x86', 'minimal_symbols', 'msvc'],
     'debug_x86_no_i18n': [
       'debug_bot', 'x86', 'v8_no_i18n'],
     'debug_x86_trybot': [
@@ -665,7 +708,10 @@
 
     # Official configs for x86.
     'official_x86': [
-        'release_bot', 'x86', 'official', 'disable_pgo'],
+        'release_bot', 'x86', 'official', 'disable_chrome_pgo'],
+    'official_x86_pgo': [
+        'release_bot', 'x86', 'official', 'disable_chrome_pgo',
+        'builtins_optimization'],
 
     # Torque compare test
     'torque_compare': [
@@ -703,6 +749,10 @@
       'gn_args': 'v8_enable_builtins_profiling=true',
     },
 
+    'builtins_optimization': {
+      'gn_args': 'v8_enable_builtins_optimization=true',
+    },
+
     'cfi': {
       'mixins': ['v8_enable_test_features'],
       'gn_args': ('is_cfi=true use_cfi_cast=true use_cfi_icall=true '
@@ -724,12 +774,7 @@
     },
 
     'conservative_stack_scanning': {
-      'gn_args': 'v8_enable_conservative_stack_scanning=true '
-                 'v8_enable_inner_pointer_resolution_mb=true',
-    },
-
-    'coverage': {
-      'gn_args': 'v8_code_coverage=true',
+      'gn_args': 'v8_enable_conservative_stack_scanning=true',
     },
 
     'dcheck_always_on': {
@@ -771,7 +816,7 @@
                  'v8_enable_atomic_object_field_writes=false ',
     },
 
-    'disable_pgo': {
+    'disable_chrome_pgo': {
       'gn_args': 'chrome_pgo_phase=0',
     },
 
@@ -823,12 +868,12 @@
 
     'msan': {
       'mixins': ['v8_enable_test_features'],
-      'gn_args': 'is_msan=true msan_track_origins=2 instrumented_libraries_release="xenial"',
+      'gn_args': 'is_msan=true msan_track_origins=2 instrumented_libraries_release="focal"',
     },
 
     'msan_no_origins': {
       'mixins': ['v8_enable_test_features'],
-      'gn_args': 'is_msan=true msan_track_origins=0 instrumented_libraries_release="xenial"',
+      'gn_args': 'is_msan=true msan_track_origins=0 instrumented_libraries_release="focal"',
     },
 
     'msvc': {
@@ -845,10 +890,6 @@
 
     'no_sandbox': {
       'gn_args': 'v8_enable_sandbox=false',
-    },
-
-    'no_sysroot': {
-      'gn_args': 'use_sysroot=false',
     },
 
     'non_default_cppgc': {
@@ -1054,6 +1095,10 @@
 
     'v8_verify_csa': {
       'gn_args': 'v8_enable_verify_csa=true',
+    },
+
+    'v8_verify_deterministic': {
+      'gn_args': 'v8_verify_deterministic_mksnapshot=true',
     },
 
     's390x': {

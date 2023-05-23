@@ -431,12 +431,14 @@ class ValueType {
 
   constexpr bool is_bottom() const { return kind() == kBottom; }
 
-  // These can occur as the result of type propagation, but never in
-  // reachable control flow.
+  // Except for {bottom}, these can occur as the result of trapping type casts,
+  // type propagation, or trivially uninhabitable parameters/locals, but never
+  // in reachable control flow.
   constexpr bool is_uninhabited() const {
-    return is_non_nullable() && (is_reference_to(HeapType::kNone) ||
-                                 is_reference_to(HeapType::kNoExtern) ||
-                                 is_reference_to(HeapType::kNoFunc));
+    return is_bottom() ||
+           (is_non_nullable() && (is_reference_to(HeapType::kNone) ||
+                                  is_reference_to(HeapType::kNoExtern) ||
+                                  is_reference_to(HeapType::kNoFunc)));
   }
 
   constexpr bool is_packed() const { return wasm::is_packed(kind()); }
@@ -772,8 +774,8 @@ class LoadType {
       : val_(val) {}
 
   constexpr LoadTypeValue value() const { return val_; }
-  constexpr unsigned size_log_2() const { return kLoadSizeLog2[val_]; }
-  constexpr unsigned size() const { return 1 << size_log_2(); }
+  constexpr uint8_t size_log_2() const { return kLoadSizeLog2[val_]; }
+  constexpr uint8_t size() const { return kLoadSize[val_]; }
   constexpr ValueType value_type() const { return kValueType[val_]; }
   constexpr MachineType mem_type() const { return kMemType[val_]; }
 
@@ -800,6 +802,15 @@ class LoadType {
 
  private:
   const LoadTypeValue val_;
+
+  static constexpr uint8_t kLoadSize[] = {
+  // MSVC wants a static_cast here.
+#define LOAD_SIZE(_, __, memtype) \
+  static_cast<uint8_t>(           \
+      ElementSizeInBytes(MachineType::memtype().representation())),
+      FOREACH_LOAD_TYPE(LOAD_SIZE)
+#undef LOAD_SIZE
+  };
 
   static constexpr uint8_t kLoadSizeLog2[] = {
   // MSVC wants a static_cast here.

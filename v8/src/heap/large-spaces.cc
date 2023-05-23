@@ -16,6 +16,7 @@
 #include "src/heap/marking.h"
 #include "src/heap/memory-allocator.h"
 #include "src/heap/memory-chunk-inl.h"
+#include "src/heap/memory-chunk-layout.h"
 #include "src/heap/remembered-set.h"
 #include "src/heap/slot-set.h"
 #include "src/heap/spaces-inl.h"
@@ -56,10 +57,9 @@ LargePage* LargePage::Initialize(Heap* heap, MemoryChunk* chunk,
 
   MSAN_ALLOCATED_UNINITIALIZED_MEMORY(chunk->area_start(), chunk->area_size());
 
-  LargePage* page = static_cast<LargePage*>(chunk);
-  page->SetFlag(MemoryChunk::LARGE_PAGE);
-  page->list_node().Initialize();
-  return page;
+  chunk->SetFlag(MemoryChunk::LARGE_PAGE);
+  chunk->list_node().Initialize();
+  return LargePage::cast(chunk);
 }
 
 size_t LargeObjectSpace::Available() const {
@@ -71,6 +71,9 @@ size_t LargeObjectSpace::Available() const {
 void LargePage::ClearOutOfLiveRangeSlots(Address free_start) {
   DCHECK_NULL(slot_set<OLD_TO_NEW>());
   DCHECK_NULL(typed_slot_set<OLD_TO_NEW>());
+
+  DCHECK_NULL(slot_set<OLD_TO_NEW_BACKGROUND>());
+  DCHECK_NULL(typed_slot_set<OLD_TO_NEW_BACKGROUND>());
 
   DCHECK_NULL(slot_set<OLD_TO_OLD>());
   DCHECK_NULL(typed_slot_set<OLD_TO_OLD>());
@@ -106,7 +109,7 @@ HeapObject LargeObjectSpaceObjectIterator::Next() {
 // OldLargeObjectSpace
 
 LargeObjectSpace::LargeObjectSpace(Heap* heap, AllocationSpace id)
-    : Space(heap, id, new NoFreeList(), allocation_counter_),
+    : Space(heap, id, nullptr, allocation_counter_),
       size_(0),
       page_count_(0),
       objects_size_(0),
@@ -126,7 +129,7 @@ void LargeObjectSpace::TearDown() {
 
 void LargeObjectSpace::AdvanceAndInvokeAllocationObservers(Address soon_object,
                                                            size_t object_size) {
-  if (!allocation_counter_.IsActive()) return;
+  if (!heap()->IsAllocationObserverActive()) return;
 
   if (object_size >= allocation_counter_.NextBytes()) {
     allocation_counter_.InvokeAllocationObservers(soon_object, object_size,
@@ -162,10 +165,10 @@ AllocationResult OldLargeObjectSpace::AllocateRaw(int object_size,
       heap()->GCFlagsForIncrementalMarking(),
       kGCCallbackScheduleIdleGarbageCollection);
   if (heap()->incremental_marking()->black_allocation()) {
-    heap()->marking_state()->WhiteToBlack(object);
+    heap()->marking_state()->TryMarkAndAccountLiveBytes(object);
   }
   DCHECK_IMPLIES(heap()->incremental_marking()->black_allocation(),
-                 heap()->marking_state()->IsBlack(object));
+                 heap()->marking_state()->IsMarked(object));
   page->InitializationMemoryFence();
   heap()->NotifyOldGenerationExpansion(identity(), page);
   AdvanceAndInvokeAllocationObservers(object.address(),
@@ -196,10 +199,10 @@ AllocationResult OldLargeObjectSpace::AllocateRawBackground(
   HeapObject object = page->GetObject();
   heap()->StartIncrementalMarkingIfAllocationLimitIsReachedBackground();
   if (heap()->incremental_marking()->black_allocation()) {
-    heap()->marking_state()->WhiteToBlack(object);
+    heap()->marking_state()->TryMarkAndAccountLiveBytes(object);
   }
   DCHECK_IMPLIES(heap()->incremental_marking()->black_allocation(),
-                 heap()->marking_state()->IsBlack(object));
+                 heap()->marking_state()->IsMarked(object));
   page->InitializationMemoryFence();
   if (identity() == CODE_LO_SPACE) {
     heap()->isolate()->AddCodeMemoryChunk(page);
@@ -278,8 +281,7 @@ void LargeObjectSpace::AddPage(LargePage* page, size_t object_size) {
   page_count_++;
   memory_chunk_list_.PushBack(page);
   page->set_owner(this);
-  page->SetOldGenerationPageFlags(!is_off_thread() &&
-                                  heap()->incremental_marking()->IsMarking());
+  page->SetOldGenerationPageFlags(heap()->incremental_marking()->IsMarking());
   for (size_t i = 0; i < ExternalBackingStoreType::kNumTypes; i++) {
     ExternalBackingStoreType t = static_cast<ExternalBackingStoreType>(i);
     IncrementExternalBackingStoreBytes(t, page->ExternalBackingStoreBytes(t));
@@ -403,6 +405,7 @@ void LargeObjectSpace::Verify(Isolate* isolate,
         object.IsUncompiledDataWithoutPreparseData(cage_base) ||  //
 #if V8_ENABLE_WEBASSEMBLY                                         //
         object.IsWasmArray() ||                                   //
+        object.IsWasmStruct() ||                                  //
 #endif                                                            //
         object.IsWeakArrayList(cage_base) ||                      //
         object.IsWeakFixedArray(cage_base);
@@ -451,8 +454,7 @@ OldLargeObjectSpace::OldLargeObjectSpace(Heap* heap, AllocationSpace id)
     : LargeObjectSpace(heap, id) {}
 
 NewLargeObjectSpace::NewLargeObjectSpace(Heap* heap, size_t capacity)
-    : LargeObjectSpace(heap, NEW_LO_SPACE),
-      capacity_(capacity) {}
+    : LargeObjectSpace(heap, NEW_LO_SPACE), capacity_(capacity) {}
 
 AllocationResult NewLargeObjectSpace::AllocateRaw(int object_size) {
   object_size = ALIGN_TO_ALLOCATION_ALIGNMENT(object_size);
@@ -536,6 +538,8 @@ CodeLargeObjectSpace::CodeLargeObjectSpace(Heap* heap)
 
 AllocationResult CodeLargeObjectSpace::AllocateRaw(int object_size) {
   DCHECK(!v8_flags.enable_third_party_heap);
+  CodePageHeaderModificationScope header_modification_scope(
+      "Code allocation needs header access.");
   return OldLargeObjectSpace::AllocateRaw(object_size, EXECUTABLE);
 }
 

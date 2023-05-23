@@ -241,7 +241,7 @@ class V8_EXPORT_PRIVATE CallDescriptor final
     // 3. JS runtime arguments are not attached as inputs to the TailCall node.
     // 4. Prior to the tail call, frame and register state is torn down to just
     //    before the caller frame was constructed.
-    // 5. Unlike normal tail calls, arguments adaptor frames (if present) are
+    // 5. Unlike normal tail calls, inlined arguments frames (if present) are
     //    *not* torn down.
     //
     // In other words, behavior is identical to a jmp instruction prior caller
@@ -506,9 +506,12 @@ class V8_EXPORT_PRIVATE Linkage : public NON_EXPORTED_BASE(ZoneObject) {
   // The call descriptor for this compilation unit describes the locations
   // of incoming parameters and the outgoing return value(s).
   CallDescriptor* GetIncomingDescriptor() const { return incoming_; }
-  static CallDescriptor* GetJSCallDescriptor(Zone* zone, bool is_osr,
-                                             int parameter_count,
-                                             CallDescriptor::Flags flags);
+  // Calls to JSFunctions should never overwrite the {properties}, but calls to
+  // known builtins might.
+  static CallDescriptor* GetJSCallDescriptor(
+      Zone* zone, bool is_osr, int parameter_count, CallDescriptor::Flags flags,
+      Operator::Properties properties =
+          Operator::kNoProperties /* use with care! */);
 
   static CallDescriptor* GetRuntimeCallDescriptor(
       Zone* zone, Runtime::FunctionId function, int js_parameter_count,

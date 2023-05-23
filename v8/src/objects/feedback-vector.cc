@@ -234,7 +234,6 @@ Handle<FeedbackVector> FeedbackVector::New(
   DCHECK(!vector->maybe_has_maglev_code());
   DCHECK(!vector->maybe_has_turbofan_code());
   DCHECK_EQ(vector->invocation_count(), 0);
-  DCHECK_EQ(vector->profiler_ticks(), 0);
   DCHECK(vector->maybe_optimized_code()->IsCleared());
 
   // Ensure we can skip the write barrier
@@ -347,26 +346,27 @@ void FeedbackVector::AddToVectorsForProfilingTools(
   isolate->SetFeedbackVectorsForProfilingTools(*list);
 }
 
-void FeedbackVector::SaturatingIncrementProfilerTicks() {
-  int ticks = profiler_ticks();
-  if (ticks < Smi::kMaxValue) set_profiler_ticks(ticks + 1);
-}
-
 void FeedbackVector::SetOptimizedCode(Code code) {
   DCHECK(CodeKindIsOptimizedJSFunction(code.kind()));
-  // We should set optimized code only when there is no valid optimized code.
-  DCHECK(!has_optimized_code() ||
-         optimized_code().marked_for_deoptimization() ||
-         (CodeKindCanTierUp(optimized_code().kind()) &&
-          optimized_code().kind() < code.kind()) ||
-         v8_flags.stress_concurrent_inlining_attach_code);
+  int32_t state = flags();
+  // Skip setting optimized code if it would cause us to tier down.
+  if (has_optimized_code() && (!CodeKindCanTierUp(optimized_code().kind()) ||
+                               optimized_code().kind() > code.kind())) {
+    if (!v8_flags.stress_concurrent_inlining_attach_code &&
+        !optimized_code().marked_for_deoptimization()) {
+      return;
+    }
+    // If we fall through, we may be tiering down. This is fine since we only do
+    // that when the current code is marked for deoptimization, or because we're
+    // stress testing.
+    state = MaybeHasTurbofanCodeBit::update(state, false);
+  }
   // TODO(mythria): We could see a CompileOptimized state here either from
   // tests that use %OptimizeFunctionOnNextCall, --always-turbofan or because we
   // re-mark the function for non-concurrent optimization after an OSR. We
   // should avoid these cases and also check that marker isn't
   // TieringState::kRequestTurbofan*.
-  set_maybe_optimized_code(HeapObjectReference::Weak(code), kReleaseStore);
-  int32_t state = flags();
+  set_maybe_optimized_code(HeapObjectReference::Weak(code));
   // TODO(leszeks): Reconsider whether this could clear the tiering state vs.
   // the callers doing so.
   state = TieringStateBits::update(state, TieringState::kNone);
@@ -384,8 +384,7 @@ void FeedbackVector::SetOptimizedCode(Code code) {
 void FeedbackVector::ClearOptimizedCode() {
   DCHECK(has_optimized_code());
   DCHECK(maybe_has_maglev_code() || maybe_has_turbofan_code());
-  set_maybe_optimized_code(HeapObjectReference::ClearedValue(GetIsolate()),
-                           kReleaseStore);
+  set_maybe_optimized_code(HeapObjectReference::ClearedValue(GetIsolate()));
   set_maybe_has_maglev_code(false);
   set_maybe_has_turbofan_code(false);
 }
@@ -430,8 +429,8 @@ void FeedbackVector::set_osr_tiering_state(TieringState marker) {
 }
 
 void FeedbackVector::EvictOptimizedCodeMarkedForDeoptimization(
-    SharedFunctionInfo shared, const char* reason) {
-  MaybeObject slot = maybe_optimized_code(kAcquireLoad);
+    Isolate* isolate, SharedFunctionInfo shared, const char* reason) {
+  MaybeObject slot = maybe_optimized_code();
   if (slot->IsCleared()) {
     set_maybe_has_maglev_code(false);
     set_maybe_has_turbofan_code(false);
@@ -440,7 +439,7 @@ void FeedbackVector::EvictOptimizedCodeMarkedForDeoptimization(
 
   Code code = Code::cast(slot->GetHeapObject());
   if (code.marked_for_deoptimization()) {
-    Deoptimizer::TraceEvictFromOptimizedCodeCache(shared, reason);
+    Deoptimizer::TraceEvictFromOptimizedCodeCache(isolate, shared, reason);
     ClearOptimizedCode();
   }
 }
@@ -736,6 +735,17 @@ InlineCacheState FeedbackNexus::ic_state() const {
                                           : InlineCacheState::MONOMORPHIC;
         }
       }
+      // TODO(1393773): Remove once the issue is solved.
+      Address vector_ptr = vector().ptr();
+      config_.isolate()->PushParamsAndDie(
+          reinterpret_cast<void*>(feedback.ptr()),
+          reinterpret_cast<void*>(extra.ptr()),
+          reinterpret_cast<void*>(vector_ptr),
+          reinterpret_cast<void*>(static_cast<intptr_t>(slot_.ToInt())),
+          reinterpret_cast<void*>(static_cast<intptr_t>(kind())),
+          // Include part of the feedback vector containing the slot.
+          reinterpret_cast<void*>(
+              vector_ptr + FeedbackVector::OffsetOfElementAt(slot_.ToInt())));
       UNREACHABLE();
     }
     case FeedbackSlotKind::kCall: {

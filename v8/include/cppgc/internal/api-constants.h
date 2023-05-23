@@ -32,7 +32,7 @@ static constexpr uint16_t kFullyConstructedBitMask = uint16_t{1};
 
 static constexpr size_t kPageSize = size_t{1} << 17;
 
-#if defined(V8_TARGET_ARCH_ARM64) && defined(V8_OS_MACOS)
+#if defined(V8_TARGET_ARCH_ARM64) && defined(V8_OS_DARWIN)
 constexpr size_t kGuardPageSize = 0;
 #else
 constexpr size_t kGuardPageSize = 4096;
@@ -49,6 +49,14 @@ constexpr size_t kCagedHeapReservationSize = static_cast<size_t>(4) * kGB;
 constexpr size_t kCagedHeapReservationAlignment = kCagedHeapReservationSize;
 #endif  // defined(CPPGC_CAGED_HEAP)
 
+#if defined(CPPGC_POINTER_COMPRESSION)
+#if defined(CPPGC_ENABLE_LARGER_CAGE)
+constexpr unsigned kPointerCompressionShift = 3;
+#else   // !defined(CPPGC_ENABLE_LARGER_CAGE)
+constexpr unsigned kPointerCompressionShift = 1;
+#endif  // !defined(CPPGC_ENABLE_LARGER_CAGE)
+#endif  // !defined(CPPGC_POINTER_COMPRESSION)
+
 static constexpr size_t kDefaultAlignment = sizeof(void*);
 
 // Maximum support alignment for a type as in `alignof(T)`.
@@ -56,6 +64,9 @@ static constexpr size_t kMaxSupportedAlignment = 2 * kDefaultAlignment;
 
 // Granularity of heap allocations.
 constexpr size_t kAllocationGranularity = sizeof(void*);
+
+// Default cacheline size.
+constexpr size_t kCachelineSize = 64;
 
 }  // namespace api_constants
 

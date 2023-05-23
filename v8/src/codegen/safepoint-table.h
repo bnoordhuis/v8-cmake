@@ -10,11 +10,13 @@
 #include "src/common/assert-scope.h"
 #include "src/utils/allocation.h"
 #include "src/utils/bit-vector.h"
-#include "src/zone/zone-chunk-list.h"
+#include "src/zone/zone-containers.h"
 #include "src/zone/zone.h"
 
 namespace v8 {
 namespace internal {
+
+class GcSafeCode;
 
 namespace wasm {
 class WasmCode;
@@ -113,10 +115,14 @@ class SafepointTable {
 
   // Returns the entry for the given pc.
   SafepointEntry FindEntry(Address pc) const;
+  static SafepointEntry FindEntry(Isolate* isolate, GcSafeCode code,
+                                  Address pc);
 
   void Print(std::ostream&) const;
 
  private:
+  SafepointTable(Isolate* isolate, Address pc, GcSafeCode code);
+
   // Layout information.
   static constexpr int kLengthOffset = 0;
   static constexpr int kEntryConfigurationOffset = kLengthOffset + kIntSize;
@@ -256,7 +262,7 @@ class SafepointTableBuilder : public SafepointTableBuilderBase {
 #endif  // DEBUG
   int min_stack_index_ = std::numeric_limits<int>::max();
 
-  ZoneChunkList<EntryBuilder> entries_;
+  ZoneDeque<EntryBuilder> entries_;
   Zone* zone_;
 };
 

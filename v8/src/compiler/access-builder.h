@@ -60,7 +60,7 @@ class V8_EXPORT_PRIVATE AccessBuilder final
 
   // Provides access to JSObject inobject property fields.
   static FieldAccess ForJSObjectInObjectProperty(
-      const MapRef& map, int index,
+      MapRef map, int index,
       MachineType machine_type = MachineType::AnyTagged());
   static FieldAccess ForJSObjectOffset(
       int offset, WriteBarrierKind write_barrier_kind = kFullWriteBarrier);
@@ -242,6 +242,9 @@ class V8_EXPORT_PRIVATE AccessBuilder final
   // Provides access to Name::raw_hash_field() field.
   static FieldAccess ForNameRawHashField();
 
+  // Provides access to FreeSpace::size() field
+  static FieldAccess ForFreeSpaceSize();
+
   // Provides access to String::length() field.
   static FieldAccess ForStringLength();
 
@@ -356,6 +359,9 @@ class V8_EXPORT_PRIVATE AccessBuilder final
   // Provides access to Dictionary fields.
   static FieldAccess ForDictionaryNextEnumerationIndex();
   static FieldAccess ForDictionaryObjectHashIndex();
+
+  // Provides access to NameDictionary fields.
+  static FieldAccess ForNameDictionaryFlagsIndex();
 
   // Provides access to FeedbackCell fields.
   static FieldAccess ForFeedbackCellInterruptBudget();

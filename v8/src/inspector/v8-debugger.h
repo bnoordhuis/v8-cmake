@@ -31,11 +31,15 @@ class V8RuntimeAgentImpl;
 class V8StackTraceImpl;
 struct V8StackTraceId;
 
-enum class WrapMode {
-  kForceValue,
-  kNoPreview,
-  kWithPreview,
-  kGenerateWebDriverValue
+enum class WrapMode { kJson, kIdOnly, kPreview, kWebDriver, kDeep };
+
+struct WrapSerializationOptions {
+  int maxDepth = v8::internal::kMaxInt;
+};
+
+struct WrapOptions {
+  WrapMode mode;
+  WrapSerializationOptions serializationOptions;
 };
 
 using protocol::Response;
@@ -54,6 +58,7 @@ class V8Debugger : public v8::debug::DebugDelegate,
   v8::Isolate* isolate() const { return m_isolate; }
 
   void setBreakpointsActive(bool);
+  void removeBreakpoint(v8::debug::BreakpointId id);
 
   v8::debug::ExceptionBreakState getPauseOnExceptionsState();
   void setPauseOnExceptionsState(v8::debug::ExceptionBreakState);
@@ -152,6 +157,8 @@ class V8Debugger : public v8::debug::DebugDelegate,
   static void terminateExecutionCompletedCallback(v8::Isolate* isolate);
   static void terminateExecutionCompletedCallbackIgnoringData(
       v8::Isolate* isolate, void*);
+  void installTerminateExecutionCallbacks(v8::Local<v8::Context> context);
+
   void handleProgramBreak(
       v8::Local<v8::Context> pausedContext, v8::Local<v8::Value> exception,
       const std::vector<v8::debug::BreakpointId>& hitBreakpoints,
@@ -173,6 +180,8 @@ class V8Debugger : public v8::debug::DebugDelegate,
                                             v8::Local<v8::Value>);
   v8::MaybeLocal<v8::Array> collectionsEntries(v8::Local<v8::Context> context,
                                                v8::Local<v8::Value> value);
+  v8::MaybeLocal<v8::Array> privateMethods(v8::Local<v8::Context> context,
+                                           v8::Local<v8::Value> value);
 
   void asyncTaskScheduledForStack(const StringView& taskName, void* task,
                                   bool recurring, bool skipTopFrame = false);
@@ -206,6 +215,10 @@ class V8Debugger : public v8::debug::DebugDelegate,
 
   bool ShouldBeSkipped(v8::Local<v8::debug::Script> script, int line,
                        int column) override;
+  void BreakpointConditionEvaluated(v8::Local<v8::Context> context,
+                                    v8::debug::BreakpointId breakpoint_id,
+                                    bool exception_thrown,
+                                    v8::Local<v8::Value> exception) override;
 
   int currentContextGroupId();
 
@@ -301,6 +314,13 @@ class V8Debugger : public v8::debug::DebugDelegate,
 
   std::unique_ptr<TerminateExecutionCallback> m_terminateExecutionCallback;
   v8::Global<v8::Context> m_terminateExecutionCallbackContext;
+  bool m_terminateExecutionReported = true;
+
+  // Throwing conditional breakpoints for which we already have logged an error
+  // message to the console. The intention is to reduce console spam.
+  // Removing the breakpoint or a non-throwing evaluation of the breakpoint
+  // clears it out of the set.
+  std::unordered_set<v8::debug::BreakpointId> m_throwingConditionReported;
 };
 
 }  // namespace v8_inspector

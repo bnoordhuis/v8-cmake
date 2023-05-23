@@ -91,9 +91,6 @@ LocalHeap::~LocalHeap() {
     FreeSharedLinearAllocationArea();
 
     if (!is_main_thread()) {
-      CodePageHeaderModificationScope rwx_write_scope(
-          "Publishing of marking barrier results for Code space pages requires "
-          "write access to Code page headers");
       marking_barrier_->PublishIfNeeded();
       marking_barrier_->PublishSharedIfNeeded();
       MarkingBarrier* overwritten =
@@ -133,7 +130,7 @@ void LocalHeap::SetUp() {
       this, heap_->code_space(), ConcurrentAllocator::Context::kNotGC);
 
   DCHECK_NULL(shared_old_space_allocator_);
-  if (heap_->isolate()->has_shared_heap()) {
+  if (heap_->isolate()->has_shared_space()) {
     shared_old_space_allocator_ = std::make_unique<ConcurrentAllocator>(
         this, heap_->shared_allocation_space(),
         ConcurrentAllocator::Context::kNotGC);
@@ -157,8 +154,8 @@ void LocalHeap::SetUpSharedMarking() {
 
   Isolate* isolate = heap_->isolate();
 
-  if (isolate->has_shared_heap() && !isolate->is_shared_heap_isolate()) {
-    if (isolate->shared_heap_isolate()
+  if (isolate->has_shared_space() && !isolate->is_shared_space_isolate()) {
+    if (isolate->shared_space_isolate()
             ->heap()
             ->incremental_marking()
             ->IsMarking()) {
@@ -365,6 +362,8 @@ void LocalHeap::SleepInSafepoint() {
 
   TRACE_GC1(heap_->tracer(), scope_id, thread_kind);
 
+  if (is_main_thread()) heap()->stack().SetMarkerToCurrentStackPosition();
+
   // Parking the running thread here is an optimization. We do not need to
   // wake this thread up to reach the next safepoint.
   ThreadState old_state = state_.SetParked();
@@ -481,11 +480,14 @@ void LocalHeap::InvokeGCEpilogueCallbacksInSafepoint(GCType gc_type,
 
 void LocalHeap::NotifyObjectSizeChange(
     HeapObject object, int old_size, int new_size,
-    ClearRecordedSlots clear_recorded_slots,
-    UpdateInvalidatedObjectSize update_invalidated_object_size) {
+    ClearRecordedSlots clear_recorded_slots) {
   heap()->NotifyObjectSizeChange(object, old_size, new_size,
-                                 clear_recorded_slots,
-                                 update_invalidated_object_size);
+                                 clear_recorded_slots);
+}
+
+void LocalHeap::WeakenDescriptorArrays(
+    GlobalHandleVector<DescriptorArray> strong_descriptor_arrays) {
+  AsHeap()->WeakenDescriptorArrays(std::move(strong_descriptor_arrays));
 }
 
 }  // namespace internal

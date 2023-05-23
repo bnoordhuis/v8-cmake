@@ -19,14 +19,13 @@ namespace v8::internal::wasm {
 
 WasmCompilationResult WasmCompilationUnit::ExecuteCompilation(
     CompilationEnv* env, const WireBytesStorage* wire_bytes_storage,
-    Counters* counters, AssemblerBufferCache* buffer_cache,
-    WasmFeatures* detected) {
+    Counters* counters, WasmFeatures* detected) {
   WasmCompilationResult result;
   if (func_index_ < static_cast<int>(env->module->num_imported_functions)) {
     result = ExecuteImportWrapperCompilation(env);
   } else {
-    result = ExecuteFunctionCompilation(env, wire_bytes_storage, counters,
-                                        buffer_cache, detected);
+    result =
+        ExecuteFunctionCompilation(env, wire_bytes_storage, counters, detected);
   }
 
   if (result.succeeded() && counters) {
@@ -46,7 +45,7 @@ WasmCompilationResult WasmCompilationUnit::ExecuteImportWrapperCompilation(
   const FunctionSig* sig = env->module->functions[func_index_].sig;
   // Assume the wrapper is going to be a JS function with matching arity at
   // instantiation time.
-  auto kind = compiler::kDefaultImportCallKind;
+  auto kind = kDefaultImportCallKind;
   bool source_positions = is_asmjs_module(env->module);
   WasmCompilationResult result = compiler::CompileWasmImportCallWrapper(
       env, kind, sig, source_positions,
@@ -56,8 +55,7 @@ WasmCompilationResult WasmCompilationUnit::ExecuteImportWrapperCompilation(
 
 WasmCompilationResult WasmCompilationUnit::ExecuteFunctionCompilation(
     CompilationEnv* env, const WireBytesStorage* wire_bytes_storage,
-    Counters* counters, AssemblerBufferCache* buffer_cache,
-    WasmFeatures* detected) {
+    Counters* counters, WasmFeatures* detected) {
   auto* func = &env->module->functions[func_index_];
   base::Vector<const uint8_t> code = wire_bytes_storage->GetCode(func->code);
   wasm::FunctionBody func_body{func->sig, func->code.offset(), code.begin(),
@@ -118,24 +116,21 @@ WasmCompilationResult WasmCompilationUnit::ExecuteFunctionCompilation(
           func_index_ >= 32 ||
           ((v8_flags.wasm_tier_mask_for_testing & (1 << func_index_)) == 0) ||
           v8_flags.liftoff_only) {
+        auto options = LiftoffOptions{}
+                           .set_func_index(func_index_)
+                           .set_for_debugging(for_debugging_)
+                           .set_counters(counters)
+                           .set_detected_features(detected);
         // We do not use the debug side table, we only (optionally) pass it to
         // cover different code paths in Liftoff for testing.
         std::unique_ptr<DebugSideTable> unused_debug_sidetable;
-        std::unique_ptr<DebugSideTable>* debug_sidetable_ptr = nullptr;
         if (V8_UNLIKELY(func_index_ < 32 &&
                         (v8_flags.wasm_debug_mask_for_testing &
                          (1 << func_index_)) != 0)) {
-          debug_sidetable_ptr = &unused_debug_sidetable;
+          options.set_debug_sidetable(&unused_debug_sidetable);
+          if (!for_debugging_) options.set_for_debugging(kForDebugging);
         }
-        result = ExecuteLiftoffCompilation(
-            env, func_body,
-            LiftoffOptions{}
-                .set_func_index(func_index_)
-                .set_for_debugging(for_debugging_)
-                .set_counters(counters)
-                .set_detected_features(detected)
-                .set_assembler_buffer_cache(buffer_cache)
-                .set_debug_sidetable(debug_sidetable_ptr));
+        result = ExecuteLiftoffCompilation(env, func_body, options);
         if (result.succeeded()) break;
       }
 
@@ -149,13 +144,16 @@ WasmCompilationResult WasmCompilationUnit::ExecuteFunctionCompilation(
       V8_FALLTHROUGH;
 
     case ExecutionTier::kTurbofan:
-      result = compiler::ExecuteTurbofanWasmCompilation(
-          env, wire_bytes_storage, func_body, func_index_, counters,
-          buffer_cache, detected);
+      compiler::WasmCompilationData data(func_body);
+      data.func_index = func_index_;
+      data.wire_bytes_storage = wire_bytes_storage;
+      result = compiler::ExecuteTurbofanWasmCompilation(env, data, counters,
+                                                        detected);
       result.for_debugging = for_debugging_;
       break;
   }
 
+  DCHECK(result.succeeded());
   return result;
 }
 
@@ -176,11 +174,12 @@ void WasmCompilationUnit::CompileWasmFunction(Counters* counters,
   CompilationEnv env = native_module->CreateCompilationEnv();
   WasmCompilationResult result = unit.ExecuteCompilation(
       &env, native_module->compilation_state()->GetWireBytesStorage().get(),
-      counters, nullptr, detected);
+      counters, detected);
   if (result.succeeded()) {
     WasmCodeRefScope code_ref_scope;
-    native_module->PublishCode(
-        native_module->AddCompiledCode(std::move(result)));
+    AssumptionsJournal* assumptions = result.assumptions.get();
+    native_module->PublishCode(native_module->AddCompiledCode(result),
+                               assumptions->empty() ? nullptr : assumptions);
   } else {
     native_module->compilation_state()->SetError();
   }
@@ -210,7 +209,8 @@ bool UseGenericWrapper(const FunctionSig* sig) {
   for (ValueType type : sig->parameters()) {
     if (type.kind() != kI32 && type.kind() != kI64 && type.kind() != kF32 &&
         type.kind() != kF64 &&
-        !(type.is_reference() &&
+        // TODO(7748): The generic wrapper should also take care of null checks.
+        !(type.kind() == kRefNull &&
           type.heap_representation() == wasm::HeapType::kExtern)) {
       return false;
     }
@@ -256,8 +256,7 @@ Handle<Code> JSToWasmWrapperCompilationUnit::Finalize() {
   CompilationJob::Status status = job_->FinalizeJob(isolate_);
   CHECK_EQ(status, CompilationJob::SUCCEEDED);
   Handle<Code> code = job_->compilation_info()->code();
-  if (isolate_->v8_file_logger()->is_listening_to_code_events() ||
-      isolate_->is_profiling()) {
+  if (isolate_->IsLoggingCodeCreation()) {
     Handle<String> name = isolate_->factory()->NewStringFromAsciiChecked(
         job_->compilation_info()->GetDebugName().get());
     PROFILE(isolate_, CodeCreateEvent(LogEventListener::CodeTag::kStub,

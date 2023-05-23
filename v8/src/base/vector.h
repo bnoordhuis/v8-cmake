@@ -242,6 +242,17 @@ class OwnedVector {
 
   constexpr T* end() const { return begin() + length_; }
 
+  // In addition to {begin}, do provide a {data()} accessor for API
+  // compatibility with other sequential containers.
+  constexpr T* data() const { return begin(); }
+
+  constexpr std::reverse_iterator<T*> rbegin() const {
+    return std::make_reverse_iterator(end());
+  }
+  constexpr std::reverse_iterator<T*> rend() const {
+    return std::make_reverse_iterator(begin());
+  }
+
   // Access individual vector elements - checks bounds in debug mode.
   T& operator[](size_t index) const {
     DCHECK_LT(index, length_);

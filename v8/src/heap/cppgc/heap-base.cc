@@ -94,41 +94,6 @@ class AgeTableResetter final : protected HeapVisitor<AgeTableResetter> {
 };
 #endif  // defined(CPPGC_YOUNG_GENERATION)
 
-class PlatformWithPageAllocator final : public cppgc::Platform {
- public:
-  explicit PlatformWithPageAllocator(std::shared_ptr<cppgc::Platform> delegate)
-      : delegate_(std::move(delegate)),
-        page_allocator_(GetGlobalPageAllocator()) {
-    // This platform wrapper should only be used if the platform doesn't provide
-    // a `PageAllocator`.
-    CHECK_NULL(delegate_->GetPageAllocator());
-  }
-  ~PlatformWithPageAllocator() override = default;
-
-  PageAllocator* GetPageAllocator() final { return &page_allocator_; }
-
-  double MonotonicallyIncreasingTime() final {
-    return delegate_->MonotonicallyIncreasingTime();
-  }
-
-  std::shared_ptr<TaskRunner> GetForegroundTaskRunner() final {
-    return delegate_->GetForegroundTaskRunner();
-  }
-
-  std::unique_ptr<JobHandle> PostJob(TaskPriority priority,
-                                     std::unique_ptr<JobTask> job_task) final {
-    return delegate_->PostJob(std::move(priority), std::move(job_task));
-  }
-
-  TracingController* GetTracingController() final {
-    return delegate_->GetTracingController();
-  }
-
- private:
-  std::shared_ptr<cppgc::Platform> delegate_;
-  cppgc::PageAllocator& page_allocator_;
-};
-
 }  // namespace
 
 HeapBase::HeapBase(
@@ -137,11 +102,7 @@ HeapBase::HeapBase(
     StackSupport stack_support, MarkingType marking_support,
     SweepingType sweeping_support, GarbageCollector& garbage_collector)
     : raw_heap_(this, custom_spaces),
-      platform_(platform->GetPageAllocator()
-                    ? std::move(platform)
-                    : std::static_pointer_cast<cppgc::Platform>(
-                          std::make_shared<PlatformWithPageAllocator>(
-                              std::move(platform)))),
+      platform_(std::move(platform)),
       oom_handler_(std::make_unique<FatalOutOfMemoryHandler>(this)),
 #if defined(LEAK_SANITIZER)
       lsan_page_allocator_(std::make_unique<v8::base::LsanPageAllocator>(
@@ -341,6 +302,27 @@ HeapStatistics HeapBase::CollectStatistics(
   sweeper_.FinishIfRunning();
   object_allocator_.ResetLinearAllocationBuffers();
   return HeapStatisticsCollector().CollectDetailedStatistics(this);
+}
+
+void HeapBase::CallMoveListeners(Address from, Address to,
+                                 size_t size_including_header) {
+  for (const auto& listener : move_listeners_) {
+    listener->OnMove(from, to, size_including_header);
+  }
+}
+
+void HeapBase::RegisterMoveListener(MoveListener* listener) {
+  // Registering the same listener multiple times would work, but probably
+  // indicates a mistake in the component requesting the registration.
+  DCHECK_EQ(std::find(move_listeners_.begin(), move_listeners_.end(), listener),
+            move_listeners_.end());
+  move_listeners_.push_back(listener);
+}
+
+void HeapBase::UnregisterMoveListener(MoveListener* listener) {
+  auto it =
+      std::remove(move_listeners_.begin(), move_listeners_.end(), listener);
+  move_listeners_.erase(it, move_listeners_.end());
 }
 
 ClassNameAsHeapObjectNameScope::ClassNameAsHeapObjectNameScope(HeapBase& heap)

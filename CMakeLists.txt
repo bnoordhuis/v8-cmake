@@ -401,7 +401,6 @@ add_library(v8_base_without_compiler STATIC
   v8/src/third_party/siphash/halfsiphash.cc
   v8/src/tracing/trace-event.cc
   v8/src/tracing/traced-value.cc
-  v8/src/web-snapshot/web-snapshot.cc
   v8/src/tracing/tracing-category-observer.cc
   v8/src/trap-handler/handler-inside.cc
   v8/src/trap-handler/handler-outside.cc
@@ -709,6 +708,7 @@ target_sources(v8_libplatform
     v8/src/libplatform/default-foreground-task-runner.cc
     v8/src/libplatform/default-job.cc
     v8/src/libplatform/default-platform.cc
+    v8/src/libplatform/default-thread-isolated-allocator.cc
     v8/src/libplatform/default-worker-threads-task-runner.cc
     v8/src/libplatform/delayed-task-queue.cc
     v8/src/libplatform/task-queue.cc
@@ -764,9 +764,10 @@ add_library(v8_libbase STATIC
   v8/src/base/once.cc
   v8/src/base/page-allocator.cc
   v8/src/base/platform/condition-variable.cc
-  v8/src/base/platform/mutex.cc
-  v8/src/base/platform/semaphore.cc
   v8/src/base/platform/memory-protection-key.cc
+  v8/src/base/platform/mutex.cc
+  v8/src/base/platform/platform.cc
+  v8/src/base/platform/semaphore.cc
   v8/src/base/platform/time.cc
   v8/src/base/region-allocator.cc
   v8/src/base/sys-info.cc

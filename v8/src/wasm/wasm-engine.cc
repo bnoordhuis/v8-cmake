@@ -6,6 +6,8 @@
 
 #include "src/base/functional.h"
 #include "src/base/platform/time.h"
+#include "src/base/small-vector.h"
+#include "src/common/assert-scope.h"
 #include "src/common/globals.h"
 #include "src/debug/debug.h"
 #include "src/diagnostics/code-tracer.h"
@@ -18,6 +20,8 @@
 #include "src/objects/heap-number.h"
 #include "src/objects/managed-inl.h"
 #include "src/objects/objects-inl.h"
+#include "src/objects/objects.h"
+#include "src/objects/primitive-heap-object.h"
 #include "src/utils/ostreams.h"
 #include "src/wasm/function-compiler.h"
 #include "src/wasm/module-compiler.h"
@@ -237,7 +241,6 @@ bool NativeModuleCache::GetStreamingCompilationOwnership(size_t prefix_hash) {
 void NativeModuleCache::StreamingCompilationFailed(size_t prefix_hash) {
   base::MutexGuard lock(&mutex_);
   Key key{prefix_hash, {}};
-  DCHECK_EQ(1, map_.count(key));
   map_.erase(key);
   cache_cv_.NotifyAll();
 }
@@ -466,28 +469,21 @@ WasmEngine::~WasmEngine() {
 }
 
 bool WasmEngine::SyncValidate(Isolate* isolate, const WasmFeatures& enabled,
-                              ModuleWireBytes bytes,
-                              std::string* error_message) {
+                              ModuleWireBytes bytes) {
   TRACE_EVENT0("v8.wasm", "wasm.SyncValidate");
-  // TODO(titzer): remove dependency on the isolate.
-  if (bytes.start() == nullptr || bytes.length() == 0) {
-    if (error_message) *error_message = "empty module wire bytes";
-    return false;
-  }
+  if (bytes.length() == 0) return false;
+
   auto result = DecodeWasmModule(
       enabled, bytes.module_bytes(), true, kWasmOrigin, isolate->counters(),
       isolate->metrics_recorder(),
       isolate->GetOrRegisterRecorderContextId(isolate->native_context()),
       DecodingMethod::kSync);
-  if (result.failed() && error_message) {
-    *error_message = result.error().message();
-  }
   return result.ok();
 }
 
 MaybeHandle<AsmWasmData> WasmEngine::SyncCompileTranslatedAsmJs(
     Isolate* isolate, ErrorThrower* thrower, ModuleWireBytes bytes,
-    base::Vector<const byte> asm_js_offset_table_bytes,
+    base::Vector<const uint8_t> asm_js_offset_table_bytes,
     Handle<HeapNumber> uses_bitset, LanguageMode language_mode) {
   int compilation_id = next_compilation_id_.fetch_add(1);
   TRACE_EVENT1("v8.wasm", "wasm.SyncCompileTranslatedAsmJs", "id",
@@ -673,7 +669,27 @@ void WasmEngine::AsyncCompile(
         StartStreamingCompilation(
             isolate, enabled, handle(isolate->context(), isolate),
             api_method_name_for_errors, std::move(resolver));
-    streaming_decoder->OnBytesReceived(bytes.module_bytes());
+
+    auto* rng = isolate->random_number_generator();
+    base::SmallVector<base::Vector<const uint8_t>, 16> ranges;
+    if (!bytes.module_bytes().empty()) ranges.push_back(bytes.module_bytes());
+    // Split into up to 16 ranges (2^4).
+    for (int round = 0; round < 4; ++round) {
+      for (auto it = ranges.begin(); it != ranges.end(); ++it) {
+        auto range = *it;
+        if (range.size() < 2 || !rng->NextBool()) continue;  // Do not split.
+        // Choose split point within [1, range.size() - 1].
+        static_assert(kV8MaxWasmModuleSize <= kMaxInt);
+        size_t split_point =
+            1 + rng->NextInt(static_cast<int>(range.size() - 1));
+        // Insert first sub-range *before* {it} and make {it} point after it.
+        it = ranges.insert(it, range.SubVector(0, split_point)) + 1;
+        *it = range.SubVectorFrom(split_point);
+      }
+    }
+    for (auto range : ranges) {
+      streaming_decoder->OnBytesReceived(range);
+    }
     streaming_decoder->Finish();
     return;
   }
@@ -789,12 +805,6 @@ namespace {
 Handle<Script> CreateWasmScript(Isolate* isolate,
                                 std::shared_ptr<NativeModule> native_module,
                                 base::Vector<const char> source_url) {
-  Handle<Script> script =
-      isolate->factory()->NewScript(isolate->factory()->undefined_value());
-  script->set_compilation_state(Script::COMPILATION_STATE_COMPILED);
-  script->set_context_data(isolate->native_context()->debug_context_id());
-  script->set_type(Script::TYPE_WASM);
-
   base::Vector<const uint8_t> wire_bytes = native_module->wire_bytes();
 
   // The source URL of the script is
@@ -841,8 +851,8 @@ Handle<Script> CreateWasmScript(Isolate* isolate,
                     .ToHandleChecked();
     }
   }
-  script->set_name(*url_str);
-
+  Handle<PrimitiveHeapObject> source_map_url =
+      isolate->factory()->undefined_value();
   const WasmDebugSymbols& debug_symbols = module->debug_symbols;
   if (debug_symbols.type == WasmDebugSymbols::Type::SourceMap &&
       !debug_symbols.external_url.is_empty()) {
@@ -850,7 +860,7 @@ Handle<Script> CreateWasmScript(Isolate* isolate,
         ModuleWireBytes(wire_bytes).GetNameOrNull(debug_symbols.external_url);
     MaybeHandle<String> src_map_str = isolate->factory()->NewStringFromUtf8(
         external_url, AllocationType::kOld);
-    script->set_source_mapping_url(*src_map_str.ToHandleChecked());
+    source_map_url = src_map_str.ToHandleChecked();
   }
 
   // Use the given shared {NativeModule}, but increase its reference count by
@@ -862,10 +872,26 @@ Handle<Script> CreateWasmScript(Isolate* isolate,
   Handle<Managed<wasm::NativeModule>> managed_native_module =
       Managed<wasm::NativeModule>::FromSharedPtr(isolate, memory_estimate,
                                                  std::move(native_module));
-  script->set_wasm_managed_native_module(*managed_native_module);
-  script->set_wasm_breakpoint_infos(ReadOnlyRoots(isolate).empty_fixed_array());
-  script->set_wasm_weak_instance_list(
-      ReadOnlyRoots(isolate).empty_weak_array_list());
+
+  Handle<Script> script =
+      isolate->factory()->NewScript(isolate->factory()->undefined_value());
+  {
+    DisallowGarbageCollection no_gc;
+    auto raw_script = *script;
+    raw_script.set_compilation_state(Script::CompilationState::kCompiled);
+    raw_script.set_context_data(isolate->native_context()->debug_context_id());
+    raw_script.set_name(*url_str);
+    raw_script.set_type(Script::Type::kWasm);
+    raw_script.set_source_mapping_url(*source_map_url);
+    raw_script.set_line_ends(ReadOnlyRoots(isolate).empty_fixed_array(),
+                             SKIP_WRITE_BARRIER);
+    raw_script.set_wasm_managed_native_module(*managed_native_module);
+    raw_script.set_wasm_breakpoint_infos(
+        ReadOnlyRoots(isolate).empty_fixed_array(), SKIP_WRITE_BARRIER);
+    raw_script.set_wasm_weak_instance_list(
+        ReadOnlyRoots(isolate).empty_weak_array_list(), SKIP_WRITE_BARRIER);
+  }
+
   return script;
 }
 }  // namespace
@@ -1041,8 +1067,8 @@ void WasmEngine::AddIsolate(Isolate* isolate) {
 #if defined(V8_COMPRESS_POINTERS)
   // The null value is not accessible on mksnapshot runs.
   if (isolate->snapshot_available()) {
-    null_tagged_compressed_ = V8HeapCompressionScheme::CompressTagged(
-        isolate->factory()->null_value()->ptr());
+    wasm_null_tagged_compressed_ = V8HeapCompressionScheme::CompressObject(
+        isolate->factory()->wasm_null()->ptr());
   }
 #endif
 
@@ -1197,6 +1223,8 @@ void WasmEngine::LogOutstandingCodesForIsolate(Isolate* isolate) {
 std::shared_ptr<NativeModule> WasmEngine::NewNativeModule(
     Isolate* isolate, const WasmFeatures& enabled,
     std::shared_ptr<const WasmModule> module, size_t code_size_estimate) {
+  TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.wasm.detailed"),
+               "wasm.NewNativeModule");
 #ifdef V8_ENABLE_WASM_GDB_REMOTE_DEBUGGING
   if (v8_flags.wasm_gdb_remote && !gdb_server_) {
     gdb_server_ = gdb_server::GdbServer::Create();

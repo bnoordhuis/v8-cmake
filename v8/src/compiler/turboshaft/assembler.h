@@ -16,16 +16,26 @@
 #include "src/base/small-vector.h"
 #include "src/base/template-utils.h"
 #include "src/codegen/callable.h"
+#include "src/codegen/code-factory.h"
 #include "src/codegen/reloc-info.h"
+#include "src/compiler/access-builder.h"
 #include "src/compiler/common-operator.h"
+#include "src/compiler/globals.h"
+#include "src/compiler/simplified-operator.h"
+#include "src/compiler/turboshaft/builtin-call-descriptors.h"
 #include "src/compiler/turboshaft/graph.h"
 #include "src/compiler/turboshaft/operation-matching.h"
 #include "src/compiler/turboshaft/operations.h"
 #include "src/compiler/turboshaft/optimization-phase.h"
 #include "src/compiler/turboshaft/reducer-traits.h"
 #include "src/compiler/turboshaft/representations.h"
+#include "src/compiler/turboshaft/runtime-call-descriptors.h"
 #include "src/compiler/turboshaft/sidetable.h"
 #include "src/compiler/turboshaft/snapshot-table.h"
+#include "src/logging/runtime-call-stats.h"
+#include "src/objects/heap-number.h"
+#include "src/objects/oddball.h"
+#include "src/objects/turbofan-types.h"
 
 namespace v8::internal {
 enum class Builtin : int32_t;
@@ -33,7 +43,387 @@ enum class Builtin : int32_t;
 
 namespace v8::internal::compiler::turboshaft {
 
+class ConditionWithHint final {
+ public:
+  ConditionWithHint(
+      V<Word32> condition,
+      BranchHint hint = BranchHint::kNone)  // NOLINT(runtime/explicit)
+      : condition_(condition), hint_(hint) {}
+
+  template <typename T, typename = std::enable_if_t<std::is_same_v<T, OpIndex>>>
+  ConditionWithHint(
+      T condition,
+      BranchHint hint = BranchHint::kNone)  // NOLINT(runtime/explicit)
+      : ConditionWithHint(V<Word32>{condition}, hint) {}
+
+  V<Word32> condition() const { return condition_; }
+  BranchHint hint() const { return hint_; }
+
+ private:
+  V<Word32> condition_;
+  BranchHint hint_;
+};
+
+namespace detail {
+template <typename T, typename = void>
+struct has_constexpr_type : std::false_type {};
+
+template <typename T>
+struct has_constexpr_type<T, std::void_t<typename v_traits<T>::constexpr_type>>
+    : std::true_type {};
+
+template <typename T, typename...>
+struct make_const_or_v {
+  using type = V<T>;
+};
+
+template <typename T>
+struct make_const_or_v<
+    T, typename std::enable_if_t<has_constexpr_type<T>::value>> {
+  using type = ConstOrV<T>;
+};
+
+template <typename T>
+struct make_const_or_v<
+    T, typename std::enable_if_t<!has_constexpr_type<T>::value>> {
+  using type = V<T>;
+};
+
+template <typename T>
+using make_const_or_v_t = typename make_const_or_v<T, void>::type;
+
+template <typename A, typename ConstOrValues>
+auto ResolveAll(A& assembler, const ConstOrValues& const_or_values) {
+  return std::apply(
+      [&](auto&... args) { return std::tuple{assembler.resolve(args)...}; },
+      const_or_values);
+}
+
+inline bool SuppressUnusedWarning(bool b) { return b; }
+}  // namespace detail
+
+template <bool loop, typename... Ts>
+class LabelBase {
+ protected:
+  static constexpr size_t size = sizeof...(Ts);
+
+ public:
+  static constexpr bool is_loop = loop;
+  using values_t = std::tuple<V<Ts>...>;
+  using const_or_values_t = std::tuple<detail::make_const_or_v_t<Ts>...>;
+  using recorded_values_t = std::tuple<base::SmallVector<V<Ts>, 2>...>;
+
+  Block* block() { return data_.block; }
+
+  template <typename A>
+  void Goto(A& assembler, const values_t& values) {
+    RecordValues(assembler, data_, values);
+    assembler.Goto(data_.block);
+  }
+
+  template <typename A>
+  void GotoIf(A& assembler, OpIndex condition, BranchHint hint,
+              const values_t& values) {
+    RecordValues(assembler, data_, values);
+    assembler.GotoIf(condition, data_.block, hint);
+  }
+
+  template <typename A>
+  void GotoIfNot(A& assembler, OpIndex condition, BranchHint hint,
+                 const values_t& values) {
+    RecordValues(assembler, data_, values);
+    assembler.GotoIfNot(condition, data_.block, hint);
+  }
+
+  template <typename A>
+  base::prepend_tuple_type<bool, values_t> Bind(A& assembler) {
+    DCHECK(!data_.block->IsBound());
+    if (!assembler.Bind(data_.block)) {
+      return std::tuple_cat(std::tuple{false}, values_t{});
+    }
+    DCHECK_EQ(data_.block, assembler.current_block());
+    return std::tuple_cat(std::tuple{true}, MaterializePhis(assembler));
+  }
+
+ protected:
+  struct BlockData {
+    Block* block;
+    base::SmallVector<Block*, 4> predecessors;
+    recorded_values_t recorded_values;
+
+    explicit BlockData(Block* block) : block(block) {}
+  };
+
+  explicit LabelBase(Block* block) : data_(block) {
+    DCHECK_NOT_NULL(data_.block);
+  }
+
+  template <typename A>
+  static void RecordValues(A& assembler, BlockData& data,
+                           const values_t& values) {
+    Block* source = assembler.current_block();
+    DCHECK_NOT_NULL(source);
+    if (data.block->IsBound()) {
+      // Cannot `Goto` to a bound block. If you are trying to construct a
+      // loop, use a `LoopLabel` instead!
+      UNREACHABLE();
+    }
+    RecordValuesImpl(data, source, values, std::make_index_sequence<size>());
+  }
+
+  template <size_t... indices>
+  static void RecordValuesImpl(BlockData& data, Block* source,
+                               const values_t& values,
+                               std::index_sequence<indices...>) {
+#ifdef DEBUG
+    std::initializer_list<size_t> sizes{
+        std::get<indices>(data.recorded_values).size()...};
+    DCHECK(base::all_equal(
+        sizes, static_cast<size_t>(data.block->PredecessorCount())));
+    DCHECK_EQ(data.block->PredecessorCount(), data.predecessors.size());
+#endif
+    (std::get<indices>(data.recorded_values)
+         .push_back(std::get<indices>(values)),
+     ...);
+    data.predecessors.push_back(source);
+  }
+
+  template <typename A>
+  values_t MaterializePhis(A& assembler) {
+    return MaterializePhisImpl(assembler, data_,
+                               std::make_index_sequence<size>());
+  }
+
+  template <typename A, size_t... indices>
+  static values_t MaterializePhisImpl(A& assembler, BlockData& data,
+                                      std::index_sequence<indices...>) {
+    size_t predecessor_count = data.block->PredecessorCount();
+    DCHECK_EQ(data.predecessors.size(), predecessor_count);
+    // If this label has no values, we don't need any Phis.
+    if constexpr (size == 0) return values_t{};
+
+    // If this block does not have any predecessors, we shouldn't call this.
+    DCHECK_LT(0, predecessor_count);
+    // With 1 predecessor, we don't need any Phis.
+    if (predecessor_count == 1) {
+      return values_t{std::get<indices>(data.recorded_values)[0]...};
+    }
+    DCHECK_LT(1, predecessor_count);
+
+    // Construct Phis.
+    return values_t{assembler.Phi(
+        base::VectorOf(std::get<indices>(data.recorded_values)))...};
+  }
+
+  BlockData data_;
+};
+
+template <typename... Ts>
+class Label : public LabelBase<false, Ts...> {
+  using super = LabelBase<false, Ts...>;
+
+ public:
+  template <typename Reducer>
+  explicit Label(Reducer* reducer) : super(reducer->Asm().NewBlock()) {}
+};
+
+template <typename... Ts>
+class LoopLabel : public LabelBase<true, Ts...> {
+  using super = LabelBase<true, Ts...>;
+  using BlockData = typename super::BlockData;
+
+ public:
+  using values_t = typename super::values_t;
+  template <typename Reducer>
+  explicit LoopLabel(Reducer* reducer)
+      : super(reducer->Asm().NewBlock()),
+        loop_header_data_{reducer->Asm().NewLoopHeader()} {}
+
+  Block* loop_header() const { return loop_header_data_.block; }
+
+  template <typename A>
+  void Goto(A& assembler, const values_t& values) {
+    if (!loop_header_data_.block->IsBound()) {
+      // If the loop header is not bound yet, we have the forward edge to the
+      // loop.
+      DCHECK_EQ(0, loop_header_data_.block->PredecessorCount());
+      super::RecordValues(assembler, loop_header_data_, values);
+      assembler.Goto(loop_header_data_.block);
+    } else {
+      // We have a jump back to the loop header and wire it to the single
+      // backedge block.
+      this->super::Goto(assembler, values);
+    }
+  }
+
+  template <typename A>
+  void GotoIf(A& assembler, OpIndex condition, BranchHint hint,
+              const values_t& values) {
+    if (!loop_header_data_.block->IsBound()) {
+      // If the loop header is not bound yet, we have the forward edge to the
+      // loop.
+      DCHECK_EQ(0, loop_header_data_.block->PredecessorCount());
+      super::RecordValues(assembler, loop_header_data_, values);
+      assembler.GotoIf(condition, loop_header_data_.block, hint);
+    } else {
+      // We have a jump back to the loop header and wire it to the single
+      // backedge block.
+      this->super::GotoIf(assembler, condition, hint, values);
+    }
+  }
+
+  template <typename A>
+  void GotoIfNot(A& assembler, OpIndex condition, BranchHint hint,
+                 const values_t& values) {
+    if (!loop_header_data_.block->IsBound()) {
+      // If the loop header is not bound yet, we have the forward edge to the
+      // loop.
+      DCHECK_EQ(0, loop_header_data_.block->PredecessorCount());
+      super::RecordValues(assembler, loop_header_data_, values);
+      assembler.GotoIfNot(condition, loop_header_data_.block, hint);
+    } else {
+      // We have a jump back to the loop header and wire it to the single
+      // backedge block.
+      this->super::GotoIfNot(assembler, condition, hint, values);
+    }
+  }
+
+  template <typename A>
+  base::prepend_tuple_type<bool, values_t> Bind(A& assembler) {
+    // LoopLabels must not be bound  using `Bind`, but with `Loop`.
+    UNREACHABLE();
+  }
+
+  template <typename A>
+  base::prepend_tuple_type<bool, values_t> BindLoop(A& assembler) {
+    DCHECK(!loop_header_data_.block->IsBound());
+    if (!assembler.Bind(loop_header_data_.block)) {
+      return std::tuple_cat(std::tuple{false}, values_t{});
+    }
+    DCHECK_EQ(loop_header_data_.block, assembler.current_block());
+    return std::tuple_cat(std::tuple{true},
+                          MaterializeLoopPhis(assembler, loop_header_data_));
+  }
+
+  template <typename A>
+  void EndLoop(A& assembler) {
+    // First, we need to bind the backedge block.
+    auto bind_result = this->super::Bind(assembler);
+    // `Bind` returns a tuple with a `bool` as first entry that indicates
+    // whether the block was bound. The rest of the tuple contains the phi
+    // values. Check if this block was bound (aka is reachable).
+    if (std::get<0>(bind_result)) {
+      // The block is bound.
+      DCHECK_EQ(assembler.current_block(), this->super::block());
+      // Now we build a jump from this block to the loop header.
+      // Remove the "bound"-flag from the beginning of the tuple.
+      auto values = base::tuple_drop<1>(bind_result);
+      assembler.Goto(loop_header_data_.block);
+      // Finalize Phis in the loop header.
+      FixLoopPhis(assembler, loop_header_data_, values);
+    }
+  }
+
+ private:
+  template <typename A>
+  static values_t MaterializeLoopPhis(A& assembler, BlockData& data) {
+    return MaterializeLoopPhisImpl(assembler, data,
+                                   std::make_index_sequence<super::size>());
+  }
+
+  template <typename A, size_t... indices>
+  static values_t MaterializeLoopPhisImpl(A& assembler, BlockData& data,
+                                          std::index_sequence<indices...>) {
+    size_t predecessor_count = data.block->PredecessorCount();
+    USE(predecessor_count);
+    DCHECK_EQ(data.predecessors.size(), predecessor_count);
+    // If this label has no values, we don't need any Phis.
+    if constexpr (super::size == 0) return typename super::values_t{};
+
+    DCHECK_EQ(predecessor_count, 1);
+    auto phis = typename super::values_t{
+        assembler.PendingLoopPhi(std::get<indices>(data.recorded_values)[0],
+                                 PendingLoopPhiOp::PhiIndex{indices})...};
+    return phis;
+  }
+
+  template <typename A>
+  static void FixLoopPhis(A& assembler, BlockData& data,
+                          const typename super::values_t& values) {
+    DCHECK(data.block->IsBound());
+    DCHECK(data.block->IsLoop());
+    DCHECK_LE(1, data.predecessors.size());
+    DCHECK_LE(data.predecessors.size(), 2);
+    auto op_range = assembler.output_graph().operations(*data.block);
+    FixLoopPhi<0>(assembler, data, values, op_range.begin(), op_range.end());
+  }
+
+  template <size_t I, typename A>
+  static void FixLoopPhi(A& assembler, BlockData& data,
+                         const typename super::values_t& values,
+                         Graph::MutableOperationIterator next,
+                         Graph::MutableOperationIterator end) {
+    if constexpr (I == std::tuple_size_v<typename super::values_t>) {
+#ifdef DEBUG
+      for (; next != end; ++next) {
+        DCHECK(!(*next).Is<PendingLoopPhiOp>());
+      }
+#endif  // DEBUG
+    } else {
+      // Find the next PendingLoopPhi.
+      for (; next != end; ++next) {
+        if (auto* pending_phi = (*next).TryCast<PendingLoopPhiOp>()) {
+          OpIndex phi_index = assembler.output_graph().Index(*pending_phi);
+          DCHECK_EQ(pending_phi->first(), std::get<I>(data.recorded_values)[0]);
+          DCHECK_EQ(I, pending_phi->data.phi_index.index);
+          assembler.output_graph().template Replace<PhiOp>(
+              phi_index,
+              base::VectorOf<OpIndex>(
+                  {pending_phi->first(), std::get<I>(values)}),
+              pending_phi->rep);
+          break;
+        }
+      }
+      // Check that we found a PendingLoopPhi. Otherwise something is wrong.
+      // Did you `Goto` to a loop header more than twice?
+      DCHECK_NE(next, end);
+      FixLoopPhi<I + 1>(assembler, data, values, ++next, end);
+    }
+  }
+
+  BlockData loop_header_data_;
+};
+
 Handle<Code> BuiltinCodeHandle(Builtin builtin, Isolate* isolate);
+
+template <typename Assembler>
+class AssemblerOpInterface;
+
+template <typename T>
+class Uninitialized {
+  static_assert(std::is_base_of_v<HeapObject, T>);
+
+ public:
+  explicit Uninitialized(V<T> object) : object_(object) {}
+
+ private:
+  template <typename Assembler>
+  friend class AssemblerOpInterface;
+
+  V<T> object() const {
+    DCHECK(object_.has_value());
+    return *object_;
+  }
+
+  V<T> ReleaseObject() {
+    DCHECK(object_.has_value());
+    auto temp = *object_;
+    object_.reset();
+    return temp;
+  }
+
+  base::Optional<V<T>> object_;
+};
 
 // Forward declarations
 template <class Assembler>
@@ -52,15 +442,32 @@ class ReducerStack<Assembler, FirstReducer, Reducers...>
   using FirstReducer<ReducerStack<Assembler, Reducers...>>::FirstReducer;
 };
 
-template <class Assembler>
-class ReducerStack<Assembler> {
+template <class Reducers>
+class ReducerStack<Assembler<Reducers>> {
  public:
-  using AssemblerType = Assembler;
-  Assembler& Asm() { return *static_cast<Assembler*>(this); }
+  using AssemblerType = Assembler<Reducers>;
+  using ReducerList = Reducers;
+  Assembler<ReducerList>& Asm() {
+    return *static_cast<Assembler<ReducerList>*>(this);
+  }
+};
+
+template <class Reducers>
+struct reducer_stack_type {};
+template <template <class> class... Reducers>
+struct reducer_stack_type<reducer_list<Reducers...>> {
+  using type = ReducerStack<Assembler<reducer_list<Reducers...>>, Reducers...,
+                            v8::internal::compiler::turboshaft::ReducerBase>;
 };
 
 template <typename Next>
 class ReducerBase;
+
+#define TURBOSHAFT_REDUCER_BOILERPLATE()                \
+  using ReducerList = typename Next::ReducerList;       \
+  Assembler<ReducerList>& Asm() {                       \
+    return *static_cast<Assembler<ReducerList>*>(this); \
+  }
 
 // LABEL_BLOCK is used in Reducers to have a single call forwarding to the next
 // reducer without change. A typical use would be:
@@ -101,15 +508,11 @@ class ReducerBaseForwarder : public Next {
 template <class Next>
 class ReducerBase : public ReducerBaseForwarder<Next> {
  public:
-  using Next::Asm;
+  TURBOSHAFT_REDUCER_BOILERPLATE()
+
   using Base = ReducerBaseForwarder<Next>;
 
-  using ArgT = std::tuple<>;
-
-  template <class... Args>
-  explicit ReducerBase(const std::tuple<Args...>&) {}
-
-  void Bind(Block*, const Block*) {}
+  void Bind(Block* block) {}
 
   void Analyze() {}
 
@@ -219,420 +622,606 @@ class AssemblerOpInterface {
 // reducer stack.
 #define DECL_MULTI_REP_BINOP(name, operation, rep_type, kind)            \
   OpIndex name(OpIndex left, OpIndex right, rep_type rep) {              \
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {      \
+      return OpIndex::Invalid();                                         \
+    }                                                                    \
     return stack().Reduce##operation(left, right,                        \
                                      operation##Op::Kind::k##kind, rep); \
   }
 #define DECL_SINGLE_REP_BINOP(name, operation, kind, rep)                \
   OpIndex name(OpIndex left, OpIndex right) {                            \
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {      \
+      return OpIndex::Invalid();                                         \
+    }                                                                    \
     return stack().Reduce##operation(left, right,                        \
                                      operation##Op::Kind::k##kind, rep); \
   }
-#define DECL_SINGLE_REP_BINOP_NO_KIND(name, operation, rep) \
-  OpIndex name(OpIndex left, OpIndex right) {               \
-    return stack().Reduce##operation(left, right, rep);     \
+#define DECL_SINGLE_REP_BINOP_V(name, operation, kind, tag)         \
+  V<tag> name(ConstOrV<tag> left, ConstOrV<tag> right) {            \
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) { \
+      return OpIndex::Invalid();                                    \
+    }                                                               \
+    return stack().Reduce##operation(resolve(left), resolve(right), \
+                                     operation##Op::Kind::k##kind,  \
+                                     V<tag>::rep);                  \
+  }
+#define DECL_SINGLE_REP_BINOP_NO_KIND(name, operation, rep)         \
+  OpIndex name(OpIndex left, OpIndex right) {                       \
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) { \
+      return OpIndex::Invalid();                                    \
+    }                                                               \
+    return stack().Reduce##operation(left, right, rep);             \
   }
   DECL_MULTI_REP_BINOP(WordAdd, WordBinop, WordRepresentation, Add)
-  DECL_SINGLE_REP_BINOP(Word32Add, WordBinop, Add, WordRepresentation::Word32())
-  DECL_SINGLE_REP_BINOP(Word64Add, WordBinop, Add, WordRepresentation::Word64())
+  DECL_SINGLE_REP_BINOP_V(Word32Add, WordBinop, Add, Word32)
+  DECL_SINGLE_REP_BINOP_V(Word64Add, WordBinop, Add, Word64)
+  DECL_SINGLE_REP_BINOP_V(WordPtrAdd, WordBinop, Add, WordPtr)
   DECL_SINGLE_REP_BINOP(PointerAdd, WordBinop, Add,
                         WordRepresentation::PointerSized())
 
   DECL_MULTI_REP_BINOP(WordMul, WordBinop, WordRepresentation, Mul)
-  DECL_SINGLE_REP_BINOP(Word32Mul, WordBinop, Mul, WordRepresentation::Word32())
-  DECL_SINGLE_REP_BINOP(Word64Mul, WordBinop, Mul, WordRepresentation::Word64())
+  DECL_SINGLE_REP_BINOP_V(Word32Mul, WordBinop, Mul, Word32)
+  DECL_SINGLE_REP_BINOP_V(Word64Mul, WordBinop, Mul, Word64)
+  DECL_SINGLE_REP_BINOP_V(WordPtrMul, WordBinop, Mul, WordPtr)
 
   DECL_MULTI_REP_BINOP(WordBitwiseAnd, WordBinop, WordRepresentation,
                        BitwiseAnd)
-  DECL_SINGLE_REP_BINOP(Word32BitwiseAnd, WordBinop, BitwiseAnd,
-                        WordRepresentation::Word32())
-  DECL_SINGLE_REP_BINOP(Word64BitwiseAnd, WordBinop, BitwiseAnd,
-                        WordRepresentation::Word64())
+  DECL_SINGLE_REP_BINOP_V(Word32BitwiseAnd, WordBinop, BitwiseAnd, Word32)
+  DECL_SINGLE_REP_BINOP_V(Word64BitwiseAnd, WordBinop, BitwiseAnd, Word64)
+  DECL_SINGLE_REP_BINOP_V(WordPtrBitwiseAnd, WordBinop, BitwiseAnd, WordPtr)
 
   DECL_MULTI_REP_BINOP(WordBitwiseOr, WordBinop, WordRepresentation, BitwiseOr)
-  DECL_SINGLE_REP_BINOP(Word32BitwiseOr, WordBinop, BitwiseOr,
-                        WordRepresentation::Word32())
-  DECL_SINGLE_REP_BINOP(Word64BitwiseOr, WordBinop, BitwiseOr,
-                        WordRepresentation::Word64())
+  DECL_SINGLE_REP_BINOP_V(Word32BitwiseOr, WordBinop, BitwiseOr, Word32)
+  DECL_SINGLE_REP_BINOP_V(Word64BitwiseOr, WordBinop, BitwiseOr, Word64)
 
   DECL_MULTI_REP_BINOP(WordBitwiseXor, WordBinop, WordRepresentation,
                        BitwiseXor)
-  DECL_SINGLE_REP_BINOP(Word32BitwiseXor, WordBinop, BitwiseXor,
-                        WordRepresentation::Word32())
-  DECL_SINGLE_REP_BINOP(Word64BitwiseXor, WordBinop, BitwiseXor,
-                        WordRepresentation::Word64())
+  DECL_SINGLE_REP_BINOP_V(Word32BitwiseXor, WordBinop, BitwiseXor, Word32)
+  DECL_SINGLE_REP_BINOP_V(Word64BitwiseXor, WordBinop, BitwiseXor, Word64)
 
   DECL_MULTI_REP_BINOP(WordSub, WordBinop, WordRepresentation, Sub)
-  DECL_SINGLE_REP_BINOP(Word32Sub, WordBinop, Sub, WordRepresentation::Word32())
-  DECL_SINGLE_REP_BINOP(Word64Sub, WordBinop, Sub, WordRepresentation::Word64())
+  DECL_SINGLE_REP_BINOP_V(Word32Sub, WordBinop, Sub, Word32)
+  DECL_SINGLE_REP_BINOP_V(Word64Sub, WordBinop, Sub, Word64)
+  DECL_SINGLE_REP_BINOP_V(WordPtrSub, WordBinop, Sub, WordPtr)
   DECL_SINGLE_REP_BINOP(PointerSub, WordBinop, Sub,
                         WordRepresentation::PointerSized())
 
   DECL_MULTI_REP_BINOP(IntDiv, WordBinop, WordRepresentation, SignedDiv)
-  DECL_SINGLE_REP_BINOP(Int32Div, WordBinop, SignedDiv,
-                        WordRepresentation::Word32())
-  DECL_SINGLE_REP_BINOP(Int64Div, WordBinop, SignedDiv,
-                        WordRepresentation::Word64())
+  DECL_SINGLE_REP_BINOP_V(Int32Div, WordBinop, SignedDiv, Word32)
+  DECL_SINGLE_REP_BINOP_V(Int64Div, WordBinop, SignedDiv, Word64)
   DECL_MULTI_REP_BINOP(UintDiv, WordBinop, WordRepresentation, UnsignedDiv)
-  DECL_SINGLE_REP_BINOP(Uint32Div, WordBinop, UnsignedDiv,
-                        WordRepresentation::Word32())
-  DECL_SINGLE_REP_BINOP(Uint64Div, WordBinop, UnsignedDiv,
-                        WordRepresentation::Word64())
+  DECL_SINGLE_REP_BINOP_V(Uint32Div, WordBinop, UnsignedDiv, Word32)
+  DECL_SINGLE_REP_BINOP_V(Uint64Div, WordBinop, UnsignedDiv, Word64)
   DECL_MULTI_REP_BINOP(IntMod, WordBinop, WordRepresentation, SignedMod)
-  DECL_SINGLE_REP_BINOP(Int32Mod, WordBinop, SignedMod,
-                        WordRepresentation::Word32())
-  DECL_SINGLE_REP_BINOP(Int64Mod, WordBinop, SignedMod,
-                        WordRepresentation::Word64())
+  DECL_SINGLE_REP_BINOP_V(Int32Mod, WordBinop, SignedMod, Word32)
+  DECL_SINGLE_REP_BINOP_V(Int64Mod, WordBinop, SignedMod, Word64)
   DECL_MULTI_REP_BINOP(UintMod, WordBinop, WordRepresentation, UnsignedMod)
-  DECL_SINGLE_REP_BINOP(Uint32Mod, WordBinop, UnsignedMod,
-                        WordRepresentation::Word32())
-  DECL_SINGLE_REP_BINOP(Uint64Mod, WordBinop, UnsignedMod,
-                        WordRepresentation::Word64())
+  DECL_SINGLE_REP_BINOP_V(Uint32Mod, WordBinop, UnsignedMod, Word32)
+  DECL_SINGLE_REP_BINOP_V(Uint64Mod, WordBinop, UnsignedMod, Word64)
   DECL_MULTI_REP_BINOP(IntMulOverflownBits, WordBinop, WordRepresentation,
                        SignedMulOverflownBits)
-  DECL_SINGLE_REP_BINOP(Int32MulOverflownBits, WordBinop,
-                        SignedMulOverflownBits, WordRepresentation::Word32())
-  DECL_SINGLE_REP_BINOP(Int64MulOverflownBits, WordBinop,
-                        SignedMulOverflownBits, WordRepresentation::Word64())
+  DECL_SINGLE_REP_BINOP_V(Int32MulOverflownBits, WordBinop,
+                          SignedMulOverflownBits, Word32)
+  DECL_SINGLE_REP_BINOP_V(Int64MulOverflownBits, WordBinop,
+                          SignedMulOverflownBits, Word64)
   DECL_MULTI_REP_BINOP(UintMulOverflownBits, WordBinop, WordRepresentation,
                        UnsignedMulOverflownBits)
-  DECL_SINGLE_REP_BINOP(Uint32MulOverflownBits, WordBinop,
-                        UnsignedMulOverflownBits, WordRepresentation::Word32())
-  DECL_SINGLE_REP_BINOP(Uint64MulOverflownBits, WordBinop,
-                        UnsignedMulOverflownBits, WordRepresentation::Word64())
+  DECL_SINGLE_REP_BINOP_V(Uint32MulOverflownBits, WordBinop,
+                          UnsignedMulOverflownBits, Word32)
+  DECL_SINGLE_REP_BINOP_V(Uint64MulOverflownBits, WordBinop,
+                          UnsignedMulOverflownBits, Word64)
 
+  OpIndex OverflowCheckedBinop(OpIndex left, OpIndex right,
+                               OverflowCheckedBinopOp::Kind kind,
+                               WordRepresentation rep) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceOverflowCheckedBinop(left, right, kind, rep);
+  }
   DECL_MULTI_REP_BINOP(IntAddCheckOverflow, OverflowCheckedBinop,
                        WordRepresentation, SignedAdd)
-  DECL_SINGLE_REP_BINOP(Int32AddCheckOverflow, OverflowCheckedBinop, SignedAdd,
-                        WordRepresentation::Word32())
-  DECL_SINGLE_REP_BINOP(Int64AddCheckOverflow, OverflowCheckedBinop, SignedAdd,
-                        WordRepresentation::Word64())
+  DECL_SINGLE_REP_BINOP_V(Int32AddCheckOverflow, OverflowCheckedBinop,
+                          SignedAdd, Word32)
+  DECL_SINGLE_REP_BINOP_V(Int64AddCheckOverflow, OverflowCheckedBinop,
+                          SignedAdd, Word64)
   DECL_MULTI_REP_BINOP(IntSubCheckOverflow, OverflowCheckedBinop,
                        WordRepresentation, SignedSub)
-  DECL_SINGLE_REP_BINOP(Int32SubCheckOverflow, OverflowCheckedBinop, SignedSub,
-                        WordRepresentation::Word32())
-  DECL_SINGLE_REP_BINOP(Int64SubCheckOverflow, OverflowCheckedBinop, SignedSub,
-                        WordRepresentation::Word64())
+  DECL_SINGLE_REP_BINOP_V(Int32SubCheckOverflow, OverflowCheckedBinop,
+                          SignedSub, Word32)
+  DECL_SINGLE_REP_BINOP_V(Int64SubCheckOverflow, OverflowCheckedBinop,
+                          SignedSub, Word64)
   DECL_MULTI_REP_BINOP(IntMulCheckOverflow, OverflowCheckedBinop,
                        WordRepresentation, SignedMul)
-  DECL_SINGLE_REP_BINOP(Int32MulCheckOverflow, OverflowCheckedBinop, SignedMul,
-                        WordRepresentation::Word32())
-  DECL_SINGLE_REP_BINOP(Int64MulCheckOverflow, OverflowCheckedBinop, SignedMul,
-                        WordRepresentation::Word64())
+  DECL_SINGLE_REP_BINOP_V(Int32MulCheckOverflow, OverflowCheckedBinop,
+                          SignedMul, Word32)
+  DECL_SINGLE_REP_BINOP_V(Int64MulCheckOverflow, OverflowCheckedBinop,
+                          SignedMul, Word64)
 
   DECL_MULTI_REP_BINOP(FloatAdd, FloatBinop, FloatRepresentation, Add)
-  DECL_SINGLE_REP_BINOP(Float32Add, FloatBinop, Add,
-                        FloatRepresentation::Float32())
-  DECL_SINGLE_REP_BINOP(Float64Add, FloatBinop, Add,
-                        FloatRepresentation::Float64())
+  DECL_SINGLE_REP_BINOP_V(Float32Add, FloatBinop, Add, Float32)
+  DECL_SINGLE_REP_BINOP_V(Float64Add, FloatBinop, Add, Float64)
   DECL_MULTI_REP_BINOP(FloatMul, FloatBinop, FloatRepresentation, Mul)
-  DECL_SINGLE_REP_BINOP(Float32Mul, FloatBinop, Mul,
-                        FloatRepresentation::Float32())
-  DECL_SINGLE_REP_BINOP(Float64Mul, FloatBinop, Mul,
-                        FloatRepresentation::Float64())
+  DECL_SINGLE_REP_BINOP_V(Float32Mul, FloatBinop, Mul, Float32)
+  DECL_SINGLE_REP_BINOP_V(Float64Mul, FloatBinop, Mul, Float64)
   DECL_MULTI_REP_BINOP(FloatSub, FloatBinop, FloatRepresentation, Sub)
-  DECL_SINGLE_REP_BINOP(Float32Sub, FloatBinop, Sub,
-                        FloatRepresentation::Float32())
-  DECL_SINGLE_REP_BINOP(Float64Sub, FloatBinop, Sub,
-                        FloatRepresentation::Float64())
+  DECL_SINGLE_REP_BINOP_V(Float32Sub, FloatBinop, Sub, Float32)
+  DECL_SINGLE_REP_BINOP_V(Float64Sub, FloatBinop, Sub, Float64)
   DECL_MULTI_REP_BINOP(FloatDiv, FloatBinop, FloatRepresentation, Div)
-  DECL_SINGLE_REP_BINOP(Float32Div, FloatBinop, Div,
-                        FloatRepresentation::Float32())
-  DECL_SINGLE_REP_BINOP(Float64Div, FloatBinop, Div,
-                        FloatRepresentation::Float64())
+  DECL_SINGLE_REP_BINOP_V(Float32Div, FloatBinop, Div, Float32)
+  DECL_SINGLE_REP_BINOP_V(Float64Div, FloatBinop, Div, Float64)
   DECL_MULTI_REP_BINOP(FloatMin, FloatBinop, FloatRepresentation, Min)
-  DECL_SINGLE_REP_BINOP(Float32Min, FloatBinop, Min,
-                        FloatRepresentation::Float32())
-  DECL_SINGLE_REP_BINOP(Float64Min, FloatBinop, Min,
-                        FloatRepresentation::Float64())
+  DECL_SINGLE_REP_BINOP_V(Float32Min, FloatBinop, Min, Float32)
+  DECL_SINGLE_REP_BINOP_V(Float64Min, FloatBinop, Min, Float64)
   DECL_MULTI_REP_BINOP(FloatMax, FloatBinop, FloatRepresentation, Max)
-  DECL_SINGLE_REP_BINOP(Float32Max, FloatBinop, Max,
-                        FloatRepresentation::Float32())
-  DECL_SINGLE_REP_BINOP(Float64Max, FloatBinop, Max,
-                        FloatRepresentation::Float64())
-  DECL_SINGLE_REP_BINOP(Float64Mod, FloatBinop, Mod,
-                        FloatRepresentation::Float64())
-  DECL_SINGLE_REP_BINOP(Float64Power, FloatBinop, Power,
-                        FloatRepresentation::Float64())
-  DECL_SINGLE_REP_BINOP(Float64Atan2, FloatBinop, Atan2,
-                        FloatRepresentation::Float64())
+  DECL_SINGLE_REP_BINOP_V(Float32Max, FloatBinop, Max, Float32)
+  DECL_SINGLE_REP_BINOP_V(Float64Max, FloatBinop, Max, Float64)
+  DECL_SINGLE_REP_BINOP_V(Float64Mod, FloatBinop, Mod, Float64)
+  DECL_SINGLE_REP_BINOP_V(Float64Power, FloatBinop, Power, Float64)
+  DECL_SINGLE_REP_BINOP_V(Float64Atan2, FloatBinop, Atan2, Float64)
 
   OpIndex Shift(OpIndex left, OpIndex right, ShiftOp::Kind kind,
                 WordRepresentation rep) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
     return stack().ReduceShift(left, right, kind, rep);
   }
 
   DECL_MULTI_REP_BINOP(ShiftRightArithmeticShiftOutZeros, Shift,
                        WordRepresentation, ShiftRightArithmeticShiftOutZeros)
-  DECL_SINGLE_REP_BINOP(Word32ShiftRightArithmeticShiftOutZeros, Shift,
-                        ShiftRightArithmeticShiftOutZeros,
-                        WordRepresentation::Word32())
-  DECL_SINGLE_REP_BINOP(Word64ShiftRightArithmeticShiftOutZeros, Shift,
-                        ShiftRightArithmeticShiftOutZeros,
-                        WordRepresentation::Word64())
+  DECL_SINGLE_REP_BINOP_V(Word32ShiftRightArithmeticShiftOutZeros, Shift,
+                          ShiftRightArithmeticShiftOutZeros, Word32)
+  DECL_SINGLE_REP_BINOP_V(Word64ShiftRightArithmeticShiftOutZeros, Shift,
+                          ShiftRightArithmeticShiftOutZeros, Word64)
+  DECL_SINGLE_REP_BINOP_V(WordPtrShiftRightArithmeticShiftOutZeros, Shift,
+                          ShiftRightArithmeticShiftOutZeros, WordPtr)
   DECL_MULTI_REP_BINOP(ShiftRightArithmetic, Shift, WordRepresentation,
                        ShiftRightArithmetic)
-  DECL_SINGLE_REP_BINOP(Word32ShiftRightArithmetic, Shift, ShiftRightArithmetic,
-                        WordRepresentation::Word32())
-  DECL_SINGLE_REP_BINOP(Word64ShiftRightArithmetic, Shift, ShiftRightArithmetic,
-                        WordRepresentation::Word64())
+  DECL_SINGLE_REP_BINOP_V(Word32ShiftRightArithmetic, Shift,
+                          ShiftRightArithmetic, Word32)
+  DECL_SINGLE_REP_BINOP_V(Word64ShiftRightArithmetic, Shift,
+                          ShiftRightArithmetic, Word64)
+  DECL_SINGLE_REP_BINOP_V(WordPtrShiftRightArithmetic, Shift,
+                          ShiftRightArithmetic, WordPtr)
   DECL_MULTI_REP_BINOP(ShiftRightLogical, Shift, WordRepresentation,
                        ShiftRightLogical)
-  DECL_SINGLE_REP_BINOP(Word32ShiftRightLogical, Shift, ShiftRightLogical,
-                        WordRepresentation::Word32())
-  DECL_SINGLE_REP_BINOP(Word64ShiftRightLogical, Shift, ShiftRightLogical,
-                        WordRepresentation::Word64())
+  DECL_SINGLE_REP_BINOP_V(Word32ShiftRightLogical, Shift, ShiftRightLogical,
+                          Word32)
+  DECL_SINGLE_REP_BINOP_V(Word64ShiftRightLogical, Shift, ShiftRightLogical,
+                          Word64)
   DECL_MULTI_REP_BINOP(ShiftLeft, Shift, WordRepresentation, ShiftLeft)
-  DECL_SINGLE_REP_BINOP(Word32ShiftLeft, Shift, ShiftLeft,
-                        WordRepresentation::Word32())
-  DECL_SINGLE_REP_BINOP(Word64ShiftLeft, Shift, ShiftLeft,
-                        WordRepresentation::Word64())
+  DECL_SINGLE_REP_BINOP_V(Word32ShiftLeft, Shift, ShiftLeft, Word32)
+  DECL_SINGLE_REP_BINOP_V(Word64ShiftLeft, Shift, ShiftLeft, Word64)
+  DECL_SINGLE_REP_BINOP_V(WordPtrShiftLeft, Shift, ShiftLeft, WordPtr)
   DECL_MULTI_REP_BINOP(RotateRight, Shift, WordRepresentation, RotateRight)
-  DECL_SINGLE_REP_BINOP(Word32RotateRight, Shift, RotateRight,
-                        WordRepresentation::Word32())
-  DECL_SINGLE_REP_BINOP(Word64RotateRight, Shift, RotateRight,
-                        WordRepresentation::Word64())
+  DECL_SINGLE_REP_BINOP_V(Word32RotateRight, Shift, RotateRight, Word32)
+  DECL_SINGLE_REP_BINOP_V(Word64RotateRight, Shift, RotateRight, Word64)
   DECL_MULTI_REP_BINOP(RotateLeft, Shift, WordRepresentation, RotateLeft)
-  DECL_SINGLE_REP_BINOP(Word32RotateLeft, Shift, RotateLeft,
-                        WordRepresentation::Word32())
-  DECL_SINGLE_REP_BINOP(Word64RotateLeft, Shift, RotateLeft,
-                        WordRepresentation::Word64())
+  DECL_SINGLE_REP_BINOP_V(Word32RotateLeft, Shift, RotateLeft, Word32)
+  DECL_SINGLE_REP_BINOP_V(Word64RotateLeft, Shift, RotateLeft, Word64)
 
   OpIndex ShiftRightLogical(OpIndex left, uint32_t right,
                             WordRepresentation rep) {
     DCHECK_GE(right, 0);
     DCHECK_LT(right, rep.bit_width());
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
     return ShiftRightLogical(left, this->Word32Constant(right), rep);
   }
   OpIndex ShiftRightArithmetic(OpIndex left, uint32_t right,
                                WordRepresentation rep) {
     DCHECK_GE(right, 0);
     DCHECK_LT(right, rep.bit_width());
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
     return ShiftRightArithmetic(left, this->Word32Constant(right), rep);
   }
   OpIndex ShiftLeft(OpIndex left, uint32_t right, WordRepresentation rep) {
     DCHECK_LT(right, rep.bit_width());
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
     return ShiftLeft(left, this->Word32Constant(right), rep);
   }
 
-  DECL_SINGLE_REP_BINOP_NO_KIND(Word32Equal, Equal,
-                                WordRepresentation::Word32())
-  DECL_SINGLE_REP_BINOP_NO_KIND(Word64Equal, Equal,
-                                WordRepresentation::Word64())
-  DECL_SINGLE_REP_BINOP_NO_KIND(Float32Equal, Equal,
-                                FloatRepresentation::Float32())
-  DECL_SINGLE_REP_BINOP_NO_KIND(Float64Equal, Equal,
-                                FloatRepresentation::Float64())
   OpIndex Equal(OpIndex left, OpIndex right, RegisterRepresentation rep) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
     return stack().ReduceEqual(left, right, rep);
+  }
+
+#define DECL_SINGLE_REP_EQUAL_V(name, operation, tag)               \
+  V<Word32> name(ConstOrV<tag> left, ConstOrV<tag> right) {         \
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) { \
+      return OpIndex::Invalid();                                    \
+    }                                                               \
+    return stack().Reduce##operation(resolve(left), resolve(right), \
+                                     V<tag>::rep);                  \
+  }
+  DECL_SINGLE_REP_EQUAL_V(Word32Equal, Equal, Word32)
+  DECL_SINGLE_REP_EQUAL_V(Word64Equal, Equal, Word64)
+  DECL_SINGLE_REP_EQUAL_V(WordPtrEqual, Equal, WordPtr)
+  DECL_SINGLE_REP_EQUAL_V(Float32Equal, Equal, Float32)
+  DECL_SINGLE_REP_EQUAL_V(Float64Equal, Equal, Float64)
+#undef DECL_SINGLE_REP_EQUAL_V
+
+  DECL_SINGLE_REP_BINOP_NO_KIND(TaggedEqual, Equal,
+                                RegisterRepresentation::Tagged())
+
+#define DECL_SINGLE_REP_COMPARISON_V(name, operation, kind, tag)    \
+  V<Word32> name(ConstOrV<tag> left, ConstOrV<tag> right) {         \
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) { \
+      return OpIndex::Invalid();                                    \
+    }                                                               \
+    return stack().Reduce##operation(resolve(left), resolve(right), \
+                                     operation##Op::Kind::k##kind,  \
+                                     V<tag>::rep);                  \
   }
 
   DECL_MULTI_REP_BINOP(IntLessThan, Comparison, RegisterRepresentation,
                        SignedLessThan)
-  DECL_SINGLE_REP_BINOP(Int32LessThan, Comparison, SignedLessThan,
-                        WordRepresentation::Word32())
-  DECL_SINGLE_REP_BINOP(Int64LessThan, Comparison, SignedLessThan,
-                        WordRepresentation::Word64())
+  DECL_SINGLE_REP_COMPARISON_V(Int32LessThan, Comparison, SignedLessThan,
+                               Word32)
+  DECL_SINGLE_REP_COMPARISON_V(Int64LessThan, Comparison, SignedLessThan,
+                               Word64)
+  DECL_SINGLE_REP_COMPARISON_V(IntPtrLessThan, Comparison, SignedLessThan,
+                               WordPtr)
+
   DECL_MULTI_REP_BINOP(UintLessThan, Comparison, RegisterRepresentation,
                        UnsignedLessThan)
-  DECL_SINGLE_REP_BINOP(Uint32LessThan, Comparison, UnsignedLessThan,
-                        WordRepresentation::Word32())
-  DECL_SINGLE_REP_BINOP(Uint64LessThan, Comparison, UnsignedLessThan,
-                        WordRepresentation::Word64())
+  DECL_SINGLE_REP_COMPARISON_V(Uint32LessThan, Comparison, UnsignedLessThan,
+                               Word32)
+  DECL_SINGLE_REP_COMPARISON_V(Uint64LessThan, Comparison, UnsignedLessThan,
+                               Word64)
   DECL_SINGLE_REP_BINOP(UintPtrLessThan, Comparison, UnsignedLessThan,
                         WordRepresentation::PointerSized())
   DECL_MULTI_REP_BINOP(FloatLessThan, Comparison, RegisterRepresentation,
                        SignedLessThan)
-  DECL_SINGLE_REP_BINOP(Float32LessThan, Comparison, SignedLessThan,
-                        FloatRepresentation::Float32())
-  DECL_SINGLE_REP_BINOP(Float64LessThan, Comparison, SignedLessThan,
-                        FloatRepresentation::Float64())
+  DECL_SINGLE_REP_COMPARISON_V(Float32LessThan, Comparison, SignedLessThan,
+                               Float32)
+  DECL_SINGLE_REP_COMPARISON_V(Float64LessThan, Comparison, SignedLessThan,
+                               Float64)
 
   DECL_MULTI_REP_BINOP(IntLessThanOrEqual, Comparison, RegisterRepresentation,
                        SignedLessThanOrEqual)
-  DECL_SINGLE_REP_BINOP(Int32LessThanOrEqual, Comparison, SignedLessThanOrEqual,
-                        WordRepresentation::Word32())
-  DECL_SINGLE_REP_BINOP(Int64LessThanOrEqual, Comparison, SignedLessThanOrEqual,
-                        WordRepresentation::Word64())
+  DECL_SINGLE_REP_COMPARISON_V(Int32LessThanOrEqual, Comparison,
+                               SignedLessThanOrEqual, Word32)
+  DECL_SINGLE_REP_COMPARISON_V(Int64LessThanOrEqual, Comparison,
+                               SignedLessThanOrEqual, Word64)
   DECL_MULTI_REP_BINOP(UintLessThanOrEqual, Comparison, RegisterRepresentation,
                        UnsignedLessThanOrEqual)
-  DECL_SINGLE_REP_BINOP(Uint32LessThanOrEqual, Comparison,
-                        UnsignedLessThanOrEqual, WordRepresentation::Word32())
-  DECL_SINGLE_REP_BINOP(Uint64LessThanOrEqual, Comparison,
-                        UnsignedLessThanOrEqual, WordRepresentation::Word64())
+  DECL_SINGLE_REP_COMPARISON_V(Uint32LessThanOrEqual, Comparison,
+                               UnsignedLessThanOrEqual, Word32)
+  DECL_SINGLE_REP_COMPARISON_V(Uint64LessThanOrEqual, Comparison,
+                               UnsignedLessThanOrEqual, Word64)
   DECL_SINGLE_REP_BINOP(UintPtrLessThanOrEqual, Comparison,
                         UnsignedLessThanOrEqual,
                         WordRepresentation::PointerSized())
   DECL_MULTI_REP_BINOP(FloatLessThanOrEqual, Comparison, RegisterRepresentation,
                        SignedLessThanOrEqual)
-  DECL_SINGLE_REP_BINOP(Float32LessThanOrEqual, Comparison,
-                        SignedLessThanOrEqual, FloatRepresentation::Float32())
-  DECL_SINGLE_REP_BINOP(Float64LessThanOrEqual, Comparison,
-                        SignedLessThanOrEqual, FloatRepresentation::Float64())
+  DECL_SINGLE_REP_COMPARISON_V(Float32LessThanOrEqual, Comparison,
+                               SignedLessThanOrEqual, Float32)
+  DECL_SINGLE_REP_COMPARISON_V(Float64LessThanOrEqual, Comparison,
+                               SignedLessThanOrEqual, Float64)
+#undef DECL_SINGLE_REP_COMPARISON_V
+
   OpIndex Comparison(OpIndex left, OpIndex right, ComparisonOp::Kind kind,
                      RegisterRepresentation rep) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
     return stack().ReduceComparison(left, right, kind, rep);
   }
 
 #undef DECL_SINGLE_REP_BINOP
+#undef DECL_SINGLE_REP_BINOP_V
 #undef DECL_MULTI_REP_BINOP
 #undef DECL_SINGLE_REP_BINOP_NO_KIND
 
 #define DECL_MULTI_REP_UNARY(name, operation, rep_type, kind)             \
   OpIndex name(OpIndex input, rep_type rep) {                             \
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {       \
+      return OpIndex::Invalid();                                          \
+    }                                                                     \
     return stack().Reduce##operation(input, operation##Op::Kind::k##kind, \
                                      rep);                                \
   }
-#define DECL_SINGLE_REP_UNARY(name, operation, kind, rep)                 \
-  OpIndex name(OpIndex input) {                                           \
-    return stack().Reduce##operation(input, operation##Op::Kind::k##kind, \
-                                     rep);                                \
+#define DECL_SINGLE_REP_UNARY_V(name, operation, kind, tag)         \
+  V<tag> name(ConstOrV<tag> input) {                                \
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) { \
+      return OpIndex::Invalid();                                    \
+    }                                                               \
+    return stack().Reduce##operation(                               \
+        resolve(input), operation##Op::Kind::k##kind, V<tag>::rep); \
   }
 
   DECL_MULTI_REP_UNARY(FloatAbs, FloatUnary, FloatRepresentation, Abs)
-  DECL_SINGLE_REP_UNARY(Float32Abs, FloatUnary, Abs,
-                        FloatRepresentation::Float32())
-  DECL_SINGLE_REP_UNARY(Float64Abs, FloatUnary, Abs,
-                        FloatRepresentation::Float64())
+  DECL_SINGLE_REP_UNARY_V(Float32Abs, FloatUnary, Abs, Float32)
+  DECL_SINGLE_REP_UNARY_V(Float64Abs, FloatUnary, Abs, Float64)
   DECL_MULTI_REP_UNARY(FloatNegate, FloatUnary, FloatRepresentation, Negate)
-  DECL_SINGLE_REP_UNARY(Float32Negate, FloatUnary, Negate,
-                        FloatRepresentation::Float32())
-  DECL_SINGLE_REP_UNARY(Float64Negate, FloatUnary, Negate,
-                        FloatRepresentation::Float64())
-  DECL_SINGLE_REP_UNARY(Float64SilenceNaN, FloatUnary, SilenceNaN,
-                        FloatRepresentation::Float64())
+  DECL_SINGLE_REP_UNARY_V(Float32Negate, FloatUnary, Negate, Float32)
+  DECL_SINGLE_REP_UNARY_V(Float64Negate, FloatUnary, Negate, Float64)
+  DECL_SINGLE_REP_UNARY_V(Float64SilenceNaN, FloatUnary, SilenceNaN, Float64)
   DECL_MULTI_REP_UNARY(FloatRoundDown, FloatUnary, FloatRepresentation,
                        RoundDown)
-  DECL_SINGLE_REP_UNARY(Float32RoundDown, FloatUnary, RoundDown,
-                        FloatRepresentation::Float32())
-  DECL_SINGLE_REP_UNARY(Float64RoundDown, FloatUnary, RoundDown,
-                        FloatRepresentation::Float64())
+  DECL_SINGLE_REP_UNARY_V(Float32RoundDown, FloatUnary, RoundDown, Float32)
+  DECL_SINGLE_REP_UNARY_V(Float64RoundDown, FloatUnary, RoundDown, Float64)
   DECL_MULTI_REP_UNARY(FloatRoundUp, FloatUnary, FloatRepresentation, RoundUp)
-  DECL_SINGLE_REP_UNARY(Float32RoundUp, FloatUnary, RoundUp,
-                        FloatRepresentation::Float32())
-  DECL_SINGLE_REP_UNARY(Float64RoundUp, FloatUnary, RoundUp,
-                        FloatRepresentation::Float64())
+  DECL_SINGLE_REP_UNARY_V(Float32RoundUp, FloatUnary, RoundUp, Float32)
+  DECL_SINGLE_REP_UNARY_V(Float64RoundUp, FloatUnary, RoundUp, Float64)
   DECL_MULTI_REP_UNARY(FloatRoundToZero, FloatUnary, FloatRepresentation,
                        RoundToZero)
-  DECL_SINGLE_REP_UNARY(Float32RoundToZero, FloatUnary, RoundToZero,
-                        FloatRepresentation::Float32())
-  DECL_SINGLE_REP_UNARY(Float64RoundToZero, FloatUnary, RoundToZero,
-                        FloatRepresentation::Float64())
+  DECL_SINGLE_REP_UNARY_V(Float32RoundToZero, FloatUnary, RoundToZero, Float32)
+  DECL_SINGLE_REP_UNARY_V(Float64RoundToZero, FloatUnary, RoundToZero, Float64)
   DECL_MULTI_REP_UNARY(FloatRoundTiesEven, FloatUnary, FloatRepresentation,
                        RoundTiesEven)
-  DECL_SINGLE_REP_UNARY(Float32RoundTiesEven, FloatUnary, RoundTiesEven,
-                        FloatRepresentation::Float32())
-  DECL_SINGLE_REP_UNARY(Float64RoundTiesEven, FloatUnary, RoundTiesEven,
-                        FloatRepresentation::Float64())
-  DECL_SINGLE_REP_UNARY(Float64Log, FloatUnary, Log,
-                        FloatRepresentation::Float64())
+  DECL_SINGLE_REP_UNARY_V(Float32RoundTiesEven, FloatUnary, RoundTiesEven,
+                          Float32)
+  DECL_SINGLE_REP_UNARY_V(Float64RoundTiesEven, FloatUnary, RoundTiesEven,
+                          Float64)
+  DECL_SINGLE_REP_UNARY_V(Float64Log, FloatUnary, Log, Float64)
   DECL_MULTI_REP_UNARY(FloatSqrt, FloatUnary, FloatRepresentation, Sqrt)
-  DECL_SINGLE_REP_UNARY(Float32Sqrt, FloatUnary, Sqrt,
-                        FloatRepresentation::Float32())
-  DECL_SINGLE_REP_UNARY(Float64Sqrt, FloatUnary, Sqrt,
-                        FloatRepresentation::Float64())
-  DECL_SINGLE_REP_UNARY(Float64Exp, FloatUnary, Exp,
-                        FloatRepresentation::Float64())
-  DECL_SINGLE_REP_UNARY(Float64Expm1, FloatUnary, Expm1,
-                        FloatRepresentation::Float64())
-  DECL_SINGLE_REP_UNARY(Float64Sin, FloatUnary, Sin,
-                        FloatRepresentation::Float64())
-  DECL_SINGLE_REP_UNARY(Float64Cos, FloatUnary, Cos,
-                        FloatRepresentation::Float64())
-  DECL_SINGLE_REP_UNARY(Float64Sinh, FloatUnary, Sinh,
-                        FloatRepresentation::Float64())
-  DECL_SINGLE_REP_UNARY(Float64Cosh, FloatUnary, Cosh,
-                        FloatRepresentation::Float64())
-  DECL_SINGLE_REP_UNARY(Float64Asin, FloatUnary, Asin,
-                        FloatRepresentation::Float64())
-  DECL_SINGLE_REP_UNARY(Float64Acos, FloatUnary, Acos,
-                        FloatRepresentation::Float64())
-  DECL_SINGLE_REP_UNARY(Float64Asinh, FloatUnary, Asinh,
-                        FloatRepresentation::Float64())
-  DECL_SINGLE_REP_UNARY(Float64Acosh, FloatUnary, Acosh,
-                        FloatRepresentation::Float64())
-  DECL_SINGLE_REP_UNARY(Float64Tan, FloatUnary, Tan,
-                        FloatRepresentation::Float64())
-  DECL_SINGLE_REP_UNARY(Float64Tanh, FloatUnary, Tanh,
-                        FloatRepresentation::Float64())
-  DECL_SINGLE_REP_UNARY(Float64Log2, FloatUnary, Log2,
-                        FloatRepresentation::Float64())
-  DECL_SINGLE_REP_UNARY(Float64Log10, FloatUnary, Log10,
-                        FloatRepresentation::Float64())
-  DECL_SINGLE_REP_UNARY(Float64Log1p, FloatUnary, Log1p,
-                        FloatRepresentation::Float64())
-  DECL_SINGLE_REP_UNARY(Float64Atan, FloatUnary, Atan,
-                        FloatRepresentation::Float64())
-  DECL_SINGLE_REP_UNARY(Float64Atanh, FloatUnary, Atanh,
-                        FloatRepresentation::Float64())
-  DECL_SINGLE_REP_UNARY(Float64Cbrt, FloatUnary, Cbrt,
-                        FloatRepresentation::Float64())
+  DECL_SINGLE_REP_UNARY_V(Float32Sqrt, FloatUnary, Sqrt, Float32)
+  DECL_SINGLE_REP_UNARY_V(Float64Sqrt, FloatUnary, Sqrt, Float64)
+  DECL_SINGLE_REP_UNARY_V(Float64Exp, FloatUnary, Exp, Float64)
+  DECL_SINGLE_REP_UNARY_V(Float64Expm1, FloatUnary, Expm1, Float64)
+  DECL_SINGLE_REP_UNARY_V(Float64Sin, FloatUnary, Sin, Float64)
+  DECL_SINGLE_REP_UNARY_V(Float64Cos, FloatUnary, Cos, Float64)
+  DECL_SINGLE_REP_UNARY_V(Float64Sinh, FloatUnary, Sinh, Float64)
+  DECL_SINGLE_REP_UNARY_V(Float64Cosh, FloatUnary, Cosh, Float64)
+  DECL_SINGLE_REP_UNARY_V(Float64Asin, FloatUnary, Asin, Float64)
+  DECL_SINGLE_REP_UNARY_V(Float64Acos, FloatUnary, Acos, Float64)
+  DECL_SINGLE_REP_UNARY_V(Float64Asinh, FloatUnary, Asinh, Float64)
+  DECL_SINGLE_REP_UNARY_V(Float64Acosh, FloatUnary, Acosh, Float64)
+  DECL_SINGLE_REP_UNARY_V(Float64Tan, FloatUnary, Tan, Float64)
+  DECL_SINGLE_REP_UNARY_V(Float64Tanh, FloatUnary, Tanh, Float64)
+  DECL_SINGLE_REP_UNARY_V(Float64Log2, FloatUnary, Log2, Float64)
+  DECL_SINGLE_REP_UNARY_V(Float64Log10, FloatUnary, Log10, Float64)
+  DECL_SINGLE_REP_UNARY_V(Float64Log1p, FloatUnary, Log1p, Float64)
+  DECL_SINGLE_REP_UNARY_V(Float64Atan, FloatUnary, Atan, Float64)
+  DECL_SINGLE_REP_UNARY_V(Float64Atanh, FloatUnary, Atanh, Float64)
+  DECL_SINGLE_REP_UNARY_V(Float64Cbrt, FloatUnary, Cbrt, Float64)
 
   DECL_MULTI_REP_UNARY(WordReverseBytes, WordUnary, WordRepresentation,
                        ReverseBytes)
-  DECL_SINGLE_REP_UNARY(Word32ReverseBytes, WordUnary, ReverseBytes,
-                        WordRepresentation::Word32())
-  DECL_SINGLE_REP_UNARY(Word64ReverseBytes, WordUnary, ReverseBytes,
-                        WordRepresentation::Word64())
+  DECL_SINGLE_REP_UNARY_V(Word32ReverseBytes, WordUnary, ReverseBytes, Word32)
+  DECL_SINGLE_REP_UNARY_V(Word64ReverseBytes, WordUnary, ReverseBytes, Word64)
   DECL_MULTI_REP_UNARY(WordCountLeadingZeros, WordUnary, WordRepresentation,
                        CountLeadingZeros)
-  DECL_SINGLE_REP_UNARY(Word32CountLeadingZeros, WordUnary, CountLeadingZeros,
-                        WordRepresentation::Word32())
-  DECL_SINGLE_REP_UNARY(Word64CountLeadingZeros, WordUnary, CountLeadingZeros,
-                        WordRepresentation::Word64())
+  DECL_SINGLE_REP_UNARY_V(Word32CountLeadingZeros, WordUnary, CountLeadingZeros,
+                          Word32)
+  DECL_SINGLE_REP_UNARY_V(Word64CountLeadingZeros, WordUnary, CountLeadingZeros,
+                          Word64)
   DECL_MULTI_REP_UNARY(WordCountTrailingZeros, WordUnary, WordRepresentation,
                        CountTrailingZeros)
-  DECL_SINGLE_REP_UNARY(Word32CountTrailingZeros, WordUnary, CountTrailingZeros,
-                        WordRepresentation::Word32())
-  DECL_SINGLE_REP_UNARY(Word64CountTrailingZeros, WordUnary, CountTrailingZeros,
-                        WordRepresentation::Word64())
+  DECL_SINGLE_REP_UNARY_V(Word32CountTrailingZeros, WordUnary,
+                          CountTrailingZeros, Word32)
+  DECL_SINGLE_REP_UNARY_V(Word64CountTrailingZeros, WordUnary,
+                          CountTrailingZeros, Word64)
   DECL_MULTI_REP_UNARY(WordPopCount, WordUnary, WordRepresentation, PopCount)
-  DECL_SINGLE_REP_UNARY(Word32PopCount, WordUnary, PopCount,
-                        WordRepresentation::Word32())
-  DECL_SINGLE_REP_UNARY(Word64PopCount, WordUnary, PopCount,
-                        WordRepresentation::Word64())
+  DECL_SINGLE_REP_UNARY_V(Word32PopCount, WordUnary, PopCount, Word32)
+  DECL_SINGLE_REP_UNARY_V(Word64PopCount, WordUnary, PopCount, Word64)
   DECL_MULTI_REP_UNARY(WordSignExtend8, WordUnary, WordRepresentation,
                        SignExtend8)
-  DECL_SINGLE_REP_UNARY(Word32SignExtend8, WordUnary, SignExtend8,
-                        WordRepresentation::Word32())
-  DECL_SINGLE_REP_UNARY(Word64SignExtend8, WordUnary, SignExtend8,
-                        WordRepresentation::Word64())
+  DECL_SINGLE_REP_UNARY_V(Word32SignExtend8, WordUnary, SignExtend8, Word32)
+  DECL_SINGLE_REP_UNARY_V(Word64SignExtend8, WordUnary, SignExtend8, Word64)
   DECL_MULTI_REP_UNARY(WordSignExtend16, WordUnary, WordRepresentation,
                        SignExtend16)
-  DECL_SINGLE_REP_UNARY(Word32SignExtend16, WordUnary, SignExtend16,
-                        WordRepresentation::Word32())
-  DECL_SINGLE_REP_UNARY(Word64SignExtend16, WordUnary, SignExtend16,
-                        WordRepresentation::Word64())
-#undef DECL_SINGLE_REP_UNARY
+  DECL_SINGLE_REP_UNARY_V(Word32SignExtend16, WordUnary, SignExtend16, Word32)
+  DECL_SINGLE_REP_UNARY_V(Word64SignExtend16, WordUnary, SignExtend16, Word64)
+#undef DECL_SINGLE_REP_UNARY_V
 #undef DECL_MULTI_REP_UNARY
 
-  OpIndex Float64InsertWord32(OpIndex float64, OpIndex word32,
-                              Float64InsertWord32Op::Kind kind) {
-    return stack().ReduceFloat64InsertWord32(float64, word32, kind);
+  V<Float64> Float64InsertWord32(ConstOrV<Float64> float64,
+                                 ConstOrV<Word32> word32,
+                                 Float64InsertWord32Op::Kind kind) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceFloat64InsertWord32(resolve(float64), resolve(word32),
+                                             kind);
   }
 
   OpIndex TaggedBitcast(OpIndex input, RegisterRepresentation from,
                         RegisterRepresentation to) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
     return stack().ReduceTaggedBitcast(input, from, to);
   }
-  OpIndex BitcastTaggedToWord(OpIndex tagged) {
+  V<WordPtr> BitcastTaggedToWord(V<Object> tagged) {
     return TaggedBitcast(tagged, RegisterRepresentation::Tagged(),
                          RegisterRepresentation::PointerSized());
   }
-  OpIndex BitcastWordToTagged(OpIndex word) {
+  V<Object> BitcastWordToTagged(V<WordPtr> word) {
     return TaggedBitcast(word, RegisterRepresentation::PointerSized(),
                          RegisterRepresentation::Tagged());
   }
 
-  OpIndex Word32Constant(uint32_t value) {
+  V<Word32> ObjectIs(V<Object> input, ObjectIsOp::Kind kind,
+                     ObjectIsOp::InputAssumptions input_assumptions) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceObjectIs(input, kind, input_assumptions);
+  }
+  V<Word32> ObjectIsSmi(V<Object> object) {
+    return ObjectIs(object, ObjectIsOp::Kind::kSmi,
+                    ObjectIsOp::InputAssumptions::kNone);
+  }
+
+  V<Word32> FloatIs(OpIndex input, NumericKind kind,
+                    FloatRepresentation input_rep) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceFloatIs(input, kind, input_rep);
+  }
+  V<Word32> Float64IsNaN(V<Float64> input) {
+    return FloatIs(input, NumericKind::kNaN, FloatRepresentation::Float64());
+  }
+
+  OpIndex ObjectIsNumericValue(OpIndex input, NumericKind kind,
+                               FloatRepresentation input_rep) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceObjectIsNumericValue(input, kind, input_rep);
+  }
+
+  V<Object> Convert(V<Object> input, ConvertOp::Kind from, ConvertOp::Kind to) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceConvert(input, from, to);
+  }
+  V<Number> ConvertPlainPrimitiveToNumber(V<PlainPrimitive> input) {
+    return V<Number>::Cast(Convert(input, ConvertOp::Kind::kPlainPrimitive,
+                                   ConvertOp::Kind::kNumber));
+  }
+  V<Boolean> ConvertToBoolean(V<Object> input) {
+    return V<Boolean>::Cast(
+        Convert(input, ConvertOp::Kind::kObject, ConvertOp::Kind::kBoolean));
+  }
+  V<String> ConvertNumberToString(V<Number> input) {
+    return V<String>::Cast(
+        Convert(input, ConvertOp::Kind::kNumber, ConvertOp::Kind::kString));
+  }
+  V<Number> ConvertStringToNumber(V<String> input) {
+    return V<Number>::Cast(
+        Convert(input, ConvertOp::Kind::kString, ConvertOp::Kind::kNumber));
+  }
+
+  V<Object> ConvertOrDeopt(V<Object> input, OpIndex frame_state,
+                           ConvertOrDeoptOp::Kind from,
+                           ConvertOrDeoptOp::Kind to,
+                           const FeedbackSource& feedback) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceConvertOrDeopt(input, frame_state, from, to, feedback);
+  }
+
+  V<Object> ConvertPrimitiveToObject(
+      OpIndex input, ConvertPrimitiveToObjectOp::Kind kind,
+      RegisterRepresentation input_rep,
+      ConvertPrimitiveToObjectOp::InputInterpretation input_interpretation,
+      CheckForMinusZeroMode minus_zero_mode) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceConvertPrimitiveToObject(
+        input, kind, input_rep, input_interpretation, minus_zero_mode);
+  }
+#define CONVERT_PRIMITIVE_TO_OBJECT(name, kind, input_rep, \
+                                    input_interpretation)  \
+  V<kind> name(V<input_rep> input) {                       \
+    return V<kind>::Cast(ConvertPrimitiveToObject(         \
+        input, ConvertPrimitiveToObjectOp::Kind::k##kind,  \
+        RegisterRepresentation::input_rep(),               \
+        ConvertPrimitiveToObjectOp::InputInterpretation::  \
+            k##input_interpretation,                       \
+        CheckForMinusZeroMode::kDontCheckForMinusZero));   \
+  }
+  CONVERT_PRIMITIVE_TO_OBJECT(ConvertInt32ToNumber, Number, Word32, Signed)
+  CONVERT_PRIMITIVE_TO_OBJECT(ConvertUint32ToNumber, Number, Word32, Unsigned)
+  CONVERT_PRIMITIVE_TO_OBJECT(ConvertWord32ToBoolean, Boolean, Word32, Signed)
+#undef CONVERT_PRIMITIVE_TO_OBJECT
+  V<Number> ConvertFloat64ToNumber(V<Float64> input,
+                                   CheckForMinusZeroMode minus_zero_mode) {
+    return V<Number>::Cast(ConvertPrimitiveToObject(
+        input, ConvertPrimitiveToObjectOp::Kind::kNumber,
+        RegisterRepresentation::Float64(),
+        ConvertPrimitiveToObjectOp::InputInterpretation::kSigned,
+        minus_zero_mode));
+  }
+
+  OpIndex ConvertPrimitiveToObjectOrDeopt(
+      OpIndex input, OpIndex frame_state,
+      ConvertPrimitiveToObjectOrDeoptOp::Kind kind,
+      RegisterRepresentation input_rep,
+      ConvertPrimitiveToObjectOrDeoptOp::InputInterpretation
+          input_interpretation,
+      const FeedbackSource& feedback) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceConvertPrimitiveToObjectOrDeopt(
+        input, frame_state, kind, input_rep, input_interpretation, feedback);
+  }
+
+  OpIndex ConvertObjectToPrimitive(
+      V<Object> object, ConvertObjectToPrimitiveOp::Kind kind,
+      ConvertObjectToPrimitiveOp::InputAssumptions input_assumptions) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceConvertObjectToPrimitive(object, kind,
+                                                  input_assumptions);
+  }
+
+  OpIndex ConvertObjectToPrimitiveOrDeopt(
+      V<Object> object, OpIndex frame_state,
+      ConvertObjectToPrimitiveOrDeoptOp::ObjectKind from_kind,
+      ConvertObjectToPrimitiveOrDeoptOp::PrimitiveKind to_kind,
+      CheckForMinusZeroMode minus_zero_mode, const FeedbackSource& feedback) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceConvertObjectToPrimitiveOrDeopt(
+        object, frame_state, from_kind, to_kind, minus_zero_mode, feedback);
+  }
+
+  OpIndex TruncateObjectToPrimitive(
+      V<Object> object, TruncateObjectToPrimitiveOp::Kind kind,
+      TruncateObjectToPrimitiveOp::InputAssumptions input_assumptions) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceTruncateObjectToPrimitive(object, kind,
+                                                   input_assumptions);
+  }
+
+  OpIndex TruncateObjectToPrimitiveOrDeopt(
+      V<Object> object, OpIndex frame_state,
+      TruncateObjectToPrimitiveOrDeoptOp::Kind kind,
+      TruncateObjectToPrimitiveOrDeoptOp::InputRequirement input_requirement,
+      const FeedbackSource& feedback) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceTruncateObjectToPrimitiveOrDeopt(
+        object, frame_state, kind, input_requirement, feedback);
+  }
+
+  V<Object> ConvertReceiver(V<Object> value, V<Object> global_proxy,
+                            ConvertReceiverMode mode) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceConvertReceiver(value, global_proxy, mode);
+  }
+
+  V<Word32> Word32Constant(uint32_t value) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
     return stack().ReduceConstant(ConstantOp::Kind::kWord32, uint64_t{value});
   }
-  OpIndex Word32Constant(int32_t value) {
+  V<Word32> Word32Constant(int32_t value) {
     return Word32Constant(static_cast<uint32_t>(value));
   }
-  OpIndex Word64Constant(uint64_t value) {
+  V<Word64> Word64Constant(uint64_t value) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
     return stack().ReduceConstant(ConstantOp::Kind::kWord64, value);
   }
-  OpIndex Word64Constant(int64_t value) {
+  V<Word64> Word64Constant(int64_t value) {
     return Word64Constant(static_cast<uint64_t>(value));
   }
   OpIndex WordConstant(uint64_t value, WordRepresentation rep) {
@@ -643,17 +1232,23 @@ class AssemblerOpInterface {
         return Word64Constant(value);
     }
   }
-  OpIndex IntPtrConstant(intptr_t value) {
+  V<WordPtr> IntPtrConstant(intptr_t value) {
     return UintPtrConstant(static_cast<uintptr_t>(value));
   }
-  OpIndex UintPtrConstant(uintptr_t value) {
+  V<WordPtr> UintPtrConstant(uintptr_t value) {
     return WordConstant(static_cast<uint64_t>(value),
                         WordRepresentation::PointerSized());
   }
-  OpIndex Float32Constant(float value) {
+  V<Float32> Float32Constant(float value) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
     return stack().ReduceConstant(ConstantOp::Kind::kFloat32, value);
   }
-  OpIndex Float64Constant(double value) {
+  V<Float64> Float64Constant(double value) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
     return stack().ReduceConstant(ConstantOp::Kind::kFloat64, value);
   }
   OpIndex FloatConstant(double value, FloatRepresentation rep) {
@@ -665,79 +1260,158 @@ class AssemblerOpInterface {
     }
   }
   OpIndex NumberConstant(double value) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
     return stack().ReduceConstant(ConstantOp::Kind::kNumber, value);
   }
   OpIndex TaggedIndexConstant(int32_t value) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
     return stack().ReduceConstant(ConstantOp::Kind::kTaggedIndex,
                                   uint64_t{static_cast<uint32_t>(value)});
   }
-  OpIndex HeapConstant(Handle<HeapObject> value) {
-    return stack().ReduceConstant(ConstantOp::Kind::kHeapObject, value);
+  template <typename T,
+            typename = std::enable_if_t<std::is_base_of_v<HeapObject, T>>>
+  V<T> HeapConstant(Handle<T> value) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceConstant(ConstantOp::Kind::kHeapObject,
+                                  ConstantOp::Storage{value});
   }
-  OpIndex BuiltinCode(Builtin builtin, Isolate* isolate) {
+  V<Code> BuiltinCode(Builtin builtin, Isolate* isolate) {
     return HeapConstant(BuiltinCodeHandle(builtin, isolate));
   }
   OpIndex CompressedHeapConstant(Handle<HeapObject> value) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
     return stack().ReduceConstant(ConstantOp::Kind::kHeapObject, value);
   }
   OpIndex ExternalConstant(ExternalReference value) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
     return stack().ReduceConstant(ConstantOp::Kind::kExternal, value);
   }
   OpIndex RelocatableConstant(int64_t value, RelocInfo::Mode mode) {
     DCHECK_EQ(mode, any_of(RelocInfo::WASM_CALL, RelocInfo::WASM_STUB_CALL));
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
     return stack().ReduceConstant(
         mode == RelocInfo::WASM_CALL
             ? ConstantOp::Kind::kRelocatableWasmCall
             : ConstantOp::Kind::kRelocatableWasmStubCall,
         static_cast<uint64_t>(value));
   }
+  V<Context> NoContextConstant() {
+    return V<Context>::Cast(SmiTag(Context::kNoContext));
+  }
+  // TODO(nicohartmann@): Might want to get rid of the isolate when supporting
+  // Wasm.
+  V<Tagged> CEntryStubConstant(Isolate* isolate, int result_size,
+                               ArgvMode argv_mode = ArgvMode::kStack,
+                               bool builtin_exit_frame = false) {
+    if (argv_mode != ArgvMode::kStack) {
+      return HeapConstant(CodeFactory::CEntry(isolate, result_size, argv_mode,
+                                              builtin_exit_frame));
+    }
+
+    DCHECK(result_size >= 1 && result_size <= 3);
+    DCHECK_IMPLIES(builtin_exit_frame, result_size == 1);
+    const int index = builtin_exit_frame ? 0 : result_size;
+    if (cached_centry_stub_constants_[index].is_null()) {
+      cached_centry_stub_constants_[index] = CodeFactory::CEntry(
+          isolate, result_size, argv_mode, builtin_exit_frame);
+    }
+    return HeapConstant(cached_centry_stub_constants_[index].ToHandleChecked());
+  }
 
 #define DECL_CHANGE(name, kind, assumption, from, to)                  \
   OpIndex name(OpIndex input) {                                        \
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {    \
+      return OpIndex::Invalid();                                       \
+    }                                                                  \
     return stack().ReduceChange(                                       \
         input, ChangeOp::Kind::kind, ChangeOp::Assumption::assumption, \
         RegisterRepresentation::from(), RegisterRepresentation::to()); \
   }
-#define DECL_TRY_CHANGE(name, kind, from, to)                      \
-  OpIndex name(OpIndex input) {                                    \
-    return stack().ReduceTryChange(input, TryChangeOp::Kind::kind, \
-                                   FloatRepresentation::from(),    \
-                                   WordRepresentation::to());      \
+#define DECL_CHANGE_V(name, kind, assumption, from, to)               \
+  V<to> name(ConstOrV<from> input) {                                  \
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {   \
+      return OpIndex::Invalid();                                      \
+    }                                                                 \
+    return stack().ReduceChange(resolve(input), ChangeOp::Kind::kind, \
+                                ChangeOp::Assumption::assumption,     \
+                                V<from>::rep, V<to>::rep);            \
+  }
+#define DECL_TRY_CHANGE(name, kind, from, to)                       \
+  OpIndex name(OpIndex input) {                                     \
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) { \
+      return OpIndex::Invalid();                                    \
+    }                                                               \
+    return stack().ReduceTryChange(input, TryChangeOp::Kind::kind,  \
+                                   FloatRepresentation::from(),     \
+                                   WordRepresentation::to());       \
   }
 
-  DECL_CHANGE(BitcastWord32ToWord64, kBitcast, kNoAssumption, Word32, Word64)
-  DECL_CHANGE(BitcastFloat32ToWord32, kBitcast, kNoAssumption, Float32, Word32)
-  DECL_CHANGE(BitcastWord32ToFloat32, kBitcast, kNoAssumption, Word32, Float32)
-  DECL_CHANGE(BitcastFloat64ToWord64, kBitcast, kNoAssumption, Float64, Word64)
-  DECL_CHANGE(BitcastWord64ToFloat64, kBitcast, kNoAssumption, Word64, Float64)
-  DECL_CHANGE(ChangeUint32ToUint64, kZeroExtend, kNoAssumption, Word32, Word64)
-  DECL_CHANGE(ChangeInt32ToInt64, kSignExtend, kNoAssumption, Word32, Word64)
-  DECL_CHANGE(ChangeInt32ToFloat64, kSignedToFloat, kNoAssumption, Word32,
-              Float64)
-  DECL_CHANGE(ChangeInt64ToFloat64, kSignedToFloat, kNoAssumption, Word64,
-              Float64)
-  DECL_CHANGE(ChangeInt32ToFloat32, kSignedToFloat, kNoAssumption, Word32,
-              Float32)
-  DECL_CHANGE(ChangeInt64ToFloat32, kSignedToFloat, kNoAssumption, Word64,
-              Float32)
-  DECL_CHANGE(ChangeUint32ToFloat32, kUnsignedToFloat, kNoAssumption, Word32,
-              Float32)
-  DECL_CHANGE(ChangeUint64ToFloat32, kUnsignedToFloat, kNoAssumption, Word64,
-              Float32)
-  DECL_CHANGE(ReversibleInt64ToFloat64, kSignedToFloat, kReversible, Word64,
-              Float64)
-  DECL_CHANGE(ChangeUint64ToFloat64, kUnsignedToFloat, kNoAssumption, Word64,
-              Float64)
-  DECL_CHANGE(ReversibleUint64ToFloat64, kUnsignedToFloat, kReversible, Word64,
-              Float64)
-  DECL_CHANGE(ChangeUint32ToFloat64, kUnsignedToFloat, kNoAssumption, Word32,
-              Float64)
-  DECL_CHANGE(ChangeFloat64ToFloat32, kFloatConversion, kNoAssumption, Float64,
-              Float32)
-  DECL_CHANGE(ChangeFloat32ToFloat64, kFloatConversion, kNoAssumption, Float32,
-              Float64)
-  DECL_CHANGE(JSTruncateFloat64ToWord32, kJSFloatTruncate, kNoAssumption,
-              Float64, Word32)
+  DECL_CHANGE_V(BitcastWord32ToWord64, kBitcast, kNoAssumption, Word32, Word64)
+  DECL_CHANGE_V(BitcastFloat32ToWord32, kBitcast, kNoAssumption, Float32,
+                Word32)
+  DECL_CHANGE_V(BitcastWord32ToFloat32, kBitcast, kNoAssumption, Word32,
+                Float32)
+  DECL_CHANGE_V(BitcastFloat64ToWord64, kBitcast, kNoAssumption, Float64,
+                Word64)
+  DECL_CHANGE_V(BitcastWord64ToFloat64, kBitcast, kNoAssumption, Word64,
+                Float64)
+  DECL_CHANGE_V(ChangeUint32ToUint64, kZeroExtend, kNoAssumption, Word32,
+                Word64)
+  DECL_CHANGE_V(ChangeInt32ToInt64, kSignExtend, kNoAssumption, Word32, Word64)
+  DECL_CHANGE_V(ChangeInt32ToFloat64, kSignedToFloat, kNoAssumption, Word32,
+                Float64)
+  DECL_CHANGE_V(ChangeInt64ToFloat64, kSignedToFloat, kNoAssumption, Word64,
+                Float64)
+  DECL_CHANGE_V(ChangeInt32ToFloat32, kSignedToFloat, kNoAssumption, Word32,
+                Float32)
+  DECL_CHANGE_V(ChangeInt64ToFloat32, kSignedToFloat, kNoAssumption, Word64,
+                Float32)
+  DECL_CHANGE_V(ChangeUint32ToFloat32, kUnsignedToFloat, kNoAssumption, Word32,
+                Float32)
+  DECL_CHANGE_V(ChangeUint64ToFloat32, kUnsignedToFloat, kNoAssumption, Word64,
+                Float32)
+  DECL_CHANGE_V(ReversibleInt64ToFloat64, kSignedToFloat, kReversible, Word64,
+                Float64)
+  DECL_CHANGE_V(ChangeUint64ToFloat64, kUnsignedToFloat, kNoAssumption, Word64,
+                Float64)
+  DECL_CHANGE_V(ReversibleUint64ToFloat64, kUnsignedToFloat, kReversible,
+                Word64, Float64)
+  DECL_CHANGE_V(ChangeUint32ToFloat64, kUnsignedToFloat, kNoAssumption, Word32,
+                Float64)
+  DECL_CHANGE_V(ChangeFloat64ToFloat32, kFloatConversion, kNoAssumption,
+                Float64, Float32)
+  DECL_CHANGE_V(ChangeFloat32ToFloat64, kFloatConversion, kNoAssumption,
+                Float32, Float64)
+  DECL_CHANGE_V(JSTruncateFloat64ToWord32, kJSFloatTruncate, kNoAssumption,
+                Float64, Word32)
+  V<WordPtr> ChangeInt32ToIntPtr(V<Word32> input) {
+    if constexpr (Is64()) {
+      return ChangeInt32ToInt64(input);
+    } else {
+      DCHECK_EQ(WordPtr::bits, Word32::bits);
+      return V<WordPtr>::Cast(input);
+    }
+  }
+  V<WordPtr> ChangeUint32ToUintPtr(V<Word32> input) {
+    if constexpr (Is64()) {
+      return ChangeUint32ToUint64(input);
+    } else {
+      DCHECK_EQ(WordPtr::bits, Word32::bits);
+      return V<WordPtr>::Cast(input);
+    }
+  }
 
 #define DECL_SIGNED_FLOAT_TRUNCATE(FloatBits, ResultBits)                     \
   DECL_CHANGE(TruncateFloat##FloatBits##ToInt##ResultBits##OverflowUndefined, \
@@ -773,24 +1447,74 @@ class AssemblerOpInterface {
   DECL_UNSIGNED_FLOAT_TRUNCATE(32, 32)
 #undef DECL_UNSIGNED_FLOAT_TRUNCATE
 
-  DECL_CHANGE(ReversibleFloat64ToInt32, kSignedFloatTruncateOverflowToMin,
-              kReversible, Float64, Word32)
-  DECL_CHANGE(ReversibleFloat64ToUint32, kUnsignedFloatTruncateOverflowToMin,
-              kReversible, Float64, Word32)
-  DECL_CHANGE(ReversibleFloat64ToInt64, kSignedFloatTruncateOverflowToMin,
-              kReversible, Float64, Word64)
-  DECL_CHANGE(ReversibleFloat64ToUint64, kUnsignedFloatTruncateOverflowToMin,
-              kReversible, Float64, Word64)
-  DECL_CHANGE(Float64ExtractLowWord32, kExtractLowHalf, kNoAssumption, Float64,
-              Word32)
-  DECL_CHANGE(Float64ExtractHighWord32, kExtractHighHalf, kNoAssumption,
-              Float64, Word32)
+  DECL_CHANGE_V(ReversibleFloat64ToInt32, kSignedFloatTruncateOverflowToMin,
+                kReversible, Float64, Word32)
+  DECL_CHANGE_V(ReversibleFloat64ToUint32, kUnsignedFloatTruncateOverflowToMin,
+                kReversible, Float64, Word32)
+  DECL_CHANGE_V(ReversibleFloat64ToInt64, kSignedFloatTruncateOverflowToMin,
+                kReversible, Float64, Word64)
+  DECL_CHANGE_V(ReversibleFloat64ToUint64, kUnsignedFloatTruncateOverflowToMin,
+                kReversible, Float64, Word64)
+  DECL_CHANGE_V(Float64ExtractLowWord32, kExtractLowHalf, kNoAssumption,
+                Float64, Word32)
+  DECL_CHANGE_V(Float64ExtractHighWord32, kExtractHighHalf, kNoAssumption,
+                Float64, Word32)
 #undef DECL_CHANGE
+#undef DECL_CHANGE_V
 #undef DECL_TRY_CHANGE
+
+  OpIndex ChangeOrDeopt(OpIndex input, OpIndex frame_state,
+                        ChangeOrDeoptOp::Kind kind,
+                        CheckForMinusZeroMode minus_zero_mode,
+                        const FeedbackSource& feedback) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceChangeOrDeopt(input, frame_state, kind,
+                                       minus_zero_mode, feedback);
+  }
+
+  V<Word32> ChangeFloat64ToInt32OrDeopt(V<Float64> input, OpIndex frame_state,
+                                        CheckForMinusZeroMode minus_zero_mode,
+                                        const FeedbackSource& feedback) {
+    return ChangeOrDeopt(input, frame_state,
+                         ChangeOrDeoptOp::Kind::kFloat64ToInt32,
+                         minus_zero_mode, feedback);
+  }
+  V<Word64> ChangeFloat64ToInt64OrDeopt(V<Float64> input, OpIndex frame_state,
+                                        CheckForMinusZeroMode minus_zero_mode,
+                                        const FeedbackSource& feedback) {
+    return ChangeOrDeopt(input, frame_state,
+                         ChangeOrDeoptOp::Kind::kFloat64ToInt64,
+                         minus_zero_mode, feedback);
+  }
+
+  OpIndex Tag(OpIndex input, TagKind kind) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceTag(input, kind);
+  }
+  V<Smi> SmiTag(ConstOrV<Word32> input) {
+    return Tag(resolve(input), TagKind::kSmiTag);
+  }
+
+  OpIndex Untag(OpIndex input, TagKind kind, RegisterRepresentation rep) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceUntag(input, kind, rep);
+  }
+  V<Word32> SmiUntag(V<Tagged> input) {
+    return Untag(input, TagKind::kSmiTag, RegisterRepresentation::Word32());
+  }
 
   OpIndex Load(OpIndex base, OpIndex index, LoadOp::Kind kind,
                MemoryRepresentation loaded_rep, int32_t offset = 0,
                uint8_t element_size_log2 = 0) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
     return stack().ReduceLoad(base, index, kind, loaded_rep,
                               loaded_rep.ToRegisterRepresentation(), offset,
                               element_size_log2);
@@ -814,16 +1538,32 @@ class AssemblerOpInterface {
 
   void Store(OpIndex base, OpIndex index, OpIndex value, StoreOp::Kind kind,
              MemoryRepresentation stored_rep, WriteBarrierKind write_barrier,
-             int32_t offset = 0, uint8_t element_size_log2 = 0) {
+             int32_t offset = 0, uint8_t element_size_log2 = 0,
+             bool maybe_initializing_or_transitioning = false) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return;
+    }
     stack().ReduceStore(base, index, value, kind, stored_rep, write_barrier,
-                        offset, element_size_log2);
+                        offset, element_size_log2,
+                        maybe_initializing_or_transitioning);
   }
   void Store(OpIndex base, OpIndex value, StoreOp::Kind kind,
              MemoryRepresentation stored_rep, WriteBarrierKind write_barrier,
-             int32_t offset = 0) {
+             int32_t offset = 0,
+             bool maybe_initializing_or_transitioning = false) {
     Store(base, OpIndex::Invalid(), value, kind, stored_rep, write_barrier,
-          offset);
+          offset, 0, maybe_initializing_or_transitioning);
   }
+
+  template <typename T>
+  void Initialize(Uninitialized<T>& object, OpIndex value,
+                  MemoryRepresentation stored_rep,
+                  WriteBarrierKind write_barrier, int32_t offset = 0) {
+    return Store(object.object(), value,
+                 StoreOp::Kind::Aligned(BaseTaggedness::kTaggedBase),
+                 stored_rep, write_barrier, offset, true);
+  }
+
   void StoreOffHeap(OpIndex address, OpIndex value, MemoryRepresentation rep,
                     int32_t offset = 0) {
     Store(address, value, StoreOp::Kind::RawAligned(), rep,
@@ -835,60 +1575,268 @@ class AssemblerOpInterface {
           WriteBarrierKind::kNoWriteBarrier, offset, rep.SizeInBytesLog2());
   }
 
-  OpIndex Allocate(OpIndex size, AllocationType type,
-                   AllowLargeObjects allow_large_objects) {
-    return stack().ReduceAllocate(size, type, allow_large_objects);
+  template <typename Rep = Any, typename Base>
+  V<Rep> LoadField(V<Base> object, const FieldAccess& access) {
+    if constexpr (std::is_base_of_v<Object, Base>) {
+      DCHECK_EQ(access.base_is_tagged, BaseTaggedness::kTaggedBase);
+    } else {
+      static_assert(std::is_same_v<Base, WordPtr>);
+      DCHECK_EQ(access.base_is_tagged, BaseTaggedness::kUntaggedBase);
+    }
+    MachineType machine_type = access.machine_type;
+    if (machine_type.IsMapWord()) {
+      machine_type = MachineType::TaggedPointer();
+#ifdef V8_MAP_PACKING
+      UNIMPLEMENTED();
+#endif
+    }
+    MemoryRepresentation rep =
+        MemoryRepresentation::FromMachineType(machine_type);
+#ifdef V8_ENABLE_SANDBOX
+    bool is_sandboxed_external =
+        access.type.Is(compiler::Type::ExternalPointer());
+    if (is_sandboxed_external) {
+      // Fields for sandboxed external pointer contain a 32-bit handle, not a
+      // 64-bit raw pointer.
+      rep = MemoryRepresentation::Uint32();
+    }
+#endif  // V8_ENABLE_SANDBOX
+    V<Rep> value = Load(object, LoadOp::Kind::Aligned(access.base_is_tagged),
+                        rep, access.offset);
+#ifdef V8_ENABLE_SANDBOX
+    if (is_sandboxed_external) {
+      value = DecodeExternalPointer(value, access.external_pointer_tag);
+    }
+    if (access.is_bounded_size_access) {
+      DCHECK(!is_sandboxed_external);
+      value = ShiftRightLogical(value, kBoundedSizeShift,
+                                WordRepresentation::PointerSized());
+    }
+#endif  // V8_ENABLE_SANDBOX
+    return value;
+  }
+
+  // Helpers to read the most common fields.
+  // TODO(nicohartmann@): Strengthen this to `V<HeapObject>`.
+  V<Map> LoadMapField(V<Object> object) {
+    return LoadField<Map>(object, AccessBuilder::ForMap());
+  }
+  V<Word32> LoadInstanceTypeField(V<Map> map) {
+    return LoadField<Word32>(map, AccessBuilder::ForMapInstanceType());
+  }
+
+  template <typename Base>
+  void StoreField(V<Base> object, const FieldAccess& access, V<Any> value) {
+    StoreFieldImpl(object, access, value,
+                   access.maybe_initializing_or_transitioning_store);
+  }
+
+  template <typename T>
+  void InitializeField(Uninitialized<T>& object, const FieldAccess& access,
+                       V<Any> value) {
+    StoreFieldImpl(object.object(), access, value, true);
+  }
+
+  template <typename Base>
+  void StoreFieldImpl(V<Base> object, const FieldAccess& access, V<Any> value,
+                      bool maybe_initializing_or_transitioning) {
+    if constexpr (std::is_base_of_v<Object, Base>) {
+      DCHECK_EQ(access.base_is_tagged, BaseTaggedness::kTaggedBase);
+    } else {
+      static_assert(std::is_same_v<Base, WordPtr>);
+      DCHECK_EQ(access.base_is_tagged, BaseTaggedness::kUntaggedBase);
+    }
+    // External pointer must never be stored by optimized code.
+    DCHECK(!access.type.Is(compiler::Type::ExternalPointer()) ||
+           !V8_ENABLE_SANDBOX_BOOL);
+    // SandboxedPointers are not currently stored by optimized code.
+    DCHECK(!access.type.Is(compiler::Type::SandboxedPointer()));
+
+#ifdef V8_ENABLE_SANDBOX
+    if (access.is_bounded_size_access) {
+      value = ShiftLeft(value, kBoundedSizeShift,
+                        WordRepresentation::PointerSized());
+    }
+#endif  // V8_ENABLE_SANDBOX
+
+    StoreOp::Kind kind = StoreOp::Kind::Aligned(access.base_is_tagged);
+    MachineType machine_type = access.machine_type;
+    if (machine_type.IsMapWord()) {
+      machine_type = MachineType::TaggedPointer();
+#ifdef V8_MAP_PACKING
+      UNIMPLEMENTED();
+#endif
+    }
+    MemoryRepresentation rep =
+        MemoryRepresentation::FromMachineType(machine_type);
+    Store(object, value, kind, rep, access.write_barrier_kind, access.offset,
+          maybe_initializing_or_transitioning);
+  }
+
+  template <typename T = Any, typename Base>
+  V<T> LoadElement(V<Base> object, const ElementAccess& access,
+                   V<WordPtr> index) {
+    if constexpr (std::is_base_of_v<Object, Base>) {
+      DCHECK_EQ(access.base_is_tagged, BaseTaggedness::kTaggedBase);
+    } else {
+      static_assert(std::is_same_v<Base, WordPtr>);
+      DCHECK_EQ(access.base_is_tagged, BaseTaggedness::kUntaggedBase);
+    }
+    LoadOp::Kind kind = LoadOp::Kind::Aligned(access.base_is_tagged);
+    MemoryRepresentation rep =
+        MemoryRepresentation::FromMachineType(access.machine_type);
+    return Load(object, index, kind, rep, access.header_size,
+                rep.SizeInBytesLog2());
+  }
+
+  template <typename Base>
+  void StoreElement(V<Base> object, const ElementAccess& access,
+                    V<WordPtr> index, V<Any> value) {
+    if constexpr (std::is_base_of_v<Object, Base>) {
+      DCHECK_EQ(access.base_is_tagged, BaseTaggedness::kTaggedBase);
+    } else {
+      static_assert(std::is_same_v<Base, WordPtr>);
+      DCHECK_EQ(access.base_is_tagged, BaseTaggedness::kUntaggedBase);
+    }
+    LoadOp::Kind kind = LoadOp::Kind::Aligned(access.base_is_tagged);
+    MemoryRepresentation rep =
+        MemoryRepresentation::FromMachineType(access.machine_type);
+    Store(object, index, value, kind, rep, access.write_barrier_kind,
+          access.header_size, rep.SizeInBytesLog2());
+  }
+
+  template <typename T = HeapObject>
+  Uninitialized<T> Allocate(
+      ConstOrV<WordPtr> size, AllocationType type,
+      AllowLargeObjects allow_large_objects = AllowLargeObjects::kFalse) {
+    static_assert(std::is_base_of_v<HeapObject, T>);
+    DCHECK(!in_object_initialization_);
+    in_object_initialization_ = true;
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return Uninitialized<T>(OpIndex::Invalid());
+    }
+    return Uninitialized<T>{
+        stack().ReduceAllocate(resolve(size), type, allow_large_objects)};
+  }
+
+  template <typename T>
+  V<T> FinishInitialization(Uninitialized<T>&& uninitialized) {
+    DCHECK(in_object_initialization_);
+    in_object_initialization_ = false;
+    return uninitialized.ReleaseObject();
   }
 
   OpIndex DecodeExternalPointer(OpIndex handle, ExternalPointerTag tag) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
     return stack().ReduceDecodeExternalPointer(handle, tag);
   }
 
-  void Retain(OpIndex value) { stack().ReduceRetain(value); }
+  void Retain(OpIndex value) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return;
+    }
+    stack().ReduceRetain(value);
+  }
 
   OpIndex StackPointerGreaterThan(OpIndex limit, StackCheckKind kind) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
     return stack().ReduceStackPointerGreaterThan(limit, kind);
   }
 
   OpIndex StackCheckOffset() {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
     return stack().ReduceFrameConstant(
         FrameConstantOp::Kind::kStackCheckOffset);
   }
   OpIndex FramePointer() {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
     return stack().ReduceFrameConstant(FrameConstantOp::Kind::kFramePointer);
   }
   OpIndex ParentFramePointer() {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
     return stack().ReduceFrameConstant(
         FrameConstantOp::Kind::kParentFramePointer);
   }
 
   OpIndex StackSlot(int size, int alignment) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
     return stack().ReduceStackSlot(size, alignment);
   }
 
-  void Goto(Block* destination) { stack().ReduceGoto(destination); }
-  void Branch(OpIndex condition, Block* if_true, Block* if_false,
+  void Goto(Block* destination) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return;
+    }
+    stack().ReduceGoto(destination);
+  }
+  void Branch(V<Word32> condition, Block* if_true, Block* if_false,
               BranchHint hint = BranchHint::kNone) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return;
+    }
     stack().ReduceBranch(condition, if_true, if_false, hint);
+  }
+  void Branch(ConditionWithHint condition, Block* if_true, Block* if_false) {
+    return Branch(condition.condition(), if_true, if_false, condition.hint());
   }
   OpIndex Select(OpIndex cond, OpIndex vtrue, OpIndex vfalse,
                  RegisterRepresentation rep, BranchHint hint,
                  SelectOp::Implementation implem) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
     return stack().ReduceSelect(cond, vtrue, vfalse, rep, hint, implem);
+  }
+  template <typename T, typename U>
+  V<std::common_type_t<T, U>> Conditional(V<Word32> cond, V<T> vtrue,
+                                          V<U> vfalse) {
+    return Select(cond, vtrue, vfalse, V<std::common_type_t<T, U>>::rep,
+                  BranchHint::kNone, SelectOp::Implementation::kBranch);
   }
   void Switch(OpIndex input, base::Vector<const SwitchOp::Case> cases,
               Block* default_case,
               BranchHint default_hint = BranchHint::kNone) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return;
+    }
     stack().ReduceSwitch(input, cases, default_case, default_hint);
   }
-  void Unreachable() { stack().ReduceUnreachable(); }
+  void Unreachable() {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return;
+    }
+    stack().ReduceUnreachable();
+  }
 
   OpIndex Parameter(int index, RegisterRepresentation rep,
                     const char* debug_name = nullptr) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
     return stack().ReduceParameter(index, rep, debug_name);
   }
-  OpIndex OsrValue(int index) { return stack().ReduceOsrValue(index); }
+  OpIndex OsrValue(int index) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceOsrValue(index);
+  }
   void Return(OpIndex pop_count, base::Vector<OpIndex> return_values) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return;
+    }
     stack().ReduceReturn(pop_count, return_values);
   }
   void Return(OpIndex result) {
@@ -898,104 +1846,530 @@ class AssemblerOpInterface {
   OpIndex Call(OpIndex callee, OpIndex frame_state,
                base::Vector<const OpIndex> arguments,
                const TSCallDescriptor* descriptor) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
     return stack().ReduceCall(callee, frame_state, arguments, descriptor);
   }
   OpIndex Call(OpIndex callee, std::initializer_list<OpIndex> arguments,
                const TSCallDescriptor* descriptor) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
     return Call(callee, OpIndex::Invalid(), base::VectorOf(arguments),
                 descriptor);
   }
+
+  template <typename Descriptor>
+  std::enable_if_t<Descriptor::NeedsFrameState && Descriptor::NeedsContext,
+                   typename Descriptor::result_t>
+  CallBuiltin(Isolate* isolate, OpIndex frame_state, OpIndex context,
+              const typename Descriptor::arguments_t& args) {
+    DCHECK(frame_state.valid());
+    DCHECK(context.valid());
+    return CallBuiltinImpl<typename Descriptor::result_t>(
+        isolate, Descriptor::Function,
+        Descriptor::Create(isolate, stack().output_graph().graph_zone()),
+        frame_state, context, args);
+  }
+  template <typename Descriptor>
+  std::enable_if_t<!Descriptor::NeedsFrameState && Descriptor::NeedsContext,
+                   typename Descriptor::result_t>
+  CallBuiltin(Isolate* isolate, OpIndex context,
+              const typename Descriptor::arguments_t& args) {
+    DCHECK(context.valid());
+    return CallBuiltinImpl<typename Descriptor::result_t>(
+        isolate, Descriptor::Function,
+        Descriptor::Create(isolate, stack().output_graph().graph_zone()), {},
+        context, args);
+  }
+  template <typename Descriptor>
+  std::enable_if_t<Descriptor::NeedsFrameState && !Descriptor::NeedsContext,
+                   typename Descriptor::result_t>
+  CallBuiltin(Isolate* isolate, OpIndex frame_state,
+              const typename Descriptor::arguments_t& args) {
+    DCHECK(frame_state.valid());
+    return CallBuiltinImpl<typename Descriptor::result_t>(
+        isolate, Descriptor::Function,
+        Descriptor::Create(isolate, stack().output_graph().graph_zone()),
+        frame_state, {}, args);
+  }
+  template <typename Descriptor>
+  std::enable_if_t<!Descriptor::NeedsFrameState && !Descriptor::NeedsContext,
+                   typename Descriptor::result_t>
+  CallBuiltin(Isolate* isolate, const typename Descriptor::arguments_t& args) {
+    return CallBuiltinImpl<typename Descriptor::result_t>(
+        isolate, Descriptor::Function,
+        Descriptor::Create(isolate, stack().output_graph().graph_zone()), {},
+        {}, args);
+  }
+
+  template <typename Ret, typename Args>
+  Ret CallBuiltinImpl(Isolate* isolate, Builtin function,
+                      const TSCallDescriptor* desc, OpIndex frame_state,
+                      V<Context> context, const Args& args) {
+    Callable callable = Builtins::CallableFor(isolate, function);
+    // Convert arguments from `args` tuple into a `SmallVector<OpIndex>`.
+    auto inputs = std::apply(
+        [](auto&&... as) {
+          return base::SmallVector<OpIndex, std::tuple_size_v<Args> + 1>{
+              std::forward<decltype(as)>(as)...};
+        },
+        args);
+    if (context.valid()) inputs.push_back(context);
+
+    if constexpr (std::is_same_v<Ret, void>) {
+      Call(HeapConstant(callable.code()), frame_state, base::VectorOf(inputs),
+           desc);
+    } else {
+      return Call(HeapConstant(callable.code()), frame_state,
+                  base::VectorOf(inputs), desc);
+    }
+  }
+
+  void CallBuiltin_CheckTurbofanType(Isolate* isolate, V<Context> context,
+                                     V<Object> object,
+                                     V<TurbofanType> allocated_type,
+                                     V<Smi> node_id) {
+    CallBuiltin<typename BuiltinCallDescriptor::CheckTurbofanType>(
+        isolate, context, {object, allocated_type, node_id});
+  }
+  V<Object> CallBuiltin_CopyFastSmiOrObjectElements(Isolate* isolate,
+                                                    V<Context> context,
+                                                    V<Object> object) {
+    return CallBuiltin<
+        typename BuiltinCallDescriptor::CopyFastSmiOrObjectElements>(
+        isolate, context, {object});
+  }
+  V<Smi> CallBuiltin_FindOrderedHashMapEntry(Isolate* isolate,
+                                             V<Context> context,
+                                             V<Object> table, V<Smi> key) {
+    return CallBuiltin<typename BuiltinCallDescriptor::FindOrderedHashMapEntry>(
+        isolate, context, {table, key});
+  }
+  V<Smi> CallBuiltin_FindOrderedHashSetEntry(Isolate* isolate,
+                                             V<Context> context, V<Object> set,
+                                             V<Smi> key) {
+    return CallBuiltin<typename BuiltinCallDescriptor::FindOrderedHashSetEntry>(
+        isolate, context, {set, key});
+  }
+  V<Object> CallBuiltin_GrowFastDoubleElements(Isolate* isolate,
+                                               V<Context> context,
+                                               V<Object> object, V<Smi> size) {
+    return CallBuiltin<typename BuiltinCallDescriptor::GrowFastDoubleElements>(
+        isolate, context, {object, size});
+  }
+  V<Object> CallBuiltin_GrowFastSmiOrObjectElements(Isolate* isolate,
+                                                    V<Context> context,
+                                                    V<Object> object,
+                                                    V<Smi> size) {
+    return CallBuiltin<
+        typename BuiltinCallDescriptor::GrowFastSmiOrObjectElements>(
+        isolate, context, {object, size});
+  }
+  V<FixedArray> CallBuiltin_NewSloppyArgumentsElements(
+      Isolate* isolate, V<WordPtr> frame, V<WordPtr> formal_parameter_count,
+      V<Smi> arguments_count) {
+    return CallBuiltin<
+        typename BuiltinCallDescriptor::NewSloppyArgumentsElements>(
+        isolate, {frame, formal_parameter_count, arguments_count});
+  }
+  V<FixedArray> CallBuiltin_NewStrictArgumentsElements(
+      Isolate* isolate, V<WordPtr> frame, V<WordPtr> formal_parameter_count,
+      V<Smi> arguments_count) {
+    return CallBuiltin<
+        typename BuiltinCallDescriptor::NewStrictArgumentsElements>(
+        isolate, {frame, formal_parameter_count, arguments_count});
+  }
+  V<FixedArray> CallBuiltin_NewRestArgumentsElements(
+      Isolate* isolate, V<WordPtr> frame, V<WordPtr> formal_parameter_count,
+      V<Smi> arguments_count) {
+    return CallBuiltin<
+        typename BuiltinCallDescriptor::NewRestArgumentsElements>(
+        isolate, {frame, formal_parameter_count, arguments_count});
+  }
+  V<String> CallBuiltin_NumberToString(Isolate* isolate, V<Number> input) {
+    return CallBuiltin<typename BuiltinCallDescriptor::NumberToString>(isolate,
+                                                                       {input});
+  }
+  V<Number> CallBuiltin_PlainPrimitiveToNumber(Isolate* isolate,
+                                               V<PlainPrimitive> input) {
+    return CallBuiltin<typename BuiltinCallDescriptor::PlainPrimitiveToNumber>(
+        isolate, {input});
+  }
+  V<Boolean> CallBuiltin_SameValue(Isolate* isolate, V<Object> left,
+                                   V<Object> right) {
+    return CallBuiltin<typename BuiltinCallDescriptor::SameValue>(
+        isolate, {left, right});
+  }
+  V<Boolean> CallBuiltin_SameValueNumbersOnly(Isolate* isolate, V<Object> left,
+                                              V<Object> right) {
+    return CallBuiltin<typename BuiltinCallDescriptor::SameValueNumbersOnly>(
+        isolate, {left, right});
+  }
+  V<String> CallBuiltin_StringAdd_CheckNone(Isolate* isolate,
+                                            V<Context> context, V<String> left,
+                                            V<String> right) {
+    return CallBuiltin<typename BuiltinCallDescriptor::StringAdd_CheckNone>(
+        isolate, context, {left, right});
+  }
+  V<Boolean> CallBuiltin_StringEqual(Isolate* isolate, V<String> left,
+                                     V<String> right, V<WordPtr> length) {
+    return CallBuiltin<typename BuiltinCallDescriptor::StringEqual>(
+        isolate, {left, right, length});
+  }
+  V<Boolean> CallBuiltin_StringLessThan(Isolate* isolate, V<String> left,
+                                        V<String> right) {
+    return CallBuiltin<typename BuiltinCallDescriptor::StringLessThan>(
+        isolate, {left, right});
+  }
+  V<Boolean> CallBuiltin_StringLessThanOrEqual(Isolate* isolate, V<String> left,
+                                               V<String> right) {
+    return CallBuiltin<typename BuiltinCallDescriptor::StringLessThanOrEqual>(
+        isolate, {left, right});
+  }
+  V<Smi> CallBuiltin_StringIndexOf(Isolate* isolate, V<String> string,
+                                   V<String> search, V<Smi> position) {
+    return CallBuiltin<typename BuiltinCallDescriptor::StringIndexOf>(
+        isolate, {string, search, position});
+  }
+  V<String> CallBuiltin_StringFromCodePointAt(Isolate* isolate,
+                                              V<String> string,
+                                              V<WordPtr> index) {
+    return CallBuiltin<typename BuiltinCallDescriptor::StringFromCodePointAt>(
+        isolate, {string, index});
+  }
+#ifdef V8_INTL_SUPPORT
+  V<String> CallBuiltin_StringToLowerCaseIntl(Isolate* isolate,
+                                              V<Context> context,
+                                              V<String> string) {
+    return CallBuiltin<typename BuiltinCallDescriptor::StringToLowerCaseIntl>(
+        isolate, context, {string});
+  }
+#endif  // V8_INTL_SUPPORT
+  V<Number> CallBuiltin_StringToNumber(Isolate* isolate, V<String> input) {
+    return CallBuiltin<typename BuiltinCallDescriptor::StringToNumber>(isolate,
+                                                                       {input});
+  }
+  V<String> CallBuiltin_StringSubstring(Isolate* isolate, V<String> string,
+                                        V<WordPtr> start, V<WordPtr> end) {
+    return CallBuiltin<typename BuiltinCallDescriptor::StringSubstring>(
+        isolate, {string, start, end});
+  }
+  V<Boolean> CallBuiltin_ToBoolean(Isolate* isolate, V<Object> object) {
+    return CallBuiltin<typename BuiltinCallDescriptor::ToBoolean>(isolate,
+                                                                  {object});
+  }
+  V<Object> CallBuiltin_ToObject(Isolate* isolate, V<Context> context,
+                                 V<Object> object) {
+    return CallBuiltin<typename BuiltinCallDescriptor::ToObject>(
+        isolate, context, {object});
+  }
+  V<String> CallBuiltin_Typeof(Isolate* isolate, V<Object> object) {
+    return CallBuiltin<typename BuiltinCallDescriptor::Typeof>(isolate,
+                                                               {object});
+  }
+
+  template <typename Descriptor>
+  std::enable_if_t<Descriptor::NeedsFrameState, typename Descriptor::result_t>
+  CallRuntime(Isolate* isolate, OpIndex frame_state, OpIndex context,
+              const typename Descriptor::arguments_t& args) {
+    DCHECK(frame_state.valid());
+    DCHECK(context.valid());
+    return CallRuntimeImpl<typename Descriptor::result_t>(
+        isolate, Descriptor::Function,
+        Descriptor::Create(stack().output_graph().graph_zone()), frame_state,
+        context, args);
+  }
+  template <typename Descriptor>
+  std::enable_if_t<!Descriptor::NeedsFrameState, typename Descriptor::result_t>
+  CallRuntime(Isolate* isolate, OpIndex context,
+              const typename Descriptor::arguments_t& args) {
+    DCHECK(context.valid());
+    return CallRuntimeImpl<typename Descriptor::result_t>(
+        isolate, Descriptor::Function,
+        Descriptor::Create(stack().output_graph().graph_zone()), {}, context,
+        args);
+  }
+
+  template <typename Ret, typename Args>
+  Ret CallRuntimeImpl(Isolate* isolate, Runtime::FunctionId function,
+                      const TSCallDescriptor* desc, OpIndex frame_state,
+                      OpIndex context, const Args& args) {
+    const int result_size = Runtime::FunctionForId(function)->result_size;
+    constexpr size_t kMaxNumArgs = 6;
+    const size_t argc = std::tuple_size_v<Args>;
+    static_assert(kMaxNumArgs >= argc);
+    // Convert arguments from `args` tuple into a `SmallVector<OpIndex>`.
+    using vector_t = base::SmallVector<OpIndex, argc + 4>;
+    auto inputs = std::apply(
+        [](auto&&... as) {
+          return vector_t{std::forward<decltype(as)>(as)...};
+        },
+        args);
+    DCHECK(context.valid());
+    inputs.push_back(ExternalConstant(ExternalReference::Create(function)));
+    inputs.push_back(Word32Constant(static_cast<int>(argc)));
+    inputs.push_back(context);
+
+    if constexpr (std::is_same_v<Ret, void>) {
+      Call(CEntryStubConstant(isolate, result_size), frame_state,
+           base::VectorOf(inputs), desc);
+    } else {
+      return Call(CEntryStubConstant(isolate, result_size), frame_state,
+                  base::VectorOf(inputs), desc);
+    }
+  }
+
+  void CallRuntime_Abort(Isolate* isolate, V<Context> context, V<Smi> reason) {
+    CallRuntime<typename RuntimeCallDescriptor::Abort>(isolate, context,
+                                                       {reason});
+  }
+  V<Number> CallRuntime_DateCurrentTime(Isolate* isolate, V<Context> context) {
+    return CallRuntime<typename RuntimeCallDescriptor::DateCurrentTime>(
+        isolate, context, {});
+  }
+  V<Tagged> CallRuntime_StringCharCodeAt(Isolate* isolate, V<Context> context,
+                                         V<String> string, V<Number> index) {
+    return CallRuntime<typename RuntimeCallDescriptor::StringCharCodeAt>(
+        isolate, context, {string, index});
+  }
+#ifdef V8_INTL_SUPPORT
+  V<String> CallRuntime_StringToUpperCaseIntl(Isolate* isolate,
+                                              V<Context> context,
+                                              V<String> string) {
+    return CallRuntime<typename RuntimeCallDescriptor::StringToUpperCaseIntl>(
+        isolate, context, {string});
+  }
+#endif  // V8_INTL_SUPPORT
+  V<Tagged> CallRuntime_TerminateExecution(Isolate* isolate,
+                                           OpIndex frame_state,
+                                           V<Context> context) {
+    return CallRuntime<typename RuntimeCallDescriptor::TerminateExecution>(
+        isolate, frame_state, context, {});
+  }
+  V<Object> CallRuntime_TransitionElementsKind(Isolate* isolate,
+                                               V<Context> context,
+                                               V<HeapObject> object,
+                                               V<Map> target_map) {
+    return CallRuntime<typename RuntimeCallDescriptor::TransitionElementsKind>(
+        isolate, context, {object, target_map});
+  }
+  V<Object> CallRuntime_TryMigrateInstance(Isolate* isolate, V<Context> context,
+                                           V<HeapObject> heap_object) {
+    return CallRuntime<typename RuntimeCallDescriptor::TryMigrateInstance>(
+        isolate, context, {heap_object});
+  }
+
   OpIndex CallAndCatchException(OpIndex callee, OpIndex frame_state,
                                 base::Vector<const OpIndex> arguments,
                                 Block* if_success, Block* if_exception,
                                 const TSCallDescriptor* descriptor) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
     return stack().ReduceCallAndCatchException(
         callee, frame_state, arguments, if_success, if_exception, descriptor);
   }
   void TailCall(OpIndex callee, base::Vector<const OpIndex> arguments,
                 const TSCallDescriptor* descriptor) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return;
+    }
     stack().ReduceTailCall(callee, arguments, descriptor);
   }
 
   OpIndex FrameState(base::Vector<const OpIndex> inputs, bool inlined,
                      const FrameStateData* data) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
     return stack().ReduceFrameState(inputs, inlined, data);
   }
   void DeoptimizeIf(OpIndex condition, OpIndex frame_state,
                     const DeoptimizeParameters* parameters) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return;
+    }
     stack().ReduceDeoptimizeIf(condition, frame_state, false, parameters);
   }
   void DeoptimizeIfNot(OpIndex condition, OpIndex frame_state,
                        const DeoptimizeParameters* parameters) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return;
+    }
     stack().ReduceDeoptimizeIf(condition, frame_state, true, parameters);
   }
+  void DeoptimizeIf(OpIndex condition, OpIndex frame_state,
+                    DeoptimizeReason reason, const FeedbackSource& feedback) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return;
+    }
+    Zone* zone = stack().output_graph().graph_zone();
+    const DeoptimizeParameters* params =
+        zone->New<DeoptimizeParameters>(reason, feedback);
+    DeoptimizeIf(condition, frame_state, params);
+  }
+  void DeoptimizeIfNot(OpIndex condition, OpIndex frame_state,
+                       DeoptimizeReason reason,
+                       const FeedbackSource& feedback) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return;
+    }
+    Zone* zone = stack().output_graph().graph_zone();
+    const DeoptimizeParameters* params =
+        zone->New<DeoptimizeParameters>(reason, feedback);
+    DeoptimizeIfNot(condition, frame_state, params);
+  }
   void Deoptimize(OpIndex frame_state, const DeoptimizeParameters* parameters) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return;
+    }
     stack().ReduceDeoptimize(frame_state, parameters);
   }
-
-  void TrapIf(OpIndex condition, TrapId trap_id) {
-    stack().ReduceTrapIf(condition, false, trap_id);
+  void Deoptimize(OpIndex frame_state, DeoptimizeReason reason,
+                  const FeedbackSource& feedback) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return;
+    }
+    Zone* zone = stack().output_graph().graph_zone();
+    const DeoptimizeParameters* params =
+        zone->New<DeoptimizeParameters>(reason, feedback);
+    Deoptimize(frame_state, params);
   }
-  void TrapIfNot(OpIndex condition, TrapId trap_id) {
-    stack().ReduceTrapIf(condition, true, trap_id);
+
+  void TrapIf(OpIndex condition, OpIndex frame_state, TrapId trap_id) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return;
+    }
+    stack().ReduceTrapIf(condition, frame_state, false, trap_id);
+  }
+  void TrapIfNot(OpIndex condition, OpIndex frame_state, TrapId trap_id) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return;
+    }
+    stack().ReduceTrapIf(condition, frame_state, true, trap_id);
   }
 
   void StaticAssert(OpIndex condition, const char* source) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return;
+    }
     stack().ReduceStaticAssert(condition, source);
   }
 
   OpIndex Phi(base::Vector<const OpIndex> inputs, RegisterRepresentation rep) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
     return stack().ReducePhi(inputs, rep);
   }
   OpIndex Phi(std::initializer_list<OpIndex> inputs,
               RegisterRepresentation rep) {
     return Phi(base::VectorOf(inputs), rep);
   }
+  template <typename T>
+  V<T> Phi(const base::Vector<V<T>>& inputs) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    std::vector<OpIndex> temp(inputs.size());
+    for (std::size_t i = 0; i < inputs.size(); ++i) temp[i] = inputs[i];
+    return Phi(base::VectorOf(temp), V<T>::rep);
+  }
+  OpIndex PendingLoopPhi(OpIndex first, RegisterRepresentation rep,
+                         PendingLoopPhiOp::Data data) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReducePendingLoopPhi(first, rep, data);
+  }
   OpIndex PendingLoopPhi(OpIndex first, RegisterRepresentation rep,
                          OpIndex old_backedge_index) {
-    return stack().ReducePendingLoopPhi(first, rep, old_backedge_index);
+    return PendingLoopPhi(first, rep,
+                          PendingLoopPhiOp::Data{old_backedge_index});
   }
   OpIndex PendingLoopPhi(OpIndex first, RegisterRepresentation rep,
                          Node* old_backedge_index) {
-    return stack().ReducePendingLoopPhi(first, rep, old_backedge_index);
+    return PendingLoopPhi(first, rep,
+                          PendingLoopPhiOp::Data{old_backedge_index});
+  }
+  template <typename T>
+  V<T> PendingLoopPhi(V<T> first, PendingLoopPhiOp::PhiIndex phi_index) {
+    return PendingLoopPhi(first, V<T>::rep, PendingLoopPhiOp::Data{phi_index});
   }
 
   OpIndex Tuple(base::Vector<OpIndex> indices) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
     return stack().ReduceTuple(indices);
   }
   OpIndex Tuple(OpIndex a, OpIndex b) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
     return stack().ReduceTuple(base::VectorOf({a, b}));
   }
   OpIndex Projection(OpIndex tuple, uint16_t index,
                      RegisterRepresentation rep) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
     return stack().ReduceProjection(tuple, index, rep);
+  }
+  template <typename T>
+  V<T> Projection(OpIndex tuple, uint16_t index) {
+    return Projection(tuple, index, V<T>::rep);
   }
   OpIndex CheckTurboshaftTypeOf(OpIndex input, RegisterRepresentation rep,
                                 Type expected_type, bool successful) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
     return stack().ReduceCheckTurboshaftTypeOf(input, rep, expected_type,
                                                successful);
   }
 
-  OpIndex LoadException() { return stack().ReduceLoadException(); }
+  OpIndex LoadException() {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceLoadException();
+  }
 
   // Return `true` if the control flow after the conditional jump is reachable.
-  V8_WARN_UNUSED_RESULT bool GotoIf(OpIndex condition, Block* if_true,
-                                    BranchHint hint = BranchHint::kNone) {
+  bool GotoIf(OpIndex condition, Block* if_true,
+              BranchHint hint = BranchHint::kNone) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return false;
+    }
     Block* if_false = stack().NewBlock();
     stack().Branch(condition, if_true, if_false, hint);
     return stack().Bind(if_false);
   }
+  bool GotoIf(ConditionWithHint condition, Block* if_true) {
+    return GotoIf(condition.condition(), if_true, condition.hint());
+  }
   // Return `true` if the control flow after the conditional jump is reachable.
-  V8_WARN_UNUSED_RESULT bool GotoIfNot(OpIndex condition, Block* if_false,
-                                       BranchHint hint = BranchHint::kNone) {
+  bool GotoIfNot(OpIndex condition, Block* if_false,
+                 BranchHint hint = BranchHint::kNone) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return false;
+    }
     Block* if_true = stack().NewBlock();
     stack().Branch(condition, if_true, if_false, hint);
     return stack().Bind(if_true);
   }
+  bool GotoIfNot(ConditionWithHint condition, Block* if_false) {
+    return GotoIfNot(condition.condition(), if_false, condition.hint());
+  }
 
   OpIndex CallBuiltin(Builtin builtin, OpIndex frame_state,
-                      const base::Vector<OpIndex>& arguments,
-                      Isolate* isolate) {
+                      base::Vector<OpIndex> arguments, Isolate* isolate) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
     Callable const callable = Builtins::CallableFor(isolate, builtin);
     Zone* graph_zone = stack().output_graph().graph_zone();
 
@@ -1013,52 +2387,598 @@ class AssemblerOpInterface {
     return stack().Call(callee, frame_state, arguments, ts_call_descriptor);
   }
 
+  V<Tagged> NewConsString(V<Word32> length, V<Tagged> first, V<Tagged> second) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceNewConsString(length, first, second);
+  }
+  V<Tagged> NewArray(V<WordPtr> length, NewArrayOp::Kind kind,
+                     AllocationType allocation_type) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceNewArray(length, kind, allocation_type);
+  }
+  V<Tagged> NewDoubleArray(V<WordPtr> length, AllocationType allocation_type) {
+    return NewArray(length, NewArrayOp::Kind::kDouble, allocation_type);
+  }
+
+  V<Tagged> DoubleArrayMinMax(V<Tagged> array, DoubleArrayMinMaxOp::Kind kind) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceDoubleArrayMinMax(array, kind);
+  }
+  V<Tagged> DoubleArrayMin(V<Tagged> array) {
+    return DoubleArrayMinMax(array, DoubleArrayMinMaxOp::Kind::kMin);
+  }
+  V<Tagged> DoubleArrayMax(V<Tagged> array) {
+    return DoubleArrayMinMax(array, DoubleArrayMinMaxOp::Kind::kMax);
+  }
+
+  V<Any> LoadFieldByIndex(V<Tagged> object, V<Word32> index) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceLoadFieldByIndex(object, index);
+  }
+
+  void DebugBreak() {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return;
+    }
+    stack().ReduceDebugBreak();
+  }
+  void DebugPrint(OpIndex input, RegisterRepresentation rep) {
+    // TODO(nicohartmann@): Relax this.
+    DCHECK_EQ(rep, RegisterRepresentation::PointerSized());
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return;
+    }
+    stack().ReduceDebugPrint(input, rep);
+  }
+
+  V<Tagged> BigIntBinop(V<Tagged> left, V<Tagged> right, OpIndex frame_state,
+                        BigIntBinopOp::Kind kind) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceBigIntBinop(left, right, frame_state, kind);
+  }
+#define BIGINT_BINOP(kind)                                \
+  V<Tagged> BigInt##kind(V<Tagged> left, V<Tagged> right, \
+                         OpIndex frame_state) {           \
+    return BigIntBinop(left, right, frame_state,          \
+                       BigIntBinopOp::Kind::k##kind);     \
+  }
+  BIGINT_BINOP(Add)
+  BIGINT_BINOP(Sub)
+  BIGINT_BINOP(Mul)
+  BIGINT_BINOP(Div)
+  BIGINT_BINOP(Mod)
+  BIGINT_BINOP(BitwiseAnd)
+  BIGINT_BINOP(BitwiseOr)
+  BIGINT_BINOP(BitwiseXor)
+  BIGINT_BINOP(ShiftLeft)
+  BIGINT_BINOP(ShiftRightArithmetic)
+#undef BIGINT_BINOP
+
+  V<Word32> BigIntEqual(V<Tagged> left, V<Tagged> right) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceBigIntEqual(left, right);
+  }
+
+  V<Word32> BigIntComparison(V<Tagged> left, V<Tagged> right,
+                             BigIntComparisonOp::Kind kind) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceBigIntComparison(left, right, kind);
+  }
+  V<Word32> BigIntLessThan(V<Tagged> left, V<Tagged> right) {
+    return BigIntComparison(left, right, BigIntComparisonOp::Kind::kLessThan);
+  }
+  V<Word32> BigIntLessThanOrEqual(V<Tagged> left, V<Tagged> right) {
+    return BigIntComparison(left, right,
+                            BigIntComparisonOp::Kind::kLessThanOrEqual);
+  }
+
+  V<Tagged> BigIntUnary(V<Tagged> input, BigIntUnaryOp::Kind kind) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceBigIntUnary(input, kind);
+  }
+  V<Tagged> BigIntNegate(V<Tagged> input) {
+    return BigIntUnary(input, BigIntUnaryOp::Kind::kNegate);
+  }
+
+  V<Word32> StringAt(V<String> string, V<WordPtr> position,
+                     StringAtOp::Kind kind) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceStringAt(string, position, kind);
+  }
+  V<Word32> StringCharCodeAt(V<String> string, V<WordPtr> position) {
+    return StringAt(string, position, StringAtOp::Kind::kCharCode);
+  }
+  V<Word32> StringCodePointAt(V<String> string, V<WordPtr> position) {
+    return StringAt(string, position, StringAtOp::Kind::kCodePoint);
+  }
+
+#ifdef V8_INTL_SUPPORT
+  V<String> StringToCaseIntl(V<String> string, StringToCaseIntlOp::Kind kind) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceStringToCaseIntl(string, kind);
+  }
+  V<String> StringToLowerCaseIntl(V<String> string) {
+    return StringToCaseIntl(string, StringToCaseIntlOp::Kind::kLower);
+  }
+  V<String> StringToUpperCaseIntl(V<String> string) {
+    return StringToCaseIntl(string, StringToCaseIntlOp::Kind::kUpper);
+  }
+#endif  // V8_INTL_SUPPORT
+
+  V<Word32> StringLength(V<String> string) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceStringLength(string);
+  }
+
+  V<Smi> StringIndexOf(V<String> string, V<String> search, V<Smi> position) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceStringIndexOf(string, search, position);
+  }
+
+  V<String> StringFromCodePointAt(V<String> string, V<WordPtr> index) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceStringFromCodePointAt(string, index);
+  }
+
+  V<String> StringSubstring(V<String> string, V<Word32> start, V<Word32> end) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceStringSubstring(string, start, end);
+  }
+
+  V<String> StringConcat(V<String> left, V<String> right) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceStringConcat(left, right);
+  }
+
+  V<Boolean> StringEqual(V<String> left, V<String> right) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceStringEqual(left, right);
+  }
+
+  V<Boolean> StringComparison(V<String> left, V<String> right,
+                              StringComparisonOp::Kind kind) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceStringComparison(left, right, kind);
+  }
+  V<Boolean> StringLessThan(V<String> left, V<String> right) {
+    return StringComparison(left, right, StringComparisonOp::Kind::kLessThan);
+  }
+  V<Boolean> StringLessThanOrEqual(V<String> left, V<String> right) {
+    return StringComparison(left, right,
+                            StringComparisonOp::Kind::kLessThanOrEqual);
+  }
+
+  V<Smi> ArgumentsLength() {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceArgumentsLength(ArgumentsLengthOp::Kind::kArguments,
+                                         0);
+  }
+  V<Smi> RestLength(int formal_parameter_count) {
+    DCHECK_LE(0, formal_parameter_count);
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceArgumentsLength(ArgumentsLengthOp::Kind::kRest,
+                                         formal_parameter_count);
+  }
+
+  V<FixedArray> NewArgumentsElements(V<Smi> arguments_count,
+                                     CreateArgumentsType type,
+                                     int formal_parameter_count) {
+    DCHECK_LE(0, formal_parameter_count);
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceNewArgumentsElements(arguments_count, type,
+                                              formal_parameter_count);
+  }
+
+  OpIndex LoadTypedElement(OpIndex buffer, V<Object> base, V<WordPtr> external,
+                           V<WordPtr> index, ExternalArrayType array_type) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceLoadTypedElement(buffer, base, external, index,
+                                          array_type);
+  }
+
+  OpIndex LoadDataViewElement(V<Object> object, V<Object> storage,
+                              V<WordPtr> index, V<Word32> is_little_endian,
+                              ExternalArrayType element_type) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceLoadDataViewElement(object, storage, index,
+                                             is_little_endian, element_type);
+  }
+
+  V<Object> LoadStackArgument(V<Object> base, V<WordPtr> index) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceLoadStackArgument(base, index);
+  }
+
+  void StoreTypedElement(OpIndex buffer, V<Object> base, V<WordPtr> external,
+                         V<WordPtr> index, OpIndex value,
+                         ExternalArrayType array_type) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return;
+    }
+    stack().ReduceStoreTypedElement(buffer, base, external, index, value,
+                                    array_type);
+  }
+
+  void StoreDataViewElement(V<Object> object, V<Object> storage,
+                            V<WordPtr> index, OpIndex value,
+                            V<Word32> is_little_endian,
+                            ExternalArrayType element_type) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return;
+    }
+    stack().ReduceStoreDataViewElement(object, storage, index, value,
+                                       is_little_endian, element_type);
+  }
+
+  void TransitionAndStoreArrayElement(
+      V<Object> array, V<WordPtr> index, OpIndex value,
+      TransitionAndStoreArrayElementOp::Kind kind, MaybeHandle<Map> fast_map,
+      MaybeHandle<Map> double_map) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return;
+    }
+    stack().ReduceTransitionAndStoreArrayElement(array, index, value, kind,
+                                                 fast_map, double_map);
+  }
+
+  void StoreSignedSmallElement(V<Object> array, V<WordPtr> index,
+                               V<Word32> value) {
+    TransitionAndStoreArrayElement(
+        array, index, value,
+        TransitionAndStoreArrayElementOp::Kind::kSignedSmallElement, {}, {});
+  }
+
+  V<Word32> CompareMaps(V<HeapObject> heap_object,
+                        const ZoneRefSet<Map>& maps) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceCompareMaps(heap_object, maps);
+  }
+
+  void CheckMaps(V<HeapObject> heap_object, OpIndex frame_state,
+                 const ZoneRefSet<Map>& maps, CheckMapsFlags flags,
+                 const FeedbackSource& feedback) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return;
+    }
+    stack().ReduceCheckMaps(heap_object, frame_state, maps, flags, feedback);
+  }
+
+  V<Object> CheckedClosure(V<Object> input, OpIndex frame_state,
+                           Handle<FeedbackCell> feedback_cell) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceCheckedClosure(input, frame_state, feedback_cell);
+  }
+
+  void CheckEqualsInternalizedString(V<Object> expected, V<Object> value,
+                                     OpIndex frame_state) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return;
+    }
+    stack().ReduceCheckEqualsInternalizedString(expected, value, frame_state);
+  }
+
+  V<Object> LoadMessage(V<WordPtr> offset) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceLoadMessage(offset);
+  }
+
+  void StoreMessage(V<WordPtr> offset, V<Object> object) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return;
+    }
+    stack().ReduceStoreMessage(offset, object);
+  }
+
+  V<Boolean> SameValue(V<Object> left, V<Object> right,
+                       SameValueOp::Mode mode) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceSameValue(left, right, mode);
+  }
+
+  V<Word32> Float64SameValue(OpIndex left, OpIndex right) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceFloat64SameValue(left, right);
+  }
+
+  OpIndex FastApiCall(OpIndex data_argument,
+                      base::Vector<const OpIndex> arguments,
+                      const FastApiCallParameters* parameters) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceFastApiCall(data_argument, arguments, parameters);
+  }
+
+  void RuntimeAbort(AbortReason reason) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return;
+    }
+    stack().ReduceRuntimeAbort(reason);
+  }
+
+  V<Object> EnsureWritableFastElements(V<Object> object, V<Object> elements) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceEnsureWritableFastElements(object, elements);
+  }
+
+  V<Object> MaybeGrowFastElements(V<Object> object, V<Object> elements,
+                                  V<Word32> index, V<Word32> elements_length,
+                                  OpIndex frame_state,
+                                  GrowFastElementsMode mode,
+                                  const FeedbackSource& feedback) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceMaybeGrowFastElements(
+        object, elements, index, elements_length, frame_state, mode, feedback);
+  }
+
+  void TransitionElementsKind(V<HeapObject> object,
+                              const ElementsTransition& transition) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return;
+    }
+    stack().ReduceTransitionElementsKind(object, transition);
+  }
+
+  OpIndex FindOrderedHashEntry(V<Object> data_structure, OpIndex key,
+                               FindOrderedHashEntryOp::Kind kind) {
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    return stack().ReduceFindOrderedHashEntry(data_structure, key, kind);
+  }
+  V<Smi> FindOrderedHashMapEntry(V<Object> table, V<Smi> key) {
+    return FindOrderedHashEntry(
+        table, key, FindOrderedHashEntryOp::Kind::kFindOrderedHashMapEntry);
+  }
+  V<Smi> FindOrderedHashSetEntry(V<Object> table, V<Smi> key) {
+    return FindOrderedHashEntry(
+        table, key, FindOrderedHashEntryOp::Kind::kFindOrderedHashSetEntry);
+  }
+  V<WordPtr> FindOrderedHashMapEntryForInt32Key(V<Object> table,
+                                                V<Word32> key) {
+    return FindOrderedHashEntry(
+        table, key,
+        FindOrderedHashEntryOp::Kind::kFindOrderedHashMapEntryForInt32Key);
+  }
+
+  template <typename Rep>
+  V<Rep> resolve(const V<Rep>& v) {
+    return v;
+  }
+  V<Word32> resolve(const ConstOrV<Word32>& v) {
+    return v.is_constant() ? Word32Constant(v.constant_value()) : v.value();
+  }
+  V<Word64> resolve(const ConstOrV<Word64>& v) {
+    return v.is_constant() ? Word64Constant(v.constant_value()) : v.value();
+  }
+  V<Float32> resolve(const ConstOrV<Float32>& v) {
+    return v.is_constant() ? Float32Constant(v.constant_value()) : v.value();
+  }
+  V<Float64> resolve(const ConstOrV<Float64>& v) {
+    return v.is_constant() ? Float64Constant(v.constant_value()) : v.value();
+  }
+
+  // These methods are used by the assembler macros (IF, ELSE, ELSE_IF, END_IF).
+  template <typename L>
+  auto ControlFlowHelper_Bind(L& label)
+      -> base::prepend_tuple_type<bool, typename L::values_t> {
+    // LoopLabels need to be bound with `LOOP` instead of `BIND`.
+    static_assert(!L::is_loop);
+    return label.Bind(stack());
+  }
+
+  template <typename L>
+  auto ControlFlowHelper_BindLoop(L& label)
+      -> base::prepend_tuple_type<bool, typename L::values_t> {
+    // Only LoopLabels can be bound with `LOOP`. Otherwise use `BIND`.
+    static_assert(L::is_loop);
+    return label.BindLoop(stack());
+  }
+
+  template <typename L>
+  void ControlFlowHelper_EndLoop(L& label) {
+    static_assert(L::is_loop);
+    label.EndLoop(stack());
+  }
+
+  template <typename L>
+  void ControlFlowHelper_Goto(L& label,
+                              const typename L::const_or_values_t& values) {
+    auto resolved_values = detail::ResolveAll(stack(), values);
+    label.Goto(stack(), resolved_values);
+  }
+
+  template <typename L>
+  void ControlFlowHelper_GotoIf(ConditionWithHint condition, L& label,
+                                const typename L::const_or_values_t& values) {
+    auto resolved_values = detail::ResolveAll(stack(), values);
+    label.GotoIf(stack(), condition.condition(), condition.hint(),
+                 resolved_values);
+  }
+
+  template <typename L>
+  void ControlFlowHelper_GotoIfNot(
+      ConditionWithHint condition, L& label,
+      const typename L::const_or_values_t& values) {
+    auto resolved_values = detail::ResolveAll(stack(), values);
+    label.GotoIfNot(stack(), condition.condition(), condition.hint(),
+                    resolved_values);
+  }
+
+  bool ControlFlowHelper_If(ConditionWithHint condition, bool negate) {
+    Block* then_block = stack().NewBlock();
+    Block* else_block = stack().NewBlock();
+    Block* end_block = stack().NewBlock();
+    if (negate) {
+      this->Branch(condition, else_block, then_block);
+    } else {
+      this->Branch(condition, then_block, else_block);
+    }
+    if_scope_stack_.emplace_back(else_block, end_block);
+    return stack().Bind(then_block);
+  }
+
+  template <typename F>
+  bool ControlFlowHelper_ElseIf(F&& condition_builder) {
+    DCHECK_LT(0, if_scope_stack_.size());
+    auto& info = if_scope_stack_.back();
+    Block* else_block = info.else_block;
+    DCHECK_NOT_NULL(else_block);
+    if (!stack().Bind(else_block)) return false;
+    Block* then_block = stack().NewBlock();
+    info.else_block = stack().NewBlock();
+    stack().Branch(ConditionWithHint{condition_builder()}, then_block,
+                   info.else_block);
+    return stack().Bind(then_block);
+  }
+
+  bool ControlFlowHelper_Else() {
+    DCHECK_LT(0, if_scope_stack_.size());
+    auto& info = if_scope_stack_.back();
+    Block* else_block = info.else_block;
+    DCHECK_NOT_NULL(else_block);
+    info.else_block = nullptr;
+    return stack().Bind(else_block);
+  }
+
+  void ControlFlowHelper_EndIf() {
+    DCHECK_LT(0, if_scope_stack_.size());
+    auto& info = if_scope_stack_.back();
+    // Do we still have to place an else block (aka we had if's without else).
+    if (info.else_block) {
+      if (stack().Bind(info.else_block)) {
+        stack().Goto(info.end_block);
+      }
+    }
+    stack().Bind(info.end_block);
+    if_scope_stack_.pop_back();
+  }
+
+  void ControlFlowHelper_GotoEnd() {
+    DCHECK_LT(0, if_scope_stack_.size());
+    auto& info = if_scope_stack_.back();
+
+    if (!stack().current_block()) {
+      // We had an unconditional goto inside the block, so we don't need to add
+      // a jump to the end block.
+      return;
+    }
+    // Generate a jump to the end block.
+    stack().Goto(info.end_block);
+  }
+
  private:
   Assembler& stack() { return *static_cast<Assembler*>(this); }
+  struct IfScopeInfo {
+    Block* else_block;
+    Block* end_block;
+
+    IfScopeInfo(Block* else_block, Block* end_block)
+        : else_block(else_block), end_block(end_block) {}
+  };
+  base::SmallVector<IfScopeInfo, 16> if_scope_stack_;
+  // [0] contains the stub with exit frame.
+  MaybeHandle<Code> cached_centry_stub_constants_[4];
+  bool in_object_initialization_ = false;
 };
 
-template <template <class> class... Reducers>
-class Assembler
-    : public GraphVisitor<Assembler<Reducers...>>,
-      public ReducerStack<Assembler<Reducers...>, Reducers...,
-                          v8::internal::compiler::turboshaft::ReducerBase>,
-      public OperationMatching<Assembler<Reducers...>>,
-      public AssemblerOpInterface<Assembler<Reducers...>> {
-  using Stack = ReducerStack<Assembler<Reducers...>, Reducers...,
-                             v8::internal::compiler::turboshaft::ReducerBase>;
+template <class Reducers>
+class Assembler : public GraphVisitor<Assembler<Reducers>>,
+                  public reducer_stack_type<Reducers>::type,
+                  public OperationMatching<Assembler<Reducers>>,
+                  public AssemblerOpInterface<Assembler<Reducers>> {
+  using Stack = typename reducer_stack_type<Reducers>::type;
 
  public:
-  template <class... ReducerArgs>
-  explicit Assembler(
-      Graph& input_graph, Graph& output_graph, Zone* phase_zone,
-      compiler::NodeOriginTable* origins,
-      const typename ReducerStack<
-          Assembler<Reducers...>, Reducers...,
-          v8::internal::compiler::turboshaft::ReducerBase>::ArgT& reducer_args)
+  explicit Assembler(Graph& input_graph, Graph& output_graph, Zone* phase_zone,
+                     compiler::NodeOriginTable* origins)
       : GraphVisitor<Assembler>(input_graph, output_graph, phase_zone, origins),
-        Stack(reducer_args) {
+        Stack() {
     SupportedOperations::Initialize();
   }
 
   Block* NewLoopHeader() { return this->output_graph().NewLoopHeader(); }
   Block* NewBlock() { return this->output_graph().NewBlock(); }
 
-  using OperationMatching<Assembler<Reducers...>>::Get;
+  using OperationMatching<Assembler<Reducers>>::Get;
   using Stack::Get;
 
-  V8_INLINE V8_WARN_UNUSED_RESULT bool Bind(Block* block,
-                                            const Block* origin = nullptr) {
-    if (!this->output_graph().Add(block)) return false;
+  V8_INLINE bool Bind(Block* block) {
+    if (!this->output_graph().Add(block)) {
+      generating_unreachable_operations_ = true;
+      return false;
+    }
     DCHECK_NULL(current_block_);
     current_block_ = block;
-    if (origin == nullptr) origin = this->current_input_block();
-    if (origin != nullptr) block->SetOrigin(origin);
-    Stack::Bind(block, origin);
+    generating_unreachable_operations_ = false;
+    block->SetOrigin(this->current_input_block());
+    Stack::Bind(block);
     return true;
   }
 
-  V8_INLINE void BindReachable(Block* block, const Block* origin = nullptr) {
-    bool bound = Bind(block, origin);
+  // TODO(nicohartmann@): Remove this.
+  V8_INLINE void BindReachable(Block* block) {
+    bool bound = Bind(block);
     DCHECK(bound);
     USE(bound);
   }
@@ -1068,6 +2988,11 @@ class Assembler
   }
 
   Block* current_block() const { return current_block_; }
+  bool generating_unreachable_operations() const {
+    DCHECK_IMPLIES(generating_unreachable_operations_,
+                   current_block_ == nullptr);
+    return generating_unreachable_operations_;
+  }
   OpIndex current_operation_origin() const { return current_operation_origin_; }
 
   // ReduceProjection eliminates projections to tuples and returns instead the
@@ -1096,7 +3021,7 @@ class Assembler
         current_operation_origin_;
 #ifdef DEBUG
     op_to_block_[result] = current_block_;
-    ValidInputs(result);
+    DCHECK(ValidInputs(result));
 #endif  // DEBUG
     if (op.Properties().is_block_terminator) FinalizeBlock();
     return result;
@@ -1127,7 +3052,8 @@ class Assembler
       Block* pred = destination->LastPredecessor();
       destination->ResetLastPredecessor();
       destination->SetKind(Block::Kind::kMerge);
-      // It is important to add `source` first, because it was bound first.
+      // We have to split `pred` first to preserve order of predecessors.
+      SplitEdge(pred, destination);
       if (branch) {
         // A branch always goes to a BranchTarget. We thus split the edge: we'll
         // insert a new Block, to which {source} will branch, and which will
@@ -1138,7 +3064,6 @@ class Assembler
         // special to do.
         destination->AddPredecessor(source);
       }
-      SplitEdge(pred, destination);
       return;
     }
 
@@ -1235,7 +3160,8 @@ class Assembler
         UNREACHABLE();
     }
 
-    BindReachable(intermediate_block, source->Origin());
+    BindReachable(intermediate_block);
+    intermediate_block->SetOrigin(source->OriginForBlockEnd());
     // Inserting a Goto in {intermediate_block} to {destination}. This will
     // create the edge from {intermediate_block} to {destination}. Note that
     // this will call AddPredecessor, but we've already removed the eventual
@@ -1245,6 +3171,7 @@ class Assembler
   }
 
   Block* current_block_ = nullptr;
+  bool generating_unreachable_operations_ = false;
   // TODO(dmercadier,tebbi): remove {current_operation_origin_} and pass instead
   // additional parameters to ReduceXXX methods.
   OpIndex current_operation_origin_ = OpIndex::Invalid();

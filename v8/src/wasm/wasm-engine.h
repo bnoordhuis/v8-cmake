@@ -147,18 +147,16 @@ class V8_EXPORT_PRIVATE WasmEngine {
   WasmEngine& operator=(const WasmEngine&) = delete;
   ~WasmEngine();
 
-  // Synchronously validates the given bytes that represent an encoded Wasm
-  // module. If validation fails and {error_msg} is present, it is set to the
-  // validation error.
+  // Synchronously validates the given bytes. Returns whether the bytes
+  // represent a valid encoded Wasm module.
   bool SyncValidate(Isolate* isolate, const WasmFeatures& enabled,
-                    ModuleWireBytes bytes,
-                    std::string* error_message = nullptr);
+                    ModuleWireBytes bytes);
 
   // Synchronously compiles the given bytes that represent a translated
   // asm.js module.
   MaybeHandle<AsmWasmData> SyncCompileTranslatedAsmJs(
       Isolate* isolate, ErrorThrower* thrower, ModuleWireBytes bytes,
-      base::Vector<const byte> asm_js_offset_table_bytes,
+      base::Vector<const uint8_t> asm_js_offset_table_bytes,
       Handle<HeapNumber> uses_bitset, LanguageMode language_mode);
   Handle<WasmModuleObject> FinalizeTranslatedAsmJs(
       Isolate* isolate, Handle<AsmWasmData> asm_wasm_data,
@@ -371,8 +369,8 @@ class V8_EXPORT_PRIVATE WasmEngine {
 
   // Returns either the compressed tagged pointer representing a null value or
   // 0 if pointer compression is not available.
-  Tagged_t compressed_null_value_or_zero() const {
-    return null_tagged_compressed_;
+  Tagged_t compressed_wasm_null_value_or_zero() const {
+    return wasm_null_tagged_compressed_;
   }
 
   // Call on process start and exit.
@@ -411,7 +409,7 @@ class V8_EXPORT_PRIVATE WasmEngine {
   std::atomic<int> next_compilation_id_{0};
 
   // Compressed tagged pointer to null value.
-  std::atomic<Tagged_t> null_tagged_compressed_{0};
+  std::atomic<Tagged_t> wasm_null_tagged_compressed_{0};
 
   TypeCanonicalizer type_canonicalizer_;
 

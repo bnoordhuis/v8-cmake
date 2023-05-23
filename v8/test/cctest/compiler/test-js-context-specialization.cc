@@ -17,16 +17,18 @@
 #include "src/objects/property.h"
 #include "test/cctest/cctest.h"
 #include "test/cctest/compiler/function-tester.h"
+#include "test/cctest/compiler/js-heap-broker-base.h"
 
 namespace v8 {
 namespace internal {
 namespace compiler {
 
-class ContextSpecializationTester : public HandleAndZoneScope {
+class ContextSpecializationTester : public HandleAndZoneScope,
+                                    public JSHeapBrokerTestBase {
  public:
   explicit ContextSpecializationTester(Maybe<OuterContext> context)
       : HandleAndZoneScope(kCompressGraphZone),
-        canonical_(main_isolate()),
+        JSHeapBrokerTestBase(main_isolate(), main_zone()),
         graph_(main_zone()->New<Graph>(main_zone())),
         common_(main_zone()),
         javascript_(main_zone()),
@@ -34,9 +36,22 @@ class ContextSpecializationTester : public HandleAndZoneScope {
         simplified_(main_zone()),
         jsgraph_(main_isolate(), graph(), common(), &javascript_, &simplified_,
                  &machine_),
-        reducer_(main_zone(), graph(), &tick_counter_, &js_heap_broker_),
-        js_heap_broker_(main_isolate(), main_zone()),
-        spec_(&reducer_, jsgraph(), &js_heap_broker_, context,
+        reducer_(main_zone(), graph(), &tick_counter_, broker()),
+        spec_(&reducer_, jsgraph(), broker(), context,
+              MaybeHandle<JSFunction>()) {}
+  ContextSpecializationTester(Maybe<OuterContext> context,
+                              CanonicalHandles&& handles)
+      : HandleAndZoneScope(kCompressGraphZone),
+        JSHeapBrokerTestBase(main_isolate(), main_zone(), std::move(handles)),
+        graph_(main_zone()->New<Graph>(main_zone())),
+        common_(main_zone()),
+        javascript_(main_zone()),
+        machine_(main_zone()),
+        simplified_(main_zone()),
+        jsgraph_(main_isolate(), graph(), common(), &javascript_, &simplified_,
+                 &machine_),
+        reducer_(main_zone(), graph(), &tick_counter_, broker()),
+        spec_(&reducer_, jsgraph(), broker(), context,
               MaybeHandle<JSFunction>()) {}
 
   JSContextSpecialization* spec() { return &spec_; }
@@ -55,11 +70,8 @@ class ContextSpecializationTester : public HandleAndZoneScope {
   void CheckContextInputAndDepthChanges(Node* node, Node* expected_new_context,
                                         size_t expected_new_depth);
 
-  JSHeapBroker* broker() { return &js_heap_broker_; }
-
  private:
   TickCounter tick_counter_;
-  CanonicalHandleScope canonical_;
   Graph* graph_;
   CommonOperatorBuilder common_;
   JSOperatorBuilder javascript_;
@@ -67,7 +79,6 @@ class ContextSpecializationTester : public HandleAndZoneScope {
   SimplifiedOperatorBuilder simplified_;
   JSGraph jsgraph_;
   GraphReducer reducer_;
-  JSHeapBroker js_heap_broker_;
   JSContextSpecialization spec_;
 };
 
@@ -114,12 +125,24 @@ void ContextSpecializationTester::CheckContextInputAndDepthChanges(
 }
 
 namespace {
+
 Handle<Context> NewContextForTesting(Isolate* isolate,
                                      Handle<Context> previous) {
   Handle<ScopeInfo> scope_info = ScopeInfo::CreateForWithScope(isolate, {});
   Handle<JSObject> extension = isolate->factory()->NewJSObjectWithNullProto();
   return isolate->factory()->NewWithContext(previous, scope_info, extension);
 }
+
+Handle<Context> NewCanonicalContextForTesting(ContextSpecializationTester& t,
+                                              Handle<Context> previous) {
+  Handle<ScopeInfo> scope_info =
+      t.CanonicalHandle(*ScopeInfo::CreateForWithScope(t.isolate(), {}));
+  Handle<JSObject> extension =
+      t.CanonicalHandle(*t.isolate()->factory()->NewJSObjectWithNullProto());
+  return t.CanonicalHandle(
+      *t.isolate()->factory()->NewWithContext(previous, scope_info, extension));
+}
+
 }  // namespace
 
 static const int slot_index = 5;
@@ -131,16 +154,18 @@ TEST(ReduceJSLoadContext0) {
   t.graph()->SetStart(start);
 
   // Make a context and initialize it a bit for this test.
-  Handle<Context> native = t.factory()->NewNativeContext();
-  Handle<Context> subcontext1 = NewContextForTesting(t.isolate(), native);
-  Handle<Context> subcontext2 = NewContextForTesting(t.isolate(), subcontext1);
-  Handle<Object> expected = t.factory()->InternalizeUtf8String("gboy!");
+  Handle<Context> native = t.CanonicalHandle(*t.factory()->NewNativeContext());
+  Handle<Context> subcontext1 = NewCanonicalContextForTesting(t, native);
+  Handle<Context> subcontext2 = NewCanonicalContextForTesting(t, subcontext1);
+  Handle<Object> expected =
+      t.CanonicalHandle(*t.factory()->InternalizeUtf8String("gboy!"));
   const int slot = 5;
   native->set(slot, *expected);
 
-  Node* const_context = t.jsgraph()->Constant(MakeRef(t.broker(), native));
+  Node* const_context =
+      t.jsgraph()->Constant(MakeRef(t.broker(), native), t.broker());
   Node* deep_const_context =
-      t.jsgraph()->Constant(MakeRef(t.broker(), subcontext2));
+      t.jsgraph()->Constant(MakeRef(t.broker(), subcontext2), t.broker());
   Node* param_context = t.graph()->NewNode(t.common()->Parameter(0), start);
 
   {
@@ -202,7 +227,7 @@ TEST(ReduceJSLoadContext1) {
 
   Node* start = t.graph()->NewNode(t.common()->Start(0));
   t.graph()->SetStart(start);
-  ScopeInfoRef empty = MakeRef(t.broker(), ScopeInfo::Empty(t.main_isolate()));
+  ScopeInfoRef empty = t.broker()->empty_scope_info();
   const i::compiler::Operator* create_function_context =
       t.javascript()->CreateFunctionContext(empty, 42, FUNCTION_SCOPE);
 
@@ -272,20 +297,24 @@ TEST(ReduceJSLoadContext2) {
 
   Node* start = t.graph()->NewNode(t.common()->Start(0));
   t.graph()->SetStart(start);
-  ScopeInfoRef empty = MakeRef(t.broker(), ScopeInfo::Empty(t.main_isolate()));
+  ScopeInfoRef empty = t.broker()->empty_scope_info();
   const i::compiler::Operator* create_function_context =
       t.javascript()->CreateFunctionContext(empty, 42, FUNCTION_SCOPE);
 
-  Handle<HeapObject> slot_value0 = t.factory()->InternalizeUtf8String("0");
-  Handle<HeapObject> slot_value1 = t.factory()->InternalizeUtf8String("1");
+  Handle<HeapObject> slot_value0 =
+      t.CanonicalHandle(*t.factory()->InternalizeUtf8String("0"));
+  Handle<HeapObject> slot_value1 =
+      t.CanonicalHandle(*t.factory()->InternalizeUtf8String("1"));
 
-  Handle<Context> context_object0 = t.factory()->NewNativeContext();
+  Handle<Context> context_object0 =
+      t.CanonicalHandle(*t.factory()->NewNativeContext());
   Handle<Context> context_object1 =
-      NewContextForTesting(t.isolate(), context_object0);
+      NewCanonicalContextForTesting(t, context_object0);
   context_object0->set_extension(*slot_value0);
   context_object1->set_extension(*slot_value1);
 
-  Node* context0 = t.jsgraph()->Constant(MakeRef(t.broker(), context_object1));
+  Node* context0 =
+      t.jsgraph()->Constant(MakeRef(t.broker(), context_object1), t.broker());
   Node* context1 =
       t.graph()->NewNode(create_function_context, context0, start, start);
   Node* context2 =
@@ -356,17 +385,21 @@ TEST(ReduceJSLoadContext3) {
   Handle<HeapObject> slot_value0 = factory->InternalizeUtf8String("0");
   Handle<HeapObject> slot_value1 = factory->InternalizeUtf8String("1");
 
-  Handle<Context> context_object0 = factory->NewNativeContext();
+  CanonicalHandles canonical_handles(isolate, handle_zone_scope.main_zone());
+
+  Handle<Context> context_object0 =
+      canonical_handles.Create(factory->NewNativeContext());
   Handle<Context> context_object1 =
-      NewContextForTesting(isolate, context_object0);
+      canonical_handles.Create(NewContextForTesting(isolate, context_object0));
   context_object0->set_extension(*slot_value0);
   context_object1->set_extension(*slot_value1);
 
-  ContextSpecializationTester t(Just(OuterContext(context_object1, 0)));
+  ContextSpecializationTester t(Just(OuterContext(context_object1, 0)),
+                                std::move(canonical_handles));
 
   Node* start = t.graph()->NewNode(t.common()->Start(2));
   t.graph()->SetStart(start);
-  ScopeInfoRef empty = MakeRef(t.broker(), ScopeInfo::Empty(t.main_isolate()));
+  ScopeInfoRef empty = t.broker()->empty_scope_info();
   const i::compiler::Operator* create_function_context =
       t.javascript()->CreateFunctionContext(empty, 42, FUNCTION_SCOPE);
 
@@ -434,16 +467,18 @@ TEST(ReduceJSStoreContext0) {
   t.graph()->SetStart(start);
 
   // Make a context and initialize it a bit for this test.
-  Handle<Context> native = t.factory()->NewNativeContext();
-  Handle<Context> subcontext1 = NewContextForTesting(t.isolate(), native);
-  Handle<Context> subcontext2 = NewContextForTesting(t.isolate(), subcontext1);
-  Handle<Object> expected = t.factory()->InternalizeUtf8String("gboy!");
+  Handle<Context> native = t.CanonicalHandle(*t.factory()->NewNativeContext());
+  Handle<Context> subcontext1 = NewCanonicalContextForTesting(t, native);
+  Handle<Context> subcontext2 = NewCanonicalContextForTesting(t, subcontext1);
+  Handle<Object> expected =
+      t.CanonicalHandle(*t.factory()->InternalizeUtf8String("gboy!"));
   const int slot = 5;
   native->set(slot, *expected);
 
-  Node* const_context = t.jsgraph()->Constant(MakeRef(t.broker(), native));
+  Node* const_context =
+      t.jsgraph()->Constant(MakeRef(t.broker(), native), t.broker());
   Node* deep_const_context =
-      t.jsgraph()->Constant(MakeRef(t.broker(), subcontext2));
+      t.jsgraph()->Constant(MakeRef(t.broker(), subcontext2), t.broker());
   Node* param_context = t.graph()->NewNode(t.common()->Parameter(0), start);
 
   {
@@ -496,7 +531,7 @@ TEST(ReduceJSStoreContext1) {
 
   Node* start = t.graph()->NewNode(t.common()->Start(0));
   t.graph()->SetStart(start);
-  ScopeInfoRef empty = MakeRef(t.broker(), ScopeInfo::Empty(t.main_isolate()));
+  ScopeInfoRef empty = t.broker()->empty_scope_info();
   const i::compiler::Operator* create_function_context =
       t.javascript()->CreateFunctionContext(empty, 42, FUNCTION_SCOPE);
 
@@ -540,20 +575,24 @@ TEST(ReduceJSStoreContext2) {
 
   Node* start = t.graph()->NewNode(t.common()->Start(0));
   t.graph()->SetStart(start);
-  ScopeInfoRef empty = MakeRef(t.broker(), ScopeInfo::Empty(t.main_isolate()));
+  ScopeInfoRef empty = t.broker()->empty_scope_info();
   const i::compiler::Operator* create_function_context =
       t.javascript()->CreateFunctionContext(empty, 42, FUNCTION_SCOPE);
 
-  Handle<HeapObject> slot_value0 = t.factory()->InternalizeUtf8String("0");
-  Handle<HeapObject> slot_value1 = t.factory()->InternalizeUtf8String("1");
+  Handle<HeapObject> slot_value0 =
+      t.CanonicalHandle(*t.factory()->InternalizeUtf8String("0"));
+  Handle<HeapObject> slot_value1 =
+      t.CanonicalHandle(*t.factory()->InternalizeUtf8String("1"));
 
-  Handle<Context> context_object0 = t.factory()->NewNativeContext();
+  Handle<Context> context_object0 =
+      t.CanonicalHandle(*t.factory()->NewNativeContext());
   Handle<Context> context_object1 =
-      NewContextForTesting(t.isolate(), context_object0);
+      NewCanonicalContextForTesting(t, context_object0);
   context_object0->set_extension(*slot_value0);
   context_object1->set_extension(*slot_value1);
 
-  Node* context0 = t.jsgraph()->Constant(MakeRef(t.broker(), context_object1));
+  Node* context0 =
+      t.jsgraph()->Constant(MakeRef(t.broker(), context_object1), t.broker());
   Node* context1 =
       t.graph()->NewNode(create_function_context, context0, start, start);
   Node* context2 =
@@ -593,20 +632,26 @@ TEST(ReduceJSStoreContext3) {
   auto isolate = handle_zone_scope.main_isolate();
   auto factory = isolate->factory();
 
-  Handle<HeapObject> slot_value0 = factory->InternalizeUtf8String("0");
-  Handle<HeapObject> slot_value1 = factory->InternalizeUtf8String("1");
+  CanonicalHandles canonical_handles(isolate, handle_zone_scope.main_zone());
 
-  Handle<Context> context_object0 = factory->NewNativeContext();
+  Handle<HeapObject> slot_value0 =
+      canonical_handles.Create(factory->InternalizeUtf8String("0"));
+  Handle<HeapObject> slot_value1 =
+      canonical_handles.Create(factory->InternalizeUtf8String("1"));
+
+  Handle<Context> context_object0 =
+      canonical_handles.Create(factory->NewNativeContext());
   Handle<Context> context_object1 =
-      NewContextForTesting(isolate, context_object0);
+      canonical_handles.Create(NewContextForTesting(isolate, context_object0));
   context_object0->set_extension(*slot_value0);
   context_object1->set_extension(*slot_value1);
 
-  ContextSpecializationTester t(Just(OuterContext(context_object1, 0)));
+  ContextSpecializationTester t(Just(OuterContext(context_object1, 0)),
+                                std::move(canonical_handles));
 
   Node* start = t.graph()->NewNode(t.common()->Start(2));
   t.graph()->SetStart(start);
-  ScopeInfoRef empty = MakeRef(t.broker(), ScopeInfo::Empty(t.main_isolate()));
+  ScopeInfoRef empty = t.broker()->empty_scope_info();
   const i::compiler::Operator* create_function_context =
       t.javascript()->CreateFunctionContext(empty, 42, FUNCTION_SCOPE);
 

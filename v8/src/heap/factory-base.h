@@ -8,6 +8,7 @@
 #include "src/base/export-template.h"
 #include "src/base/strings.h"
 #include "src/common/globals.h"
+#include "src/objects/code-kind.h"
 #include "src/objects/fixed-array.h"
 #include "src/objects/function-kind.h"
 #include "src/objects/instance-type.h"
@@ -60,9 +61,33 @@ class EXPORT_TEMPLATE_DECLARE(V8_EXPORT_PRIVATE) TorqueGeneratedFactory {
 #include "torque-generated/factory.inc"
 };
 
+struct NewCodeOptions {
+  CodeKind kind;
+  Builtin builtin;
+  bool is_turbofanned;
+  int stack_slots;
+  AllocationType allocation;
+  int instruction_size;
+  int metadata_size;
+  unsigned int inlined_bytecode_size;
+  BytecodeOffset osr_offset;
+  int handler_table_offset;
+  int constant_pool_offset;
+  int code_comments_offset;
+  int32_t unwinding_info_offset;
+  Handle<HeapObject> bytecode_or_deoptimization_data;
+  Handle<ByteArray> bytecode_offsets_or_source_position_table;
+  // Either instruction_stream is set and instruction_start is kNullAddress, or
+  // instruction_stream is empty and instruction_start a valid target.
+  MaybeHandle<InstructionStream> instruction_stream;
+  Address instruction_start;
+};
+
 template <typename Impl>
 class FactoryBase : public TorqueGeneratedFactory<Impl> {
  public:
+  Handle<Code> NewCode(const NewCodeOptions& options);
+
   // Converts the given boolean condition to JavaScript boolean value.
   inline Handle<Oddball> ToBoolean(bool value);
 
@@ -97,9 +122,6 @@ class FactoryBase : public TorqueGeneratedFactory<Impl> {
 
   // Create a pre-tenured empty AccessorPair.
   Handle<AccessorPair> NewAccessorPair();
-
-  // Creates a new Code for a InstructionStream object.
-  Handle<Code> NewCode(int flags, AllocationType allocation);
 
   // Allocates a fixed array initialized with undefined values.
   Handle<FixedArray> NewFixedArray(
@@ -207,20 +229,20 @@ class FactoryBase : public TorqueGeneratedFactory<Impl> {
 
   Handle<CoverageInfo> NewCoverageInfo(const ZoneVector<SourceRange>& slots);
 
-  Handle<String> InternalizeString(const base::Vector<const uint8_t>& string,
+  Handle<String> InternalizeString(base::Vector<const uint8_t> string,
                                    bool convert_encoding = false);
-  Handle<String> InternalizeString(const base::Vector<const uint16_t>& string,
+  Handle<String> InternalizeString(base::Vector<const uint16_t> string,
                                    bool convert_encoding = false);
 
   template <class StringTableKey>
   Handle<String> InternalizeStringWithKey(StringTableKey* key);
 
   Handle<SeqOneByteString> NewOneByteInternalizedString(
-      const base::Vector<const uint8_t>& str, uint32_t raw_hash_field);
+      base::Vector<const uint8_t> str, uint32_t raw_hash_field);
   Handle<SeqTwoByteString> NewTwoByteInternalizedString(
-      const base::Vector<const base::uc16>& str, uint32_t raw_hash_field);
+      base::Vector<const base::uc16> str, uint32_t raw_hash_field);
   Handle<SeqOneByteString> NewOneByteInternalizedStringFromTwoByte(
-      const base::Vector<const base::uc16>& str, uint32_t raw_hash_field);
+      base::Vector<const base::uc16> str, uint32_t raw_hash_field);
 
   Handle<SeqOneByteString> AllocateRawOneByteInternalizedString(
       int length, uint32_t raw_hash_field);
@@ -232,7 +254,7 @@ class FactoryBase : public TorqueGeneratedFactory<Impl> {
   Handle<String> LookupSingleCharacterStringFromCode(uint16_t code);
 
   MaybeHandle<String> NewStringFromOneByte(
-      const base::Vector<const uint8_t>& string,
+      base::Vector<const uint8_t> string,
       AllocationType allocation = AllocationType::kYoung);
 
   inline Handle<String> NewStringFromAsciiChecked(
@@ -322,7 +344,7 @@ class FactoryBase : public TorqueGeneratedFactory<Impl> {
   HeapObject NewWithImmortalMap(Map map, AllocationType allocation);
 
   Handle<FixedArray> NewFixedArrayWithFiller(Handle<Map> map, int length,
-                                             Handle<Oddball> filler,
+                                             Handle<HeapObject> filler,
                                              AllocationType allocation);
 
   Handle<SharedFunctionInfo> NewSharedFunctionInfo();
@@ -338,7 +360,6 @@ class FactoryBase : public TorqueGeneratedFactory<Impl> {
                                               AllocationType allocation);
 
  private:
-  friend class WebSnapshotDeserializer;
   Impl* impl() { return static_cast<Impl*>(this); }
   auto isolate() { return impl()->isolate(); }
   ReadOnlyRoots read_only_roots() { return impl()->read_only_roots(); }

@@ -47,7 +47,7 @@ class Simd128 {
   FOREACH_SIMD_TYPE(DEFINE_SIMD_TYPE_SPECIFIC_METHODS)
 #undef DEFINE_SIMD_TYPE_SPECIFIC_METHODS
 
-  explicit Simd128(byte* bytes) {
+  explicit Simd128(uint8_t* bytes) {
     memcpy(static_cast<void*>(val_), reinterpret_cast<void*>(bytes),
            kSimd128Size);
   }
@@ -113,7 +113,8 @@ class WasmValue {
   FOREACH_PRIMITIVE_WASMVAL_TYPE(DEFINE_TYPE_SPECIFIC_METHODS)
 #undef DEFINE_TYPE_SPECIFIC_METHODS
 
-  WasmValue(byte* raw_bytes, ValueType type) : type_(type), bit_pattern_{} {
+  WasmValue(const uint8_t* raw_bytes, ValueType type)
+      : type_(type), bit_pattern_{} {
     DCHECK(type_.is_numeric());
     memcpy(bit_pattern_, raw_bytes, type.value_kind_size());
   }
@@ -142,7 +143,7 @@ class WasmValue {
                                         : type_.value_kind_size());
   }
 
-  void CopyTo(byte* to) const {
+  void CopyTo(uint8_t* to) const {
     static_assert(sizeof(float) == sizeof(Float32));
     static_assert(sizeof(double) == sizeof(Float64));
     DCHECK(type_.is_numeric());
@@ -192,9 +193,9 @@ class WasmValue {
       case kS128: {
         std::stringstream stream;
         stream << "0x" << std::hex;
-        for (int8_t byte : bit_pattern_) {
-          if (!(byte & 0xf0)) stream << '0';
-          stream << byte;
+        for (int8_t uint8_t : bit_pattern_) {
+          if (!(uint8_t & 0xf0)) stream << '0';
+          stream << uint8_t;
         }
         return stream.str();
       }

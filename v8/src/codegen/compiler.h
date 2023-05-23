@@ -97,7 +97,7 @@ class V8_EXPORT_PRIVATE Compiler : public AllStatic {
   // a future OSR request will pick up the resulting code object).
   V8_WARN_UNUSED_RESULT static MaybeHandle<Code> CompileOptimizedOSR(
       Isolate* isolate, Handle<JSFunction> function, BytecodeOffset osr_offset,
-      ConcurrencyMode mode);
+      ConcurrencyMode mode, CodeKind code_kind);
 
   V8_WARN_UNUSED_RESULT static MaybeHandle<SharedFunctionInfo>
   CompileForLiveEdit(ParseInfo* parse_info, Handle<Script> script,
@@ -115,7 +115,8 @@ class V8_EXPORT_PRIVATE Compiler : public AllStatic {
                                             ClearExceptionFlag flag);
 
   // Dispose a job without finalization.
-  static void DisposeTurbofanCompilationJob(TurbofanCompilationJob* job,
+  static void DisposeTurbofanCompilationJob(Isolate* isolate,
+                                            TurbofanCompilationJob* job,
                                             bool restore_function_code);
 
   // Finalize and install Turbofan code from a previously run job.
@@ -215,6 +216,16 @@ class V8_EXPORT_PRIVATE Compiler : public AllStatic {
       ScriptCompiler::NoCacheReason no_cache_reason,
       NativesFlag is_natives_code);
 
+  static MaybeHandle<SharedFunctionInfo>
+  GetSharedFunctionInfoForScriptWithCompileHints(
+      Isolate* isolate, Handle<String> source,
+      const ScriptDetails& script_details,
+      v8::CompileHintCallback compile_hint_callback,
+      void* compile_hint_callback_data,
+      ScriptCompiler::CompileOptions compile_options,
+      ScriptCompiler::NoCacheReason no_cache_reason,
+      NativesFlag is_natives_code);
+
   // Create a shared function info object for a Script source that has already
   // been parsed and possibly compiled on a background thread while being loaded
   // from a streamed source. On return, the data held by |streaming_data| will
@@ -223,9 +234,6 @@ class V8_EXPORT_PRIVATE Compiler : public AllStatic {
   static MaybeHandle<SharedFunctionInfo> GetSharedFunctionInfoForStreamedScript(
       Isolate* isolate, Handle<String> source,
       const ScriptDetails& script_details, ScriptStreamingData* streaming_data);
-
-  static Handle<SharedFunctionInfo> GetSharedFunctionInfoForWebSnapshot(
-      Isolate* isolate, Handle<String> source, MaybeHandle<Object> script_name);
 
   // Create a shared function info object for the given function literal
   // node (the code may be lazily compiled).

@@ -55,6 +55,7 @@ namespace internal {
   V(CloneObjectBaseline)                             \
   V(CloneObjectWithVector)                           \
   V(Compare)                                         \
+  V(CompareNoContext)                                \
   V(StringEqual)                                     \
   V(Compare_Baseline)                                \
   V(Compare_WithFeedback)                            \
@@ -72,7 +73,6 @@ namespace internal {
   V(CopyDataPropertiesWithExcludedProperties)        \
   V(CopyDataPropertiesWithExcludedPropertiesOnStack) \
   V(CppBuiltinAdaptor)                               \
-  V(DataViewGetVariableLength)                       \
   V(DefineKeyedOwn)                                  \
   V(DefineKeyedOwnBaseline)                          \
   V(DefineKeyedOwnWithVector)                        \
@@ -105,6 +105,7 @@ namespace internal {
   V(LoadWithReceiverAndVector)                       \
   V(LoadWithReceiverBaseline)                        \
   V(LoadWithVector)                                  \
+  V(LookupWithVector)                                \
   V(LookupTrampoline)                                \
   V(LookupBaseline)                                  \
   V(NewHeapNumber)                                   \
@@ -134,7 +135,7 @@ namespace internal {
   V(UnaryOp_WithFeedback)                            \
   V(Void)                                            \
   V(WasmFloat32ToNumber)                             \
-  V(WasmFloat64ToNumber)                             \
+  V(WasmFloat64ToTagged)                             \
   V(WasmSuspend)                                     \
   V(WriteBarrier)                                    \
   IF_TSAN(V, TSANLoad)                               \
@@ -850,6 +851,17 @@ class LoadGlobalBaselineDescriptor
   static constexpr auto registers();
 };
 
+class LookupWithVectorDescriptor
+    : public StaticCallInterfaceDescriptor<LookupWithVectorDescriptor> {
+ public:
+  DEFINE_PARAMETERS(kName, kDepth, kSlot, kVector)
+  DEFINE_PARAMETER_TYPES(MachineType::AnyTagged(),  // kName
+                         MachineType::AnyTagged(),  // kDepth
+                         MachineType::AnyTagged(),  // kSlot
+                         MachineType::AnyTagged())  // kVector
+  DECLARE_DESCRIPTOR(LookupWithVectorDescriptor)
+};
+
 class LookupTrampolineDescriptor
     : public StaticCallInterfaceDescriptor<LookupTrampolineDescriptor> {
  public:
@@ -1297,7 +1309,7 @@ class GetPropertyDescriptor final
 class TypeofDescriptor
     : public StaticCallInterfaceDescriptor<TypeofDescriptor> {
  public:
-  DEFINE_PARAMETERS(kObject)
+  DEFINE_PARAMETERS_NO_CONTEXT(kObject)
   DEFINE_PARAMETER_TYPES(MachineType::AnyTagged())
   DECLARE_DESCRIPTOR(TypeofDescriptor)
 
@@ -1616,10 +1628,19 @@ class CompareDescriptor
   static constexpr inline auto registers();
 };
 
+class CompareNoContextDescriptor
+    : public StaticCallInterfaceDescriptor<CompareNoContextDescriptor> {
+ public:
+  DEFINE_PARAMETERS_NO_CONTEXT(kLeft, kRight)
+  DECLARE_DESCRIPTOR(CompareNoContextDescriptor)
+
+  static constexpr inline auto registers();
+};
+
 class StringEqualDescriptor
     : public StaticCallInterfaceDescriptor<StringEqualDescriptor> {
  public:
-  DEFINE_PARAMETERS(kLeft, kRight, kLength)
+  DEFINE_PARAMETERS_NO_CONTEXT(kLeft, kRight, kLength)
   DEFINE_PARAMETER_TYPES(MachineType::AnyTagged(),  // kLeft
                          MachineType::AnyTagged(),  // kRight
                          MachineType::IntPtr())     // kLength
@@ -1662,7 +1683,7 @@ class BinarySmiOp_BaselineDescriptor
 class StringAtAsStringDescriptor final
     : public StaticCallInterfaceDescriptor<StringAtAsStringDescriptor> {
  public:
-  DEFINE_PARAMETERS(kReceiver, kPosition)
+  DEFINE_PARAMETERS_NO_CONTEXT(kReceiver, kPosition)
   // TODO(turbofan): Return untagged value here.
   DEFINE_RESULT_AND_PARAMETER_TYPES(
       MachineType::TaggedPointer(),  // result string
@@ -1674,7 +1695,7 @@ class StringAtAsStringDescriptor final
 class StringSubstringDescriptor final
     : public StaticCallInterfaceDescriptor<StringSubstringDescriptor> {
  public:
-  DEFINE_PARAMETERS(kString, kFrom, kTo)
+  DEFINE_PARAMETERS_NO_CONTEXT(kString, kFrom, kTo)
   DEFINE_PARAMETER_TYPES(MachineType::AnyTagged(),  // kString
                          MachineType::IntPtr(),     // kFrom
                          MachineType::IntPtr())     // kTo
@@ -1689,16 +1710,6 @@ class CppBuiltinAdaptorDescriptor
   DEFINE_JS_PARAMETERS(kCFunction)
   DEFINE_JS_PARAMETER_TYPES(MachineType::Pointer())
   DECLARE_JS_COMPATIBLE_DESCRIPTOR(CppBuiltinAdaptorDescriptor)
-};
-
-class DataViewGetVariableLengthDescriptor
-    : public StaticCallInterfaceDescriptor<
-          DataViewGetVariableLengthDescriptor> {
- public:
-  DEFINE_PARAMETERS(kDataView)
-  DEFINE_RESULT_AND_PARAMETER_TYPES(MachineType::IntPtr(),     // Byte Length
-                                    MachineType::AnyTagged())  // kDataView
-  DECLARE_DESCRIPTOR(DataViewGetVariableLengthDescriptor)
 };
 
 class CEntry1ArgvOnStackDescriptor
@@ -1993,13 +2004,13 @@ class WasmFloat32ToNumberDescriptor final
 #endif
 };
 
-class WasmFloat64ToNumberDescriptor final
-    : public StaticCallInterfaceDescriptor<WasmFloat64ToNumberDescriptor> {
+class WasmFloat64ToTaggedDescriptor final
+    : public StaticCallInterfaceDescriptor<WasmFloat64ToTaggedDescriptor> {
  public:
   DEFINE_PARAMETERS_NO_CONTEXT(kValue)
   DEFINE_RESULT_AND_PARAMETER_TYPES(MachineType::AnyTagged(),  // result
                                     MachineType::Float64())    // value
-  DECLARE_DESCRIPTOR(WasmFloat64ToNumberDescriptor)
+  DECLARE_DESCRIPTOR(WasmFloat64ToTaggedDescriptor)
 
 #if V8_TARGET_ARCH_IA32
   // We need a custom descriptor on ia32 to avoid using xmm0.
@@ -2225,6 +2236,15 @@ class CheckTurboshaftFloat64TypeDescriptor
   // We need a custom descriptor on ia32 to avoid using xmm0.
   static constexpr inline auto registers();
 #endif
+};
+
+class DebugPrintWordPtrDescriptor
+    : public StaticCallInterfaceDescriptor<DebugPrintWordPtrDescriptor> {
+ public:
+  DEFINE_RESULT_AND_PARAMETERS(1, kValue)
+  DEFINE_RESULT_AND_PARAMETER_TYPES(MachineType::TaggedPointer(),
+                                    MachineType::UintPtr())
+  DECLARE_DEFAULT_DESCRIPTOR(DebugPrintWordPtrDescriptor)
 };
 
 #define DEFINE_TFS_BUILTIN_DESCRIPTOR(Name, ...)                 \

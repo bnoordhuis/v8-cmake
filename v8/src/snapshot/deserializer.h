@@ -11,6 +11,7 @@
 #include "src/base/macros.h"
 #include "src/common/globals.h"
 #include "src/execution/local-isolate.h"
+#include "src/handles/global-handles.h"
 #include "src/objects/allocation-site.h"
 #include "src/objects/api-callbacks.h"
 #include "src/objects/backing-store.h"
@@ -48,7 +49,7 @@ class Deserializer : public SerializerDeserializer {
 
  protected:
   // Create a deserializer from a snapshot byte source.
-  Deserializer(IsolateT* isolate, base::Vector<const byte> payload,
+  Deserializer(IsolateT* isolate, base::Vector<const uint8_t> payload,
                uint32_t magic_number, bool deserializing_user_code,
                bool can_rehash);
 
@@ -96,10 +97,6 @@ class Deserializer : public SerializerDeserializer {
     return new_scripts_;
   }
 
-  const std::vector<Handle<DescriptorArray>>& new_descriptor_arrays() const {
-    return new_descriptor_arrays_;
-  }
-
   std::shared_ptr<BackingStore> backing_store(size_t i) {
     DCHECK_LT(i, backing_stores_.size());
     return backing_stores_[i];
@@ -108,12 +105,14 @@ class Deserializer : public SerializerDeserializer {
   bool deserializing_user_code() const { return deserializing_user_code_; }
   bool should_rehash() const { return should_rehash_; }
 
+  void PushObjectToRehash(Handle<HeapObject> object) {
+    to_rehash_.push_back(object);
+  }
   void Rehash();
 
   Handle<HeapObject> ReadObject();
 
  private:
-  friend class DeserializerRelocInfoVisitor;
   // A circular queue of hot objects. This is added to in the same order as in
   // Serializer::HotObjectsList, but this stores the objects as a vector of
   // existing handles. This allows us to add Handles to the queue without having
@@ -167,56 +166,54 @@ class Deserializer : public SerializerDeserializer {
   // data into the given slot. May fill in zero or multiple slots, so it returns
   // the number of slots filled.
   template <typename SlotAccessor>
-  int ReadSingleBytecodeData(byte data, SlotAccessor slot_accessor);
+  int ReadSingleBytecodeData(uint8_t data, SlotAccessor slot_accessor);
 
   template <typename SlotAccessor>
-  int ReadNewObject(byte data, SlotAccessor slot_accessor);
+  int ReadNewObject(uint8_t data, SlotAccessor slot_accessor);
   template <typename SlotAccessor>
-  int ReadBackref(byte data, SlotAccessor slot_accessor);
+  int ReadBackref(uint8_t data, SlotAccessor slot_accessor);
   template <typename SlotAccessor>
-  int ReadReadOnlyHeapRef(byte data, SlotAccessor slot_accessor);
+  int ReadReadOnlyHeapRef(uint8_t data, SlotAccessor slot_accessor);
   template <typename SlotAccessor>
-  int ReadRootArray(byte data, SlotAccessor slot_accessor);
+  int ReadRootArray(uint8_t data, SlotAccessor slot_accessor);
   template <typename SlotAccessor>
-  int ReadStartupObjectCache(byte data, SlotAccessor slot_accessor);
+  int ReadStartupObjectCache(uint8_t data, SlotAccessor slot_accessor);
   template <typename SlotAccessor>
-  int ReadReadOnlyObjectCache(byte data, SlotAccessor slot_accessor);
+  int ReadReadOnlyObjectCache(uint8_t data, SlotAccessor slot_accessor);
   template <typename SlotAccessor>
-  int ReadSharedHeapObjectCache(byte data, SlotAccessor slot_accessor);
+  int ReadSharedHeapObjectCache(uint8_t data, SlotAccessor slot_accessor);
   template <typename SlotAccessor>
-  int ReadNewMetaMap(byte data, SlotAccessor slot_accessor);
+  int ReadNewMetaMap(uint8_t data, SlotAccessor slot_accessor);
   template <typename SlotAccessor>
-  int ReadExternalReference(byte data, SlotAccessor slot_accessor);
+  int ReadExternalReference(uint8_t data, SlotAccessor slot_accessor);
   template <typename SlotAccessor>
-  int ReadRawExternalReference(byte data, SlotAccessor slot_accessor);
+  int ReadRawExternalReference(uint8_t data, SlotAccessor slot_accessor);
   template <typename SlotAccessor>
-  int ReadAttachedReference(byte data, SlotAccessor slot_accessor);
+  int ReadAttachedReference(uint8_t data, SlotAccessor slot_accessor);
   template <typename SlotAccessor>
-  int ReadRegisterPendingForwardRef(byte data, SlotAccessor slot_accessor);
+  int ReadRegisterPendingForwardRef(uint8_t data, SlotAccessor slot_accessor);
   template <typename SlotAccessor>
-  int ReadResolvePendingForwardRef(byte data, SlotAccessor slot_accessor);
+  int ReadResolvePendingForwardRef(uint8_t data, SlotAccessor slot_accessor);
   template <typename SlotAccessor>
-  int ReadVariableRawData(byte data, SlotAccessor slot_accessor);
+  int ReadVariableRawData(uint8_t data, SlotAccessor slot_accessor);
   template <typename SlotAccessor>
-  int ReadCodeBody(byte data, SlotAccessor slot_accessor);
+  int ReadVariableRepeat(uint8_t data, SlotAccessor slot_accessor);
   template <typename SlotAccessor>
-  int ReadVariableRepeat(byte data, SlotAccessor slot_accessor);
+  int ReadOffHeapBackingStore(uint8_t data, SlotAccessor slot_accessor);
   template <typename SlotAccessor>
-  int ReadOffHeapBackingStore(byte data, SlotAccessor slot_accessor);
+  int ReadApiReference(uint8_t data, SlotAccessor slot_accessor);
   template <typename SlotAccessor>
-  int ReadApiReference(byte data, SlotAccessor slot_accessor);
+  int ReadClearedWeakReference(uint8_t data, SlotAccessor slot_accessor);
   template <typename SlotAccessor>
-  int ReadClearedWeakReference(byte data, SlotAccessor slot_accessor);
+  int ReadWeakPrefix(uint8_t data, SlotAccessor slot_accessor);
   template <typename SlotAccessor>
-  int ReadWeakPrefix(byte data, SlotAccessor slot_accessor);
+  int ReadRootArrayConstants(uint8_t data, SlotAccessor slot_accessor);
   template <typename SlotAccessor>
-  int ReadRootArrayConstants(byte data, SlotAccessor slot_accessor);
+  int ReadHotObject(uint8_t data, SlotAccessor slot_accessor);
   template <typename SlotAccessor>
-  int ReadHotObject(byte data, SlotAccessor slot_accessor);
+  int ReadFixedRawData(uint8_t data, SlotAccessor slot_accessor);
   template <typename SlotAccessor>
-  int ReadFixedRawData(byte data, SlotAccessor slot_accessor);
-  template <typename SlotAccessor>
-  int ReadFixedRepeat(byte data, SlotAccessor slot_accessor);
+  int ReadFixedRepeat(uint8_t data, SlotAccessor slot_accessor);
 
   // A helper function for ReadData for reading external references.
   inline Address ReadExternalReferenceCase();
@@ -258,8 +255,11 @@ class Deserializer : public SerializerDeserializer {
   std::vector<Handle<AccessorInfo>> accessor_infos_;
   std::vector<Handle<CallHandlerInfo>> call_handler_infos_;
   std::vector<Handle<Script>> new_scripts_;
-  std::vector<Handle<DescriptorArray>> new_descriptor_arrays_;
   std::vector<std::shared_ptr<BackingStore>> backing_stores_;
+
+  // Roots vector as those arrays are passed to Heap, see
+  // WeakenDescriptorArrays().
+  GlobalHandleVector<DescriptorArray> new_descriptor_arrays_;
 
   // Vector of allocated objects that can be accessed by a backref, by index.
   std::vector<Handle<HeapObject>> back_refs_;

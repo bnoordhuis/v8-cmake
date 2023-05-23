@@ -39,7 +39,7 @@ static void AssertCodeIsBaseline(MacroAssembler* masm, Register code,
                                  Register scratch) {
   DCHECK(!AreAliased(code, scratch));
   // Verify that the code kind is baseline code via the CodeKind.
-  __ LoadU16(scratch, FieldMemOperand(code, Code::kFlagsOffset));
+  __ LoadU32(scratch, FieldMemOperand(code, Code::kFlagsOffset));
   __ DecodeField<Code::KindField>(scratch);
   __ CmpS64(scratch, Operand(static_cast<int>(CodeKind::BASELINE)), r0);
   __ Assert(eq, AbortReason::kExpectedBaselineData);
@@ -52,7 +52,10 @@ static void GetSharedFunctionInfoBytecodeOrBaseline(MacroAssembler* masm,
   USE(GetSharedFunctionInfoBytecodeOrBaseline);
   ASM_CODE_COMMENT(masm);
   Label done;
-  __ CompareObjectType(sfi_data, scratch1, scratch1, CODE_TYPE);
+  __ LoadMap(scratch1, sfi_data);
+
+#ifndef V8_JITLESS
+  __ CompareInstanceType(scratch1, scratch1, CODE_TYPE);
   if (v8_flags.debug_code) {
     Label not_baseline;
     __ b(ne, &not_baseline);
@@ -63,8 +66,12 @@ static void GetSharedFunctionInfoBytecodeOrBaseline(MacroAssembler* masm,
     __ beq(is_baseline);
   }
   __ CmpS32(scratch1, Operand(INTERPRETER_DATA_TYPE), r0);
+#else
+  __ CompareInstanceType(scratch1, scratch1, INTERPRETER_DATA_TYPE);
+#endif  // !V8_JITLESS
+
   __ bne(&done);
-  __ LoadTaggedPointerField(
+  __ LoadTaggedField(
       sfi_data,
       FieldMemOperand(sfi_data, InterpreterData::kBytecodeArrayOffset), r0);
 
@@ -120,10 +127,10 @@ void Generate_BaselineOrInterpreterEntry(MacroAssembler* masm,
 
   // Get the InstructionStream object from the shared function info.
   Register code_obj = r9;
-  __ LoadTaggedPointerField(
+  __ LoadTaggedField(
       code_obj, FieldMemOperand(closure, JSFunction::kSharedFunctionInfoOffset),
       r0);
-  __ LoadTaggedPointerField(
+  __ LoadTaggedField(
       code_obj,
       FieldMemOperand(code_obj, SharedFunctionInfo::kFunctionDataOffset), r0);
 
@@ -151,16 +158,14 @@ void Generate_BaselineOrInterpreterEntry(MacroAssembler* masm,
   if (v8_flags.debug_code) {
     AssertCodeIsBaseline(masm, code_obj, r6);
   }
-  __ LoadCodeInstructionStreamNonBuiltin(code_obj, code_obj);
 
   // Load the feedback vector.
   Register feedback_vector = r5;
-  __ LoadTaggedPointerField(
-      feedback_vector,
-      FieldMemOperand(closure, JSFunction::kFeedbackCellOffset), r0);
-  __ LoadTaggedPointerField(
-      feedback_vector, FieldMemOperand(feedback_vector, Cell::kValueOffset),
-      r0);
+  __ LoadTaggedField(feedback_vector,
+                     FieldMemOperand(closure, JSFunction::kFeedbackCellOffset),
+                     r0);
+  __ LoadTaggedField(feedback_vector,
+                     FieldMemOperand(feedback_vector, Cell::kValueOffset), r0);
 
   Label install_baseline_code;
   // Check if feedback vector is valid. If not, call prepare for baseline to
@@ -215,9 +220,6 @@ void Generate_BaselineOrInterpreterEntry(MacroAssembler* masm,
   __ Push(kInterpreterAccumulatorRegister);
   __ Push(code_obj);
   {
-    Register arg_reg_1 = r3;
-    Register arg_reg_2 = r4;
-    Register arg_reg_3 = r5;
     __ mr(arg_reg_1, code_obj);
     __ mr(arg_reg_2, kInterpreterBytecodeOffsetRegister);
     __ mr(arg_reg_3, kInterpreterBytecodeArrayRegister);
@@ -226,17 +228,15 @@ void Generate_BaselineOrInterpreterEntry(MacroAssembler* masm,
     __ CallCFunction(get_baseline_pc, 3, 0);
   }
   __ Pop(code_obj);
+  __ LoadCodeInstructionStart(code_obj, code_obj);
   __ AddS64(code_obj, code_obj, kReturnRegister0);
   __ Pop(kInterpreterAccumulatorRegister);
 
   if (is_osr) {
     Register scratch = ip;
     ResetBytecodeAge(masm, kInterpreterBytecodeArrayRegister, scratch);
-    Generate_OSREntry(masm, code_obj,
-                      InstructionStream::kHeaderSize - kHeapObjectTag);
+    Generate_OSREntry(masm, code_obj, 0);
   } else {
-    __ AddS64(code_obj, code_obj,
-              Operand(InstructionStream::kHeaderSize - kHeapObjectTag));
     __ Jump(code_obj);
   }
   __ Trap();  // Unreachable.
@@ -361,8 +361,8 @@ void Generate_JSBuiltinsConstructStubHelper(MacroAssembler* masm) {
     // Leave construct frame.
   }
   // Remove caller arguments from the stack and return.
-  __ DropArguments(scratch, TurboAssembler::kCountIsSmi,
-                   TurboAssembler::kCountIncludesReceiver);
+  __ DropArguments(scratch, MacroAssembler::kCountIsSmi,
+                   MacroAssembler::kCountIncludesReceiver);
   __ blr();
 
   __ bind(&stack_overflow);
@@ -427,25 +427,20 @@ void OnStackReplacement(MacroAssembler* masm, OsrSourceTier source,
     __ LeaveFrame(StackFrame::STUB);
   }
 
-  __ LoadCodeInstructionStreamNonBuiltin(r3, r3);
-
   // Load deoptimization data from the code object.
   // <deopt_data> = <code>[#deoptimization_data_offset]
-  __ LoadTaggedPointerField(
-      r4,
-      FieldMemOperand(
-          r3, InstructionStream::kDeoptimizationDataOrInterpreterDataOffset),
+  __ LoadTaggedField(
+      r4, FieldMemOperand(r3, Code::kDeoptimizationDataOrInterpreterDataOffset),
       r0);
 
   {
     ConstantPoolUnavailableScope constant_pool_unavailable(masm);
-    __ addi(r3, r3,
-            Operand(InstructionStream::kHeaderSize -
-                    kHeapObjectTag));  // InstructionStream start
 
     if (V8_EMBEDDED_CONSTANT_POOL_BOOL) {
-      __ LoadConstantPoolPointerRegisterFromCodeTargetAddress(r3);
+      __ LoadConstantPoolPointerRegisterFromCodeTargetAddress(r3, r0, ip);
     }
+
+    __ LoadCodeInstructionStart(r3, r3);
 
     // Load the OSR entrypoint offset from the deoptimization data.
     // <osr_offset> = <deopt_data>[#header_size + #osr_pc_offset]
@@ -495,7 +490,7 @@ void Builtins::Generate_JSConstructStubGeneric(MacroAssembler* masm) {
   //  --        sp[4*kSystemPointerSize]: context
   // -----------------------------------
 
-  __ LoadTaggedPointerField(
+  __ LoadTaggedField(
       r7, FieldMemOperand(r4, JSFunction::kSharedFunctionInfoOffset), r0);
   __ lwz(r7, FieldMemOperand(r7, SharedFunctionInfo::kFlagsOffset));
   __ DecodeField<SharedFunctionInfo::FunctionKindBits>(r7);
@@ -611,8 +606,8 @@ void Builtins::Generate_JSConstructStubGeneric(MacroAssembler* masm) {
   __ LeaveFrame(StackFrame::CONSTRUCT);
 
   // Remove caller arguments from the stack and return.
-  __ DropArguments(r4, TurboAssembler::kCountIsSmi,
-                   TurboAssembler::kCountIncludesReceiver);
+  __ DropArguments(r4, MacroAssembler::kCountIsSmi,
+                   MacroAssembler::kCountIncludesReceiver);
   __ blr();
 
   __ bind(&check_receiver);
@@ -660,10 +655,9 @@ void Builtins::Generate_ResumeGeneratorTrampoline(MacroAssembler* masm) {
   __ AssertGeneratorObject(r4);
 
   // Load suspended function and context.
-  __ LoadTaggedPointerField(
+  __ LoadTaggedField(
       r7, FieldMemOperand(r4, JSGeneratorObject::kFunctionOffset), r0);
-  __ LoadTaggedPointerField(cp, FieldMemOperand(r7, JSFunction::kContextOffset),
-                            r0);
+  __ LoadTaggedField(cp, FieldMemOperand(r7, JSFunction::kContextOffset), r0);
 
   // Flood function if we are stepping.
   Label prepare_step_in_if_stepping, prepare_step_in_suspended_generator;
@@ -703,12 +697,12 @@ void Builtins::Generate_ResumeGeneratorTrampoline(MacroAssembler* masm) {
   // -----------------------------------
 
   // Copy the function arguments from the generator object's register file.
-  __ LoadTaggedPointerField(
+  __ LoadTaggedField(
       r6, FieldMemOperand(r7, JSFunction::kSharedFunctionInfoOffset), r0);
   __ LoadU16(
       r6, FieldMemOperand(r6, SharedFunctionInfo::kFormalParameterCountOffset));
   __ subi(r6, r6, Operand(kJSArgcReceiverSlots));
-  __ LoadTaggedPointerField(
+  __ LoadTaggedField(
       r5, FieldMemOperand(r4, JSGeneratorObject::kParametersAndRegistersOffset),
       r0);
   {
@@ -719,14 +713,14 @@ void Builtins::Generate_ResumeGeneratorTrampoline(MacroAssembler* masm) {
     __ blt(&done_loop);
     __ ShiftLeftU64(r10, r6, Operand(kTaggedSizeLog2));
     __ add(scratch, r5, r10);
-    __ LoadAnyTaggedField(
-        scratch, FieldMemOperand(scratch, FixedArray::kHeaderSize), r0);
+    __ LoadTaggedField(scratch,
+                       FieldMemOperand(scratch, FixedArray::kHeaderSize), r0);
     __ Push(scratch);
     __ b(&loop);
     __ bind(&done_loop);
 
     // Push receiver.
-    __ LoadAnyTaggedField(
+    __ LoadTaggedField(
         scratch, FieldMemOperand(r4, JSGeneratorObject::kReceiverOffset), r0);
     __ Push(scratch);
   }
@@ -734,9 +728,9 @@ void Builtins::Generate_ResumeGeneratorTrampoline(MacroAssembler* masm) {
   // Underlying function needs to have bytecode available.
   if (v8_flags.debug_code) {
     Label is_baseline;
-    __ LoadTaggedPointerField(
+    __ LoadTaggedField(
         r6, FieldMemOperand(r7, JSFunction::kSharedFunctionInfoOffset), r0);
-    __ LoadTaggedPointerField(
+    __ LoadTaggedField(
         r6, FieldMemOperand(r6, SharedFunctionInfo::kFunctionDataOffset), r0);
     GetSharedFunctionInfoBytecodeOrBaseline(masm, r6, ip, &is_baseline);
     __ CompareObjectType(r6, r6, r6, BYTECODE_ARRAY_TYPE);
@@ -746,7 +740,7 @@ void Builtins::Generate_ResumeGeneratorTrampoline(MacroAssembler* masm) {
 
   // Resume (Ignition/TurboFan) generator object.
   {
-    __ LoadTaggedPointerField(
+    __ LoadTaggedField(
         r3, FieldMemOperand(r7, JSFunction::kSharedFunctionInfoOffset), r0);
     __ LoadU16(r3, FieldMemOperand(
                        r3, SharedFunctionInfo::kFormalParameterCountOffset));
@@ -756,8 +750,7 @@ void Builtins::Generate_ResumeGeneratorTrampoline(MacroAssembler* masm) {
     __ mr(r6, r4);
     __ mr(r4, r7);
     static_assert(kJavaScriptCallCodeStartRegister == r5, "ABI mismatch");
-    __ LoadTaggedPointerField(r5, FieldMemOperand(r4, JSFunction::kCodeOffset),
-                              r0);
+    __ LoadTaggedField(r5, FieldMemOperand(r4, JSFunction::kCodeOffset), r0);
     __ JumpCodeObject(r5);
   }
 
@@ -769,7 +762,7 @@ void Builtins::Generate_ResumeGeneratorTrampoline(MacroAssembler* masm) {
     __ PushRoot(RootIndex::kTheHoleValue);
     __ CallRuntime(Runtime::kDebugOnFunctionCall);
     __ Pop(r4);
-    __ LoadTaggedPointerField(
+    __ LoadTaggedField(
         r7, FieldMemOperand(r4, JSGeneratorObject::kFunctionOffset), r0);
   }
   __ b(&stepping_prepared);
@@ -780,7 +773,7 @@ void Builtins::Generate_ResumeGeneratorTrampoline(MacroAssembler* masm) {
     __ Push(r4);
     __ CallRuntime(Runtime::kDebugPrepareStepInSuspendedGenerator);
     __ Pop(r4);
-    __ LoadTaggedPointerField(
+    __ LoadTaggedField(
         r7, FieldMemOperand(r4, JSGeneratorObject::kFunctionOffset), r0);
   }
   __ b(&stepping_prepared);
@@ -846,7 +839,7 @@ void Generate_JSEntryVariant(MacroAssembler* masm, StackFrame::Type type,
     // C calling convention. The first argument is passed in r3.
     __ mr(kRootRegister, r3);
 
-#ifdef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
+#ifdef V8_COMPRESS_POINTERS
     // Initialize the pointer cage base register.
     __ LoadRootRelative(kPtrComprCageBaseRegister,
                         IsolateData::cage_base_offset());
@@ -876,8 +869,8 @@ void Generate_JSEntryVariant(MacroAssembler* masm, StackFrame::Type type,
 
   // Clear c_entry_fp, now we've pushed its previous value to the stack.
   // If the c_entry_fp is not already zero and we don't clear it, the
-  // SafeStackFrameIterator will assume we are executing C++ and miss the JS
-  // frames on top.
+  // StackFrameIteratorForProfiler will assume we are executing C++ and miss the
+  // JS frames on top.
   __ li(r0, Operand::Zero());
   __ StoreU64(r0, MemOperand(r3));
 
@@ -1119,8 +1112,8 @@ static void LeaveInterpreterFrame(MacroAssembler* masm, Register scratch1,
   // Leave the frame (also dropping the register file).
   __ LeaveFrame(StackFrame::INTERPRETED);
 
-  __ DropArguments(params_size, TurboAssembler::kCountIsBytes,
-                   TurboAssembler::kCountIncludesReceiver);
+  __ DropArguments(params_size, MacroAssembler::kCountIsBytes,
+                   MacroAssembler::kCountIncludesReceiver);
 }
 
 // Advance the current bytecode offset. This simulates what all bytecode
@@ -1212,12 +1205,11 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
       BaselineOutOfLinePrologueDescriptor::kClosure);
   // Load the feedback vector from the closure.
   Register feedback_vector = ip;
-  __ LoadTaggedPointerField(
-      feedback_vector,
-      FieldMemOperand(closure, JSFunction::kFeedbackCellOffset), r0);
-  __ LoadTaggedPointerField(
-      feedback_vector, FieldMemOperand(feedback_vector, Cell::kValueOffset),
-      r0);
+  __ LoadTaggedField(feedback_vector,
+                     FieldMemOperand(closure, JSFunction::kFeedbackCellOffset),
+                     r0);
+  __ LoadTaggedField(feedback_vector,
+                     FieldMemOperand(feedback_vector, Cell::kValueOffset), r0);
   __ AssertFeedbackVector(feedback_vector, r11);
 
   // Check for an tiering state.
@@ -1374,14 +1366,13 @@ void Builtins::Generate_BaselineOutOfLinePrologueDeopt(MacroAssembler* masm) {
 void Builtins::Generate_InterpreterEntryTrampoline(
     MacroAssembler* masm, InterpreterEntryTrampolineMode mode) {
   Register closure = r4;
-  Register feedback_vector = r5;
 
   // Get the bytecode array from the function object and load it into
   // kInterpreterBytecodeArrayRegister.
-  __ LoadTaggedPointerField(
+  __ LoadTaggedField(
       r7, FieldMemOperand(closure, JSFunction::kSharedFunctionInfoOffset), r0);
   // Load original bytecode array or the debug copy.
-  __ LoadTaggedPointerField(
+  __ LoadTaggedField(
       kInterpreterBytecodeArrayRegister,
       FieldMemOperand(r7, SharedFunctionInfo::kFunctionDataOffset), r0);
 
@@ -1396,18 +1387,19 @@ void Builtins::Generate_InterpreterEntryTrampoline(
                        BYTECODE_ARRAY_TYPE);
   __ bne(&compile_lazy);
 
+#ifndef V8_JITLESS
   // Load the feedback vector from the closure.
-  __ LoadTaggedPointerField(
-      feedback_vector,
-      FieldMemOperand(closure, JSFunction::kFeedbackCellOffset), r0);
-  __ LoadTaggedPointerField(
-      feedback_vector, FieldMemOperand(feedback_vector, Cell::kValueOffset),
-      r0);
+  Register feedback_vector = r5;
+  __ LoadTaggedField(feedback_vector,
+                     FieldMemOperand(closure, JSFunction::kFeedbackCellOffset),
+                     r0);
+  __ LoadTaggedField(feedback_vector,
+                     FieldMemOperand(feedback_vector, Cell::kValueOffset), r0);
 
   Label push_stack_frame;
   // Check if feedback vector is valid. If valid, check for optimized code
   // and update invocation count. Otherwise, setup the stack frame.
-  __ LoadTaggedPointerField(
+  __ LoadTaggedField(
       r7, FieldMemOperand(feedback_vector, HeapObject::kMapOffset), r0);
   __ LoadU16(r7, FieldMemOperand(r7, Map::kInstanceTypeOffset));
   __ cmpi(r7, Operand(FEEDBACK_VECTOR_TYPE));
@@ -1443,6 +1435,12 @@ void Builtins::Generate_InterpreterEntryTrampoline(
   // the frame (that is done below).
 
   __ bind(&push_stack_frame);
+#else
+  // Note: By omitting the above code in jitless mode we also disable:
+  // - kFlagsLogNextExecution: only used for logging/profiling; and
+  // - kInvocationCountOffset: only used for tiering heuristics and code
+  //   coverage.
+#endif  // !V8_JITLESS
 
   FrameScope frame_scope(masm, StackFrame::MANUAL);
   __ PushStandardFrame(closure);
@@ -1583,23 +1581,24 @@ void Builtins::Generate_InterpreterEntryTrampoline(
 
   __ jmp(&after_stack_check_interrupt);
 
+#ifndef V8_JITLESS
   __ bind(&flags_need_processing);
   __ OptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector);
 
   __ bind(&is_baseline);
   {
     // Load the feedback vector from the closure.
-    __ LoadTaggedPointerField(
+    __ LoadTaggedField(
         feedback_vector,
         FieldMemOperand(closure, JSFunction::kFeedbackCellOffset), r0);
-    __ LoadTaggedPointerField(
-        feedback_vector, FieldMemOperand(feedback_vector, Cell::kValueOffset),
-        r0);
+    __ LoadTaggedField(feedback_vector,
+                       FieldMemOperand(feedback_vector, Cell::kValueOffset),
+                       r0);
 
     Label install_baseline_code;
     // Check if feedback vector is valid. If not, call prepare for baseline to
     // allocate it.
-    __ LoadTaggedPointerField(
+    __ LoadTaggedField(
         ip, FieldMemOperand(feedback_vector, HeapObject::kMapOffset), r0);
     __ LoadU16(ip, FieldMemOperand(ip, Map::kInstanceTypeOffset));
     __ CmpS32(ip, Operand(FEEDBACK_VECTOR_TYPE), r0);
@@ -1618,6 +1617,7 @@ void Builtins::Generate_InterpreterEntryTrampoline(
     __ bind(&install_baseline_code);
     __ GenerateTailCallToReturnedCode(Runtime::kInstallBaselineCode);
   }
+#endif  // !V8_JITLESS
 
   __ bind(&compile_lazy);
   __ GenerateTailCallToReturnedCode(Runtime::kCompileLazy);
@@ -1636,7 +1636,7 @@ static void GenerateInterpreterPushArgs(MacroAssembler* masm, Register num_args,
   __ sub(start_address, start_address, scratch);
   // Push the arguments.
   __ PushArray(start_address, num_args, scratch, r0,
-               TurboAssembler::PushArrayOrder::kReverse);
+               MacroAssembler::PushArrayOrder::kReverse);
 }
 
 // static
@@ -1773,19 +1773,19 @@ static void Generate_InterpreterEnterBytecode(MacroAssembler* masm) {
   // get the custom trampoline, otherwise grab the entry address of the global
   // trampoline.
   __ LoadU64(r5, MemOperand(fp, StandardFrameConstants::kFunctionOffset));
-  __ LoadTaggedPointerField(
+  __ LoadTaggedField(
       r5, FieldMemOperand(r5, JSFunction::kSharedFunctionInfoOffset), r0);
-  __ LoadTaggedPointerField(
+  __ LoadTaggedField(
       r5, FieldMemOperand(r5, SharedFunctionInfo::kFunctionDataOffset), r0);
   __ CompareObjectType(r5, kInterpreterDispatchTableRegister,
                        kInterpreterDispatchTableRegister,
                        INTERPRETER_DATA_TYPE);
   __ bne(&builtin_trampoline);
 
-  __ LoadTaggedPointerField(
+  __ LoadTaggedField(
       r5, FieldMemOperand(r5, InterpreterData::kInterpreterTrampolineOffset),
       r0);
-  __ LoadCodeEntry(r5, r5);
+  __ LoadCodeInstructionStart(r5, r5);
   __ b(&trampoline_loaded);
 
   __ bind(&builtin_trampoline);
@@ -1947,7 +1947,7 @@ void Generate_ContinueToBuiltinHelper(MacroAssembler* masm,
           Operand(BuiltinContinuationFrameConstants::kFixedFrameSizeFromFp));
   __ Pop(r0);
   __ mtlr(r0);
-  __ LoadEntryFromBuiltinIndex(builtin);
+  __ LoadEntryFromBuiltinIndex(builtin, builtin);
   __ Jump(builtin);
 }
 }  // namespace
@@ -2027,8 +2027,8 @@ void Builtins::Generate_FunctionPrototypeApply(MacroAssembler* masm) {
     __ LoadU64(r5, MemOperand(sp, 2 * kSystemPointerSize));  // argArray
 
     __ bind(&done);
-    __ DropArgumentsAndPushNewReceiver(r3, r8, TurboAssembler::kCountIsInteger,
-                                       TurboAssembler::kCountIncludesReceiver);
+    __ DropArgumentsAndPushNewReceiver(r3, r8, MacroAssembler::kCountIsInteger,
+                                       MacroAssembler::kCountIncludesReceiver);
   }
 
   // ----------- S t a t e -------------
@@ -2111,8 +2111,8 @@ void Builtins::Generate_ReflectApply(MacroAssembler* masm) {
     __ LoadU64(r5, MemOperand(sp, 3 * kSystemPointerSize));  // argArray
 
     __ bind(&done);
-    __ DropArgumentsAndPushNewReceiver(r3, r8, TurboAssembler::kCountIsInteger,
-                                       TurboAssembler::kCountIncludesReceiver);
+    __ DropArgumentsAndPushNewReceiver(r3, r8, MacroAssembler::kCountIsInteger,
+                                       MacroAssembler::kCountIncludesReceiver);
   }
 
   // ----------- S t a t e -------------
@@ -2160,8 +2160,8 @@ void Builtins::Generate_ReflectConstruct(MacroAssembler* masm) {
     __ blt(&done);
     __ LoadU64(r6, MemOperand(sp, 3 * kSystemPointerSize));  // argArray
     __ bind(&done);
-    __ DropArgumentsAndPushNewReceiver(r3, r7, TurboAssembler::kCountIsInteger,
-                                       TurboAssembler::kCountIncludesReceiver);
+    __ DropArgumentsAndPushNewReceiver(r3, r7, MacroAssembler::kCountIsInteger,
+                                       MacroAssembler::kCountIncludesReceiver);
   }
 
   // ----------- S t a t e -------------
@@ -2222,7 +2222,7 @@ void Generate_AllocateSpaceAndShiftExistingArguments(
 }  // namespace
 
 // static
-// TODO(v8:11615): Observe InstructionStream::kMaxArguments in
+// TODO(v8:11615): Observe Code::kMaxArguments in
 // CallOrConstructVarargs
 void Builtins::Generate_CallOrConstructVarargs(MacroAssembler* masm,
                                                Handle<Code> code) {
@@ -2240,8 +2240,8 @@ void Builtins::Generate_CallOrConstructVarargs(MacroAssembler* masm,
     // Allow r5 to be a FixedArray, or a FixedDoubleArray if r7 == 0.
     Label ok, fail;
     __ AssertNotSmi(r5);
-    __ LoadTaggedPointerField(scratch,
-                              FieldMemOperand(r5, HeapObject::kMapOffset), r0);
+    __ LoadTaggedField(scratch, FieldMemOperand(r5, HeapObject::kMapOffset),
+                       r0);
     __ LoadU16(scratch, FieldMemOperand(scratch, Map::kInstanceTypeOffset));
     __ cmpi(scratch, Operand(FIXED_ARRAY_TYPE));
     __ beq(&ok);
@@ -2276,7 +2276,7 @@ void Builtins::Generate_CallOrConstructVarargs(MacroAssembler* masm,
             Operand(FixedArray::kHeaderSize - kHeapObjectTag - kTaggedSize));
     __ mtctr(r7);
     __ bind(&loop);
-    __ LoadTaggedPointerField(scratch, MemOperand(r5, kTaggedSize), r0);
+    __ LoadTaggedField(scratch, MemOperand(r5, kTaggedSize), r0);
     __ addi(r5, r5, Operand(kTaggedSize));
     __ CompareRoot(scratch, RootIndex::kTheHoleValue);
     __ bne(&skip);
@@ -2311,8 +2311,8 @@ void Builtins::Generate_CallOrConstructForwardVarargs(MacroAssembler* masm,
   if (mode == CallOrConstructMode::kConstruct) {
     Label new_target_constructor, new_target_not_constructor;
     __ JumpIfSmi(r6, &new_target_not_constructor);
-    __ LoadTaggedPointerField(scratch,
-                              FieldMemOperand(r6, HeapObject::kMapOffset), r0);
+    __ LoadTaggedField(scratch, FieldMemOperand(r6, HeapObject::kMapOffset),
+                       r0);
     __ lbz(scratch, FieldMemOperand(scratch, Map::kBitFieldOffset));
     __ TestBit(scratch, Map::Bits1::IsConstructorBit::kShift, r0);
     __ bne(&new_target_constructor, cr0);
@@ -2395,14 +2395,13 @@ void Builtins::Generate_CallFunction(MacroAssembler* masm,
   // -----------------------------------
   __ AssertCallableFunction(r4);
 
-  __ LoadTaggedPointerField(
+  __ LoadTaggedField(
       r5, FieldMemOperand(r4, JSFunction::kSharedFunctionInfoOffset), r0);
 
   // Enter the context of the function; ToObject has to run in the function
   // context, and we also need to take the global proxy from the function
   // context in case of conversion.
-  __ LoadTaggedPointerField(cp, FieldMemOperand(r4, JSFunction::kContextOffset),
-                            r0);
+  __ LoadTaggedField(cp, FieldMemOperand(r4, JSFunction::kContextOffset), r0);
   // We need to convert the receiver for non-native sloppy mode functions.
   Label done_convert;
   __ lwz(r6, FieldMemOperand(r5, SharedFunctionInfo::kFlagsOffset));
@@ -2456,7 +2455,7 @@ void Builtins::Generate_CallFunction(MacroAssembler* masm,
         __ Pop(r3, r4);
         __ SmiUntag(r3);
       }
-      __ LoadTaggedPointerField(
+      __ LoadTaggedField(
           r5, FieldMemOperand(r4, JSFunction::kSharedFunctionInfoOffset), r0);
       __ bind(&convert_receiver);
     }
@@ -2487,7 +2486,7 @@ void Generate_PushBoundArguments(MacroAssembler* masm) {
 
   // Load [[BoundArguments]] into r5 and length of that into r7.
   Label no_bound_arguments;
-  __ LoadTaggedPointerField(
+  __ LoadTaggedField(
       r5, FieldMemOperand(r4, JSBoundFunction::kBoundArgumentsOffset), r0);
   __ SmiUntag(r7, FieldMemOperand(r5, FixedArray::kLengthOffset), SetRC, r0);
   __ beq(&no_bound_arguments, cr0);
@@ -2536,7 +2535,7 @@ void Generate_PushBoundArguments(MacroAssembler* masm) {
       __ subi(r7, r7, Operand(1));
       __ ShiftLeftU64(scratch, r7, Operand(kTaggedSizeLog2));
       __ add(scratch, scratch, r5);
-      __ LoadAnyTaggedField(scratch, MemOperand(scratch), r0);
+      __ LoadTaggedField(scratch, MemOperand(scratch), r0);
       __ Push(scratch);
       __ bdnz(&loop);
       __ bind(&done);
@@ -2559,15 +2558,15 @@ void Builtins::Generate_CallBoundFunctionImpl(MacroAssembler* masm) {
   __ AssertBoundFunction(r4);
 
   // Patch the receiver to [[BoundThis]].
-  __ LoadAnyTaggedField(
-      r6, FieldMemOperand(r4, JSBoundFunction::kBoundThisOffset), r0);
+  __ LoadTaggedField(r6, FieldMemOperand(r4, JSBoundFunction::kBoundThisOffset),
+                     r0);
   __ StoreReceiver(r6, r3, ip);
 
   // Push the [[BoundArguments]] onto the stack.
   Generate_PushBoundArguments(masm);
 
   // Call the [[BoundTargetFunction]] via the Call builtin.
-  __ LoadTaggedPointerField(
+  __ LoadTaggedField(
       r4, FieldMemOperand(r4, JSBoundFunction::kBoundTargetFunctionOffset), r0);
   __ Jump(BUILTIN_CODE(masm->isolate(), Call_ReceiverIsAny),
           RelocInfo::CODE_TARGET);
@@ -2667,7 +2666,7 @@ void Builtins::Generate_ConstructFunction(MacroAssembler* masm) {
   Label call_generic_stub;
 
   // Jump to JSBuiltinsConstructStub or JSConstructStubGeneric.
-  __ LoadTaggedPointerField(
+  __ LoadTaggedField(
       r7, FieldMemOperand(r4, JSFunction::kSharedFunctionInfoOffset), r0);
   __ lwz(r7, FieldMemOperand(r7, SharedFunctionInfo::kFlagsOffset));
   __ mov(ip, Operand(SharedFunctionInfo::ConstructAsBuiltinBit::kMask));
@@ -2699,12 +2698,12 @@ void Builtins::Generate_ConstructBoundFunction(MacroAssembler* masm) {
   Label skip;
   __ CompareTagged(r4, r6);
   __ bne(&skip);
-  __ LoadTaggedPointerField(
+  __ LoadTaggedField(
       r6, FieldMemOperand(r4, JSBoundFunction::kBoundTargetFunctionOffset), r0);
   __ bind(&skip);
 
   // Construct the [[BoundTargetFunction]] via the Construct builtin.
-  __ LoadTaggedPointerField(
+  __ LoadTaggedField(
       r4, FieldMemOperand(r4, JSBoundFunction::kBoundTargetFunctionOffset), r0);
   __ Jump(BUILTIN_CODE(masm->isolate(), Construct), RelocInfo::CODE_TARGET);
 }
@@ -2728,8 +2727,7 @@ void Builtins::Generate_Construct(MacroAssembler* masm) {
   __ JumpIfSmi(target, &non_constructor);
 
   // Check if target has a [[Construct]] internal method.
-  __ LoadTaggedPointerField(
-      map, FieldMemOperand(target, HeapObject::kMapOffset), r0);
+  __ LoadTaggedField(map, FieldMemOperand(target, HeapObject::kMapOffset), r0);
   {
     Register flags = r5;
     DCHECK(!AreAliased(argc, target, map, instance_type, flags));
@@ -2817,15 +2815,15 @@ void Builtins::Generate_WasmLiftoffFrameSetup(MacroAssembler* masm) {
   Register scratch = ip;
   Label allocate_vector, done;
 
-  __ LoadTaggedPointerField(
+  __ LoadTaggedField(
       vector,
       FieldMemOperand(kWasmInstanceRegister,
                       WasmInstanceObject::kFeedbackVectorsOffset),
       scratch);
   __ ShiftLeftU64(scratch, func_index, Operand(kTaggedSizeLog2));
   __ AddS64(vector, vector, scratch);
-  __ LoadTaggedPointerField(
-      vector, FieldMemOperand(vector, FixedArray::kHeaderSize), scratch);
+  __ LoadTaggedField(vector, FieldMemOperand(vector, FixedArray::kHeaderSize),
+                     scratch);
   __ JumpIfSmi(vector, &allocate_vector);
   __ bind(&done);
   __ push(kWasmInstanceRegister);
@@ -3256,125 +3254,182 @@ void Builtins::Generate_DoubleToI(MacroAssembler* masm) {
 
 namespace {
 
-static int AddressOffset(ExternalReference ref0, ExternalReference ref1) {
-  return ref0.address() - ref1.address();
-}
-
-
 // Calls an API function.  Allocates HandleScope, extracts returned value
-// from handle and propagates exceptions.  Restores context.  stack_space
-// - space to be unwound on exit (includes the call JS arguments space and
-// the additional space allocated for the fast call).
+// from handle and propagates exceptions.  Restores context.  On return removes
+// *stack_space_operand * kSystemPointerSize or stack_space * kSystemPointerSize
+// (GCed, includes the call JS arguments space and the additional space
+// allocated for the fast call).
 static void CallApiFunctionAndReturn(MacroAssembler* masm,
                                      Register function_address,
                                      ExternalReference thunk_ref,
-                                     int stack_space,
+                                     Register thunk_arg, int stack_space,
                                      MemOperand* stack_space_operand,
                                      MemOperand return_value_operand) {
+  using ER = ExternalReference;
+
   Isolate* isolate = masm->isolate();
-  ExternalReference next_address =
-      ExternalReference::handle_scope_next_address(isolate);
-  const int kNextOffset = 0;
-  const int kLimitOffset = AddressOffset(
-      ExternalReference::handle_scope_limit_address(isolate), next_address);
-  const int kLevelOffset = AddressOffset(
-      ExternalReference::handle_scope_level_address(isolate), next_address);
+  MemOperand next_mem_op = __ ExternalReferenceAsOperand(
+      ER::handle_scope_next_address(isolate), no_reg);
+  MemOperand limit_mem_op = __ ExternalReferenceAsOperand(
+      ER::handle_scope_limit_address(isolate), no_reg);
+  MemOperand level_mem_op = __ ExternalReferenceAsOperand(
+      ER::handle_scope_level_address(isolate), no_reg);
 
   // Additional parameter is the address of the actual callback.
-  DCHECK(function_address == r4 || function_address == r5);
-  Register scratch = r6;
+  Register return_value = r3;
+  Register scratch = ip;
+  Register scratch2 = r0;
 
-  // Allocate HandleScope in callee-save registers.
-  // r17 - next_address
-  // r14 - next_address->kNextOffset
-  // r15 - next_address->kLimitOffset
-  // r16 - next_address->kLevelOffset
-  __ Move(r17, next_address);
-  __ LoadU64(r14, MemOperand(r17, kNextOffset));
-  __ LoadU64(r15, MemOperand(r17, kLimitOffset));
-  __ lwz(r16, MemOperand(r17, kLevelOffset));
-  __ addi(r16, r16, Operand(1));
-  __ stw(r16, MemOperand(r17, kLevelOffset));
+  // Allocate HandleScope in callee-saved registers.
+  // We will need to restore the HandleScope after the call to the API function,
+  // by allocating it in callee-saved registers it'll be preserved by C code.
+  Register prev_next_address_reg = r14;
+  Register prev_limit_reg = r15;
+  Register prev_level_reg = r16;
 
-  Label profiler_enabled, done_api_call;
-  __ lbz(scratch,
-         __ ExternalReferenceAsOperand(
-             ExternalReference::is_profiling_address(isolate), scratch));
+  // C arguments (arg_reg_1/2) are expected to be initialized outside, so this
+  // function must not corrupt them (return_value overlaps with arg_reg_1 but
+  // that's ok because we start using it only after the C call).
+  DCHECK(!AreAliased(arg_reg_1, arg_reg_2,  // C args
+                     scratch, scratch2, prev_next_address_reg, prev_limit_reg));
+  // function_address and thunk_arg might overlap but this function must not
+  // corrupted them until the call is made (i.e. overlap with return_value is
+  // fine).
+  DCHECK(!AreAliased(function_address,  // incoming parameters
+                     scratch, scratch2, prev_next_address_reg, prev_limit_reg));
+  DCHECK(!AreAliased(thunk_arg,  // incoming parameters
+                     scratch, scratch2, prev_next_address_reg, prev_limit_reg));
+  {
+    ASM_CODE_COMMENT_STRING(masm,
+                            "Allocate HandleScope in callee-save registers.");
+    __ LoadU64(prev_next_address_reg, next_mem_op);
+    __ LoadU64(prev_limit_reg, limit_mem_op);
+    __ lwz(prev_level_reg, level_mem_op);
+    __ addi(scratch, prev_level_reg, Operand(1));
+    __ stw(scratch, level_mem_op);
+  }
+
+  Label profiler_or_side_effects_check_enabled, done_api_call;
+  __ RecordComment("Check if profiler or side effects check is enabled");
+  __ lbz(scratch, __ ExternalReferenceAsOperand(
+                      ER::execution_mode_address(isolate), no_reg));
   __ cmpi(scratch, Operand::Zero());
-  __ bne(&profiler_enabled);
+  __ bne(&profiler_or_side_effects_check_enabled);
 #ifdef V8_RUNTIME_CALL_STATS
-  __ Move(scratch, ExternalReference::address_of_runtime_stats_flag());
+  __ RecordComment("Check if RCS is enabled");
+  __ Move(scratch, ER::address_of_runtime_stats_flag());
   __ lwz(scratch, MemOperand(scratch, 0));
   __ cmpi(scratch, Operand::Zero());
-  __ bne(&profiler_enabled);
+  __ bne(&profiler_or_side_effects_check_enabled);
 #endif  // V8_RUNTIME_CALL_STATS
 
-  // Call the api function directly.
+  __ RecordComment("Call the api function directly.");
   __ StoreReturnAddressAndCall(function_address);
   __ bind(&done_api_call);
 
   Label promote_scheduled_exception;
   Label delete_allocated_handles;
   Label leave_exit_frame;
-  Label return_value_loaded;
 
   // load value from ReturnValue
+  __ RecordComment("Load the value from ReturnValue");
   __ LoadU64(r3, return_value_operand);
-  __ bind(&return_value_loaded);
-  // No more valid handles (the result handle was the last one). Restore
-  // previous handle scope.
-  __ StoreU64(r14, MemOperand(r17, kNextOffset));
-  if (v8_flags.debug_code) {
-    __ lwz(r4, MemOperand(r17, kLevelOffset));
-    __ CmpS64(r4, r16);
-    __ Check(eq, AbortReason::kUnexpectedLevelAfterReturnFromApiCall);
-  }
-  __ subi(r16, r16, Operand(1));
-  __ stw(r16, MemOperand(r17, kLevelOffset));
-  __ LoadU64(r0, MemOperand(r17, kLimitOffset));
-  __ CmpS64(r15, r0);
-  __ bne(&delete_allocated_handles);
 
-  // Leave the API exit frame.
+  {
+    ASM_CODE_COMMENT_STRING(
+        masm,
+        "No more valid handles (the result handle was the last one)."
+        "Restore previous handle scope.");
+    __ StoreU64(prev_next_address_reg, next_mem_op);
+    if (v8_flags.debug_code) {
+      __ lwz(scratch, level_mem_op);
+      __ subi(scratch, scratch, Operand(1));
+      __ CmpS64(scratch, prev_level_reg);
+      __ Check(eq, AbortReason::kUnexpectedLevelAfterReturnFromApiCall);
+    }
+    __ stw(prev_level_reg, level_mem_op);
+    __ LoadU64(scratch, limit_mem_op);
+    __ CmpS64(scratch, prev_limit_reg);
+    __ bne(&delete_allocated_handles);
+  }
+
+  __ RecordComment("Leave the API exit frame.");
   __ bind(&leave_exit_frame);
   // LeaveExitFrame expects unwind space to be in a register.
+  Register stack_space_reg = prev_limit_reg;
   if (stack_space_operand != nullptr) {
-    __ LoadU64(r14, *stack_space_operand);
+    __ LoadU64(stack_space_reg, *stack_space_operand);
   } else {
-    __ mov(r14, Operand(stack_space));
+    __ mov(stack_space_reg, Operand(stack_space));
   }
-  __ LeaveExitFrame(r14, stack_space_operand != nullptr);
+  __ LeaveExitFrame(stack_space_reg, stack_space_operand != nullptr);
 
-  // Check if the function scheduled an exception.
-  __ LoadRoot(r14, RootIndex::kTheHoleValue);
-  __ Move(r15, ExternalReference::scheduled_exception_address(isolate));
-  __ LoadU64(r15, MemOperand(r15));
-  __ CmpS64(r14, r15);
-  __ bne(&promote_scheduled_exception);
+  {
+    ASM_CODE_COMMENT_STRING(masm,
+                            "Check if the function scheduled an exception.");
+    __ LoadRoot(scratch, RootIndex::kTheHoleValue);
+    __ LoadU64(scratch2, __ ExternalReferenceAsOperand(
+                             ER::scheduled_exception_address(isolate), no_reg));
+    __ CmpS64(scratch, scratch2);
+    __ bne(&promote_scheduled_exception);
+  }
+
+  {
+    ASM_CODE_COMMENT_STRING(masm, "Convert return value");
+    Label finish_return;
+    __ CompareRoot(return_value, RootIndex::kTheHoleValue);
+    __ bne(&finish_return);
+    __ LoadRoot(return_value, RootIndex::kUndefinedValue);
+    __ bind(&finish_return);
+  }
+
+  __ AssertJSAny(return_value, scratch, scratch2,
+                 AbortReason::kAPICallReturnedInvalidObject);
 
   __ blr();
 
-  // Call the api function via thunk wrapper.
-  __ bind(&profiler_enabled);
-  // Additional parameter is the address of the actual callback.
-  __ Move(r6, function_address);
-  __ Move(ip, thunk_ref);
-  __ StoreReturnAddressAndCall(ip);
-  __ b(&done_api_call);
+  {
+    ASM_CODE_COMMENT_STRING(masm, "Call the api function via the thunk.");
+    __ bind(&profiler_or_side_effects_check_enabled);
+    // Additional parameter is the address of the actual callback function.
+    MemOperand thunk_arg_mem_op = __ ExternalReferenceAsOperand(
+        ER::api_callback_thunk_argument_address(isolate), no_reg);
+    __ StoreU64(thunk_arg, thunk_arg_mem_op);
+    __ Move(scratch, thunk_ref);
+    __ StoreReturnAddressAndCall(scratch);
+    __ b(&done_api_call);
+  }
 
-  // Re-throw by promoting a scheduled exception.
+  __ RecordComment("Re-throw by promoting a scheduled exception.");
   __ bind(&promote_scheduled_exception);
   __ TailCallRuntime(Runtime::kPromoteScheduledException);
 
-  // HandleScope limit has changed. Delete allocated extensions.
-  __ bind(&delete_allocated_handles);
-  __ StoreU64(r15, MemOperand(r17, kLimitOffset));
-  __ mr(r14, r3);
-  __ PrepareCallCFunction(1, r15);
-  __ Move(r3, ExternalReference::isolate_address(isolate));
-  __ CallCFunction(ExternalReference::delete_handle_scope_extensions(), 1);
-  __ mr(r3, r14);
-  __ b(&leave_exit_frame);
+  {
+    ASM_CODE_COMMENT_STRING(
+        masm, "HandleScope limit has changed. Delete allocated extensions.");
+    __ bind(&delete_allocated_handles);
+    __ StoreU64(prev_limit_reg, limit_mem_op);
+    // Save the return value in a callee-save register.
+    Register saved_result = prev_limit_reg;
+    __ mr(saved_result, return_value);
+    __ PrepareCallCFunction(1, scratch);
+    __ Move(arg_reg_1, ER::isolate_address(isolate));
+    __ CallCFunction(ER::delete_handle_scope_extensions(), 1);
+    __ mr(return_value, saved_result);
+    __ b(&leave_exit_frame);
+  }
+}
+
+MemOperand ExitFrameStackSlotOperand(int offset) {
+  static constexpr int kSPOffset = 1 * kSystemPointerSize;
+  return MemOperand(sp, (kStackFrameExtraParamSlot * kSystemPointerSize) +
+                            offset + kSPOffset);
+}
+
+MemOperand ExitFrameCallerStackSlotOperand(int index) {
+  return MemOperand(
+      fp, (BuiltinExitFrameConstants::kFixedSlotCountAboveFp + index) *
+              kSystemPointerSize);
 }
 
 }  // namespace
@@ -3392,6 +3447,8 @@ void Builtins::Generate_CallApiCallback(MacroAssembler* masm) {
   //  -- sp[(argc) * 8]      : last argument
   // -----------------------------------
 
+  Register function_callback_info_arg = arg_reg_1;
+
   Register api_function_address = r4;
   Register argc = r5;
   Register call_data = r6;
@@ -3399,50 +3456,58 @@ void Builtins::Generate_CallApiCallback(MacroAssembler* masm) {
   Register scratch = r7;
   DCHECK(!AreAliased(api_function_address, argc, call_data, holder, scratch));
 
+  using FCI = FunctionCallbackInfo<v8::Value>;
   using FCA = FunctionCallbackArguments;
 
   static_assert(FCA::kArgsLength == 6);
   static_assert(FCA::kNewTargetIndex == 5);
   static_assert(FCA::kDataIndex == 4);
-  static_assert(FCA::kReturnValueOffset == 3);
-  static_assert(FCA::kReturnValueDefaultValueIndex == 2);
+  static_assert(FCA::kReturnValueIndex == 3);
+  static_assert(FCA::kUnusedIndex == 2);
   static_assert(FCA::kIsolateIndex == 1);
   static_assert(FCA::kHolderIndex == 0);
 
   // Set up FunctionCallbackInfo's implicit_args on the stack as follows:
   //
   // Target state:
-  //   sp[0 * kSystemPointerSize]: kHolder
-  //   sp[1 * kSystemPointerSize]: kIsolate
-  //   sp[2 * kSystemPointerSize]: undefined (kReturnValueDefaultValue)
-  //   sp[3 * kSystemPointerSize]: undefined (kReturnValue)
-  //   sp[4 * kSystemPointerSize]: kData
-  //   sp[5 * kSystemPointerSize]: undefined (kNewTarget)
+  //   sp[1 * kSystemPointerSize]: kHolder   <= FCA::implicit_args_
+  //   sp[2 * kSystemPointerSize]: kIsolate
+  //   sp[3 * kSystemPointerSize]: Smi::zero(padding, unused)
+  //   sp[4 * kSystemPointerSize]: undefined (kReturnValue)
+  //   sp[5 * kSystemPointerSize]: kData
+  //   sp[6 * kSystemPointerSize]: undefined (kNewTarget)
+  // Existing state:
+  //   sp[7 * kSystemPointerSize]:            <= FCA:::values_
 
   // Reserve space on the stack.
   __ subi(sp, sp, Operand(FCA::kArgsLength * kSystemPointerSize));
 
   // kHolder.
-  __ StoreU64(holder, MemOperand(sp, 0 * kSystemPointerSize));
+  __ StoreU64(holder, MemOperand(sp, FCA::kHolderIndex * kSystemPointerSize));
 
   // kIsolate.
   __ Move(scratch, ExternalReference::isolate_address(masm->isolate()));
-  __ StoreU64(scratch, MemOperand(sp, 1 * kSystemPointerSize));
+  __ StoreU64(scratch, MemOperand(sp, FCA::kIsolateIndex * kSystemPointerSize));
 
-  // kReturnValueDefaultValue and kReturnValue.
+  // kUnused
+  __ Move(scratch, Smi::zero());
+  __ StoreU64(scratch, MemOperand(sp, FCA::kUnusedIndex * kSystemPointerSize));
+
+  // kReturnValue.
   __ LoadRoot(scratch, RootIndex::kUndefinedValue);
-  __ StoreU64(scratch, MemOperand(sp, 2 * kSystemPointerSize));
-  __ StoreU64(scratch, MemOperand(sp, 3 * kSystemPointerSize));
+  __ StoreU64(scratch,
+              MemOperand(sp, FCA::kReturnValueIndex * kSystemPointerSize));
 
   // kData.
-  __ StoreU64(call_data, MemOperand(sp, 4 * kSystemPointerSize));
+  __ StoreU64(call_data, MemOperand(sp, FCA::kDataIndex * kSystemPointerSize));
 
   // kNewTarget.
-  __ StoreU64(scratch, MemOperand(sp, 5 * kSystemPointerSize));
+  __ StoreU64(scratch,
+              MemOperand(sp, FCA::kNewTargetIndex * kSystemPointerSize));
 
-  // Keep a pointer to kHolder (= implicit_args) in a scratch register.
+  // Keep a pointer to kHolder (= implicit_args) in a {holder} register.
   // We use it below to set up the FunctionCallbackInfo object.
-  __ mr(scratch, sp);
+  __ mr(holder, sp);
 
   // Allocate the v8::Arguments structure in the arguments' space since
   // it's not controlled by GC.
@@ -3452,102 +3517,129 @@ void Builtins::Generate_CallApiCallback(MacroAssembler* masm) {
   //    [0] space for DirectCEntryStub's LR save
   //    [1-3] FunctionCallbackInfo
   //    [4] number of bytes to drop from the stack after returning
+  static constexpr int kSlotsToDropOnStackSize = 1 * kSystemPointerSize;
   static constexpr int kApiStackSpace = 5;
+  static_assert(FCI::kImplicitArgsOffset == 0);
+  static_assert(FCI::kValuesOffset == 1 * kSystemPointerSize);
+  static_assert(FCI::kLengthOffset == 2 * kSystemPointerSize);
 
   FrameScope frame_scope(masm, StackFrame::MANUAL);
   __ EnterExitFrame(kApiStackSpace, StackFrame::EXIT);
 
-  // FunctionCallbackInfo::implicit_args_ (points at kHolder as set up above).
-  // Arguments are after the return address (pushed by EnterExitFrame()).
-  __ StoreU64(scratch, MemOperand(sp, (kStackFrameExtraParamSlot + 1) *
-                                          kSystemPointerSize));
+  {
+    ASM_CODE_COMMENT_STRING(masm, "Initialize FunctionCallbackInfo");
+    // FunctionCallbackInfo::implicit_args_ (points at kHolder as set up above).
+    // Arguments are after the return address (pushed by EnterExitFrame()).
+    __ StoreU64(holder, ExitFrameStackSlotOperand(FCI::kImplicitArgsOffset));
 
-  // FunctionCallbackInfo::values_ (points at the first varargs argument passed
-  // on the stack).
-  __ addi(scratch, scratch,
-          Operand((FCA::kArgsLength + 1) * kSystemPointerSize));
-  __ StoreU64(scratch, MemOperand(sp, (kStackFrameExtraParamSlot + 2) *
-                                          kSystemPointerSize));
+    // FunctionCallbackInfo::values_ (points at the first varargs argument
+    // passed on the stack).
+    __ addi(holder, holder,
+            Operand(FCA::kArgsLengthWithReceiver * kSystemPointerSize));
+    __ StoreU64(holder, ExitFrameStackSlotOperand(FCI::kValuesOffset));
 
-  // FunctionCallbackInfo::length_.
-  __ stw(argc,
-         MemOperand(sp, (kStackFrameExtraParamSlot + 3) * kSystemPointerSize));
+    // FunctionCallbackInfo::length_.
+    __ stw(argc, ExitFrameStackSlotOperand(FCI::kLengthOffset));
+  }
 
   // We also store the number of bytes to drop from the stack after returning
   // from the API function here.
+  MemOperand stack_space_operand =
+      ExitFrameStackSlotOperand(FCI::kLengthOffset + kSlotsToDropOnStackSize);
   __ mov(scratch,
          Operand((FCA::kArgsLength + 1 /* receiver */) * kSystemPointerSize));
   __ ShiftLeftU64(ip, argc, Operand(kSystemPointerSizeLog2));
   __ add(scratch, scratch, ip);
-  __ StoreU64(scratch, MemOperand(sp, (kStackFrameExtraParamSlot + 4) *
-                                          kSystemPointerSize));
+  __ StoreU64(scratch, stack_space_operand);
 
-  // v8::InvocationCallback's argument.
-  __ addi(r3, sp,
+  __ RecordComment("v8::FunctionCallback's argument");
+  __ addi(function_callback_info_arg, sp,
           Operand((kStackFrameExtraParamSlot + 1) * kSystemPointerSize));
 
+  DCHECK(!AreAliased(api_function_address, function_callback_info_arg));
+
   ExternalReference thunk_ref = ExternalReference::invoke_function_callback();
+  // Pass api function address to thunk wrapper in case profiler or side-effect
+  // checking is enabled.
+  Register thunk_arg = api_function_address;
 
-  // There are two stack slots above the arguments we constructed on the stack.
-  // TODO(jgruber): Document what these arguments are.
-  static constexpr int kStackSlotsAboveFCA = 2;
-  MemOperand return_value_operand(
-      fp, (kStackSlotsAboveFCA + FCA::kReturnValueOffset) * kSystemPointerSize);
-
+  MemOperand return_value_operand =
+      ExitFrameCallerStackSlotOperand(FCA::kReturnValueIndex);
   static constexpr int kUseStackSpaceOperand = 0;
-  MemOperand stack_space_operand(
-      sp, (kStackFrameExtraParamSlot + 4) * kSystemPointerSize);
 
-  AllowExternalCallThatCantCauseGC scope(masm);
-  CallApiFunctionAndReturn(masm, api_function_address, thunk_ref,
+  CallApiFunctionAndReturn(masm, api_function_address, thunk_ref, thunk_arg,
                            kUseStackSpaceOperand, &stack_space_operand,
                            return_value_operand);
 }
 
 
 void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+  // ----------- S t a t e -------------
+  //  -- cp                  : context
+  //  -- r4                  : receiver
+  //  -- r6                  : accessor info
+  //  -- r3                  : holder
+  // -----------------------------------
+
   int arg0Slot = 0;
   int accessorInfoSlot = 0;
   int apiStackSpace = 0;
   // Build v8::PropertyCallbackInfo::args_ array on the stack and push property
   // name below the exit frame to make GC aware of them.
-  static_assert(PropertyCallbackArguments::kShouldThrowOnErrorIndex == 0);
-  static_assert(PropertyCallbackArguments::kHolderIndex == 1);
-  static_assert(PropertyCallbackArguments::kIsolateIndex == 2);
-  static_assert(PropertyCallbackArguments::kReturnValueDefaultValueIndex == 3);
-  static_assert(PropertyCallbackArguments::kReturnValueOffset == 4);
-  static_assert(PropertyCallbackArguments::kDataIndex == 5);
-  static_assert(PropertyCallbackArguments::kThisIndex == 6);
-  static_assert(PropertyCallbackArguments::kArgsLength == 7);
+  using PCA = PropertyCallbackArguments;
+  static_assert(PCA::kShouldThrowOnErrorIndex == 0);
+  static_assert(PCA::kHolderIndex == 1);
+  static_assert(PCA::kIsolateIndex == 2);
+  static_assert(PCA::kUnusedIndex == 3);
+  static_assert(PCA::kReturnValueIndex == 4);
+  static_assert(PCA::kDataIndex == 5);
+  static_assert(PCA::kThisIndex == 6);
+  static_assert(PCA::kArgsLength == 7);
 
+  // Set up PropertyCallbackInfo's args_ on the stack as follows:
+  // Target state:
+  //   sp[0 * kSystemPointerSize]: name
+  //   sp[1 * kSystemPointerSize]: kShouldThrowOnErrorIndex   <= PCI:args_
+  //   sp[2 * kSystemPointerSize]: kHolderIndex
+  //   sp[3 * kSystemPointerSize]: kIsolateIndex
+  //   sp[4 * kSystemPointerSize]: kUnusedIndex
+  //   sp[5 * kSystemPointerSize]: kReturnValueIndex
+  //   sp[6 * kSystemPointerSize]: kDataIndex
+  //   sp[7 * kSystemPointerSize]: kThisIndex / receiver
+
+  Register name_arg = arg_reg_1;
+  Register property_callback_info_arg = arg_reg_2;
+
+  Register api_function_address = r5;
   Register receiver = ApiGetterDescriptor::ReceiverRegister();
   Register holder = ApiGetterDescriptor::HolderRegister();
   Register callback = ApiGetterDescriptor::CallbackRegister();
   Register scratch = r7;
-  DCHECK(!AreAliased(receiver, holder, callback, scratch));
+  Register smi_zero = r8;
+  DCHECK(!AreAliased(receiver, holder, callback, scratch, smi_zero));
 
-  Register api_function_address = r5;
-
-  __ push(receiver);
-  // Push data from AccessorInfo.
-  __ LoadAnyTaggedField(
-      scratch, FieldMemOperand(callback, AccessorInfo::kDataOffset), r0);
-  __ push(scratch);
+  __ LoadTaggedField(scratch,
+                     FieldMemOperand(callback, AccessorInfo::kDataOffset), r0);
+  __ Push(receiver, scratch);  // kThisIndex, kDataIndex
   __ LoadRoot(scratch, RootIndex::kUndefinedValue);
-  __ Push(scratch, scratch);
+  __ Move(smi_zero, Smi::zero());
+  __ Push(scratch, smi_zero);  // kReturnValueIndex, kUnusedIndex
   __ Move(scratch, ExternalReference::isolate_address(masm->isolate()));
-  __ Push(scratch, holder);
-  __ Push(Smi::zero());  // should_throw_on_error -> false
-  __ LoadTaggedPointerField(
-      scratch, FieldMemOperand(callback, AccessorInfo::kNameOffset), r0);
-  __ push(scratch);
+  __ Push(scratch, holder);  // kIsolateIndex, kHolderIndex
 
-  // v8::PropertyCallbackInfo::args_ array and name handle.
-  const int kStackUnwindSpace = PropertyCallbackArguments::kArgsLength + 1;
+  __ LoadTaggedField(scratch,
+                     FieldMemOperand(callback, AccessorInfo::kNameOffset), r0);
+  __ Push(smi_zero, scratch);  // should_throw_on_error -> false, name
+
+  __ RecordComment(
+      "Load address of v8::PropertyAccessorInfo::args_ array and name handle.");
 
   // Load address of v8::PropertyAccessorInfo::args_ array and name handle.
-  __ mr(r3, sp);                               // r3 = Handle<Name>
-  __ addi(r4, r3, Operand(1 * kSystemPointerSize));  // r4 = v8::PCI::args_
+  // name_arg = Handle<Name>(&name), name value was pushed to GC-ed stack space.
+  __ mr(name_arg, sp);
+  // property_callback_info_arg = v8::PCI::args_ (= &ShouldThrow)
+  __ addi(property_callback_info_arg, name_arg,
+          Operand(1 * kSystemPointerSize));
 
   // If ABI passes Handles (pointer-sized struct) in a register:
   //
@@ -3570,6 +3662,9 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
     apiStackSpace = 3;
   }
 
+  constexpr int kNameOnStackSize = 1;
+  constexpr int kStackUnwindSpace = PCA::kArgsLength + kNameOnStackSize;
+
   FrameScope frame_scope(masm, StackFrame::MANUAL);
   __ EnterExitFrame(apiStackSpace, StackFrame::EXIT);
 
@@ -3579,26 +3674,34 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
     __ addi(r3, sp, Operand(arg0Slot * kSystemPointerSize));
   }
 
-  // Create v8::PropertyCallbackInfo object on the stack and initialize
-  // it's args_ field.
-  __ StoreU64(r4, MemOperand(sp, accessorInfoSlot * kSystemPointerSize));
-  __ addi(r4, sp, Operand(accessorInfoSlot * kSystemPointerSize));
-  // r4 = v8::PropertyCallbackInfo&
+  __ RecordComment("Create v8::PropertyCallbackInfo object on the stack.");
+  // Initialize v8::PropertyCallbackInfo::args_ field.
+  __ StoreU64(property_callback_info_arg,
+              MemOperand(sp, accessorInfoSlot * kSystemPointerSize));
+  // property_callback_info_arg = v8::PropertyCallbackInfo&
+  __ addi(property_callback_info_arg, sp,
+          Operand(accessorInfoSlot * kSystemPointerSize));
 
-  ExternalReference thunk_ref =
-      ExternalReference::invoke_accessor_getter_callback();
-
+  __ RecordComment("Load api_function_address");
   __ LoadU64(
       api_function_address,
       FieldMemOperand(callback, AccessorInfo::kMaybeRedirectedGetterOffset),
       r0);
 
-  // +3 is to skip prolog, return address and name handle.
-  MemOperand return_value_operand(
-      fp,
-      (PropertyCallbackArguments::kReturnValueOffset + 3) * kSystemPointerSize);
+  DCHECK(
+      !AreAliased(api_function_address, property_callback_info_arg, name_arg));
+
+  ExternalReference thunk_ref =
+      ExternalReference::invoke_accessor_getter_callback();
+  // Pass AccessorInfo to thunk wrapper in case profiler or side-effect
+  // checking is enabled.
+  Register thunk_arg = callback;
+
+  MemOperand return_value_operand = ExitFrameCallerStackSlotOperand(
+      PCA::kReturnValueIndex + kNameOnStackSize);
   MemOperand* const kUseStackSpaceConstant = nullptr;
-  CallApiFunctionAndReturn(masm, api_function_address, thunk_ref,
+
+  CallApiFunctionAndReturn(masm, api_function_address, thunk_ref, thunk_arg,
                            kStackUnwindSpace, kUseStackSpaceConstant,
                            return_value_operand);
 }

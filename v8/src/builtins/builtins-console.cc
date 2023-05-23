@@ -144,11 +144,12 @@ void ConsoleCall(
     Isolate* isolate, const internal::BuiltinArguments& args,
     void (debug::ConsoleDelegate::*func)(const v8::debug::ConsoleCallArguments&,
                                          const v8::debug::ConsoleContext&)) {
+  if (isolate->is_execution_terminating()) return;
   CHECK(!isolate->has_pending_exception());
   CHECK(!isolate->has_scheduled_exception());
   if (!isolate->console_delegate()) return;
   HandleScope scope(isolate);
-  debug::ConsoleCallArguments wrapper(args);
+  debug::ConsoleCallArguments wrapper(isolate, args);
   Handle<Object> context_id_obj = JSObject::GetDataProperty(
       isolate, args.target(), isolate->factory()->console_context_id_symbol());
   int context_id =

@@ -19,10 +19,6 @@
 #include "src/objects/objects-inl.h"
 #include "src/objects/slots-inl.h"
 
-#ifdef V8_ENABLE_INNER_POINTER_RESOLUTION_OSB
-#include "src/heap/object-start-bitmap-inl.h"
-#endif  // V8_ENABLE_INNER_POINTER_RESOLUTION_OSB
-
 namespace v8 {
 namespace internal {
 
@@ -135,7 +131,7 @@ CopyAndForwardResult Scavenger::SemiSpaceCopyObject(
 
   HeapObject target;
   if (allocation.To(&target)) {
-    DCHECK(heap()->marking_state()->IsWhite(target));
+    DCHECK(heap()->marking_state()->IsUnmarked(target));
     const bool self_success =
         MigrateObject(map, object, target, object_size, kPromoteIntoLocalHeap);
     if (!self_success) {
@@ -183,7 +179,7 @@ CopyAndForwardResult Scavenger::PromoteObject(Map map, THeapObjectSlot slot,
 
   HeapObject target;
   if (allocation.To(&target)) {
-    DCHECK(heap()->non_atomic_marking_state()->IsWhite(target));
+    DCHECK(heap()->non_atomic_marking_state()->IsUnmarked(target));
     const bool self_success =
         MigrateObject(map, object, target, object_size, promotion_heap_choice);
     if (!self_success) {
@@ -298,7 +294,7 @@ SlotCallbackResult Scavenger::EvacuateThinString(Map map, THeapObjectSlot slot,
   static_assert(std::is_same<THeapObjectSlot, FullHeapObjectSlot>::value ||
                     std::is_same<THeapObjectSlot, HeapObjectSlot>::value,
                 "Only FullHeapObjectSlot and HeapObjectSlot are expected here");
-  if (!is_incremental_marking_ && shortcut_strings_) {
+  if (shortcut_strings_) {
     // The ThinString should die after Scavenge, so avoid writing the proper
     // forwarding pointer and instead just signal the actual object as forwarded
     // reference.
@@ -326,7 +322,7 @@ SlotCallbackResult Scavenger::EvacuateShortcutCandidate(Map map,
                 "Only FullHeapObjectSlot and HeapObjectSlot are expected here");
   DCHECK(IsShortcutCandidate(map.instance_type()));
 
-  if (!is_incremental_marking_ && shortcut_strings_ &&
+  if (shortcut_strings_ &&
       object.unchecked_second() == ReadOnlyRoots(heap()).empty_string()) {
     HeapObject first = HeapObject::cast(object.unchecked_first());
 
@@ -397,9 +393,11 @@ SlotCallbackResult Scavenger::EvacuateObject(THeapObjectSlot slot, Map map,
     case kVisitSeqOneByteString:
     case kVisitSeqTwoByteString:
       DCHECK(String::IsInPlaceInternalizable(map.instance_type()));
+      static_assert(Map::ObjectFieldsFrom(kVisitSeqOneByteString) ==
+                    Map::ObjectFieldsFrom(kVisitSeqTwoByteString));
       return EvacuateInPlaceInternalizableString(
           map, slot, String::unchecked_cast(source), size,
-          ObjectFields::kMaybePointers);
+          Map::ObjectFieldsFrom(kVisitSeqOneByteString));
     case kVisitDataObject:  // External strings have kVisitDataObject.
       if (String::IsInPlaceInternalizableExcludingExternal(
               map.instance_type())) {
@@ -482,12 +480,6 @@ class ScavengeVisitor final : public NewSpaceVisitor<ScavengeVisitor> {
 
   V8_INLINE void VisitPointers(HeapObject host, MaybeObjectSlot start,
                                MaybeObjectSlot end) final;
-  V8_INLINE void VisitCodePointer(HeapObject host, CodeObjectSlot slot) final;
-
-  V8_INLINE void VisitCodeTarget(InstructionStream host,
-                                 RelocInfo* rinfo) final;
-  V8_INLINE void VisitEmbeddedPointer(InstructionStream host,
-                                      RelocInfo* rinfo) final;
   V8_INLINE int VisitEphemeronHashTable(Map map, EphemeronHashTable object);
   V8_INLINE int VisitJSArrayBuffer(Map map, JSArrayBuffer object);
   V8_INLINE int VisitJSApiObject(Map map, JSObject object);
@@ -510,41 +502,6 @@ void ScavengeVisitor::VisitPointers(HeapObject host, ObjectSlot start,
 void ScavengeVisitor::VisitPointers(HeapObject host, MaybeObjectSlot start,
                                     MaybeObjectSlot end) {
   return VisitPointersImpl(host, start, end);
-}
-
-void ScavengeVisitor::VisitCodePointer(HeapObject host, CodeObjectSlot slot) {
-  CHECK(V8_EXTERNAL_CODE_SPACE_BOOL);
-  // InstructionStream slots never appear in new space because
-  // Code objects, the only object that can contain code pointers, are
-  // always allocated in the old space.
-  UNREACHABLE();
-}
-
-void ScavengeVisitor::VisitCodeTarget(InstructionStream host,
-                                      RelocInfo* rinfo) {
-  InstructionStream target =
-      InstructionStream::GetCodeFromTargetAddress(rinfo->target_address());
-#ifdef DEBUG
-  InstructionStream old_target = target;
-#endif
-  FullObjectSlot slot(&target);
-  VisitHeapObjectImpl(slot, target);
-  // InstructionStream objects are never in new-space, so the slot contents must
-  // not change.
-  DCHECK_EQ(old_target, target);
-}
-
-void ScavengeVisitor::VisitEmbeddedPointer(InstructionStream host,
-                                           RelocInfo* rinfo) {
-  HeapObject heap_object = rinfo->target_object(cage_base());
-#ifdef DEBUG
-  HeapObject old_heap_object = heap_object;
-#endif
-  FullObjectSlot slot(&heap_object);
-  VisitHeapObjectImpl(slot, heap_object);
-  // We don't embed new-space objects into code, so the slot contents must not
-  // change.
-  DCHECK_EQ(old_heap_object, heap_object);
 }
 
 template <typename TSlot>

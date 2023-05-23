@@ -12,6 +12,10 @@
   'wpt/function/constructor.tentative': [FAIL],
   'wpt/function/table.tentative': [FAIL],
   'wpt/function/type.tentative': [FAIL],
+  # TODO(v8): Should work after
+  # https://github.com/WebAssembly/exception-handling/pull/257 landed and the
+  # tests have been updated.
+  'wpt/exception/getArg.tentative': [FAIL],
 
   # Outdated proposal tests.
   'proposals/js-types/table/get-set': [FAIL],
@@ -30,9 +34,15 @@
   'proposals/js-types/global/value-get-set': [FAIL],
   'proposals/js-types/instance/constructor': [FAIL],
 
-  # These are slow, and not useful to run for the proposals:
+  # Limits tests are slow, and not useful to run for the proposals:
+  'proposals/extended-const/limits': [SKIP],
   'proposals/js-types/limits': [SKIP],
   'proposals/memory64/limits': [SKIP],
+  'proposals/multi-memory/limits': [SKIP],
+  'proposals/tail-call/limits': [SKIP],
+
+  # Slow tests:
+  'limits': [PASS, SLOW],
 }], # ALWAYS
 
 ['system == android', {

@@ -18,8 +18,11 @@ function get(o, ext_key) {
 %OptimizeFunctionOnNextCall(get);
 
 (function test() {
-  let ext_key = "AAAAAAAAAAAAAAAAAAAAAA";
-  externalizeString(ext_key);
+  let ext_key = createExternalizableString('AAAAAAAAAAAAAAAAAAAAAA');
+  try {
+    externalizeString(ext_key);
+  } catch {
+  }
 
   set({a:1}, ext_key);
   set({b:2}, ext_key);
