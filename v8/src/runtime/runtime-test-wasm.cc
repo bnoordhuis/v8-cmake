@@ -274,8 +274,10 @@ RUNTIME_FUNCTION(Runtime_IsWasmCode) {
   DCHECK_EQ(1, args.length());
   auto function = JSFunction::cast(args[0]);
   Code code = function.code();
-  bool is_js_to_wasm = code.kind() == CodeKind::JS_TO_WASM_FUNCTION ||
-                       (code.builtin_id() == Builtin::kGenericJSToWasmWrapper);
+  bool is_js_to_wasm =
+      code.kind() == CodeKind::JS_TO_WASM_FUNCTION ||
+      (code.builtin_id() == Builtin::kGenericJSToWasmWrapper) ||
+      (code.builtin_id() == Builtin::kJSToWasmWrapper);
   return isolate->heap()->ToBoolean(is_js_to_wasm);
 }
 
@@ -327,7 +329,18 @@ RUNTIME_FUNCTION(Runtime_GetWasmExceptionValues) {
       WasmExceptionPackage::GetExceptionValues(isolate, exception);
   CHECK(values_obj->IsFixedArray());  // Only called with correct input.
   Handle<FixedArray> values = Handle<FixedArray>::cast(values_obj);
-  return *isolate->factory()->NewJSArrayWithElements(values);
+  Handle<FixedArray> externalized_values =
+      isolate->factory()->NewFixedArray(values->length());
+  for (int i = 0; i < values->length(); i++) {
+    Handle<Object> value = handle(values->get(i), isolate);
+    if (!value->IsSmi()) {
+      // Note: This will leak string views to JS. This should be fine for a
+      // debugging function.
+      value = wasm::WasmToJSObject(isolate, value);
+    }
+    externalized_values->set(i, *value);
+  }
+  return *isolate->factory()->NewJSArrayWithElements(externalized_values);
 }
 
 RUNTIME_FUNCTION(Runtime_SerializeWasmModule) {
@@ -412,7 +425,8 @@ RUNTIME_FUNCTION(Runtime_WasmNumCodeSpaces) {
 }
 
 RUNTIME_FUNCTION(Runtime_WasmTraceMemory) {
-  HandleScope scope(isolate);
+  SealHandleScope scope(isolate);
+  DisallowGarbageCollection no_gc;
   DCHECK_EQ(1, args.length());
   auto info_addr = Smi::cast(args[0]);
 
@@ -426,8 +440,10 @@ RUNTIME_FUNCTION(Runtime_WasmTraceMemory) {
   DCHECK(it.is_wasm());
   WasmFrame* frame = WasmFrame::cast(it.frame());
 
-  uint8_t* mem_start = reinterpret_cast<uint8_t*>(
-      frame->wasm_instance().memory_object().array_buffer().backing_store());
+  // TODO(13918): Fix for multi-memory.
+  auto memory_object = frame->wasm_instance().memory_object(0);
+  uint8_t* mem_start =
+      reinterpret_cast<uint8_t*>(memory_object.array_buffer().backing_store());
   int func_index = frame->function_index();
   int pos = frame->position();
   wasm::ExecutionTier tier = frame->wasm_code()->is_liftoff()

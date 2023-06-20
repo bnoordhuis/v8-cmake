@@ -37,7 +37,7 @@
 #include "src/codegen/script-details.h"
 #include "src/common/assert-scope.h"
 #include "src/heap/heap-inl.h"
-#include "src/heap/parked-scope.h"
+#include "src/heap/parked-scope-inl.h"
 #include "src/heap/read-only-heap.h"
 #include "src/heap/safepoint.h"
 #include "src/heap/spaces.h"
@@ -64,13 +64,7 @@
 namespace v8 {
 namespace internal {
 
-enum CodeCacheType { kLazy, kEager, kAfterExecute };
-
-void DisableAlwaysOpt() {
-  // Isolates prepared for serialization do not optimize. The only exception is
-  // with the flag --always-turbofan.
-  v8_flags.always_turbofan = false;
-}
+namespace {
 
 // A convenience struct to simplify management of the blobs required to
 // deserialize an isolate.
@@ -85,6 +79,8 @@ struct StartupBlobs {
     shared_space.Dispose();
   }
 };
+
+}  // namespace
 
 // TestSerializer is used for testing isolate serialization.
 class TestSerializer {
@@ -136,15 +132,23 @@ class TestSerializer {
   }
 };
 
-static base::Vector<const uint8_t> WritePayload(
-    base::Vector<const uint8_t> payload) {
+namespace {
+
+enum CodeCacheType { kLazy, kEager, kAfterExecute };
+
+void DisableAlwaysOpt() {
+  // Isolates prepared for serialization do not optimize. The only exception is
+  // with the flag --always-turbofan.
+  v8_flags.always_turbofan = false;
+}
+
+base::Vector<const uint8_t> WritePayload(
+    const base::Vector<const uint8_t>& payload) {
   int length = payload.length();
   uint8_t* blob = NewArray<uint8_t>(length);
   memcpy(blob, payload.begin(), length);
   return base::Vector<const uint8_t>(const_cast<const uint8_t*>(blob), length);
 }
-
-namespace {
 
 // Convenience wrapper around the convenience wrapper.
 v8::StartupData CreateSnapshotDataBlob(const char* embedded_source) {
@@ -153,9 +157,13 @@ v8::StartupData CreateSnapshotDataBlob(const char* embedded_source) {
   return data;
 }
 
-}  // namespace
+enum class SerializeQuirks {
+  kNone,
+  kReadOnlySpaceIsSealed,
+};
 
-static StartupBlobs Serialize(v8::Isolate* isolate) {
+StartupBlobs Serialize(v8::Isolate* isolate,
+                       SerializeQuirks quirks = SerializeQuirks::kNone) {
   // We have to create one context.  One reason for this is so that the builtins
   // can be loaded from self hosted JS builtins and their addresses can be
   // processed.  This will clear the pending fixups array, which would otherwise
@@ -168,27 +176,38 @@ static StartupBlobs Serialize(v8::Isolate* isolate) {
   }
 
   Isolate* i_isolate = reinterpret_cast<Isolate*>(isolate);
-  heap::CollectAllAvailableGarbage(i_isolate->heap());
+  heap::InvokeMemoryReducingMajorGCs(i_isolate->heap());
+
+  // Note this effectively reimplements Snapshot::Create, keep in sync.
 
   IsolateSafepointScope safepoint(i_isolate->heap());
   HandleScope scope(i_isolate);
 
+  if (!i_isolate->initialized_from_snapshot() &&
+      quirks != SerializeQuirks::kReadOnlySpaceIsSealed) {
+    // When creating the snapshot from scratch, we are responsible for sealing
+    // the RO heap here. Note we cannot delegate the responsibility e.g. to
+    // Isolate::Init since it should still be possible to allocate into RO
+    // space after the Isolate has been initialized, for example as part of
+    // Context creation.
+    i_isolate->read_only_heap()->OnCreateHeapObjectsComplete(i_isolate);
+  }
+
   DisallowGarbageCollection no_gc;
   ReadOnlySerializer read_only_serializer(i_isolate,
                                           Snapshot::kDefaultSerializerFlags);
-  read_only_serializer.SerializeReadOnlyRoots();
+  read_only_serializer.Serialize();
 
   SharedHeapSerializer shared_space_serializer(
-      i_isolate, Snapshot::kDefaultSerializerFlags, &read_only_serializer);
+      i_isolate, Snapshot::kDefaultSerializerFlags);
 
   StartupSerializer ser(i_isolate, Snapshot::kDefaultSerializerFlags,
-                        &read_only_serializer, &shared_space_serializer);
+                        &shared_space_serializer);
   ser.SerializeStrongReferences(no_gc);
 
   ser.SerializeWeakReferencesAndDeferred();
 
   shared_space_serializer.FinalizeSerialization();
-  read_only_serializer.FinalizeSerialization();
   SnapshotData startup_snapshot(&ser);
   SnapshotData read_only_snapshot(&read_only_serializer);
   SnapshotData shared_space_snapshot(&shared_space_serializer);
@@ -213,13 +232,13 @@ base::Vector<const char> ConstructSource(base::Vector<const char> head,
   return base::VectorOf(source, source_length);
 }
 
-static v8::Isolate* Deserialize(const StartupBlobs& blobs) {
+v8::Isolate* Deserialize(const StartupBlobs& blobs) {
   v8::Isolate* isolate = TestSerializer::NewIsolateFromBlob(blobs);
   CHECK(isolate);
   return isolate;
 }
 
-static void SanityCheck(v8::Isolate* v8_isolate) {
+void SanityCheck(v8::Isolate* v8_isolate) {
   Isolate* isolate = reinterpret_cast<Isolate*>(v8_isolate);
   v8::HandleScope scope(v8_isolate);
 #ifdef VERIFY_HEAP
@@ -249,6 +268,8 @@ void TestStartupSerializerOnceImpl() {
   FreeCurrentEmbeddedBlob();
 }
 
+}  // namespace
+
 UNINITIALIZED_TEST(StartupSerializerOnce) {
   DisableAlwaysOpt();
   TestStartupSerializerOnceImpl();
@@ -258,7 +279,8 @@ UNINITIALIZED_TEST(StartupSerializerTwice) {
   DisableAlwaysOpt();
   v8::Isolate* isolate = TestSerializer::NewIsolateInitialized();
   StartupBlobs blobs1 = Serialize(isolate);
-  StartupBlobs blobs2 = Serialize(isolate);
+  StartupBlobs blobs2 =
+      Serialize(isolate, SerializeQuirks::kReadOnlySpaceIsSealed);
   isolate->Dispose();
   blobs1.Dispose();
   isolate = Deserialize(blobs2);
@@ -305,7 +327,8 @@ UNINITIALIZED_TEST(StartupSerializerTwiceRunScript) {
   DisableAlwaysOpt();
   v8::Isolate* isolate = TestSerializer::NewIsolateInitialized();
   StartupBlobs blobs1 = Serialize(isolate);
-  StartupBlobs blobs2 = Serialize(isolate);
+  StartupBlobs blobs2 =
+      Serialize(isolate, SerializeQuirks::kReadOnlySpaceIsSealed);
   isolate->Dispose();
   blobs1.Dispose();
   isolate = Deserialize(blobs2);
@@ -351,7 +374,7 @@ static void SerializeContext(base::Vector<const uint8_t>* startup_blob_out,
 
     // If we don't do this then we end up with a stray root pointing at the
     // context even after we have disposed of env.
-    heap::CollectAllAvailableGarbage(heap);
+    heap::InvokeMemoryReducingMajorGCs(heap);
 
     {
       v8::HandleScope handle_scope(v8_isolate);
@@ -365,19 +388,27 @@ static void SerializeContext(base::Vector<const uint8_t>* startup_blob_out,
 
     IsolateSafepointScope safepoint(heap);
 
+    if (!isolate->initialized_from_snapshot()) {
+      // When creating the snapshot from scratch, we are responsible for sealing
+      // the RO heap here. Note we cannot delegate the responsibility e.g. to
+      // Isolate::Init since it should still be possible to allocate into RO
+      // space after the Isolate has been initialized, for example as part of
+      // Context creation.
+      isolate->read_only_heap()->OnCreateHeapObjectsComplete(isolate);
+    }
+
     DisallowGarbageCollection no_gc;
     SnapshotByteSink read_only_sink;
     ReadOnlySerializer read_only_serializer(isolate,
                                             Snapshot::kDefaultSerializerFlags);
-    read_only_serializer.SerializeReadOnlyRoots();
+    read_only_serializer.Serialize();
 
     SharedHeapSerializer shared_space_serializer(
-        isolate, Snapshot::kDefaultSerializerFlags, &read_only_serializer);
+        isolate, Snapshot::kDefaultSerializerFlags);
 
     SnapshotByteSink startup_sink;
     StartupSerializer startup_serializer(
-        isolate, Snapshot::kDefaultSerializerFlags, &read_only_serializer,
-        &shared_space_serializer);
+        isolate, Snapshot::kDefaultSerializerFlags, &shared_space_serializer);
     startup_serializer.SerializeStrongReferences(no_gc);
 
     SnapshotByteSink context_sink;
@@ -389,7 +420,6 @@ static void SerializeContext(base::Vector<const uint8_t>* startup_blob_out,
     startup_serializer.SerializeWeakReferencesAndDeferred();
 
     shared_space_serializer.FinalizeSerialization();
-    read_only_serializer.FinalizeSerialization();
 
     SnapshotData read_only_snapshot(&read_only_serializer);
     SnapshotData shared_space_snapshot(&shared_space_serializer);
@@ -520,7 +550,7 @@ static void SerializeCustomContext(
     }
     // If we don't do this then we end up with a stray root pointing at the
     // context even after we have disposed of env.
-    heap::CollectAllAvailableGarbage(isolate->heap());
+    heap::InvokeMemoryReducingMajorGCs(isolate->heap());
 
     {
       v8::HandleScope handle_scope(v8_isolate);
@@ -534,19 +564,27 @@ static void SerializeCustomContext(
 
     IsolateSafepointScope safepoint(isolate->heap());
 
+    if (!isolate->initialized_from_snapshot()) {
+      // When creating the snapshot from scratch, we are responsible for sealing
+      // the RO heap here. Note we cannot delegate the responsibility e.g. to
+      // Isolate::Init since it should still be possible to allocate into RO
+      // space after the Isolate has been initialized, for example as part of
+      // Context creation.
+      isolate->read_only_heap()->OnCreateHeapObjectsComplete(isolate);
+    }
+
     DisallowGarbageCollection no_gc;
     SnapshotByteSink read_only_sink;
     ReadOnlySerializer read_only_serializer(isolate,
                                             Snapshot::kDefaultSerializerFlags);
-    read_only_serializer.SerializeReadOnlyRoots();
+    read_only_serializer.Serialize();
 
     SharedHeapSerializer shared_space_serializer(
-        isolate, Snapshot::kDefaultSerializerFlags, &read_only_serializer);
+        isolate, Snapshot::kDefaultSerializerFlags);
 
     SnapshotByteSink startup_sink;
     StartupSerializer startup_serializer(
-        isolate, Snapshot::kDefaultSerializerFlags, &read_only_serializer,
-        &shared_space_serializer);
+        isolate, Snapshot::kDefaultSerializerFlags, &shared_space_serializer);
     startup_serializer.SerializeStrongReferences(no_gc);
 
     SnapshotByteSink context_sink;
@@ -558,7 +596,6 @@ static void SerializeCustomContext(
     startup_serializer.SerializeWeakReferencesAndDeferred();
 
     shared_space_serializer.FinalizeSerialization();
-    read_only_serializer.FinalizeSerialization();
 
     SnapshotData read_only_snapshot(&read_only_serializer);
     SnapshotData shared_space_snapshot(&shared_space_serializer);
@@ -601,12 +638,12 @@ UNINITIALIZED_TEST(ContextSerializerCustomContext) {
                  v8::DeserializeInternalFieldsCallback())
                  .ToHandleChecked();
       CHECK(root->IsContext());
-      Handle<Context> context = Handle<Context>::cast(root);
+      Handle<NativeContext> context = Handle<NativeContext>::cast(root);
 
       // Add context to the weak native context list
-      context->set(Context::NEXT_CONTEXT_LINK,
-                   isolate->heap()->native_contexts_list(),
-                   UPDATE_WRITE_BARRIER);
+      Handle<Context>::cast(context)->set(
+          Context::NEXT_CONTEXT_LINK, isolate->heap()->native_contexts_list(),
+          UPDATE_WRITE_BARRIER);
       isolate->heap()->set_native_contexts_list(*context);
 
       CHECK(context->global_proxy() == *global_proxy);
@@ -2088,7 +2125,7 @@ TEST(CodeSerializerLargeCodeObjectWithIncrementalMarking) {
   // We should have missed a write barrier. Complete incremental marking
   // to flush out the bug.
   heap::SimulateIncrementalMarking(heap, true);
-  heap::CollectAllGarbage(heap);
+  heap::InvokeMajorGC(heap);
 
   Handle<JSFunction> copy_fun =
       Factory::JSFunctionBuilder{isolate, copy, isolate->native_context()}
@@ -2848,9 +2885,7 @@ static void CodeSerializerMergeDeserializedScript(bool retain_toplevel_sfi) {
     Handle<SharedFunctionInfo> shared = CompileScriptAndProduceCache(
         isolate, source, ScriptDetails(), &cached_data,
         v8::ScriptCompiler::kNoCompileOptions);
-    Handle<BytecodeArray> bytecode =
-        handle(shared->GetBytecodeArray(isolate), isolate);
-    bytecode->EnsureOldForTesting();
+    SharedFunctionInfo::EnsureOldForTesting(*shared);
     Handle<Script> local_script =
         handle(Script::cast(shared->script()), isolate);
     script = first_compilation_scope.CloseAndEscape(local_script);
@@ -2866,8 +2901,8 @@ static void CodeSerializerMergeDeserializedScript(bool retain_toplevel_sfi) {
   // GC twice in case incremental marking had already marked the bytecode array.
   // After this, the Isolate compilation cache contains a weak reference to the
   // Script but not the top-level SharedFunctionInfo.
-  heap::CollectAllGarbage(isolate->heap());
-  heap::CollectAllGarbage(isolate->heap());
+  heap::InvokeMajorGC(isolate->heap());
+  heap::InvokeMajorGC(isolate->heap());
 
   Handle<SharedFunctionInfo> copy =
       CompileScript(isolate, source, ScriptDetails(), cached_data,
@@ -4988,6 +5023,37 @@ TEST(CachedCompileFunction) {
   }
 }
 
+TEST(CachedCompileFunctionRespectsEager) {
+  DisableAlwaysOpt();
+  LocalContext env;
+  Isolate* isolate = CcTest::i_isolate();
+  isolate->compilation_cache()
+      ->DisableScriptAndEval();  // Disable same-isolate code cache.
+
+  v8::HandleScope scope(CcTest::isolate());
+
+  v8::Local<v8::String> source = v8_str("return function() { return 42; }");
+  v8::ScriptCompiler::Source script_source(source);
+
+  for (bool eager_compile : {false, true}) {
+    v8::ScriptCompiler::CompileOptions options =
+        eager_compile ? v8::ScriptCompiler::kEagerCompile
+                      : v8::ScriptCompiler::kNoCompileOptions;
+    v8::Local<v8::Value> fun =
+        v8::ScriptCompiler::CompileFunction(env.local(), &script_source, 0,
+                                            nullptr, 0, nullptr, options)
+            .ToLocalChecked()
+            .As<v8::Function>()
+            ->Call(env.local(), v8::Undefined(CcTest::isolate()), 0, nullptr)
+            .ToLocalChecked();
+
+    auto i_fun = i::Handle<i::JSFunction>::cast(Utils::OpenHandle(*fun));
+
+    // Function should be compiled iff kEagerCompile was used.
+    CHECK_EQ(i_fun->shared().is_compiled(), eager_compile);
+  }
+}
+
 UNINITIALIZED_TEST(SnapshotCreatorAnonClassWithKeep) {
   DisableAlwaysOpt();
   v8::SnapshotCreator creator;
@@ -5138,23 +5204,17 @@ UNINITIALIZED_TEST(SharedStrings) {
   Isolate* i_isolate2 = reinterpret_cast<Isolate*>(isolate2);
 
   CHECK_EQ(i_isolate1->string_table(), i_isolate2->string_table());
-  {
-    ParkedScope parked(i_isolate2->main_thread_local_heap());
-    CheckObjectsAreInSharedHeap(i_isolate1);
-  }
+  i_isolate2->main_thread_local_heap()->BlockMainThreadWhileParked(
+      [i_isolate1]() { CheckObjectsAreInSharedHeap(i_isolate1); });
 
-  {
-    ParkedScope parked(i_isolate1->main_thread_local_heap());
-    CheckObjectsAreInSharedHeap(i_isolate2);
-  }
+  i_isolate1->main_thread_local_heap()->BlockMainThreadWhileParked(
+      [i_isolate2]() { CheckObjectsAreInSharedHeap(i_isolate2); });
 
-  {
-    // Because both isolate1 and isolate2 are considered running on the main
-    // thread, one must be parked to avoid deadlock in the shared heap
-    // verification that may happen on client heap disposal.
-    ParkedScope parked(i_isolate1->main_thread_local_isolate());
-    isolate2->Dispose();
-  }
+  // Because both isolate1 and isolate2 are considered running on the main
+  // thread, one must be parked to avoid deadlock in the shared heap
+  // verification that may happen on client heap disposal.
+  i_isolate1->main_thread_local_heap()->BlockMainThreadWhileParked(
+      [isolate2]() { isolate2->Dispose(); });
   isolate1->Dispose();
 
   blobs.Dispose();

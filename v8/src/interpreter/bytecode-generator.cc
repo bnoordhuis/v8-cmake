@@ -1460,6 +1460,14 @@ bool NeedsContextInitialization(DeclarationScope* scope) {
 
 void BytecodeGenerator::GenerateBytecode(uintptr_t stack_limit) {
   InitializeAstVisitor(stack_limit);
+  if (v8_flags.stress_lazy_compilation && local_isolate_->is_main_thread()) {
+    // Trigger stack overflow with 1/stress_lazy_compilation probability.
+    // Do this only for the main thread compilations because querying random
+    // numbers from background threads will make the random values dependent
+    // on the thread scheduling and thus non-deterministic.
+    stack_overflow_ = local_isolate_->fuzzer_rng()->NextInt(
+                          v8_flags.stress_lazy_compilation) == 0;
+  }
 
   // Initialize the incoming context.
   ContextScope incoming_context(this, closure_scope());
@@ -4031,7 +4039,8 @@ void BytecodeGenerator::BuildVariableAssignment(
       }
 
       if (mode != VariableMode::kConst || op == Token::INIT) {
-        if (op == Token::INIT) {
+        if (op == Token::INIT &&
+            variable->HasHoleCheckUseInSameClosureScope()) {
           // After initializing a variable it won't be the hole anymore, so
           // elide subsequent checks.
           RememberHoleCheckInCurrentBlock(variable);
@@ -4072,7 +4081,8 @@ void BytecodeGenerator::BuildVariableAssignment(
       }
 
       if (mode != VariableMode::kConst || op == Token::INIT) {
-        if (op == Token::INIT) {
+        if (op == Token::INIT &&
+            variable->HasHoleCheckUseInSameClosureScope()) {
           // After initializing a variable it won't be the hole anymore, so
           // elide subsequent checks.
           RememberHoleCheckInCurrentBlock(variable);

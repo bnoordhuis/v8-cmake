@@ -256,27 +256,31 @@ class WasmMemoryObject
  public:
   DECL_OPTIONAL_ACCESSORS(instances, WeakArrayList)
 
-  // Add an instance to the internal (weak) list.
-  V8_EXPORT_PRIVATE static void AddInstance(Isolate* isolate,
-                                            Handle<WasmMemoryObject> memory,
-                                            Handle<WasmInstanceObject> object);
+  // Add a use of this memory object to the given instance. This updates the
+  // internal weak list of instances that use this memory and also updates the
+  // fields of the instance to reference this memory's buffer.
+  V8_EXPORT_PRIVATE static void UseInInstance(Isolate* isolate,
+                                              Handle<WasmMemoryObject> memory,
+                                              Handle<WasmInstanceObject> object,
+                                              int memory_index_in_instance);
   inline bool has_maximum_pages();
 
   V8_EXPORT_PRIVATE static Handle<WasmMemoryObject> New(
       Isolate* isolate, Handle<JSArrayBuffer> buffer, int maximum,
-      WasmMemoryFlag memory_type = WasmMemoryFlag::kWasmMemory32);
+      WasmMemoryFlag memory_type);
 
   V8_EXPORT_PRIVATE static MaybeHandle<WasmMemoryObject> New(
-      Isolate* isolate, int initial, int maximum,
-      SharedFlag shared = SharedFlag::kNotShared,
-      WasmMemoryFlag memory_type = WasmMemoryFlag::kWasmMemory32);
+      Isolate* isolate, int initial, int maximum, SharedFlag shared,
+      WasmMemoryFlag memory_type);
 
-  static constexpr int kNoMaximum = -1;
-
-  void update_instances(Isolate* isolate, Handle<JSArrayBuffer> buffer);
+  // Assign a new (grown) buffer to this memory, also updating the shortcut
+  // fields of all instances that use this memory.
+  void SetNewBuffer(JSArrayBuffer new_buffer);
 
   V8_EXPORT_PRIVATE static int32_t Grow(Isolate*, Handle<WasmMemoryObject>,
                                         uint32_t pages);
+
+  static constexpr int kNoMaximum = -1;
 
   TQ_OBJECT_CONSTRUCTORS(WasmMemoryObject)
 };
@@ -331,7 +335,7 @@ class V8_EXPORT_PRIVATE WasmInstanceObject : public JSObject {
   DECL_ACCESSORS(module_object, WasmModuleObject)
   DECL_ACCESSORS(exports_object, JSObject)
   DECL_ACCESSORS(native_context, Context)
-  DECL_OPTIONAL_ACCESSORS(memory_object, WasmMemoryObject)
+  DECL_ACCESSORS(memory_objects, FixedArray)
   DECL_OPTIONAL_ACCESSORS(untagged_globals_buffer, JSArrayBuffer)
   DECL_OPTIONAL_ACCESSORS(tagged_globals_buffer, FixedArray)
   DECL_OPTIONAL_ACCESSORS(imported_mutable_globals_buffers, FixedArray)
@@ -362,6 +366,7 @@ class V8_EXPORT_PRIVATE WasmInstanceObject : public JSObject {
   DECL_PRIMITIVE_ACCESSORS(jump_table_start, Address)
   DECL_PRIMITIVE_ACCESSORS(hook_on_function_call_address, Address)
   DECL_PRIMITIVE_ACCESSORS(tiering_budget_array, uint32_t*)
+  DECL_ACCESSORS(memory_bases_and_sizes, FixedAddressArray)
   DECL_ACCESSORS(data_segment_starts, FixedAddressArray)
   DECL_ACCESSORS(data_segment_sizes, FixedUInt32Array)
   DECL_ACCESSORS(element_segments, FixedArray)
@@ -370,6 +375,10 @@ class V8_EXPORT_PRIVATE WasmInstanceObject : public JSObject {
   // Clear uninitialized padding space. This ensures that the snapshot content
   // is deterministic. Depending on the V8 build mode there could be no padding.
   V8_INLINE void clear_padding();
+
+  inline WasmMemoryObject memory_object(int memory_index) const;
+  inline Address memory_base(int memory_index) const;
+  inline size_t memory_size(int memory_index) const;
 
   // Dispatched behavior.
   DECL_PRINTER(WasmInstanceObject)
@@ -404,13 +413,14 @@ class V8_EXPORT_PRIVATE WasmInstanceObject : public JSObject {
   V(kHookOnFunctionCallAddressOffset, kSystemPointerSize)                 \
   V(kTieringBudgetArrayOffset, kSystemPointerSize)                        \
   /* Less than system pointer size aligned fields are below. */           \
+  V(kMemoryBasesAndSizesOffset, kTaggedSize)                              \
   V(kDataSegmentStartsOffset, kTaggedSize)                                \
   V(kDataSegmentSizesOffset, kTaggedSize)                                 \
   V(kElementSegmentsOffset, kTaggedSize)                                  \
   V(kModuleObjectOffset, kTaggedSize)                                     \
   V(kExportsObjectOffset, kTaggedSize)                                    \
   V(kNativeContextOffset, kTaggedSize)                                    \
-  V(kMemoryObjectOffset, kTaggedSize)                                     \
+  V(kMemoryObjectsOffset, kTaggedSize)                                    \
   V(kUntaggedGlobalsBufferOffset, kTaggedSize)                            \
   V(kTaggedGlobalsBufferOffset, kTaggedSize)                              \
   V(kImportedMutableGlobalsBuffersOffset, kTaggedSize)                    \
@@ -449,7 +459,7 @@ class V8_EXPORT_PRIVATE WasmInstanceObject : public JSObject {
       kModuleObjectOffset,
       kExportsObjectOffset,
       kNativeContextOffset,
-      kMemoryObjectOffset,
+      kMemoryObjectsOffset,
       kUntaggedGlobalsBufferOffset,
       kTaggedGlobalsBufferOffset,
       kImportedMutableGlobalsBuffersOffset,
@@ -462,6 +472,7 @@ class V8_EXPORT_PRIVATE WasmInstanceObject : public JSObject {
       kWellKnownImportsOffset,
       kImportedMutableGlobalsOffset,
       kImportedFunctionTargetsOffset,
+      kMemoryBasesAndSizesOffset,
       kDataSegmentStartsOffset,
       kDataSegmentSizesOffset,
       kElementSegmentsOffset};
@@ -542,8 +553,7 @@ class V8_EXPORT_PRIVATE WasmInstanceObject : public JSObject {
   OBJECT_CONSTRUCTORS(WasmInstanceObject, JSObject);
 
  private:
-  static void InitDataSegmentArrays(Handle<WasmInstanceObject>,
-                                    Handle<WasmModuleObject>);
+  void InitDataSegmentArrays(WasmModuleObject);
 };
 
 // Representation of WebAssembly.Exception JavaScript-level object.
@@ -1114,11 +1124,10 @@ MaybeHandle<Object> JSToWasmObject(Isolate* isolate, const WasmModule* module,
                                    Handle<Object> value, ValueType expected,
                                    const char** error_message);
 
-// Takes a {value} in the Wasm representation and tries to transform it to the
-// respective JS representation. If the transformation fails, the empty handle
-// is returned.
-MaybeHandle<Object> WasmToJSObject(Isolate* isolate, Handle<Object> value,
-                                   HeapType type, const char** error_message);
+// Takes a {value} in the Wasm representation and transforms it to the
+// respective JS representation. The caller is responsible for not providing an
+// object which cannot be transformed to JS.
+Handle<Object> WasmToJSObject(Isolate* isolate, Handle<Object> value);
 }  // namespace wasm
 }  // namespace internal
 }  // namespace v8

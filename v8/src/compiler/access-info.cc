@@ -10,6 +10,7 @@
 #include "src/builtins/accessors.h"
 #include "src/compiler/compilation-dependencies.h"
 #include "src/compiler/heap-refs.h"
+#include "src/compiler/js-heap-broker-inl.h"
 #include "src/compiler/simplified-operator.h"
 #include "src/compiler/type-cache.h"
 #include "src/ic/call-optimization.h"
@@ -757,8 +758,7 @@ PropertyAccessInfo AccessInfoFactory::ComputePropertyAccessInfo(
     }
 
     if (index.is_found()) {
-      if (access_mode == AccessMode::kStore ||
-          access_mode == AccessMode::kStoreInLiteral) {
+      if (IsAnyStore(access_mode)) {
         DCHECK(!map.is_dictionary_map());
 
         // Don't bother optimizing stores to read-only properties.

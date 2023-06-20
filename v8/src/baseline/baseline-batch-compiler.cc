@@ -75,6 +75,7 @@ class BaselineCompilerTask {
     }
 
     shared_function_info_->set_baseline_code(*code, kReleaseStore);
+    shared_function_info_->set_age(0);
     if (v8_flags.trace_baseline_concurrent_compilation) {
       CodeTracer::Scope scope(isolate->GetCodeTracer());
       std::stringstream ss;
@@ -163,7 +164,6 @@ class ConcurrentBaselineCompiler {
           outgoing_queue_(outcoming_queue) {}
 
     void Run(JobDelegate* delegate) override {
-      RwxMemoryWriteScope::SetDefaultPermissionsForNewThread();
       LocalIsolate local_isolate(isolate_, ThreadKind::kBackground);
       UnparkedScope unparked_scope(&local_isolate);
       LocalHandleScope handle_scope(&local_isolate);

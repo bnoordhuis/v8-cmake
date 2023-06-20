@@ -278,7 +278,9 @@ bool CanOptimizeFunction(CodeKind target_kind, Handle<JSFunction> function,
   }
 
   if (target_kind == CodeKind::TURBOFAN && !v8_flags.turbofan) return false;
-  if (target_kind == CodeKind::MAGLEV && !v8_flags.maglev) return false;
+  if (target_kind == CodeKind::MAGLEV && !maglev::IsMaglevEnabled()) {
+    return false;
+  }
 
   if (function->shared().optimization_disabled() &&
       function->shared().disabled_optimization_reason() ==
@@ -474,7 +476,7 @@ RUNTIME_FUNCTION(Runtime_IsSparkplugEnabled) {
 
 RUNTIME_FUNCTION(Runtime_IsMaglevEnabled) {
   DCHECK_EQ(args.length(), 0);
-  return isolate->heap()->ToBoolean(v8_flags.maglev);
+  return isolate->heap()->ToBoolean(maglev::IsMaglevEnabled());
 }
 
 RUNTIME_FUNCTION(Runtime_IsTurbofanEnabled) {
@@ -620,6 +622,12 @@ RUNTIME_FUNCTION(Runtime_OptimizeOsr) {
   while (!it.done() && stack_depth--) it.Advance();
   if (!it.done()) {
     if (it.frame()->is_turbofan()) {
+      if (v8_flags.trace_osr) {
+        CodeTracer::Scope scope(isolate->GetCodeTracer());
+        PrintF(scope.file(),
+               "[OSR - %%OptimizeOsr failed because the current function could "
+               "not be found.]\n");
+      }
       // This can happen if %OptimizeOsr is in inlined function.
       return ReadOnlyRoots(isolate).undefined_value();
     } else if (it.frame()->is_maglev()) {
@@ -630,7 +638,8 @@ RUNTIME_FUNCTION(Runtime_OptimizeOsr) {
   }
   if (function.is_null()) return CrashUnlessFuzzing(isolate);
 
-  if (V8_UNLIKELY(!v8_flags.turbofan) || V8_UNLIKELY(!v8_flags.use_osr)) {
+  if (V8_UNLIKELY((!v8_flags.turbofan && !maglev::IsMaglevEnabled()) ||
+                  (!v8_flags.use_osr && !maglev::IsMaglevOsrEnabled()))) {
     return ReadOnlyRoots(isolate).undefined_value();
   }
 
@@ -650,14 +659,15 @@ RUNTIME_FUNCTION(Runtime_OptimizeOsr) {
   }
 
   if (function->HasAvailableOptimizedCode() &&
-      !function->code().is_maglevved()) {
+      (!function->code().is_maglevved() || !v8_flags.osr_from_maglev)) {
     DCHECK(function->HasAttachedOptimizedCode() ||
            function->ChecksTieringState());
     // If function is already optimized, return.
     return ReadOnlyRoots(isolate).undefined_value();
   }
 
-  if (!it.frame()->is_unoptimized() && !it.frame()->is_maglev()) {
+  if (!it.frame()->is_unoptimized() &&
+      (!it.frame()->is_maglev() || !v8_flags.osr_from_maglev)) {
     // Nothing to be done.
     return ReadOnlyRoots(isolate).undefined_value();
   }
@@ -677,7 +687,13 @@ RUNTIME_FUNCTION(Runtime_OptimizeOsr) {
   // If not (e.g. because we enter a nested loop first), the next JumpLoop will
   // see the cached OSR code with a mismatched offset, and trigger
   // non-concurrent OSR compilation and installation.
-  if (isolate->concurrent_recompilation_enabled() && v8_flags.concurrent_osr) {
+  // To tier up from Maglev to TF we always do this, because the non-concurrent
+  // recompilation in `CompileOptimizedOSRFromMaglev` is broken. See the comment
+  // in `runtime-compiler.cc`.
+  bool concurrent_osr =
+      isolate->concurrent_recompilation_enabled() && v8_flags.concurrent_osr;
+  bool is_maglev = false;
+  if (it.frame()->is_maglev() || concurrent_osr) {
     BytecodeOffset osr_offset = BytecodeOffset::None();
     if (it.frame()->is_unoptimized()) {
       UnoptimizedFrame* frame = UnoptimizedFrame::cast(it.frame());
@@ -689,31 +705,54 @@ RUNTIME_FUNCTION(Runtime_OptimizeOsr) {
       MaglevFrame* frame = MaglevFrame::cast(it.frame());
       Handle<BytecodeArray> bytecode_array(
           function->shared().GetBytecodeArray(isolate), isolate);
-      const int current_offset = frame->GetBytecodeOffsetForOSR().ToInt();
-      osr_offset =
-          OffsetOfNextJumpLoop(isolate, bytecode_array, current_offset);
+      const BytecodeOffset current_offset = frame->GetBytecodeOffsetForOSR();
+      // TODO(olivf) It's possible that a valid osr_offset happens to be the
+      // construct stub range but. We should use OptimizedFrame::Summarize here
+      // instead.
+      if (!function->IsConstructor() ||
+          !current_offset.IsValidForConstructStub()) {
+        osr_offset = OffsetOfNextJumpLoop(isolate, bytecode_array,
+                                          current_offset.ToInt());
+      }
+      is_maglev = true;
     }
 
     if (osr_offset.IsNone()) {
       // The loop may have been elided by bytecode generation (e.g. for
-      // patterns such as `do { ... } while (false);`.
+      // patterns such as `do { ... } while (false);` or we are in an inlined
+      // constructor stub.
       return ReadOnlyRoots(isolate).undefined_value();
     }
 
     // Finalize first to ensure all pending tasks are done (since we can't
     // queue more than one OSR job for each function).
-    FinalizeOptimization(isolate);
+    if (concurrent_osr) {
+      FinalizeOptimization(isolate);
+    }
 
     // Queue the job.
     auto unused_result = Compiler::CompileOptimizedOSR(
-        isolate, function, osr_offset, ConcurrencyMode::kConcurrent,
-        v8_flags.maglev_osr ? CodeKind::MAGLEV : CodeKind::TURBOFAN);
+        isolate, function, osr_offset,
+        concurrent_osr ? ConcurrencyMode::kConcurrent
+                       : ConcurrencyMode::kSynchronous,
+        (maglev::IsMaglevOsrEnabled() && !it.frame()->is_maglev())
+            ? CodeKind::MAGLEV
+            : CodeKind::TURBOFAN);
     USE(unused_result);
 
     // Finalize again to finish the queued job. The next call into
     // Runtime::kCompileOptimizedOSR will pick up the cached InstructionStream
     // object.
-    FinalizeOptimization(isolate);
+    if (concurrent_osr) {
+      FinalizeOptimization(isolate);
+    }
+
+    if (is_maglev) {
+      // Maglev ignores the maybe_has_optimized_osr_code flag, thus we also need
+      // to set a maximum urgency.
+      function->feedback_vector().set_osr_urgency(
+          FeedbackVector::kMaxOsrUrgency);
+    }
   }
 
   return ReadOnlyRoots(isolate).undefined_value();
@@ -1344,7 +1383,7 @@ RUNTIME_FUNCTION(Runtime_DisassembleFunction) {
   if (!func->is_compiled() && func->HasAvailableOptimizedCode()) {
     func->set_code(func->feedback_vector().optimized_code());
   }
-  CHECK(func->is_compiled() ||
+  CHECK(func->shared().is_compiled() ||
         Compiler::Compile(isolate, func, Compiler::KEEP_EXCEPTION,
                           &is_compiled_scope));
   StdoutStream os;

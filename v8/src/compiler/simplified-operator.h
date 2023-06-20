@@ -1182,10 +1182,11 @@ class V8_EXPORT_PRIVATE SimplifiedOperatorBuilder final
   const Operator* Null(wasm::ValueType type);
   const Operator* RttCanon(int index);
   const Operator* WasmTypeCheck(WasmTypeCheckConfig config);
+  const Operator* WasmTypeCheckAbstract(WasmTypeCheckConfig config);
   const Operator* WasmTypeCast(WasmTypeCheckConfig config);
+  const Operator* WasmTypeCastAbstract(WasmTypeCheckConfig config);
   const Operator* WasmExternInternalize();
   const Operator* WasmExternExternalize();
-  // TODO(manoskouk): Use {CheckForNull} over bool.
   const Operator* WasmStructGet(const wasm::StructType* type, int field_index,
                                 bool is_signed, CheckForNull null_check);
   const Operator* WasmStructSet(const wasm::StructType* type, int field_index,

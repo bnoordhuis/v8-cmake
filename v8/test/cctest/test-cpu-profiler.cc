@@ -1256,6 +1256,9 @@ static void TickLines(bool optimize) {
 #ifdef V8_ENABLE_MAGLEV
   // TODO(v8:7700): Also test maglev here.
   v8_flags.maglev = false;
+#ifdef V8_TARGET_ARCH_ARM
+  v8_flags.maglev_arm = false;
+#endif
 #endif  // V8_ENABLE_MAGLEV
 #endif  // !defined(V8_LITE_MODE) && defined(V8_ENABLE_TURBOFAN)
   CcTest::InitializeVM();
@@ -1429,7 +1432,7 @@ TEST(FunctionCallSample) {
 
   // Collect garbage that might have be generated while installing
   // extensions.
-  heap::CollectAllGarbage(CcTest::heap());
+  heap::InvokeMajorGC(CcTest::heap());
 
   CompileRun(call_function_test_source);
   v8::Local<v8::Function> function = GetFunction(env.local(), "start");
@@ -4203,7 +4206,7 @@ TEST(EmbedderStatePropagateNativeContextMove) {
                   isolate->heap());
               i::heap::ForceEvacuationCandidate(
                   i::Page::FromHeapObject(isolate->raw_native_context()));
-              heap::CollectAllGarbage(isolate->heap());
+              heap::InvokeMajorGC(isolate->heap());
             });
     v8::Local<v8::Function> move_func =
         move_func_template->GetFunction(execution_env.local()).ToLocalChecked();
@@ -4266,7 +4269,7 @@ TEST(ContextFilterMovedNativeContext) {
                   reinterpret_cast<i::Isolate*>(info.GetIsolate());
               i::heap::ForceEvacuationCandidate(
                   i::Page::FromHeapObject(isolate->raw_native_context()));
-              heap::CollectAllGarbage(isolate->heap());
+              heap::InvokeMajorGC(isolate->heap());
             });
     v8::Local<v8::Function> move_func =
         move_func_template->GetFunction(env.local()).ToLocalChecked();
@@ -4671,12 +4674,12 @@ TEST(BytecodeFlushEventsEagerLogging) {
     CHECK(instruction_stream_map->FindEntry(bytecode_start));
 
     // The code will survive at least two GCs.
-    heap::CollectAllGarbage(CcTest::heap());
-    heap::CollectAllGarbage(CcTest::heap());
+    heap::InvokeMajorGC(CcTest::heap());
+    heap::InvokeMajorGC(CcTest::heap());
     CHECK(function->shared().is_compiled());
 
-    function->shared().GetBytecodeArray(i_isolate).EnsureOldForTesting();
-    heap::CollectAllGarbage(CcTest::heap());
+    i::SharedFunctionInfo::EnsureOldForTesting(function->shared());
+    heap::InvokeMajorGC(CcTest::heap());
 
     // foo should no longer be in the compilation cache
     CHECK(!function->shared().is_compiled());
@@ -4725,7 +4728,7 @@ TEST(ClearUnusedWithEagerLogging) {
   // given two functions.
   isolate->compilation_cache()->Clear();
 
-  heap::CollectAllGarbage(CcTest::heap());
+  heap::InvokeMajorGC(CcTest::heap());
 
   // Verify that the InstructionStreamMap's size is unchanged post-GC.
   CHECK_EQ(instruction_stream_map->size(), initial_size);

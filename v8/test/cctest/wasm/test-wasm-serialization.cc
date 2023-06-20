@@ -107,7 +107,7 @@ class WasmSerializationTest {
   void CollectGarbage() {
     // Try hard to collect all garbage and will therefore also invoke all weak
     // callbacks of actually unreachable persistent handles.
-    heap::CollectAllAvailableGarbage(CcTest::heap());
+    heap::InvokeMemoryReducingMajorGCs(CcTest::heap());
   }
 
   v8::MemorySpan<const uint8_t> wire_bytes() const { return wire_bytes_; }
@@ -201,6 +201,7 @@ class WasmSerializationTest {
   v8::OwnedBuffer data_;
   v8::MemorySpan<const uint8_t> wire_bytes_ = {nullptr, 0};
   v8::MemorySpan<const uint8_t> serialized_bytes_ = {nullptr, 0};
+  FlagScope<int> tier_up_quickly_{&v8_flags.wasm_tiering_budget, 1000};
 };
 
 TEST(DeserializeValidModule) {

@@ -4,6 +4,7 @@
 
 #include "src/objects/js-function.h"
 
+#include "src/base/optional.h"
 #include "src/baseline/baseline-batch-compiler.h"
 #include "src/codegen/compiler.h"
 #include "src/common/globals.h"
@@ -229,9 +230,10 @@ void JSFunction::MarkForOptimization(Isolate* isolate, CodeKind target_kind,
   set_tiering_state(TieringStateFor(target_kind, mode));
 }
 
-void JSFunction::SetInterruptBudget(Isolate* isolate, bool deoptimize) {
+void JSFunction::SetInterruptBudget(
+    Isolate* isolate, base::Optional<CodeKind> override_active_tier) {
   raw_feedback_cell().set_interrupt_budget(
-      TieringManager::InterruptBudgetFor(isolate, *this, deoptimize));
+      TieringManager::InterruptBudgetFor(isolate, *this, override_active_tier));
 }
 
 // static
@@ -676,6 +678,10 @@ void SetInstancePrototype(Isolate* isolate, Handle<JSFunction> function,
       // At that point, a new initial map is created and the prototype is put
       // into the initial map where it belongs.
       function->set_prototype_or_initial_map(*value, kReleaseStore);
+      if (value->IsJSObjectThatCanBeTrackedAsPrototype()) {
+        // Optimize as prototype to detach it from its transition tree.
+        JSObject::OptimizeAsPrototype(Handle<JSObject>::cast(value));
+      }
     } else {
       Handle<Map> new_map =
           Map::Copy(isolate, initial_map, "SetInstancePrototype");
@@ -755,11 +761,10 @@ void JSFunction::SetInitialMap(Isolate* isolate, Handle<JSFunction> function,
 
 void JSFunction::SetInitialMap(Isolate* isolate, Handle<JSFunction> function,
                                Handle<Map> map, Handle<HeapObject> prototype,
-                               Handle<HeapObject> constructor) {
+                               Handle<JSFunction> constructor) {
   if (map->prototype() != *prototype) {
     Map::SetPrototype(isolate, map, prototype);
   }
-  DCHECK_IMPLIES(!constructor->IsJSFunction(), map->InSharedHeap());
   map->SetConstructor(*constructor);
   function->set_prototype_or_initial_map(*map, kReleaseStore);
   if (v8_flags.log_maps) {
@@ -808,8 +813,10 @@ void JSFunction::EnsureHasInitialMap(Handle<JSFunction> function) {
   Handle<HeapObject> prototype;
   if (function->has_instance_prototype()) {
     prototype = handle(function->instance_prototype(), isolate);
+    map->set_prototype(*prototype);
   } else {
     prototype = isolate->factory()->NewFunctionPrototype(function);
+    Map::SetPrototype(isolate, map, prototype);
   }
   DCHECK(map->has_fast_object_elements());
 

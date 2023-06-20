@@ -1993,7 +1993,10 @@ std::shared_ptr<NativeModule> CompileToNativeModule(
   }
 
   // Embedder usage count for declared shared memories.
-  if (module->has_shared_memory) {
+  const bool has_shared_memory =
+      std::any_of(module->memories.begin(), module->memories.end(),
+                  [](auto& memory) { return memory.is_shared; });
+  if (has_shared_memory) {
     isolate->CountUsage(v8::Isolate::UseCounterFeature::kWasmSharedMemory);
   }
 
@@ -2036,7 +2039,7 @@ std::shared_ptr<NativeModule> CompileToNativeModule(
 AsyncCompileJob::AsyncCompileJob(
     Isolate* isolate, WasmFeatures enabled_features,
     base::OwnedVector<const uint8_t> bytes, Handle<Context> context,
-    Handle<Context> incumbent_context, const char* api_method_name,
+    Handle<NativeContext> incumbent_context, const char* api_method_name,
     std::shared_ptr<CompilationResultResolver> resolver, int compilation_id)
     : isolate_(isolate),
       api_method_name_(api_method_name),
@@ -2264,7 +2267,10 @@ AsyncCompileJob::~AsyncCompileJob() {
 void AsyncCompileJob::CreateNativeModule(
     std::shared_ptr<const WasmModule> module, size_t code_size_estimate) {
   // Embedder usage count for declared shared memories.
-  if (module->has_shared_memory) {
+  const bool has_shared_memory =
+      std::any_of(module->memories.begin(), module->memories.end(),
+                  [](auto& memory) { return memory.is_shared; });
+  if (has_shared_memory) {
     isolate_->CountUsage(v8::Isolate::UseCounterFeature::kWasmSharedMemory);
   }
 
@@ -3436,7 +3442,9 @@ void CompilationStateImpl::InitializeCompilationProgressAfterDeserialization(
   }
   auto builder = std::make_unique<CompilationUnitBuilder>(native_module_);
   InitializeCompilationUnits(std::move(builder));
-  WaitForCompilationEvent(CompilationEvent::kFinishedBaselineCompilation);
+  if (!v8_flags.wasm_lazy_compilation) {
+    WaitForCompilationEvent(CompilationEvent::kFinishedBaselineCompilation);
+  }
 }
 
 void CompilationStateImpl::AddCallback(
@@ -3851,7 +3859,8 @@ using JSToWasmWrapperUnitVector =
 
 class CompileJSToWasmWrapperJob final : public BaseCompileJSToWasmWrapperJob {
  public:
-  CompileJSToWasmWrapperJob(JSToWasmWrapperUnitVector* compilation_units)
+  explicit CompileJSToWasmWrapperJob(
+      JSToWasmWrapperUnitVector* compilation_units)
       : BaseCompileJSToWasmWrapperJob(compilation_units->size()),
         compilation_units_(compilation_units) {}
 

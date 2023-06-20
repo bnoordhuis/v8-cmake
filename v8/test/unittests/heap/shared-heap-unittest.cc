@@ -4,8 +4,9 @@
 
 #include "src/base/optional.h"
 #include "src/base/platform/platform.h"
+#include "src/base/platform/semaphore.h"
 #include "src/heap/heap.h"
-#include "src/heap/parked-scope.h"
+#include "src/heap/parked-scope-inl.h"
 #include "test/unittests/heap/heap-utils.h"
 #include "test/unittests/test-utils.h"
 #include "testing/gtest/include/gtest/gtest.h"
@@ -65,7 +66,7 @@ class SharedOldSpaceAllocationThread final : public ParkingThread {
                 10, AllocationType::kSharedOld);
           }
 
-          CollectGarbage(OLD_SPACE, client_isolate);
+          InvokeMajorGC(i_client_isolate);
 
           v8::platform::PumpMessageLoop(i::V8::GetCurrentPlatform(),
                                         client_isolate);
@@ -75,19 +76,19 @@ class SharedOldSpaceAllocationThread final : public ParkingThread {
 }  // namespace
 
 TEST_F(SharedHeapTest, ConcurrentAllocationInSharedOldSpace) {
-  std::vector<std::unique_ptr<SharedOldSpaceAllocationThread>> threads;
-  const int kThreads = 4;
+  i_isolate()->main_thread_local_isolate()->BlockMainThreadWhileParked(
+      [](const ParkedScope& parked) {
+        std::vector<std::unique_ptr<SharedOldSpaceAllocationThread>> threads;
+        const int kThreads = 4;
 
-  ParkedScope parked(i_isolate()->main_thread_local_isolate());
-  for (int i = 0; i < kThreads; i++) {
-    auto thread = std::make_unique<SharedOldSpaceAllocationThread>();
-    CHECK(thread->Start());
-    threads.push_back(std::move(thread));
-  }
+        for (int i = 0; i < kThreads; i++) {
+          auto thread = std::make_unique<SharedOldSpaceAllocationThread>();
+          CHECK(thread->Start());
+          threads.push_back(std::move(thread));
+        }
 
-  for (auto& thread : threads) {
-    thread->ParkedJoin(parked);
-  }
+        ParkingThread::ParkedJoinAll(parked, threads);
+      });
 }
 
 namespace {
@@ -112,7 +113,7 @@ class SharedLargeOldSpaceAllocationThread final : public ParkingThread {
             CHECK(MemoryChunk::FromHeapObject(*fixed_array)->IsLargePage());
           }
 
-          CollectGarbage(OLD_SPACE, client_isolate);
+          InvokeMajorGC(i_client_isolate);
 
           v8::platform::PumpMessageLoop(i::V8::GetCurrentPlatform(),
                                         client_isolate);
@@ -122,19 +123,20 @@ class SharedLargeOldSpaceAllocationThread final : public ParkingThread {
 }  // namespace
 
 TEST_F(SharedHeapTest, ConcurrentAllocationInSharedLargeOldSpace) {
-  std::vector<std::unique_ptr<SharedLargeOldSpaceAllocationThread>> threads;
-  const int kThreads = 4;
+  i_isolate()->main_thread_local_isolate()->BlockMainThreadWhileParked(
+      [](const ParkedScope& parked) {
+        std::vector<std::unique_ptr<SharedLargeOldSpaceAllocationThread>>
+            threads;
+        const int kThreads = 4;
 
-  ParkedScope parked(i_isolate()->main_thread_local_isolate());
-  for (int i = 0; i < kThreads; i++) {
-    auto thread = std::make_unique<SharedLargeOldSpaceAllocationThread>();
-    CHECK(thread->Start());
-    threads.push_back(std::move(thread));
-  }
+        for (int i = 0; i < kThreads; i++) {
+          auto thread = std::make_unique<SharedLargeOldSpaceAllocationThread>();
+          CHECK(thread->Start());
+          threads.push_back(std::move(thread));
+        }
 
-  for (auto& thread : threads) {
-    thread->ParkedJoin(parked);
-  }
+        ParkingThread::ParkedJoinAll(parked, threads);
+      });
 }
 
 namespace {
@@ -155,7 +157,7 @@ class SharedMapSpaceAllocationThread final : public ParkingThread {
                 TERMINAL_FAST_ELEMENTS_KIND, 0, AllocationType::kSharedMap);
           }
 
-          CollectGarbage(OLD_SPACE, client_isolate);
+          InvokeMajorGC(i_client_isolate);
 
           v8::platform::PumpMessageLoop(i::V8::GetCurrentPlatform(),
                                         client_isolate);
@@ -165,23 +167,23 @@ class SharedMapSpaceAllocationThread final : public ParkingThread {
 }  // namespace
 
 TEST_F(SharedHeapTest, ConcurrentAllocationInSharedMapSpace) {
-  std::vector<std::unique_ptr<SharedMapSpaceAllocationThread>> threads;
-  const int kThreads = 4;
+  i_isolate()->main_thread_local_isolate()->BlockMainThreadWhileParked(
+      [](const ParkedScope& parked) {
+        std::vector<std::unique_ptr<SharedMapSpaceAllocationThread>> threads;
+        const int kThreads = 4;
 
-  ParkedScope parked(i_isolate()->main_thread_local_isolate());
-  for (int i = 0; i < kThreads; i++) {
-    auto thread = std::make_unique<SharedMapSpaceAllocationThread>();
-    CHECK(thread->Start());
-    threads.push_back(std::move(thread));
-  }
+        for (int i = 0; i < kThreads; i++) {
+          auto thread = std::make_unique<SharedMapSpaceAllocationThread>();
+          CHECK(thread->Start());
+          threads.push_back(std::move(thread));
+        }
 
-  for (auto& thread : threads) {
-    thread->ParkedJoin(parked);
-  }
+        ParkingThread::ParkedJoinAll(parked, threads);
+      });
 }
 
 TEST_F(SharedHeapNoClientsTest, SharedCollectionWithoutClients) {
-  ::v8::internal::CollectGarbage(OLD_SPACE, shared_space_isolate());
+  ::v8::internal::InvokeMajorGC(i_shared_space_isolate());
 }
 
 void AllocateInSharedHeap(int iterations = 100) {
@@ -226,8 +228,8 @@ void AllocateInSharedHeap(int iterations = 100) {
 
 TEST_F(SharedHeapTest, SharedCollectionWithOneClient) {
   v8_flags.max_old_space_size = 8;
-  ParkedScope parked(i_isolate()->main_thread_local_isolate());
-  AllocateInSharedHeap();
+  i_isolate()->main_thread_local_isolate()->BlockMainThreadWhileParked(
+      []() { AllocateInSharedHeap(); });
 }
 
 namespace {
@@ -244,19 +246,19 @@ class SharedFixedArrayAllocationThread final : public ParkingThread {
 TEST_F(SharedHeapTest, SharedCollectionWithMultipleClients) {
   v8_flags.max_old_space_size = 8;
 
-  std::vector<std::unique_ptr<SharedFixedArrayAllocationThread>> threads;
-  const int kThreads = 4;
+  i_isolate()->main_thread_local_isolate()->BlockMainThreadWhileParked(
+      [](const ParkedScope& parked) {
+        std::vector<std::unique_ptr<SharedFixedArrayAllocationThread>> threads;
+        const int kThreads = 4;
 
-  ParkedScope parked(i_isolate()->main_thread_local_isolate());
-  for (int i = 0; i < kThreads; i++) {
-    auto thread = std::make_unique<SharedFixedArrayAllocationThread>();
-    CHECK(thread->Start());
-    threads.push_back(std::move(thread));
-  }
+        for (int i = 0; i < kThreads; i++) {
+          auto thread = std::make_unique<SharedFixedArrayAllocationThread>();
+          CHECK(thread->Start());
+          threads.push_back(std::move(thread));
+        }
 
-  for (auto& thread : threads) {
-    thread->ParkedJoin(parked);
-  }
+        ParkingThread::ParkedJoinAll(parked, threads);
+      });
 }
 
 namespace {
@@ -300,13 +302,15 @@ class ConcurrentThread final : public ParkingThread {
   using ThreadType = ConcurrentThread<State>;
   using Callback = void(ThreadType*);
 
-  explicit ConcurrentThread(ParkingSemaphore* sema_ready = nullptr,
-                            ParkingSemaphore* sema_execute_start = nullptr,
-                            ParkingSemaphore* sema_execute_complete = nullptr)
+  explicit ConcurrentThread(
+      bool wait_while_parked, v8::base::Semaphore* sema_ready = nullptr,
+      v8::base::Semaphore* sema_execute_start = nullptr,
+      v8::base::Semaphore* sema_execute_complete = nullptr)
       : ParkingThread(Options("ConcurrentThread")),
         sema_ready_(sema_ready),
         sema_execute_start_(sema_execute_start),
-        sema_execute_complete_(sema_execute_complete) {}
+        sema_execute_complete_(sema_execute_complete),
+        wait_while_parked_(wait_while_parked) {}
 
   void Run() override {
     IsolateWrapper isolate_wrapper(kNoCounters);
@@ -321,8 +325,18 @@ class ConcurrentThread final : public ParkingThread {
 
     if (sema_ready_) sema_ready_->Signal();
     if (sema_execute_start_) {
-      sema_execute_start_->ParkedWait(
-          i_client_isolate_->main_thread_local_isolate());
+      if (wait_while_parked_) {
+        // Park and wait.
+        i_client_isolate_->main_thread_local_isolate()
+            ->BlockMainThreadWhileParked(
+                [this]() { sema_execute_start_->Wait(); });
+      } else {
+        // Do not park, but enter a safepoint every now and then.
+        const auto timeout = base::TimeDelta::FromMilliseconds(100);
+        do {
+          i_client_isolate_->main_thread_local_isolate()->heap()->Safepoint();
+        } while (!sema_execute_start_->WaitFor(timeout));
+      }
     }
 
     if (execute_callback_) execute_callback_(this);
@@ -356,24 +370,26 @@ class ConcurrentThread final : public ParkingThread {
  private:
   Isolate* i_client_isolate_ = nullptr;
   State* state_ = nullptr;
-  ParkingSemaphore* sema_ready_ = nullptr;
-  ParkingSemaphore* sema_execute_start_ = nullptr;
-  ParkingSemaphore* sema_execute_complete_ = nullptr;
+  v8::base::Semaphore* sema_ready_ = nullptr;
+  v8::base::Semaphore* sema_execute_start_ = nullptr;
+  v8::base::Semaphore* sema_execute_complete_ = nullptr;
   Callback* setup_callback_ = nullptr;
   Callback* execute_callback_ = nullptr;
   Callback* complete_callback_ = nullptr;
+  bool wait_while_parked_;
 };
 
-template <typename State, typename ThreadState>
+template <typename State, typename ThreadState, bool wait_while_parked>
 class SharedHeapTestBase : public TestJSSharedMemoryWithNativeContext {
  public:
-  using TestType = SharedHeapTestBase<State, ThreadState>;
+  using TestType = SharedHeapTestBase<State, ThreadState, wait_while_parked>;
   using Callback = void(TestType*);
   using ThreadType = ConcurrentThread<ThreadState>;
   using ThreadCallback = typename ThreadType::Callback;
 
   SharedHeapTestBase()
-      : thread_(std::make_unique<ThreadType>(&sema_ready_, &sema_execute_start_,
+      : thread_(std::make_unique<ThreadType>(wait_while_parked, &sema_ready_,
+                                             &sema_execute_start_,
                                              &sema_execute_complete_)) {}
 
   void Interact() {
@@ -384,10 +400,10 @@ class SharedHeapTestBase : public TestJSSharedMemoryWithNativeContext {
 
     if (setup_callback_) setup_callback_(this);
     CHECK(thread()->Start());
-    sema_ready_.ParkedWait(i_isolate()->main_thread_local_isolate());
+    sema_ready_.Wait();
     if (execute_callback_) execute_callback_(this);
     sema_execute_start_.Signal();
-    sema_execute_complete_.ParkedWait(i_isolate()->main_thread_local_isolate());
+    sema_execute_complete_.Wait();
     if (complete_callback_) complete_callback_(this);
     thread()->ParkedJoin(i_isolate()->main_thread_local_isolate());
     if (teardown_callback_) teardown_callback_(this);
@@ -411,9 +427,9 @@ class SharedHeapTestBase : public TestJSSharedMemoryWithNativeContext {
  private:
   State* state_ = nullptr;
   std::unique_ptr<ConcurrentThread<State>> thread_;
-  ParkingSemaphore sema_ready_{0};
-  ParkingSemaphore sema_execute_start_{0};
-  ParkingSemaphore sema_execute_complete_{0};
+  v8::base::Semaphore sema_ready_{0};
+  v8::base::Semaphore sema_execute_start_{0};
+  v8::base::Semaphore sema_execute_complete_{0};
   Callback* setup_callback_ = nullptr;
   Callback* execute_callback_ = nullptr;
   Callback* complete_callback_ = nullptr;
@@ -421,6 +437,25 @@ class SharedHeapTestBase : public TestJSSharedMemoryWithNativeContext {
 };
 
 }  // namespace
+
+#define TEST_SCENARIO(test_class, test_method, test_name, allocation, space) \
+  TEST_F(test_class, test_name) {                                            \
+    test_method<test_class, allocation, space>(this);                        \
+  }
+
+#define TEST_ALL_SCENARIA(test_class, test_prefix, test_method)    \
+  TEST_SCENARIO(test_class, test_method, test_prefix##YoungYoung,  \
+                AllocationType::kYoung, NEW_SPACE)                 \
+  TEST_SCENARIO(test_class, test_method, test_prefix##YoungOld,    \
+                AllocationType::kYoung, OLD_SPACE)                 \
+  TEST_SCENARIO(test_class, test_method, test_prefix##OldYoung,    \
+                AllocationType::kOld, NEW_SPACE)                   \
+  TEST_SCENARIO(test_class, test_method, test_prefix##OldOld,      \
+                AllocationType::kOld, OLD_SPACE)                   \
+  TEST_SCENARIO(test_class, test_method, test_prefix##SharedYoung, \
+                AllocationType::kSharedOld, NEW_SPACE)             \
+  TEST_SCENARIO(test_class, test_method, test_prefix##SharedOld,   \
+                AllocationType::kSharedOld, OLD_SPACE)
 
 namespace {
 
@@ -432,8 +467,25 @@ struct StateWithHandle {
   Global<v8::FixedArray> weak;
 };
 
-using SharedHeapTestStateWithHandle =
-    SharedHeapTestBase<StateWithHandle, StateWithHandle>;
+template <AllocationType allocation, AllocationSpace space, int size>
+void AllocateWithHandle(Isolate* isolate, StateWithHandle* state) {
+  // Install a handle scope.
+  state->scope.emplace(isolate);
+  // Allocate a fixed array, keep a handle and a weak reference.
+  state->handle = isolate->factory()->NewFixedArray(size, allocation);
+  auto l = Utils::Convert<FixedArray, v8::FixedArray>(state->handle);
+  state->weak.Reset(reinterpret_cast<v8::Isolate*>(isolate), l);
+  state->weak.SetWeak();
+}
+
+using SharedHeapTestStateWithHandleParked =
+    SharedHeapTestBase<StateWithHandle, StateWithHandle, true>;
+using SharedHeapTestStateWithHandleUnparked =
+    SharedHeapTestBase<StateWithHandle, StateWithHandle, false>;
+
+void InvokeGC(AllocationSpace space, Isolate* isolate) {
+  space == NEW_SPACE ? InvokeMinorGC(isolate) : InvokeMajorGC(isolate);
+}
 
 template <typename TestType, AllocationType allocation, AllocationSpace space>
 void ToEachTheirOwnWithHandle(TestType* test) {
@@ -442,35 +494,19 @@ void ToEachTheirOwnWithHandle(TestType* test) {
 
   // Install all the callbacks.
   test->with_setup([](TestType* test) {
-    auto isolate = test->i_isolate();
-    auto state = test->state();
-    // Install a handle scope.
-    state->scope.emplace(isolate);
-    // Allocate a fixed array, keep a handle and a weak reference.
-    state->handle = isolate->factory()->NewFixedArray(10, allocation);
-    auto l = Utils::Convert<FixedArray, v8::FixedArray>(state->handle);
-    state->weak.Reset(test->v8_isolate(), l);
-    state->weak.SetWeak();
+    AllocateWithHandle<allocation, space, 10>(test->i_isolate(), test->state());
   });
 
   thread->with_setup([](ThreadType* thread) {
-    auto isolate = thread->i_client_isolate();
-    auto state = thread->state();
-    // Install a handle scope.
-    state->scope.emplace(isolate);
-    // Allocate a fixed array, keep a handle and a weak reference.
-    state->handle = isolate->factory()->NewFixedArray(20, allocation);
-    auto l = Utils::Convert<FixedArray, v8::FixedArray>(state->handle);
-    state->weak.Reset(thread->client_isolate(), l);
-    state->weak.SetWeak();
+    AllocateWithHandle<allocation, space, 20>(thread->i_client_isolate(),
+                                              thread->state());
   });
 
   test->with_execute(
-      [](TestType* test) { i::CollectGarbage(space, test->v8_isolate()); });
+      [](TestType* test) { InvokeGC(space, test->i_isolate()); });
 
-  thread->with_execute([](ThreadType* thread) {
-    i::CollectGarbage(space, thread->client_isolate());
-  });
+  thread->with_execute(
+      [](ThreadType* thread) { InvokeGC(space, thread->i_client_isolate()); });
 
   test->with_complete([](TestType* test) {
     // The handle should keep the fixed array from being reclaimed.
@@ -481,12 +517,12 @@ void ToEachTheirOwnWithHandle(TestType* test) {
     // The handle should keep the fixed array from being reclaimed.
     EXPECT_FALSE(thread->state()->weak.IsEmpty());
     thread->state()->scope.reset();  // Deallocate the handle scope.
-    i::CollectGarbage(space, thread->client_isolate());
+    InvokeGC(space, thread->i_client_isolate());
   });
 
   test->with_teardown([](TestType* test) {
     test->state()->scope.reset();  // Deallocate the handle scope.
-    i::CollectGarbage(space, test->v8_isolate());
+    InvokeGC(space, test->i_isolate());
   });
 
   // Perform the test.
@@ -495,35 +531,10 @@ void ToEachTheirOwnWithHandle(TestType* test) {
 
 }  // namespace
 
-TEST_F(SharedHeapTestStateWithHandle, ToEachTheirOwnYoungYoung) {
-  ToEachTheirOwnWithHandle<SharedHeapTestStateWithHandle,
-                           AllocationType::kYoung, NEW_SPACE>(this);
-}
-
-TEST_F(SharedHeapTestStateWithHandle, ToEachTheirOwnYoungOld) {
-  ToEachTheirOwnWithHandle<SharedHeapTestStateWithHandle,
-                           AllocationType::kYoung, OLD_SPACE>(this);
-}
-
-TEST_F(SharedHeapTestStateWithHandle, ToEachTheirOwnOldYoung) {
-  ToEachTheirOwnWithHandle<SharedHeapTestStateWithHandle, AllocationType::kOld,
-                           NEW_SPACE>(this);
-}
-
-TEST_F(SharedHeapTestStateWithHandle, ToEachTheirOwnOldOld) {
-  ToEachTheirOwnWithHandle<SharedHeapTestStateWithHandle, AllocationType::kOld,
-                           OLD_SPACE>(this);
-}
-
-TEST_F(SharedHeapTestStateWithHandle, ToEachTheirOwnSharedYoung) {
-  ToEachTheirOwnWithHandle<SharedHeapTestStateWithHandle,
-                           AllocationType::kSharedOld, NEW_SPACE>(this);
-}
-
-TEST_F(SharedHeapTestStateWithHandle, ToEachTheirOwnSharedOld) {
-  ToEachTheirOwnWithHandle<SharedHeapTestStateWithHandle,
-                           AllocationType::kSharedOld, OLD_SPACE>(this);
-}
+TEST_ALL_SCENARIA(SharedHeapTestStateWithHandleParked, ToEachTheirOwn,
+                  ToEachTheirOwnWithHandle)
+TEST_ALL_SCENARIA(SharedHeapTestStateWithHandleUnparked, ToEachTheirOwn,
+                  ToEachTheirOwnWithHandle)
 
 #ifdef V8_ENABLE_CONSERVATIVE_STACK_SCANNING
 
@@ -537,8 +548,21 @@ struct StateWithRawPointer {
   Global<v8::FixedArray> weak;
 };
 
-using SharedHeapTestStateWithRawPointer =
-    SharedHeapTestBase<StateWithRawPointer, StateWithRawPointer>;
+template <AllocationType allocation, AllocationSpace space, int size>
+void AllocateWithRawPointer(Isolate* isolate, StateWithRawPointer* state) {
+  // Allocate a fixed array, keep a raw pointer and a weak reference.
+  HandleScope scope(isolate);
+  auto h = isolate->factory()->NewFixedArray(size, allocation);
+  state->ptr = h->GetHeapObject().ptr();
+  auto l = Utils::Convert<FixedArray, v8::FixedArray>(h);
+  state->weak.Reset(reinterpret_cast<v8::Isolate*>(isolate), l);
+  state->weak.SetWeak();
+}
+
+using SharedHeapTestStateWithRawPointerParked =
+    SharedHeapTestBase<StateWithRawPointer, StateWithRawPointer, true>;
+using SharedHeapTestStateWithRawPointerUnparked =
+    SharedHeapTestBase<StateWithRawPointer, StateWithRawPointer, false>;
 
 template <typename TestType, AllocationType allocation, AllocationSpace space>
 void ToEachTheirOwnWithRawPointer(TestType* test) {
@@ -547,39 +571,20 @@ void ToEachTheirOwnWithRawPointer(TestType* test) {
 
   // Install all the callbacks.
   test->with_setup([](TestType* test) {
-    auto isolate = test->i_isolate();
-    auto state = test->state();
-    {
-      // Allocate a fixed array, keep a raw pointer and a weak reference.
-      HandleScope scope(isolate);
-      auto h = isolate->factory()->NewFixedArray(10, allocation);
-      state->ptr = h->GetHeapObject().ptr();
-      auto l = Utils::Convert<FixedArray, v8::FixedArray>(h);
-      state->weak.Reset(test->v8_isolate(), l);
-      state->weak.SetWeak();
-    }
+    AllocateWithRawPointer<allocation, space, 10>(test->i_isolate(),
+                                                  test->state());
   });
 
   thread->with_setup([](ThreadType* thread) {
-    auto isolate = thread->i_client_isolate();
-    auto state = thread->state();
-    {
-      // Allocate a fixed array, keep a raw pointer and a weak reference.
-      HandleScope scope(isolate);
-      auto h = isolate->factory()->NewFixedArray(20, allocation);
-      state->ptr = h->GetHeapObject().ptr();
-      auto l = Utils::Convert<FixedArray, v8::FixedArray>(h);
-      state->weak.Reset(thread->client_isolate(), l);
-      state->weak.SetWeak();
-    }
+    AllocateWithRawPointer<allocation, space, 20>(thread->i_client_isolate(),
+                                                  thread->state());
   });
 
   test->with_execute(
-      [](TestType* test) { i::CollectGarbage(space, test->v8_isolate()); });
+      [](TestType* test) { InvokeGC(space, test->i_isolate()); });
 
-  thread->with_execute([](ThreadType* thread) {
-    i::CollectGarbage(space, thread->client_isolate());
-  });
+  thread->with_execute(
+      [](ThreadType* thread) { InvokeGC(space, thread->i_client_isolate()); });
 
   test->with_complete([](TestType* test) {
     // With conservative stack scanning, the raw pointer should keep the fixed
@@ -591,11 +596,11 @@ void ToEachTheirOwnWithRawPointer(TestType* test) {
     // With conservative stack scanning, the raw pointer should keep the fixed
     // array from being reclaimed.
     EXPECT_FALSE(thread->state()->weak.IsEmpty());
-    i::CollectGarbage(space, thread->client_isolate());
+    InvokeGC(space, thread->i_client_isolate());
   });
 
   test->with_teardown(
-      [](TestType* test) { i::CollectGarbage(space, test->v8_isolate()); });
+      [](TestType* test) { InvokeGC(space, test->i_isolate()); });
 
   // Perform the test.
   test->Interact();
@@ -603,39 +608,17 @@ void ToEachTheirOwnWithRawPointer(TestType* test) {
 
 }  // namespace
 
-TEST_F(SharedHeapTestStateWithRawPointer, ToEachTheirOwnYoungYoung) {
-  ToEachTheirOwnWithRawPointer<SharedHeapTestStateWithRawPointer,
-                               AllocationType::kYoung, NEW_SPACE>(this);
-}
-
-TEST_F(SharedHeapTestStateWithRawPointer, ToEachTheirOwnYoungOld) {
-  ToEachTheirOwnWithRawPointer<SharedHeapTestStateWithRawPointer,
-                               AllocationType::kYoung, OLD_SPACE>(this);
-}
-
-TEST_F(SharedHeapTestStateWithRawPointer, ToEachTheirOwnOldYoung) {
-  ToEachTheirOwnWithRawPointer<SharedHeapTestStateWithRawPointer,
-                               AllocationType::kOld, NEW_SPACE>(this);
-}
-
-TEST_F(SharedHeapTestStateWithRawPointer, ToEachTheirOwnOldOld) {
-  ToEachTheirOwnWithRawPointer<SharedHeapTestStateWithRawPointer,
-                               AllocationType::kOld, OLD_SPACE>(this);
-}
-
-TEST_F(SharedHeapTestStateWithRawPointer, ToEachTheirOwnSharedYoung) {
-  ToEachTheirOwnWithRawPointer<SharedHeapTestStateWithRawPointer,
-                               AllocationType::kSharedOld, NEW_SPACE>(this);
-}
-
-TEST_F(SharedHeapTestStateWithRawPointer, ToEachTheirOwnSharedOld) {
-  ToEachTheirOwnWithRawPointer<SharedHeapTestStateWithRawPointer,
-                               AllocationType::kSharedOld, OLD_SPACE>(this);
-}
+TEST_ALL_SCENARIA(SharedHeapTestStateWithRawPointerParked, ToEachTheirOwn,
+                  ToEachTheirOwnWithRawPointer)
+TEST_ALL_SCENARIA(SharedHeapTestStateWithRawPointerUnparked, ToEachTheirOwn,
+                  ToEachTheirOwnWithRawPointer)
 
 #endif  // V8_ENABLE_CONSERVATIVE_STACK_SCANNING
+
+#undef TEST_SCENARIO
+#undef TEST_ALL_SCENARIA
 
 }  // namespace internal
 }  // namespace v8
 
-#endif  // V8_CAN_CREATE_SHARED_HEAP
+#endif  // V8_CAN_CREATE_SHARED_HEAP_BOOL

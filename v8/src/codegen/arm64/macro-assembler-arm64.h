@@ -921,8 +921,6 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
       Register object, Register slot_address, SaveFPRegsMode fp_mode,
       StubCallMode mode = StubCallMode::kCallBuiltinPointer);
 
-  inline void MoveHeapNumber(Register dst, double value);
-
   // For a given |object| and |offset|:
   //   - Move |object| to |dst_object|.
   //   - Compute the address of the slot pointed to by |offset| in |object| and
@@ -1560,11 +1558,15 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   void StoreSandboxedPointerField(const Register& value,
                                   const MemOperand& dst_field_operand);
 
-  // Loads a field containing off-heap pointer and does necessary decoding
-  // if sandboxed external pointers are enabled.
+  // Loads a field containing an off-heap ("external") pointer and does
+  // necessary decoding if the sandbox is enabled.
   void LoadExternalPointerField(Register destination, MemOperand field_operand,
                                 ExternalPointerTag tag,
                                 Register isolate_root = Register::no_reg());
+
+  // Loads a field containing a code pointer and does the necessary decoding if
+  // the sandbox is enabled.
+  void LoadCodePointerField(Register destination, MemOperand field_operand);
 
   // Instruction set functions ------------------------------------------------
   // Logical macros.
@@ -1897,6 +1899,8 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
 
   void JumpIfCodeIsMarkedForDeoptimization(Register code, Register scratch,
                                            Label* if_marked_for_deoptimization);
+  void JumpIfCodeIsTurbofanned(Register code, Register scratch,
+                               Label* if_marked_for_deoptimization);
   Operand ClearedValue() const;
 
   Operand ReceiverOperand(const Register arg_count);
@@ -2148,8 +2152,9 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   // Falls through and sets scratch_and_result to 0 on failure, jumps to
   // on_result on success.
   void TryLoadOptimizedOsrCode(Register scratch_and_result,
-                               Register feedback_vector, FeedbackSlot slot,
-                               Label* on_result, Label::Distance distance);
+                               CodeKind min_opt_level, Register feedback_vector,
+                               FeedbackSlot slot, Label* on_result,
+                               Label::Distance distance);
 
  protected:
   // The actual Push and Pop implementations. These don't generate any code
@@ -2203,8 +2208,40 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   // for generating appropriate code.
   // Otherwise it returns false.
   // This function also checks wether veneers need to be emitted.
-  bool NeedExtraInstructionsOrRegisterBranch(Label* label,
-                                             ImmBranchType branch_type);
+  template <ImmBranchType branch_type>
+  bool NeedExtraInstructionsOrRegisterBranch(Label* label) {
+    static_assert((branch_type == CondBranchType) ||
+                  (branch_type == CompareBranchType) ||
+                  (branch_type == TestBranchType));
+
+    bool need_longer_range = false;
+    // There are two situations in which we care about the offset being out of
+    // range:
+    //  - The label is bound but too far away.
+    //  - The label is not bound but linked, and the previous branch
+    //    instruction in the chain is too far away.
+    if (label->is_bound() || label->is_linked()) {
+      need_longer_range = !Instruction::IsValidImmPCOffset(
+          branch_type, label->pos() - pc_offset());
+    }
+    if (!need_longer_range && !label->is_bound()) {
+      int max_reachable_pc =
+          pc_offset() + Instruction::ImmBranchRange(branch_type);
+
+      // Use the LSB of the max_reachable_pc (always four-byte aligned) to
+      // encode the branch type. We need only distinguish between TB[N]Z and
+      // CB[N]Z/conditional branch, as the ranges for the latter are the same.
+      int branch_type_tag = (branch_type == TestBranchType) ? 1 : 0;
+
+      unresolved_branches_.insert(
+          std::pair<int, Label*>(max_reachable_pc + branch_type_tag, label));
+      // Also maintain the next pool check.
+      next_veneer_pool_check_ =
+          std::min(next_veneer_pool_check_,
+                   max_reachable_pc - kVeneerDistanceCheckMargin);
+    }
+    return need_longer_range;
+  }
 
   void Movi16bitHelper(const VRegister& vd, uint64_t imm);
   void Movi32bitHelper(const VRegister& vd, uint64_t imm);
@@ -2212,6 +2249,8 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
 
   void LoadStoreMacro(const CPURegister& rt, const MemOperand& addr,
                       LoadStoreOp op);
+  void LoadStoreMacroComplex(const CPURegister& rt, const MemOperand& addr,
+                             LoadStoreOp op);
 
   void LoadStorePairMacro(const CPURegister& rt, const CPURegister& rt2,
                           const MemOperand& addr, LoadStorePairOp op);

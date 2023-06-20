@@ -13,6 +13,7 @@
 #include "src/objects/objects-definitions.h"
 #include "src/objects/objects.h"
 #include "src/objects/slots.h"
+#include "src/objects/tagged.h"
 
 namespace v8 {
 namespace internal {
@@ -191,6 +192,10 @@ class Symbol;
   V(Map, stale_register_map, StaleRegisterMap)                                 \
   V(Map, self_reference_marker_map, SelfReferenceMarkerMap)                    \
   V(Map, basic_block_counters_marker_map, BasicBlockCountersMarkerMap)         \
+  /* Shared space object maps */                                               \
+  V(Map, js_shared_array_map, JSSharedArrayMap)                                \
+  V(Map, js_atomics_mutex_map, JSAtomicsMutexMap)                              \
+  V(Map, js_atomics_condition_map, JSAtomicsConditionMap)                      \
   /* Canonical empty values */                                                 \
   V(EnumCache, empty_enum_cache, EmptyEnumCache)                               \
   V(PropertyArray, empty_property_array, EmptyPropertyArray)                   \
@@ -448,6 +453,10 @@ enum class RootIndex : uint16_t {
   kFirstHeapNumberRoot = kNanValue,
   kLastHeapNumberRoot = kSmiMaxValuePlusOne,
 
+  // Keep this in sync with the first map allocated by
+  // Heap::CreateLateReadOnlyJSReceiverMaps.
+  kFirstJSReceiverMapRoot = kJSSharedArrayMap,
+
   // Use for fast protector update checks
   kFirstNameForProtector = kconstructor_string,
   kNameForProtectorCount = 0 NAME_FOR_PROTECTOR_ROOT_LIST(COUNT_ROOT),
@@ -610,6 +619,10 @@ class RootsTable {
   friend class SoleReadOnlyHeap;
 };
 
+#define ROOT_TYPE_FWD_DECL(Type, name, CamelName) class Type;
+READ_ONLY_ROOT_LIST(ROOT_TYPE_FWD_DECL)
+#undef ROOT_TYPE_FWD_DECL
+
 class ReadOnlyRoots {
  public:
   static constexpr size_t kEntriesCount =
@@ -623,9 +636,9 @@ class ReadOnlyRoots {
   // map-word instead of a tagged heap pointer.
   MapWord one_pointer_filler_map_word();
 
-#define ROOT_ACCESSOR(Type, name, CamelName)     \
-  V8_INLINE class Type name() const;             \
-  V8_INLINE class Type unchecked_##name() const; \
+#define ROOT_ACCESSOR(Type, name, CamelName)       \
+  V8_INLINE Tagged<Type> name() const;             \
+  V8_INLINE Tagged<Type> unchecked_##name() const; \
   V8_INLINE Handle<Type> name##_handle() const;
 
   READ_ONLY_ROOT_LIST(ROOT_ACCESSOR)
@@ -642,7 +655,7 @@ class ReadOnlyRoots {
   Handle<HeapNumber> FindHeapNumber(double value);
 
   V8_INLINE Address address_at(RootIndex root_index) const;
-  V8_INLINE Object object_at(RootIndex root_index) const;
+  V8_INLINE Tagged<Object> object_at(RootIndex root_index) const;
   V8_INLINE Handle<Object> handle_at(RootIndex root_index) const;
 
   // Check if a slot is initialized yet. Should only be neccessary for code
@@ -678,6 +691,7 @@ class ReadOnlyRoots {
 
   friend class ReadOnlyHeap;
   friend class DeserializerAllocator;
+  friend class ReadOnlyHeapImageDeserializer;
 };
 
 }  // namespace internal

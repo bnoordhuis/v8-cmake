@@ -42,6 +42,7 @@
 #include "src/debug/debug.h"
 #include "src/handles/global-handles.h"
 #include "src/heap/heap-inl.h"
+#include "src/heap/pretenuring-handler.h"
 #include "src/objects/objects-inl.h"
 #include "src/profiler/allocation-tracker.h"
 #include "src/profiler/heap-profiler.h"
@@ -915,7 +916,7 @@ TEST(HeapSnapshotAddressReuse) {
   CompileRun(
       "for (var i = 0; i < 10000; ++i)\n"
       "  a[i] = new A();\n");
-  i::heap::CollectAllGarbage(CcTest::heap());
+  i::heap::InvokeMajorGC(CcTest::heap());
 
   const v8::HeapSnapshot* snapshot2 = heap_profiler->TakeHeapSnapshot();
   CHECK(ValidateSnapshot(snapshot2));
@@ -957,7 +958,7 @@ TEST(HeapEntryIdsAndArrayShift) {
       "for (var i = 0; i < 1; ++i)\n"
       "  a.shift();\n");
 
-  i::heap::CollectAllGarbage(CcTest::heap());
+  i::heap::InvokeMajorGC(CcTest::heap());
 
   const v8::HeapSnapshot* snapshot2 = heap_profiler->TakeHeapSnapshot();
   CHECK(ValidateSnapshot(snapshot2));
@@ -998,7 +999,7 @@ TEST(HeapEntryIdsAndGC) {
   const v8::HeapSnapshot* snapshot1 = heap_profiler->TakeHeapSnapshot();
   CHECK(ValidateSnapshot(snapshot1));
 
-  i::heap::CollectAllGarbage(CcTest::heap());
+  i::heap::InvokeMajorGC(CcTest::heap());
 
   const v8::HeapSnapshot* snapshot2 = heap_profiler->TakeHeapSnapshot();
   CHECK(ValidateSnapshot(snapshot2));
@@ -1271,7 +1272,7 @@ TEST(HeapSnapshotObjectsStats) {
   // We have to call GC 6 times. In other case the garbage will be
   // the reason of flakiness.
   for (int i = 0; i < 6; ++i) {
-    i::heap::CollectAllGarbage(CcTest::heap());
+    i::heap::InvokeMajorGC(CcTest::heap());
   }
 
   v8::SnapshotObjectId initial_id;
@@ -1426,7 +1427,7 @@ TEST(HeapObjectIds) {
   }
 
   heap_profiler->StopTrackingHeapObjects();
-  i::heap::CollectAllAvailableGarbage(CcTest::heap());
+  i::heap::InvokeMemoryReducingMajorGCs(CcTest::heap());
 
   for (int i = 0; i < kLength; i++) {
     v8::SnapshotObjectId id = heap_profiler->GetObjectId(objects[i]);
@@ -1805,7 +1806,7 @@ TEST(NativeSnapshotObjectId) {
 TEST(NativeSnapshotObjectIdMoving) {
   if (i::v8_flags.enable_third_party_heap) return;
   // Required to allow moving specific objects.
-  ManualGCScope manual_gc_scope;
+  i::ManualGCScope manual_gc_scope;
   i::heap::ManualEvacuationCandidatesSelectionScope
       manual_evacuation_candidate_selection_scope(manual_gc_scope);
   // Concurrent allocation writes page flags in a racy way.
@@ -1847,7 +1848,7 @@ TEST(NativeSnapshotObjectIdMoving) {
         v8::Utils::OpenHandle(*v8::Local<v8::String>::Cast(local)));
     i::heap::ForceEvacuationCandidate(i::Page::FromHeapObject(*internal));
   }
-  i::heap::CollectAllGarbage(CcTest::heap());
+  i::heap::InvokeMajorGC(CcTest::heap());
 
   non_merged_id = heap_profiler->GetObjectId(&native1);
   CHECK_NE(v8::HeapProfiler::kUnknownObjectId, non_merged_id);
@@ -3718,7 +3719,7 @@ TEST(SamplingHeapProfiler) {
         "  eval(\"new Array(100)\");\n"
         "}\n");
 
-    i::heap::CollectAllGarbage(CcTest::heap());
+    i::heap::InvokeMajorGC(CcTest::heap());
 
     std::unique_ptr<v8::AllocationProfile> profile(
         heap_profiler->GetAllocationProfile());
@@ -3900,7 +3901,7 @@ TEST(SamplingHeapProfilerLeftTrimming) {
       "      a.shift();\n"
       "}\n");
 
-  i::heap::CollectGarbage(CcTest::heap(), i::NEW_SPACE);
+  i::heap::InvokeMinorGC(CcTest::heap());
   // Should not crash.
 
   heap_profiler->StopSamplingHeapProfiler();
@@ -3945,7 +3946,7 @@ TEST(SamplingHeapProfilerPretenuredInlineAllocations) {
                      "%%OptimizeFunctionOnNextCall(f);"
                      "f();"
                      "f;",
-                     i::AllocationSite::kPretenureMinimumCreated + 1);
+                     i::PretenuringHandler::GetMinMementoCountForTesting() + 1);
 
   v8::Local<v8::Function> f =
       v8::Local<v8::Function>::Cast(CompileRun(source.begin()));

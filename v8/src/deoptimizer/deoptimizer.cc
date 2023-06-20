@@ -885,14 +885,17 @@ void Deoptimizer::DoComputeOutputFrames() {
   // Don't reset the tiering state for OSR code since we might reuse OSR code
   // after deopt, and we still want to tier up to non-OSR code even if OSR code
   // deoptimized.
+  bool osr_early_exit = Deoptimizer::GetDeoptInfo().deopt_reason ==
+                        DeoptimizeReason::kOSREarlyExit;
   if (function_.IsJSFunction() &&
       (compiled_code_.osr_offset().IsNone()
            ? function_.code() == compiled_code_
-           : DeoptExitIsInsideOsrLoop(isolate(), function_,
-                                      bytecode_offset_in_outermost_frame_,
-                                      compiled_code_.osr_offset()))) {
-    function_.SetInterruptBudget(isolate_, true);
+           : (!osr_early_exit &&
+              DeoptExitIsInsideOsrLoop(isolate(), function_,
+                                       bytecode_offset_in_outermost_frame_,
+                                       compiled_code_.osr_offset())))) {
     function_.reset_tiering_state();
+    function_.SetInterruptBudget(isolate_, CodeKind::INTERPRETED_FUNCTION);
   }
 
   // Print some helpful diagnostic information.
@@ -2044,11 +2047,12 @@ unsigned Deoptimizer::ComputeInputFrameSize() const {
   unsigned result = fixed_size_above_fp + fp_to_sp_delta_;
   DCHECK(CodeKindCanDeoptimize(compiled_code_.kind()));
   unsigned stack_slots = compiled_code_.stack_slots();
-  if (compiled_code_.is_maglevved()) {
+  if (compiled_code_.is_maglevved() && !deoptimizing_throw_) {
     // Maglev code can deopt in deferred code which has spilled registers across
     // the call. These will be included in the fp_to_sp_delta, but the expected
     // frame size won't include them, so we need to check for less-equal rather
-    // than equal.
+    // than equal. For deoptimizing throws, these will have already been trimmed
+    // off.
     CHECK_LE(fixed_size_above_fp + (stack_slots * kSystemPointerSize) -
                  CommonFrameConstants::kFixedFrameSizeAboveFp,
              result);

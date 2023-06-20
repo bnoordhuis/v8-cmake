@@ -27,7 +27,7 @@ void LogExecution(Isolate* isolate, Handle<JSFunction> function) {
   Handle<SharedFunctionInfo> sfi(function->shared(), isolate);
   Handle<String> name = SharedFunctionInfo::DebugName(isolate, sfi);
   DisallowGarbageCollection no_gc;
-  auto raw_sfi = *sfi;
+  Tagged<SharedFunctionInfo> raw_sfi = *sfi;
   std::string event_name = "first-execution";
   CodeKind kind = function->abstract_code(isolate).kind(isolate);
   // Not adding "-interpreter" for tooling backwards compatiblity.
@@ -36,8 +36,8 @@ void LogExecution(Isolate* isolate, Handle<JSFunction> function) {
     event_name += CodeKindToString(kind);
   }
   LOG(isolate,
-      FunctionEvent(event_name.c_str(), Script::cast(raw_sfi.script()).id(), 0,
-                    raw_sfi.StartPosition(), raw_sfi.EndPosition(), *name));
+      FunctionEvent(event_name.c_str(), Script::cast(raw_sfi->script()).id(), 0,
+                    raw_sfi->StartPosition(), raw_sfi->EndPosition(), *name));
   function->feedback_vector().set_log_next_execution(false);
 }
 }  // namespace
@@ -387,7 +387,8 @@ RUNTIME_FUNCTION(Runtime_NotifyDeoptimized) {
   if (osr_offset.IsNone()) {
     Deoptimizer::DeoptimizeFunction(*function, *optimized_code);
     DeoptAllOsrLoopsContainingDeoptExit(isolate, *function, deopt_exit_offset);
-  } else if (Deoptimizer::DeoptExitIsInsideOsrLoop(
+  } else if (deopt_reason != DeoptimizeReason::kOSREarlyExit &&
+             Deoptimizer::DeoptExitIsInsideOsrLoop(
                  isolate, *function, deopt_exit_offset, osr_offset)) {
     Deoptimizer::DeoptimizeFunction(*function, *optimized_code);
   }
@@ -443,7 +444,7 @@ void GetOsrOffsetAndFunctionForOSR(Isolate* isolate, BytecodeOffset* osr_offset,
 }
 
 Object CompileOptimizedOSR(Isolate* isolate, Handle<JSFunction> function,
-                           BytecodeOffset osr_offset) {
+                           CodeKind min_opt_level, BytecodeOffset osr_offset) {
   const ConcurrencyMode mode =
       V8_LIKELY(isolate->concurrent_recompilation_enabled() &&
                 v8_flags.concurrent_osr)
@@ -453,7 +454,9 @@ Object CompileOptimizedOSR(Isolate* isolate, Handle<JSFunction> function,
   Handle<Code> result;
   if (!Compiler::CompileOptimizedOSR(
            isolate, function, osr_offset, mode,
-           v8_flags.maglev_osr ? CodeKind::MAGLEV : CodeKind::TURBOFAN)
+           (maglev::IsMaglevOsrEnabled() && min_opt_level == CodeKind::MAGLEV)
+               ? CodeKind::MAGLEV
+               : CodeKind::TURBOFAN)
            .ToHandle(&result) ||
       result->marked_for_deoptimization()) {
     // An empty result can mean one of two things:
@@ -493,7 +496,7 @@ RUNTIME_FUNCTION(Runtime_CompileOptimizedOSR) {
   Handle<JSFunction> function;
   GetOsrOffsetAndFunctionForOSR(isolate, &osr_offset, &function);
 
-  return CompileOptimizedOSR(isolate, function, osr_offset);
+  return CompileOptimizedOSR(isolate, function, CodeKind::MAGLEV, osr_offset);
 }
 
 namespace {
@@ -519,10 +522,17 @@ Object CompileOptimizedOSRFromMaglev(Isolate* isolate,
     // letting it handle OSR. How do we trigger the early bailout? Returning
     // any non-null InstructionStream from this function triggers the deopt in
     // JumpLoop.
+    if (v8_flags.trace_osr) {
+      CodeTracer::Scope scope(isolate->GetCodeTracer());
+      PrintF(scope.file(),
+             "[OSR - Tiering from Maglev to Turbofan failed because "
+             "concurrent_osr is disabled. function: %s, osr offset: %d]\n",
+             function->DebugNameCStr().get(), osr_offset.ToInt());
+    }
     return function->code();
   }
 
-  return CompileOptimizedOSR(isolate, function, osr_offset);
+  return CompileOptimizedOSR(isolate, function, CodeKind::TURBOFAN, osr_offset);
 }
 
 }  // namespace
@@ -557,7 +567,10 @@ RUNTIME_FUNCTION(Runtime_CompileOptimizedOSRFromMaglevInlined) {
   if (*function != frame->function()) {
     // We are OSRing an inlined function. Mark the top frame one for
     // optimization.
-    isolate->tiering_manager()->MarkForTurboFanOptimization(frame->function());
+    if (!frame->function().ActiveTierIsTurbofan()) {
+      isolate->tiering_manager()->MarkForTurboFanOptimization(
+          frame->function());
+    }
   }
 
   return CompileOptimizedOSRFromMaglev(isolate, function, osr_offset);
@@ -588,8 +601,7 @@ static Object CompileGlobalEval(Isolate* isolate,
                                 Handle<SharedFunctionInfo> outer_info,
                                 LanguageMode language_mode,
                                 int eval_scope_position, int eval_position) {
-  Handle<Context> context(isolate->context(), isolate);
-  Handle<Context> native_context(context->native_context(), isolate);
+  Handle<NativeContext> native_context = isolate->native_context();
 
   // Check if native context allows code generation from
   // strings. Throw an exception if it doesn't.
@@ -615,6 +627,7 @@ static Object CompileGlobalEval(Isolate* isolate,
   // and return the compiled function bound in the local context.
   static const ParseRestriction restriction = NO_PARSE_RESTRICTION;
   Handle<JSFunction> compiled;
+  Handle<Context> context(isolate->context(), isolate);
   ASSIGN_RETURN_ON_EXCEPTION_VALUE(
       isolate, compiled,
       Compiler::GetFunctionFromEval(

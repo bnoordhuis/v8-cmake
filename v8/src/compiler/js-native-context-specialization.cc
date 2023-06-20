@@ -2768,7 +2768,10 @@ Node* JSNativeContextSpecialization::InlineApiCall(
   // Only setters have a value.
   int const argc = value == nullptr ? 0 : 1;
   // The stub always expects the receiver as the first param on the stack.
-  Callable call_api_callback = CodeFactory::CallApiCallback(isolate());
+  Callable call_api_callback = Builtins::CallableFor(
+      isolate(), call_handler_info.object()->IsSideEffectCallHandlerInfo()
+                     ? Builtin::kCallApiCallbackWithSideEffects
+                     : Builtin::kCallApiCallbackNoSideEffects);
   CallInterfaceDescriptor call_interface_descriptor =
       call_api_callback.descriptor();
   auto call_descriptor = Linkage::GetStubCallDescriptor(
@@ -3260,11 +3263,14 @@ JSNativeContextSpecialization::BuildElementAccess(
         // Do a real bounds check against {length}. This is in order to
         // protect against a potential typer bug leading to the elimination of
         // the NumberLessThan above.
-        index = etrue = graph()->NewNode(
-            simplified()->CheckBounds(
-                FeedbackSource(), CheckBoundsFlag::kConvertStringAndMinusZero |
-                                      CheckBoundsFlag::kAbortOnOutOfBounds),
-            index, length, etrue, if_true);
+        if (v8_flags.turbo_typer_hardening) {
+          index = etrue =
+              graph()->NewNode(simplified()->CheckBounds(
+                                   FeedbackSource(),
+                                   CheckBoundsFlag::kConvertStringAndMinusZero |
+                                       CheckBoundsFlag::kAbortOnOutOfBounds),
+                               index, length, etrue, if_true);
+        }
 
         // Perform the actual load
         vtrue = etrue =
@@ -3679,12 +3685,14 @@ JSNativeContextSpecialization::
           // Do a real bounds check against {length}. This is in order to
           // protect against a potential typer bug leading to the elimination
           // of the NumberLessThan above.
-          index = etrue =
-              graph()->NewNode(simplified()->CheckBounds(
-                                   FeedbackSource(),
-                                   CheckBoundsFlag::kConvertStringAndMinusZero |
-                                       CheckBoundsFlag::kAbortOnOutOfBounds),
-                               index, length, etrue, if_true);
+          if (v8_flags.turbo_typer_hardening) {
+            index = etrue = graph()->NewNode(
+                simplified()->CheckBounds(
+                    FeedbackSource(),
+                    CheckBoundsFlag::kConvertStringAndMinusZero |
+                        CheckBoundsFlag::kAbortOnOutOfBounds),
+                index, length, etrue, if_true);
+          }
 
           // Perform the actual load
           vtrue = etrue = graph()->NewNode(
@@ -3759,12 +3767,14 @@ JSNativeContextSpecialization::
           // Do a real bounds check against {length}. This is in order to
           // protect against a potential typer bug leading to the elimination
           // of the NumberLessThan above.
-          index = etrue =
-              graph()->NewNode(simplified()->CheckBounds(
-                                   FeedbackSource(),
-                                   CheckBoundsFlag::kConvertStringAndMinusZero |
-                                       CheckBoundsFlag::kAbortOnOutOfBounds),
-                               index, length, etrue, if_true);
+          if (v8_flags.turbo_typer_hardening) {
+            index = etrue = graph()->NewNode(
+                simplified()->CheckBounds(
+                    FeedbackSource(),
+                    CheckBoundsFlag::kConvertStringAndMinusZero |
+                        CheckBoundsFlag::kAbortOnOutOfBounds),
+                index, length, etrue, if_true);
+          }
 
           // Perform the actual store.
           etrue = graph()->NewNode(
@@ -3839,11 +3849,14 @@ Node* JSNativeContextSpecialization::BuildIndexedStringLoad(
     // Do a real bounds check against {length}. This is in order to protect
     // against a potential typer bug leading to the elimination of the
     // NumberLessThan above.
-    Node* etrue = index = graph()->NewNode(
-        simplified()->CheckBounds(FeedbackSource(),
-                                  CheckBoundsFlag::kConvertStringAndMinusZero |
-                                      CheckBoundsFlag::kAbortOnOutOfBounds),
-        index, length, *effect, if_true);
+    Node* etrue = *effect;
+    if (v8_flags.turbo_typer_hardening) {
+      etrue = index = graph()->NewNode(
+          simplified()->CheckBounds(
+              FeedbackSource(), CheckBoundsFlag::kConvertStringAndMinusZero |
+                                    CheckBoundsFlag::kAbortOnOutOfBounds),
+          index, length, etrue, if_true);
+    }
     Node* vtrue = etrue = graph()->NewNode(simplified()->StringCharCodeAt(),
                                            receiver, index, etrue, if_true);
     vtrue = graph()->NewNode(simplified()->StringFromSingleCharCode(), vtrue);

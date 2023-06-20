@@ -593,18 +593,18 @@ void Map::MapVerify(Isolate* isolate) {
     }
   }
 
-  if (!may_have_interesting_symbols()) {
+  if (!may_have_interesting_properties()) {
     CHECK(!has_named_interceptor());
     CHECK(!is_dictionary_map());
     CHECK(!is_access_check_needed());
     DescriptorArray const descriptors = instance_descriptors(isolate);
     for (InternalIndex i : IterateOwnDescriptors()) {
-      CHECK(!descriptors.GetKey(i).IsInterestingSymbol());
+      CHECK(!descriptors.GetKey(i).IsInteresting(isolate));
     }
   }
-  CHECK_IMPLIES(has_named_interceptor(), may_have_interesting_symbols());
-  CHECK_IMPLIES(is_dictionary_map(), may_have_interesting_symbols());
-  CHECK_IMPLIES(is_access_check_needed(), may_have_interesting_symbols());
+  CHECK_IMPLIES(has_named_interceptor(), may_have_interesting_properties());
+  CHECK_IMPLIES(is_dictionary_map(), may_have_interesting_properties());
+  CHECK_IMPLIES(is_access_check_needed(), may_have_interesting_properties());
   CHECK_IMPLIES(IsJSObjectMap() && !CanHaveFastTransitionableElementsKind(),
                 IsDictionaryElementsKind(elements_kind()) ||
                     IsTerminalElementsKind(elements_kind()) ||
@@ -973,12 +973,29 @@ void JSFunction::JSFunctionVerify(Isolate* isolate) {
 
 void SharedFunctionInfo::SharedFunctionInfoVerify(Isolate* isolate) {
   // TODO(leszeks): Add a TorqueGeneratedClassVerifier for LocalIsolate.
-  this->SharedFunctionInfoVerify(ReadOnlyRoots(isolate));
+  SharedFunctionInfoVerify(ReadOnlyRoots(isolate));
 }
 
 void SharedFunctionInfo::SharedFunctionInfoVerify(LocalIsolate* isolate) {
-  this->SharedFunctionInfoVerify(ReadOnlyRoots(isolate));
+  SharedFunctionInfoVerify(ReadOnlyRoots(isolate));
 }
+
+namespace {
+
+bool ShouldVerifySharedFunctionInfoFunctionIndex(SharedFunctionInfo sfi) {
+  if (!sfi.HasBuiltinId()) return true;
+  switch (sfi.builtin_id()) {
+    case Builtin::kPromiseCapabilityDefaultReject:
+    case Builtin::kPromiseCapabilityDefaultResolve:
+      // For these we manually set custom function indices.
+      return false;
+    default:
+      return true;
+  }
+  UNREACHABLE();
+}
+
+}  // namespace
 
 void SharedFunctionInfo::SharedFunctionInfoVerify(ReadOnlyRoots roots) {
   Object value = name_or_scope_info(kAcquireLoad);
@@ -1012,12 +1029,14 @@ void SharedFunctionInfo::SharedFunctionInfoVerify(ReadOnlyRoots roots) {
     CHECK(feedback_metadata().IsFeedbackMetadata());
   }
 
-  int expected_map_index =
-      Context::FunctionMapIndex(language_mode(), kind(), HasSharedName());
-  CHECK_EQ(expected_map_index, function_map_index());
+  if (ShouldVerifySharedFunctionInfoFunctionIndex(*this)) {
+    int expected_map_index =
+        Context::FunctionMapIndex(language_mode(), kind(), HasSharedName());
+    CHECK_EQ(expected_map_index, function_map_index());
+  }
 
-  if (!scope_info().IsEmpty()) {
-    ScopeInfo info = scope_info();
+  ScopeInfo info = EarlyScopeInfo(kAcquireLoad);
+  if (!info.IsEmpty()) {
     CHECK(kind() == info.function_kind());
     CHECK_EQ(internal::IsModule(kind()), info.scope_type() == MODULE_SCOPE);
   }
@@ -1928,6 +1947,7 @@ void WasmExportedFunctionData::WasmExportedFunctionDataVerify(
       wrapper_code().kind() == CodeKind::C_WASM_ENTRY ||
       (wrapper_code().is_builtin() &&
        (wrapper_code().builtin_id() == Builtin::kGenericJSToWasmWrapper ||
+        wrapper_code().builtin_id() == Builtin::kJSToWasmWrapper ||
         wrapper_code().builtin_id() == Builtin::kWasmReturnPromiseOnSuspend)));
 }
 

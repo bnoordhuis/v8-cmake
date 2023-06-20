@@ -30,20 +30,16 @@
 namespace cppgc {
 namespace internal {
 
-static_assert(api_constants::kCagedHeapReservationSize ==
-              kCagedHeapReservationSize);
-static_assert(api_constants::kCagedHeapReservationAlignment ==
-              kCagedHeapReservationAlignment);
-
 uintptr_t CagedHeapBase::g_heap_base_ = 0u;
+size_t CagedHeapBase::g_age_table_size_ = 0u;
 
 CagedHeap* CagedHeap::instance_ = nullptr;
 
 namespace {
 
 VirtualMemory ReserveCagedHeap(PageAllocator& platform_allocator) {
-  DCHECK_EQ(0u,
-            kCagedHeapReservationSize % platform_allocator.AllocatePageSize());
+  DCHECK_EQ(0u, api_constants::kCagedHeapMaxReservationSize %
+                    platform_allocator.AllocatePageSize());
 
   static constexpr size_t kAllocationTries = 4;
   for (size_t i = 0; i < kAllocationTries; ++i) {
@@ -63,14 +59,14 @@ VirtualMemory ReserveCagedHeap(PageAllocator& platform_allocator) {
     // TODO(chromium:1325007): Provide API in PageAllocator to left trim
     // allocations and return unused portions of the reservation back to the OS.
     static constexpr size_t kTryReserveSize =
-        kCagedHeapReservationSize << api_constants::kPointerCompressionShift;
+        2 * api_constants::kCagedHeapMaxReservationSize;
     static constexpr size_t kTryReserveAlignment =
-        kCagedHeapReservationAlignment
-        << api_constants::kPointerCompressionShift;
+        2 * api_constants::kCagedHeapReservationAlignment;
 #else   // !defined(CPPGC_POINTER_COMPRESSION)
-    static constexpr size_t kTryReserveSize = kCagedHeapReservationSize;
+    static constexpr size_t kTryReserveSize =
+        api_constants::kCagedHeapMaxReservationSize;
     static constexpr size_t kTryReserveAlignment =
-        kCagedHeapReservationAlignment;
+        api_constants::kCagedHeapReservationAlignment;
 #endif  // !defined(CPPGC_POINTER_COMPRESSION)
     void* hint = reinterpret_cast<void*>(RoundDown(
         reinterpret_cast<uintptr_t>(platform_allocator.GetRandomMmapAddr()),
@@ -87,8 +83,10 @@ VirtualMemory ReserveCagedHeap(PageAllocator& platform_allocator) {
 }  // namespace
 
 // static
-void CagedHeap::InitializeIfNeeded(PageAllocator& platform_allocator) {
-  static v8::base::LeakyObject<CagedHeap> caged_heap(platform_allocator);
+void CagedHeap::InitializeIfNeeded(PageAllocator& platform_allocator,
+                                   size_t desired_heap_size) {
+  static v8::base::LeakyObject<CagedHeap> caged_heap(platform_allocator,
+                                                     desired_heap_size);
 }
 
 // static
@@ -97,7 +95,8 @@ CagedHeap& CagedHeap::Instance() {
   return *instance_;
 }
 
-CagedHeap::CagedHeap(PageAllocator& platform_allocator)
+CagedHeap::CagedHeap(PageAllocator& platform_allocator,
+                     size_t desired_heap_size)
     : reserved_area_(ReserveCagedHeap(platform_allocator)) {
   using CagedAddress = CagedHeap::AllocatorType::Address;
 
@@ -105,8 +104,7 @@ CagedHeap::CagedHeap(PageAllocator& platform_allocator)
   // Pick a base offset according to pointer compression shift. See comment in
   // ReserveCagedHeap().
   static constexpr size_t kBaseOffset =
-      kCagedHeapReservationSize
-      << (api_constants::kPointerCompressionShift - 1);
+      api_constants::kCagedHeapMaxReservationSize;
 #else   // !defined(CPPGC_POINTER_COMPRESSION)
   static constexpr size_t kBaseOffset = 0;
 #endif  //! defined(CPPGC_POINTER_COMPRESSION)
@@ -122,27 +120,34 @@ CagedHeap::CagedHeap(PageAllocator& platform_allocator)
   CageBaseGlobalUpdater::UpdateCageBase(CagedHeapBase::g_heap_base_);
 #endif  // defined(CPPGC_POINTER_COMPRESSION)
 
+  const size_t total_heap_size = std::clamp<size_t>(
+      v8::base::bits::RoundUpToPowerOfTwo64(desired_heap_size),
+      api_constants::kCagedHeapDefaultReservationSize,
+      api_constants::kCagedHeapMaxReservationSize);
+
+  const size_t local_data_size =
+      CagedHeapLocalData::CalculateLocalDataSizeForHeapSize(total_heap_size);
   if (!platform_allocator.SetPermissions(
           cage_start,
-          RoundUp(sizeof(CagedHeapLocalData),
-                  platform_allocator.CommitPageSize()),
+          RoundUp(local_data_size, platform_allocator.CommitPageSize()),
           PageAllocator::kReadWrite)) {
     GetGlobalOOMHandler()("Oilpan: CagedHeap commit CageHeapLocalData.");
   }
 
   const CagedAddress caged_heap_start = RoundUp(
-      reinterpret_cast<CagedAddress>(cage_start) + sizeof(CagedHeapLocalData),
-      kPageSize);
+      reinterpret_cast<CagedAddress>(cage_start) + local_data_size, kPageSize);
   const size_t local_data_size_with_padding =
       caged_heap_start - reinterpret_cast<CagedAddress>(cage_start);
 
   page_bounded_allocator_ = std::make_unique<v8::base::BoundedPageAllocator>(
       &platform_allocator, caged_heap_start,
-      kCagedHeapReservationSize - local_data_size_with_padding, kPageSize,
+      total_heap_size - local_data_size_with_padding, kPageSize,
       v8::base::PageInitializationMode::kAllocatedPagesMustBeZeroInitialized,
       v8::base::PageFreeingMode::kMakeInaccessible);
 
   instance_ = this;
+  CagedHeapBase::g_age_table_size_ = AgeTable::CalculateAgeTableSizeForHeapSize(
+      api_constants::kCagedHeapDefaultReservationSize);
 }
 
 }  // namespace internal

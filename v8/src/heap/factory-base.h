@@ -18,23 +18,24 @@
 namespace v8 {
 namespace internal {
 
-class HeapObject;
-class SharedFunctionInfo;
+class ArrayBoilerplateDescription;
+class BytecodeArray;
+class ClassPositions;
+class CoverageInfo;
+class DeoptimizationLiteralArray;
+class FreshlyAllocatedBigInt;
 class FunctionLiteral;
+class HeapObject;
+class ObjectBoilerplateDescription;
+class PreparseData;
+class RegExpBoilerplateDescription;
 class SeqOneByteString;
 class SeqTwoByteString;
-class FreshlyAllocatedBigInt;
-class ObjectBoilerplateDescription;
-class ArrayBoilerplateDescription;
-class RegExpBoilerplateDescription;
-class TemplateObjectDescription;
+class SharedFunctionInfo;
 class SourceTextModuleInfo;
-class PreparseData;
+class TemplateObjectDescription;
 class UncompiledDataWithoutPreparseData;
 class UncompiledDataWithPreparseData;
-class BytecodeArray;
-class CoverageInfo;
-class ClassPositions;
 struct SourceRange;
 enum class Builtin : int32_t;
 template <typename T>
@@ -162,7 +163,10 @@ class FactoryBase : public TorqueGeneratedFactory<Impl> {
   Handle<ByteArray> NewByteArray(
       int length, AllocationType allocation = AllocationType::kYoung);
 
-  Handle<BytecodeArray> NewBytecodeArray(int length, const byte* raw_bytecodes,
+  Handle<DeoptimizationLiteralArray> NewDeoptimizationLiteralArray(int length);
+
+  Handle<BytecodeArray> NewBytecodeArray(int length,
+                                         const uint8_t* raw_bytecodes,
                                          int frame_size, int parameter_count,
                                          Handle<FixedArray> constant_pool);
 
@@ -347,7 +351,7 @@ class FactoryBase : public TorqueGeneratedFactory<Impl> {
                                              Handle<HeapObject> filler,
                                              AllocationType allocation);
 
-  Handle<SharedFunctionInfo> NewSharedFunctionInfo();
+  Handle<SharedFunctionInfo> NewSharedFunctionInfo(AllocationType allocation);
   Handle<SharedFunctionInfo> NewSharedFunctionInfo(
       MaybeHandle<String> maybe_name,
       MaybeHandle<HeapObject> maybe_function_data, Builtin builtin,

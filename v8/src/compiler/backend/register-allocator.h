@@ -481,9 +481,6 @@ class V8_EXPORT_PRIVATE UsePosition final
 
   LifetimePosition pos() const { return pos_; }
 
-  UsePosition* next() const { return next_; }
-  void set_next(UsePosition* next) { next_ = next; }
-
   // For hinting only.
   void set_assigned_register(int register_code) {
     flags_ = AssignedRegisterField::update(flags_, register_code);
@@ -513,7 +510,6 @@ class V8_EXPORT_PRIVATE UsePosition final
 
   InstructionOperand* const operand_;
   void* hint_;
-  UsePosition* next_;
   LifetimePosition const pos_;
   uint32_t flags_;
 };
@@ -531,7 +527,7 @@ class V8_EXPORT_PRIVATE LiveRange : public NON_EXPORTED_BASE(ZoneObject) {
   LiveRange& operator=(const LiveRange&) = delete;
 
   UseInterval* first_interval() const { return first_interval_; }
-  UsePosition* first_pos() const { return first_pos_; }
+  base::Vector<UsePosition*> positions() const { return positions_span_; }
   TopLevelLiveRange* TopLevel() { return top_level_; }
   const TopLevelLiveRange* TopLevel() const { return top_level_; }
 
@@ -582,14 +578,11 @@ class V8_EXPORT_PRIVATE LiveRange : public NON_EXPORTED_BASE(ZoneObject) {
 
   // Returns use position in this live range that follows both start
   // and last processed use position.
-  UsePosition* NextUsePosition(LifetimePosition start) const;
+  UsePosition* const* NextUsePosition(LifetimePosition start) const;
 
   // Returns use position for which register is required in this live
   // range and which follows both start and last processed use position
   UsePosition* NextRegisterPosition(LifetimePosition start) const;
-
-  // Returns the first use position requiring stack slot, or nullptr.
-  UsePosition* NextSlotPosition(LifetimePosition start) const;
 
   // Returns use position for which register is beneficial in this live
   // range and which follows both start and last processed use position
@@ -601,11 +594,6 @@ class V8_EXPORT_PRIVATE LiveRange : public NON_EXPORTED_BASE(ZoneObject) {
   LifetimePosition NextLifetimePositionRegisterIsBeneficial(
       const LifetimePosition& start) const;
 
-  // Returns use position for which register is beneficial in this live
-  // range and which precedes start.
-  UsePosition* PreviousUsePositionRegisterIsBeneficial(
-      LifetimePosition start) const;
-
   // Returns use position for which spilling is detrimental in this live
   // range and which follows both start and last processed use position
   UsePosition* NextUsePositionSpillDetrimental(LifetimePosition start) const;
@@ -613,34 +601,20 @@ class V8_EXPORT_PRIVATE LiveRange : public NON_EXPORTED_BASE(ZoneObject) {
   // Can this live range be spilled at this position.
   bool CanBeSpilled(LifetimePosition pos) const;
 
-  // Splitting primitive used by splitting members.
-  // Performs the split, but does not link the resulting ranges.
-  // The given position must follow the start of the range.
+  // Splits this live range and links the resulting ranges together.
+  // Returns the child, which starts at position.
   // All uses following the given position will be moved from this
   // live range to the result live range.
   // The current range will terminate at position, while result will start from
   // position.
-  enum HintConnectionOption : bool {
-    DoNotConnectHints = false,
-    ConnectHints = true
-  };
-  UsePosition* DetachAt(LifetimePosition position, LiveRange* result,
-                        Zone* zone, HintConnectionOption connect_hints);
-
-  // Detaches at position, and then links the resulting ranges. Returns the
-  // child, which starts at position.
   LiveRange* SplitAt(LifetimePosition position, Zone* zone);
 
-  // Returns nullptr when no register is hinted, otherwise sets register_index.
+  // Returns false when no register is hinted, otherwise sets register_index.
   // Uses {current_hint_position_} as a cache, and tries to update it.
-  UsePosition* FirstHintPosition(int* register_index);
-  UsePosition* FirstHintPosition() {
-    int register_index;
-    return FirstHintPosition(&register_index);
-  }
+  bool RegisterFromFirstHint(int* register_index);
 
   UsePosition* current_hint_position() const {
-    return current_hint_position_;
+    return positions_span_[current_hint_position_index_];
   }
 
   LifetimePosition Start() const {
@@ -670,7 +644,7 @@ class V8_EXPORT_PRIVATE LiveRange : public NON_EXPORTED_BASE(ZoneObject) {
                             const InstructionOperand& spill_op);
   void SetUseHints(int register_index);
   void UnsetUseHints() { SetUseHints(kUnassignedRegister); }
-  void ResetCurrentHintPosition() { current_hint_position_ = first_pos_; }
+  void ResetCurrentHintPosition() { current_hint_position_index_ = 0; }
 
   void Print(const RegisterConfiguration* config, bool with_children) const;
   void Print(bool with_children) const;
@@ -686,8 +660,6 @@ class V8_EXPORT_PRIVATE LiveRange : public NON_EXPORTED_BASE(ZoneObject) {
 
   explicit LiveRange(int relative_id, MachineRepresentation rep,
                      TopLevelLiveRange* top_level);
-
-  void UpdateParentForAllChildren(TopLevelLiveRange* new_top_level);
 
   void set_spilled(bool value) { bits_ = SpilledField::update(bits_, value); }
 
@@ -711,15 +683,16 @@ class V8_EXPORT_PRIVATE LiveRange : public NON_EXPORTED_BASE(ZoneObject) {
   uint32_t bits_;
   UseInterval* last_interval_;
   UseInterval* first_interval_;
-  UsePosition* first_pos_;
+  // This is a view into the `positions_` owned by the `TopLevelLiveRange`.
+  // This allows cheap splitting and merging of `LiveRange`s.
+  base::Vector<UsePosition*> positions_span_;
   TopLevelLiveRange* top_level_;
   LiveRange* next_;
   // This is used as a cache, it doesn't affect correctness.
   mutable UseInterval* current_interval_;
-  // This is used as a cache, it doesn't affect correctness.
-  mutable UsePosition* last_processed_use_;
-  // This is used as a cache in BuildLiveRanges and during register allocation.
-  UsePosition* current_hint_position_;
+  // This is used as a cache in `BuildLiveRanges` and during register
+  // allocation.
+  size_t current_hint_position_index_ = 0;
   LiveRangeBundle* bundle_ = nullptr;
   // Next interval start, relative to the current linear scan position.
   LifetimePosition next_start_;
@@ -814,7 +787,7 @@ class LiveRangeBundle : public ZoneObject {
 // TopLevelLiveRange.
 class V8_EXPORT_PRIVATE TopLevelLiveRange final : public LiveRange {
  public:
-  explicit TopLevelLiveRange(int vreg, MachineRepresentation rep);
+  explicit TopLevelLiveRange(int vreg, MachineRepresentation rep, Zone* zone);
   TopLevelLiveRange(const TopLevelLiveRange&) = delete;
   TopLevelLiveRange& operator=(const TopLevelLiveRange&) = delete;
 
@@ -1070,8 +1043,9 @@ class V8_EXPORT_PRIVATE TopLevelLiveRange final : public LiveRange {
   bool has_preassigned_slot_;
 
   int spill_start_index_;
-  UsePosition* last_pos_;
   LiveRange* last_child_covers_;
+
+  ZoneVector<UsePosition*> positions_;
 };
 
 struct PrintableLiveRange {

@@ -154,6 +154,16 @@ class MachineOptimizationReducer : public Next {
           to == WordRepresentation::Word32()) {
         return Asm().Word32Constant(DoubleToInt32_NoInline(value));
       }
+      if (kind == Kind::kExtractHighHalf) {
+        DCHECK_EQ(to, RegisterRepresentation::Word32());
+        return Asm().Word32Constant(
+            static_cast<uint32_t>(base::bit_cast<uint64_t>(value) >> 32));
+      }
+      if (kind == Kind::kExtractLowHalf) {
+        DCHECK_EQ(to, RegisterRepresentation::Word32());
+        return Asm().Word32Constant(
+            static_cast<uint32_t>(base::bit_cast<uint64_t>(value)));
+      }
     }
     if (float value; from == RegisterRepresentation::Float32() &&
                      Asm().MatchFloat32Constant(input, &value)) {
@@ -173,26 +183,18 @@ class MachineOptimizationReducer : public Next {
     return Next::ReduceChange(input, kind, assumption, from, to);
   }
 
-  OpIndex REDUCE(Float64InsertWord32)(OpIndex float64, OpIndex word32,
-                                      Float64InsertWord32Op::Kind kind) {
+  OpIndex REDUCE(BitcastWord32PairToFloat64)(OpIndex hi_word32,
+                                             OpIndex lo_word32) {
     if (ShouldSkipOptimizationStep()) {
-      return Next::ReduceFloat64InsertWord32(float64, word32, kind);
+      return Next::ReduceBitcastWord32PairToFloat64(hi_word32, lo_word32);
     }
-    double f;
-    uint32_t w;
-    if (Asm().MatchFloat64Constant(float64, &f) &&
-        Asm().MatchWord32Constant(word32, &w)) {
-      uint64_t float_as_word = base::bit_cast<uint64_t>(f);
-      switch (kind) {
-        case Float64InsertWord32Op::Kind::kLowHalf:
-          return Asm().Float64Constant(base::bit_cast<double>(
-              (float_as_word & uint64_t{0xFFFFFFFF00000000}) | w));
-        case Float64InsertWord32Op::Kind::kHighHalf:
-          return Asm().Float64Constant(base::bit_cast<double>(
-              (float_as_word & uint64_t{0xFFFFFFFF}) | (uint64_t{w} << 32)));
-      }
+    uint32_t lo, hi;
+    if (Asm().MatchWord32Constant(hi_word32, &hi) &&
+        Asm().MatchWord32Constant(lo_word32, &lo)) {
+      return Asm().Float64Constant(
+          base::bit_cast<double>(uint64_t{hi} << 32 | uint64_t{lo}));
     }
-    return Next::ReduceFloat64InsertWord32(float64, word32, kind);
+    return Next::ReduceBitcastWord32PairToFloat64(hi_word32, lo_word32);
   }
 
   OpIndex REDUCE(TaggedBitcast)(OpIndex input, RegisterRepresentation from,
@@ -923,7 +925,7 @@ class MachineOptimizationReducer : public Next {
     // Note the side condition for XOR: the optimization doesn't hold for
     // an effective rotation amount of 0.
 
-    if (!(kind == any_of(WordBinopOp::Kind::kBitwiseAnd,
+    if (!(kind == any_of(WordBinopOp::Kind::kBitwiseOr,
                          WordBinopOp::Kind::kBitwiseXor))) {
       return {};
     }
@@ -1157,7 +1159,7 @@ class MachineOptimizationReducer : public Next {
                   left, &x, rep_w, &k1) &&
               Asm().MatchWordConstant(right, rep_w, &k2) &&
               CountLeadingSignBits(k2, rep_w) > k1 &&
-              Asm().Get(left).saturated_use_count == 0) {
+              Asm().Get(left).saturated_use_count.IsZero()) {
             return Asm().Equal(
                 x, Asm().WordConstant(base::bits::Unsigned(k2) << k1, rep_w),
                 rep_w);
@@ -1336,7 +1338,7 @@ class MachineOptimizationReducer : public Next {
                                                                  rep_w, &k1) &&
             Asm().MatchWordConstant(right, rep_w, &k2) &&
             CountLeadingSignBits(k2, rep_w) > k1 &&
-            Asm().Get(left).saturated_use_count == 0) {
+            Asm().Get(left).saturated_use_count.IsZero()) {
           return Asm().Comparison(
               x, Asm().WordConstant(base::bits::Unsigned(k2) << k1, rep_w),
               kind, rep_w);
@@ -1348,7 +1350,7 @@ class MachineOptimizationReducer : public Next {
                                                                  rep_w, &k1) &&
             Asm().MatchWordConstant(left, rep_w, &k2) &&
             CountLeadingSignBits(k2, rep_w) > k1 &&
-            Asm().Get(right).saturated_use_count == 0) {
+            Asm().Get(right).saturated_use_count.IsZero()) {
           return Asm().Comparison(
               Asm().WordConstant(base::bits::Unsigned(k2) << k1, rep_w), x,
               kind, rep_w);

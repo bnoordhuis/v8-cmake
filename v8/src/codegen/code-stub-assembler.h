@@ -138,6 +138,7 @@ enum class PrimitiveType { kBoolean, kNumber, kString, kSymbol };
     AllocationSiteWithoutWeakNextMap)                                        \
   V(AllocationSiteWithWeakNextMap, allocation_site_map, AllocationSiteMap)   \
   V(arguments_to_string, arguments_to_string, ArgumentsToString)             \
+  V(ArrayListMap, array_list_map, ArrayListMap)                              \
   V(Array_string, Array_string, ArrayString)                                 \
   V(array_to_string, array_to_string, ArrayToString)                         \
   V(BooleanMap, boolean_map, BooleanMap)                                     \
@@ -148,6 +149,7 @@ enum class PrimitiveType { kBoolean, kNumber, kString, kSymbol };
   V(constructor_string, constructor_string, ConstructorString)               \
   V(date_to_string, date_to_string, DateToString)                            \
   V(default_string, default_string, DefaultString)                           \
+  V(EmptyArrayList, empty_array_list, EmptyArrayList)                        \
   V(EmptyByteArray, empty_byte_array, EmptyByteArray)                        \
   V(EmptyFixedArray, empty_fixed_array, EmptyFixedArray)                     \
   V(EmptyScopeInfo, empty_scope_info, EmptyScopeInfo)                        \
@@ -168,10 +170,12 @@ enum class PrimitiveType { kBoolean, kNumber, kString, kSymbol };
   V(Function_string, function_string, FunctionString)                        \
   V(function_to_string, function_to_string, FunctionToString)                \
   V(has_instance_symbol, has_instance_symbol, HasInstanceSymbol)             \
+  V(has_string, has_string, HasString)                                       \
   V(Infinity_string, Infinity_string, InfinityString)                        \
   V(is_concat_spreadable_symbol, is_concat_spreadable_symbol,                \
     IsConcatSpreadableSymbol)                                                \
   V(iterator_symbol, iterator_symbol, IteratorSymbol)                        \
+  V(keys_string, keys_string, KeysString)                                    \
   V(length_string, length_string, LengthString)                              \
   V(ManyClosuresCellMap, many_closures_cell_map, ManyClosuresCellMap)        \
   V(match_symbol, match_symbol, MatchSymbol)                                 \
@@ -215,6 +219,7 @@ enum class PrimitiveType { kBoolean, kNumber, kString, kSymbol };
   V(search_symbol, search_symbol, SearchSymbol)                              \
   V(SingleCharacterStringTable, single_character_string_table,               \
     SingleCharacterStringTable)                                              \
+  V(size_string, size_string, SizeString)                                    \
   V(species_symbol, species_symbol, SpeciesSymbol)                           \
   V(StaleRegister, stale_register, StaleRegister)                            \
   V(StoreHandler0Map, store_handler0_map, StoreHandler0Map)                  \
@@ -536,16 +541,15 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
 
   TNode<Smi> NoContextConstant();
 
-#define HEAP_CONSTANT_ACCESSOR(rootIndexName, rootAccessorName, name)  \
-  TNode<std::remove_pointer<std::remove_reference<decltype(            \
-      std::declval<ReadOnlyRoots>().rootAccessorName())>::type>::type> \
+#define HEAP_CONSTANT_ACCESSOR(rootIndexName, rootAccessorName, name)    \
+  TNode<RemoveTagged<                                                    \
+      decltype(std::declval<ReadOnlyRoots>().rootAccessorName())>::type> \
       name##Constant();
   HEAP_IMMUTABLE_IMMOVABLE_OBJECT_LIST(HEAP_CONSTANT_ACCESSOR)
 #undef HEAP_CONSTANT_ACCESSOR
 
-#define HEAP_CONSTANT_ACCESSOR(rootIndexName, rootAccessorName, name) \
-  TNode<std::remove_pointer<std::remove_reference<decltype(           \
-      std::declval<Heap>().rootAccessorName())>::type>::type>         \
+#define HEAP_CONSTANT_ACCESSOR(rootIndexName, rootAccessorName, name)          \
+  TNode<RemoveTagged<decltype(std::declval<Heap>().rootAccessorName())>::type> \
       name##Constant();
   HEAP_MUTABLE_IMMOVABLE_OBJECT_LIST(HEAP_CONSTANT_ACCESSOR)
 #undef HEAP_CONSTANT_ACCESSOR
@@ -1120,6 +1124,15 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                                     TNode<IntPtrT> offset,
                                     TNode<RawPtrT> pointer,
                                     ExternalPointerTag tag);
+
+  // Load a code pointer from an object.
+  TNode<RawPtrT> LoadCodePointerFromObject(TNode<HeapObject> object,
+                                           int offset) {
+    return LoadCodePointerFromObject(object, IntPtrConstant(offset));
+  }
+
+  TNode<RawPtrT> LoadCodePointerFromObject(TNode<HeapObject> object,
+                                           TNode<IntPtrT> offset);
 
   TNode<RawPtrT> LoadForeignForeignAddressPtr(TNode<Foreign> object) {
     return LoadExternalPointerFromObject(object, Foreign::kForeignAddressOffset,
@@ -2234,6 +2247,22 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
     return UncheckedCast<FixedDoubleArray>(base);
   }
 
+  TNode<ArrayList> AllocateArrayList(TNode<Smi> size);
+
+  TNode<ArrayList> ArrayListEnsureSpace(TNode<ArrayList> array,
+                                        TNode<Smi> size);
+
+  TNode<ArrayList> ArrayListAdd(TNode<ArrayList> array, TNode<Object> object);
+
+  void ArrayListSet(TNode<ArrayList> array, TNode<Smi> index,
+                    TNode<Object> object);
+
+  TNode<Smi> ArrayListGetLength(TNode<ArrayList> array);
+
+  void ArrayListSetLength(TNode<ArrayList> array, TNode<Smi> length);
+
+  TNode<FixedArray> ArrayListElements(TNode<ArrayList> array);
+
   template <typename T>
   bool ClassHasMapConstant() {
     return false;
@@ -2430,28 +2459,31 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                               Label* if_number, TVariable<Word32T>* var_word32,
                               Label* if_bigint, Label* if_bigint64,
                               TVariable<BigInt>* var_maybe_bigint);
+  struct FeedbackValues {
+    TVariable<Smi>* var_feedback = nullptr;
+    const LazyNode<HeapObject>* maybe_feedback_vector = nullptr;
+    TNode<UintPtrT>* slot = nullptr;
+    UpdateFeedbackMode update_mode = UpdateFeedbackMode::kNoFeedback;
+  };
   void TaggedToWord32OrBigIntWithFeedback(TNode<Context> context,
                                           TNode<Object> value, Label* if_number,
                                           TVariable<Word32T>* var_word32,
                                           Label* if_bigint, Label* if_bigint64,
                                           TVariable<BigInt>* var_maybe_bigint,
-                                          TVariable<Smi>* var_feedback);
+                                          const FeedbackValues& feedback);
   void TaggedPointerToWord32OrBigIntWithFeedback(
       TNode<Context> context, TNode<HeapObject> pointer, Label* if_number,
       TVariable<Word32T>* var_word32, Label* if_bigint, Label* if_bigint64,
-      TVariable<BigInt>* var_maybe_bigint, TVariable<Smi>* var_feedback);
+      TVariable<BigInt>* var_maybe_bigint, const FeedbackValues& feedback);
 
   TNode<Int32T> TruncateNumberToWord32(TNode<Number> value);
   // Truncate the floating point value of a HeapNumber to an Int32.
   TNode<Int32T> TruncateHeapNumberValueToWord32(TNode<HeapNumber> object);
 
   // Conversions.
-  void TryHeapNumberToSmi(TNode<HeapNumber> number, TVariable<Smi>* output,
-                          Label* if_smi);
-  void TryFloat32ToSmi(TNode<Float32T> number, TVariable<Smi>* output,
-                       Label* if_smi);
-  void TryFloat64ToSmi(TNode<Float64T> number, TVariable<Smi>* output,
-                       Label* if_smi);
+  TNode<Smi> TryHeapNumberToSmi(TNode<HeapNumber> number, Label* not_smi);
+  TNode<Smi> TryFloat32ToSmi(TNode<Float32T> number, Label* not_smi);
+  TNode<Smi> TryFloat64ToSmi(TNode<Float64T> number, Label* not_smi);
   TNode<Number> ChangeFloat32ToTagged(TNode<Float32T> value);
   TNode<Number> ChangeFloat64ToTagged(TNode<Float64T> value);
   TNode<Number> ChangeInt32ToTagged(TNode<Int32T> value);
@@ -2697,6 +2729,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<BoolT> IsRegExpSpeciesProtectorCellInvalid();
   TNode<BoolT> IsPromiseSpeciesProtectorCellInvalid();
   TNode<BoolT> IsNumberStringNotRegexpLikeProtectorCellInvalid();
+  TNode<BoolT> IsSetIteratorProtectorCellInvalid();
+  TNode<BoolT> IsMapIteratorProtectorCellInvalid();
 
   TNode<IntPtrT> LoadBasicMemoryChunkFlags(TNode<HeapObject> object);
 
@@ -3246,8 +3280,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                    TNode<Smi> enum_index);
 
   template <class Dictionary>
-  void Add(TNode<Dictionary> dictionary, TNode<Name> key, TNode<Object> value,
-           Label* bailout);
+  void AddToDictionary(TNode<Dictionary> dictionary, TNode<Name> key,
+                       TNode<Object> value, Label* bailout);
 
   // Tries to check if {object} has own {unique_name} property.
   void TryHasOwnProperty(TNode<HeapObject> object, TNode<Map> map,
@@ -3313,6 +3347,17 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                             TNode<Object> name) {
     return CallBuiltin(Builtin::kGetProperty, context, receiver, name);
   }
+
+  TNode<Object> GetInterestingProperty(TNode<Context> context,
+                                       TNode<JSReceiver> receiver,
+                                       TNode<Symbol> symbol,
+                                       Label* if_not_found);
+  TNode<Object> GetInterestingProperty(TNode<Context> context,
+                                       TNode<Object> receiver,
+                                       TVariable<HeapObject>* var_holder,
+                                       TVariable<Map>* var_holder_map,
+                                       TNode<Symbol> symbol,
+                                       Label* if_not_found, Label* if_proxy);
 
   TNode<Object> SetPropertyStrict(TNode<Context> context,
                                   TNode<Object> receiver, TNode<Object> key,
@@ -3547,6 +3592,10 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   // {var_high} is only used on 32-bit platforms.
   void BigIntToRawBytes(TNode<BigInt> bigint, TVariable<UintPtrT>* var_low,
                         TVariable<UintPtrT>* var_high);
+
+#if V8_ENABLE_WEBASSEMBLY
+  TorqueStructInt64AsInt32Pair BigIntToRawBytes(TNode<BigInt> value);
+#endif  // V8_ENABLE_WEBASSEMBLY
 
   void EmitElementStore(TNode<JSObject> object, TNode<Object> key,
                         TNode<Object> value, ElementsKind elements_kind,
@@ -3821,7 +3870,6 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
 
   // Debug helpers
   TNode<BoolT> IsDebugActive();
-  TNode<BoolT> IsSideEffectFreeDebuggingActive();
 
   // JSArrayBuffer helpers
   TNode<UintPtrT> LoadJSArrayBufferByteLength(
@@ -4368,14 +4416,13 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
 
   enum IsKnownTaggedPointer { kNo, kYes };
   template <Object::Conversion conversion>
-  void TaggedToWord32OrBigIntImpl(TNode<Context> context, TNode<Object> value,
-                                  Label* if_number,
-                                  TVariable<Word32T>* var_word32,
-                                  IsKnownTaggedPointer is_known_tagged_pointer,
-                                  Label* if_bigint = nullptr,
-                                  Label* if_bigint64 = nullptr,
-                                  TVariable<BigInt>* var_maybe_bigint = nullptr,
-                                  TVariable<Smi>* var_feedback = nullptr);
+  void TaggedToWord32OrBigIntImpl(
+      TNode<Context> context, TNode<Object> value, Label* if_number,
+      TVariable<Word32T>* var_word32,
+      IsKnownTaggedPointer is_known_tagged_pointer,
+      const FeedbackValues& feedback, Label* if_bigint = nullptr,
+      Label* if_bigint64 = nullptr,
+      TVariable<BigInt>* var_maybe_bigint = nullptr);
 
   // Low-level accessors for Descriptor arrays.
   template <typename T>

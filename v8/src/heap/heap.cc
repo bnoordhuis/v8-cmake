@@ -70,6 +70,7 @@
 #include "src/heap/marking-barrier.h"
 #include "src/heap/marking-state-inl.h"
 #include "src/heap/marking-state.h"
+#include "src/heap/memory-balancer.h"
 #include "src/heap/memory-chunk-inl.h"
 #include "src/heap/memory-chunk-layout.h"
 #include "src/heap/memory-measurement.h"
@@ -308,13 +309,18 @@ size_t Heap::MaxReserved() const {
 
 size_t Heap::YoungGenerationSizeFromOldGenerationSize(size_t old_generation) {
   // Compute the semi space size and cap it.
-  size_t ratio = old_generation <= kOldGenerationLowMemory
-                     ? OldGenerationToSemiSpaceRatioLowMemory()
-                     : OldGenerationToSemiSpaceRatio();
-  size_t semi_space = old_generation / ratio;
-  semi_space = std::min({semi_space, DefaultMaxSemiSpaceSize()});
-  semi_space = std::max({semi_space, DefaultMinSemiSpaceSize()});
-  semi_space = RoundUp(semi_space, Page::kPageSize);
+  bool is_low_memory = old_generation <= kOldGenerationLowMemory;
+  size_t semi_space;
+  if (v8_flags.minor_mc && !is_low_memory) {
+    semi_space = DefaultMaxSemiSpaceSize();
+  } else {
+    size_t ratio = is_low_memory ? OldGenerationToSemiSpaceRatioLowMemory()
+                                 : OldGenerationToSemiSpaceRatio();
+    semi_space = old_generation / ratio;
+    semi_space = std::min({semi_space, DefaultMaxSemiSpaceSize()});
+    semi_space = std::max({semi_space, DefaultMinSemiSpaceSize()});
+    semi_space = RoundUp(semi_space, Page::kPageSize);
+  }
   return YoungGenerationSizeFromSemiSpaceSize(semi_space);
 }
 
@@ -382,13 +388,13 @@ size_t Heap::AllocatorLimitOnMaxOldGenerationSize() {
 
 size_t Heap::MaxOldGenerationSize(uint64_t physical_memory) {
   size_t max_size = V8HeapTrait::kMaxSize;
-  // Finch experiment: Increase the heap size from 2GB to 4GB for 64-bit
-  // systems with physical memory bigger than 16GB. The physical memory
-  // is rounded up to GB.
+  // Increase the heap size from 2GB to 4GB for 64-bit systems with physical
+  // memory at least 16GB. The theshold is set to 15GB to accomodate for some
+  // memory being reserved by the hardware.
   constexpr bool x64_bit = Heap::kHeapLimitMultiplier >= 2;
   if (v8_flags.huge_max_old_generation_size && x64_bit &&
-      (physical_memory + 512 * MB) / GB >= 16) {
-    DCHECK_EQ(max_size / GB, 2);
+      (physical_memory / GB) >= 15) {
+    DCHECK_EQ(max_size / GB, 2u);
     max_size *= 2;
   }
   return std::min(max_size, AllocatorLimitOnMaxOldGenerationSize());
@@ -1154,11 +1160,6 @@ void Heap::IncrementDeferredCount(v8::Isolate::UseCounterFeature feature) {
   deferred_counters_[feature]++;
 }
 
-bool Heap::IsNewSpaceCapacityAbovePretenuringThreshold() const {
-  return new_space_ &&
-         new_space_->TotalCapacity() >= min_semi_space_size_for_pretenuring_;
-}
-
 void Heap::GarbageCollectionPrologue(
     GarbageCollectionReason gc_reason,
     const v8::GCCallbackFlags gc_callback_flags) {
@@ -1198,11 +1199,6 @@ void Heap::GarbageCollectionPrologue(
   if (v8_flags.gc_verbose) Print();
 #endif  // DEBUG
 
-  if (IsNewSpaceCapacityAbovePretenuringThreshold()) {
-    minor_gc_above_pretenuring_threshold_++;
-  } else {
-    minor_gc_above_pretenuring_threshold_ = 0;
-  }
   memory_allocator()->unmapper()->PrepareForGC();
 }
 
@@ -1578,17 +1574,26 @@ void ReportDuplicates(int size, std::vector<HeapObject>* objects) {
 }  // anonymous namespace
 
 void Heap::CollectAllAvailableGarbage(GarbageCollectionReason gc_reason) {
-  // Since we are ignoring the return value, the exact choice of space does
-  // not matter, so long as we do not specify NEW_SPACE, which would not
-  // cause a full GC.
-  // Major GC would invoke weak handle callbacks on weakly reachable
-  // handles, but won't collect weakly reachable objects until next
-  // major GC.  Therefore if we collect aggressively and weak handle callback
-  // has been invoked, we rerun major GC to release objects which become
-  // garbage.
-  // Note: as weak callbacks can execute arbitrary code, we cannot
-  // hope that eventually there will be no weak callbacks invocations.
-  // Therefore stop recollecting after several attempts.
+  // Min and max number of attempts for GC. The method will continue with more
+  // GCs until the root set is stable.
+  static constexpr int kMaxNumberOfAttempts = 7;
+  static constexpr int kMinNumberOfAttempts = 2;
+
+  // Returns the number of roots. We assume stack layout is stable but global
+  // roots could change between GCs due to finalizers and weak callbacks.
+  const auto num_roots = [this]() {
+    size_t js_roots = 0;
+    js_roots += isolate()->global_handles()->handles_count();
+    js_roots += isolate()->eternal_handles()->handles_count();
+    size_t cpp_roots = 0;
+    if (auto* cpp_heap = CppHeap::From(cpp_heap_)) {
+      cpp_roots += cpp_heap->GetStrongPersistentRegion().NodesInUse();
+      cpp_roots +=
+          cpp_heap->GetStrongCrossThreadPersistentRegion().NodesInUse();
+    }
+    return js_roots + cpp_roots;
+  };
+
   if (gc_reason == GarbageCollectionReason::kLastResort) {
     InvokeNearHeapLimitCallback();
   }
@@ -1604,12 +1609,11 @@ void Heap::CollectAllAvailableGarbage(GarbageCollectionReason gc_reason) {
       (gc_reason == GarbageCollectionReason::kLowMemoryNotification
            ? GCFlag::kForced
            : GCFlag::kNoFlags);
-  constexpr int kMaxNumberOfAttempts = 7;
-  constexpr int kMinNumberOfAttempts = 2;
   for (int attempt = 0; attempt < kMaxNumberOfAttempts; attempt++) {
+    const size_t roots_before = num_roots();
     CollectGarbage(OLD_SPACE, gc_reason, kNoGCCallbackFlags);
-    if ((isolate()->global_handles()->last_gc_custom_callbacks() == 0) &&
-        (attempt + 1 >= kMinNumberOfAttempts)) {
+    if ((roots_before == num_roots()) &&
+        ((attempt + 1) >= kMinNumberOfAttempts)) {
       break;
     }
   }
@@ -2316,6 +2320,8 @@ void Heap::PerformGarbageCollection(GarbageCollector collector,
   // capacity is set in the epilogue.
   PauseAllocationObserversScope pause_observers(this);
 
+  size_t new_space_capacity_before_gc = NewSpaceTargetCapacity();
+
   if (collector == GarbageCollector::MARK_COMPACTOR) {
     MarkCompact();
   } else if (collector == GarbageCollector::MINOR_MARK_COMPACTOR) {
@@ -2325,7 +2331,7 @@ void Heap::PerformGarbageCollection(GarbageCollector collector,
     Scavenge();
   }
 
-  pretenuring_handler_.ProcessPretenuringFeedback();
+  pretenuring_handler_.ProcessPretenuringFeedback(new_space_capacity_before_gc);
 
   UpdateSurvivalStatistics(static_cast<int>(start_young_generation_size));
   ConfigureInitialOldGenerationSize();
@@ -2528,6 +2534,12 @@ void Heap::RecomputeLimits(GarbageCollector collector) {
     if (new_global_limit < global_allocation_limit_) {
       global_allocation_limit_ = new_global_limit;
     }
+  }
+  if (v8_flags.memory_balancer) {
+    DCHECK(global_allocation_limit_ > old_generation_allocation_limit_);
+    mb_->UpdateExternalAllocationLimit(global_allocation_limit_ -
+                                       old_generation_allocation_limit_);
+    mb_->NotifyGC();
   }
 }
 
@@ -3329,16 +3341,18 @@ void Heap::OnMoveEvent(HeapObject source, HeapObject target,
   for (auto& tracker : allocation_trackers_) {
     tracker->MoveEvent(source.address(), target.address(), size_in_bytes);
   }
-  if (target.IsSharedFunctionInfo()) {
+  if (target.IsSharedFunctionInfo(isolate_)) {
     LOG_CODE_EVENT(isolate_, SharedFunctionInfoMoveEvent(source.address(),
                                                          target.address()));
-  } else if (target.IsNativeContext()) {
+  } else if (target.IsNativeContext(isolate_)) {
     if (isolate_->current_embedder_state() != nullptr) {
       isolate_->current_embedder_state()->OnMoveEvent(source.address(),
                                                       target.address());
     }
     PROFILE(isolate_,
             NativeContextMoveEvent(source.address(), target.address()));
+  } else if (target.IsMap(isolate_)) {
+    LOG(isolate_, MapMoveEvent(Map::cast(source), Map::cast(target)));
   }
 }
 
@@ -4168,8 +4182,7 @@ bool Heap::MeasureMemory(std::unique_ptr<v8::MeasureMemoryDelegate> delegate,
   std::vector<Handle<NativeContext>> contexts = FindAllNativeContexts();
   std::vector<Handle<NativeContext>> to_measure;
   for (auto& current : contexts) {
-    if (delegate->ShouldMeasure(
-            v8::Utils::ToLocal(Handle<Context>::cast(current)))) {
+    if (delegate->ShouldMeasure(v8::Utils::ToLocal(current))) {
       to_measure.push_back(current);
     }
   }
@@ -4448,7 +4461,7 @@ void Heap::VerifyCommittedPhysicalMemory() {
 
 void Heap::ZapCodeObject(Address start_address, int size_in_bytes) {
 #ifdef DEBUG
-  CodePageMemoryModificationScope code_modification_scope(
+  CodePageMemoryModificationScopeForDebugging code_modification_scope(
       BasicMemoryChunk::FromAddress(start_address));
   DCHECK(IsAligned(start_address, kIntSize));
   for (int i = 0; i < size_in_bytes / kIntSize; i++) {
@@ -4833,17 +4846,17 @@ void Heap::ConfigureHeap(const v8::ResourceConstraints& constraints) {
       // This will cause more frequent GCs when stressing.
       max_semi_space_size_ = MB;
     }
-    // TODO(dinfuehr): Rounding to a power of 2 is not longer needed. Remove it.
+    if (!v8_flags.minor_mc) {
+      // TODO(dinfuehr): Rounding to a power of 2 is technically no longer
+      // needed but yields best performance on Pixel2.
+      max_semi_space_size_ =
+          static_cast<size_t>(base::bits::RoundUpToPowerOfTwo64(
+              static_cast<uint64_t>(max_semi_space_size_)));
+    }
     max_semi_space_size_ =
-        static_cast<size_t>(base::bits::RoundUpToPowerOfTwo64(
-            static_cast<uint64_t>(max_semi_space_size_)));
-    max_semi_space_size_ =
-        std::max({max_semi_space_size_, DefaultMinSemiSpaceSize()});
+        std::max(max_semi_space_size_, DefaultMinSemiSpaceSize());
     max_semi_space_size_ = RoundDown<Page::kPageSize>(max_semi_space_size_);
   }
-
-  min_semi_space_size_for_pretenuring_ =
-      std::min(max_semi_space_size_, kDefaultMinSemiSpaceSizeForPretenuring);
 
   // Initialize max_old_generation_size_ and max_global_memory_.
   {
@@ -5158,7 +5171,15 @@ bool Heap::IsMainThreadParked(LocalHeap* local_heap) {
 }
 
 bool Heap::IsMajorMarkingComplete(LocalHeap* local_heap) {
+  // Only check this on the main thread.
   if (!local_heap || !local_heap->is_main_thread()) return false;
+
+  // But also ignore main threads of client isolates.
+  if (local_heap->heap() != this) {
+    DCHECK(isolate()->is_shared_space_isolate());
+    return false;
+  }
+
   return incremental_marking()->IsMajorMarkingComplete();
 }
 
@@ -5405,6 +5426,9 @@ void Heap::SetUp(LocalHeap* main_thread_local_heap) {
     AddGCEpilogueCallback(HeapLayoutTracer::GCEpiloguePrintHeapLayout, gc_type,
                           nullptr);
   }
+  if (v8_flags.memory_balancer) {
+    mb_.reset(new MemoryBalancer(this));
+  }
 }
 
 void Heap::SetUpFromReadOnlyHeap(ReadOnlyHeap* ro_heap) {
@@ -5522,7 +5546,7 @@ void Heap::SetUpSpaces(LinearAllocationArea& new_allocation_info,
 
   if (new_space()) {
     minor_gc_job_.reset(new MinorGCJob());
-    if (v8_flags.concurrent_minor_mc_marking) {
+    if (v8_flags.minor_mc && v8_flags.concurrent_minor_mc_marking) {
       // TODO(v8:13012): Atomic MinorMC should not use ScavengeJob. Instead, we
       // should schedule MinorMC tasks at a soft limit, which are used by atomic
       // MinorMC, and to finalize concurrent MinorMC. The condition
@@ -5580,8 +5604,8 @@ void Heap::InitializeHashSeed() {
   } else {
     new_hash_seed = static_cast<uint64_t>(v8_flags.hash_seed);
   }
-  ReadOnlyRoots(this).hash_seed().copy_in(
-      0, reinterpret_cast<byte*>(&new_hash_seed), kInt64Size);
+  ReadOnlyRoots(this).hash_seed()->copy_in(
+      0, reinterpret_cast<uint8_t*>(&new_hash_seed), kInt64Size);
 }
 
 // static
@@ -7196,6 +7220,70 @@ CppClassNamesAsHeapObjectNameScope::CppClassNamesAsHeapObjectNameScope(
 
 CppClassNamesAsHeapObjectNameScope::~CppClassNamesAsHeapObjectNameScope() =
     default;
+
+#if V8_HEAP_USE_PTHREAD_JIT_WRITE_PROTECT || V8_HEAP_USE_PKU_JIT_WRITE_PROTECT
+
+CodePageMemoryModificationScopeForDebugging::
+    CodePageMemoryModificationScopeForDebugging(Heap* heap,
+                                                VirtualMemory* reservation,
+                                                base::AddressRegion region)
+    : rwx_write_scope_("Write access for zapping.") {
+#if !defined(DEBUG) && !defined(VERIFY_HEAP)
+  UNREACHABLE();
+#endif
+}
+
+CodePageMemoryModificationScopeForDebugging::
+    CodePageMemoryModificationScopeForDebugging(BasicMemoryChunk* chunk)
+    : rwx_write_scope_("Write access for zapping.") {
+#if !defined(DEBUG) && !defined(VERIFY_HEAP)
+  UNREACHABLE();
+#endif
+}
+
+CodePageMemoryModificationScopeForDebugging::
+    ~CodePageMemoryModificationScopeForDebugging() {}
+
+#else  // V8_HEAP_USE_PTHREAD_JIT_WRITE_PROTECT ||
+       // V8_HEAP_USE_PKU_JIT_WRITE_PROTECT
+
+CodePageMemoryModificationScopeForDebugging::
+    CodePageMemoryModificationScopeForDebugging(Heap* heap,
+                                                VirtualMemory* reservation,
+                                                base::AddressRegion region) {
+#if !defined(DEBUG) && !defined(VERIFY_HEAP)
+  UNREACHABLE();
+#else
+  if (heap->write_protect_code_memory()) {
+    reservation_ = reservation;
+    region_.emplace(region);
+    CHECK(reservation_->SetPermissions(
+        region_->begin(), region_->size(),
+        MemoryChunk::GetCodeModificationPermission()));
+  }
+#endif
+}
+
+CodePageMemoryModificationScopeForDebugging::
+    CodePageMemoryModificationScopeForDebugging(BasicMemoryChunk* chunk)
+    : memory_modification_scope_(chunk) {
+#if !defined(DEBUG) && !defined(VERIFY_HEAP)
+  UNREACHABLE();
+#endif
+}
+
+CodePageMemoryModificationScopeForDebugging::
+    ~CodePageMemoryModificationScopeForDebugging() {
+  if (reservation_) {
+    DCHECK(region_.has_value());
+    CHECK(reservation_->SetPermissions(
+        region_->begin(), region_->size(),
+        v8_flags.jitless ? PageAllocator::Permission::kRead
+                         : PageAllocator::Permission::kReadExecute));
+  }
+}
+
+#endif
 
 }  // namespace internal
 }  // namespace v8

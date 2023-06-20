@@ -150,7 +150,7 @@ TEST_F(UnifiedHeapDetachedTest, AllocationBeforeConfigureHeap) {
   js_heap.AttachCppHeap(heap.get());
   auto& cpp_heap = *CppHeap::From(isolate()->heap()->cpp_heap());
   {
-    CollectGarbage(OLD_SPACE);
+    InvokeMajorGC();
     cpp_heap.AsBase().sweeper().FinishIfRunning();
     EXPECT_TRUE(weak_holder);
   }
@@ -159,7 +159,7 @@ TEST_F(UnifiedHeapDetachedTest, AllocationBeforeConfigureHeap) {
     EmbedderStackStateScope stack_scope(
         &js_heap, EmbedderStackStateScope::kExplicitInvocation,
         StackState::kNoHeapPointers);
-    CollectGarbage(OLD_SPACE);
+    InvokeMajorGC();
     cpp_heap.AsBase().sweeper().FinishIfRunning();
     EXPECT_FALSE(weak_holder);
   }
@@ -439,7 +439,7 @@ TEST_F(UnifiedHeapTest, TracedReferenceOnStack) {
     observer.SetWeak();
   }
   EXPECT_FALSE(observer.IsEmpty());
-  FullGC();
+  InvokeMajorGC();
   EXPECT_FALSE(observer.IsEmpty());
 }
 
@@ -478,6 +478,7 @@ class GCedWithHeapRef final : public cppgc::GarbageCollected<GCedWithHeapRef> {
 
 V8_NOINLINE void StackToHeapTest(v8::Isolate* v8_isolate, Operation op,
                                  TargetHandling target_handling) {
+  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(v8_isolate);
   v8::Global<v8::Object> observer;
   v8::TracedReference<v8::Value> stack_handle;
   v8::CppHeap* cpp_heap = v8_isolate->GetCppHeap();
@@ -492,7 +493,7 @@ V8_NOINLINE void StackToHeapTest(v8::Isolate* v8_isolate, Operation op,
         IsNewObjectInCorrectGeneration(*v8::Utils::OpenHandle(*to_object)));
     if (!v8_flags.single_generation &&
         target_handling == TargetHandling::kInitializedOldGen) {
-      FullGC(v8_isolate);
+      InvokeMajorGC(i_isolate);
       EXPECT_FALSE(
           i::Heap::InYoungGeneration(*v8::Utils::OpenHandle(*to_object)));
     }
@@ -507,24 +508,25 @@ V8_NOINLINE void StackToHeapTest(v8::Isolate* v8_isolate, Operation op,
     observer.SetWeak();
   }
   EXPECT_FALSE(observer.IsEmpty());
-  FullGC(v8_isolate);
+  InvokeMajorGC(i_isolate);
   EXPECT_FALSE(observer.IsEmpty());
   PerformOperation(op, &cpp_heap_obj->heap_handle, &stack_handle);
-  FullGC(v8_isolate);
+  InvokeMajorGC(i_isolate);
   EXPECT_FALSE(observer.IsEmpty());
   cpp_heap_obj.Clear();
   {
     // Conservative scanning may find stale pointers to on-stack handles.
     // Disable scanning, assuming the slots are overwritten.
     DisableConservativeStackScanningScopeForTesting no_stack_scanning(
-        reinterpret_cast<i::Isolate*>(v8_isolate)->heap());
-    FullGC(v8_isolate);
+        i_isolate->heap());
+    InvokeMajorGC(i_isolate);
   }
   ASSERT_TRUE(observer.IsEmpty());
 }
 
 V8_NOINLINE void HeapToStackTest(v8::Isolate* v8_isolate, Operation op,
                                  TargetHandling target_handling) {
+  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(v8_isolate);
   v8::Global<v8::Object> observer;
   v8::TracedReference<v8::Value> stack_handle;
   v8::CppHeap* cpp_heap = v8_isolate->GetCppHeap();
@@ -539,7 +541,7 @@ V8_NOINLINE void HeapToStackTest(v8::Isolate* v8_isolate, Operation op,
         IsNewObjectInCorrectGeneration(*v8::Utils::OpenHandle(*to_object)));
     if (!v8_flags.single_generation &&
         target_handling == TargetHandling::kInitializedOldGen) {
-      FullGC(v8_isolate);
+      InvokeMajorGC(i_isolate);
       EXPECT_FALSE(
           i::Heap::InYoungGeneration(*v8::Utils::OpenHandle(*to_object)));
     }
@@ -554,24 +556,25 @@ V8_NOINLINE void HeapToStackTest(v8::Isolate* v8_isolate, Operation op,
     observer.SetWeak();
   }
   EXPECT_FALSE(observer.IsEmpty());
-  FullGC(v8_isolate);
+  InvokeMajorGC(i_isolate);
   EXPECT_FALSE(observer.IsEmpty());
   PerformOperation(op, &stack_handle, &cpp_heap_obj->heap_handle);
-  FullGC(v8_isolate);
+  InvokeMajorGC(i_isolate);
   EXPECT_FALSE(observer.IsEmpty());
   stack_handle.Reset();
   {
     // Conservative scanning may find stale pointers to on-stack handles.
     // Disable scanning, assuming the slots are overwritten.
     DisableConservativeStackScanningScopeForTesting no_stack_scanning(
-        reinterpret_cast<i::Isolate*>(v8_isolate)->heap());
-    FullGC(v8_isolate);
+        i_isolate->heap());
+    InvokeMajorGC(i_isolate);
   }
   EXPECT_TRUE(observer.IsEmpty());
 }
 
 V8_NOINLINE void StackToStackTest(v8::Isolate* v8_isolate, Operation op,
                                   TargetHandling target_handling) {
+  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(v8_isolate);
   v8::Global<v8::Object> observer;
   v8::TracedReference<v8::Value> stack_handle1;
   v8::TracedReference<v8::Value> stack_handle2;
@@ -583,7 +586,7 @@ V8_NOINLINE void StackToStackTest(v8::Isolate* v8_isolate, Operation op,
         IsNewObjectInCorrectGeneration(*v8::Utils::OpenHandle(*to_object)));
     if (!v8_flags.single_generation &&
         target_handling == TargetHandling::kInitializedOldGen) {
-      FullGC(v8_isolate);
+      InvokeMajorGC(i_isolate);
       EXPECT_FALSE(
           i::Heap::InYoungGeneration(*v8::Utils::OpenHandle(*to_object)));
     }
@@ -598,18 +601,18 @@ V8_NOINLINE void StackToStackTest(v8::Isolate* v8_isolate, Operation op,
     observer.SetWeak();
   }
   EXPECT_FALSE(observer.IsEmpty());
-  FullGC(v8_isolate);
+  InvokeMajorGC(i_isolate);
   EXPECT_FALSE(observer.IsEmpty());
   PerformOperation(op, &stack_handle2, &stack_handle1);
-  FullGC(v8_isolate);
+  InvokeMajorGC(i_isolate);
   EXPECT_FALSE(observer.IsEmpty());
   stack_handle2.Reset();
   {
     // Conservative scanning may find stale pointers to on-stack handles.
     // Disable scanning, assuming the slots are overwritten.
     DisableConservativeStackScanningScopeForTesting no_stack_scanning(
-        reinterpret_cast<i::Isolate*>(v8_isolate)->heap());
-    FullGC(v8_isolate);
+        i_isolate->heap());
+    InvokeMajorGC(i_isolate);
   }
   EXPECT_TRUE(observer.IsEmpty());
 }

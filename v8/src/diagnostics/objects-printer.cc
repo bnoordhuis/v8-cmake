@@ -667,7 +667,7 @@ void JSGeneratorObject::JSGeneratorObjectPrint(std::ostream& os) {
     if (fun_info.HasSourceCode()) {
       Script script = Script::cast(fun_info.script());
       String script_name = script.name().IsString()
-                               ? String::cast(script.name())
+                               ? Tagged<String>::cast(script.name())
                                : GetReadOnlyRoots().empty_string();
 
       os << "\n - source position: ";
@@ -919,8 +919,8 @@ void PrintTableContentsGeneric(std::ostream& os, T dict,
 }
 
 void PrintNameDictionaryFlags(std::ostream& os, NameDictionary dict) {
-  if (dict.may_have_interesting_symbols()) {
-    os << "\n - may_have_interesting_symbols";
+  if (dict.may_have_interesting_properties()) {
+    os << "\n - may_have_interesting_properties";
   }
 }
 
@@ -1338,12 +1338,18 @@ void FeedbackNexus::Print(std::ostream& os) {
     case FeedbackSlotKind::kSetKeyedStrict: {
       os << InlineCacheState2String(ic_state());
       if (ic_state() == InlineCacheState::MONOMORPHIC) {
-        os << "\n   " << Brief(GetFeedback()) << ": ";
-        Object handler = GetFeedbackExtra().GetHeapObjectOrSmi();
-        if (handler.IsWeakFixedArray()) {
-          handler = WeakFixedArray::cast(handler).Get(0).GetHeapObjectOrSmi();
+        HeapObject feedback = GetFeedback().GetHeapObject();
+        HeapObject feedback_extra = GetFeedbackExtra().GetHeapObject();
+        if (feedback.IsName()) {
+          os << " with name " << Brief(feedback);
+          WeakFixedArray array = WeakFixedArray::cast(feedback_extra);
+          os << "\n   " << Brief(array.Get(0)) << ": ";
+          Object handler = array.Get(1).GetHeapObjectOrSmi();
+          StoreHandler::PrintHandler(handler, os);
+        } else {
+          os << "\n   " << Brief(feedback) << ": ";
+          StoreHandler::PrintHandler(feedback_extra, os);
         }
-        StoreHandler::PrintHandler(handler, os);
       } else if (ic_state() == InlineCacheState::POLYMORPHIC) {
         HeapObject feedback = GetFeedback().GetHeapObject();
         WeakFixedArray array;
@@ -2092,7 +2098,16 @@ void WasmStruct::WasmStructPrint(std::ostream& os) {
         break;
       }
       case wasm::kS128:
-        os << "UNIMPLEMENTED";  // TODO(7748): Implement.
+        os << "0x" << std::hex << std::setfill('0');
+#ifdef V8_TARGET_BIG_ENDIAN
+        for (int j = 0; j < kSimd128Size; j++) {
+#else
+        for (int j = kSimd128Size - 1; j >= 0; j--) {
+#endif
+          os << std::setw(2)
+             << static_cast<int>(reinterpret_cast<uint8_t*>(field_address)[j]);
+        }
+        os << std::dec << std::setfill(' ');
         break;
       case wasm::kBottom:
       case wasm::kVoid:
@@ -2153,15 +2168,18 @@ void WasmArray::WasmArrayPrint(std::ostream& os) {
       for (uint32_t i = 0;
            i < std::min(this->length(), kWasmArrayMaximumPrintedElements);
            i++) {
-        os << "\n   " << static_cast<int>(i) << " - 0x" << std::hex;
+        os << "\n   " << static_cast<int>(i) << " - 0x" << std::hex
+           << std::setfill('0');
 #ifdef V8_TARGET_BIG_ENDIAN
         for (int j = 0; j < kSimd128Size; j++) {
 #else
         for (int j = kSimd128Size - 1; j >= 0; j--) {
 #endif
-          os << reinterpret_cast<uint8_t*>(this->ElementAddress(i))[j];
+          os << std::setw(2)
+             << static_cast<int>(
+                    reinterpret_cast<uint8_t*>(this->ElementAddress(i))[j]);
         }
-        os << std::dec;
+        os << std::dec << std::setfill(' ');
       }
       if (this->length() > kWasmArrayMaximumPrintedElements) os << "\n   ...";
       break;
@@ -2186,6 +2204,9 @@ void WasmSuspenderObject::WasmSuspenderObjectPrint(std::ostream& os) {
   PrintHeader(os, "WasmSuspenderObject");
   os << "\n - continuation: " << continuation();
   os << "\n - parent: " << parent();
+  os << "\n - promise: " << promise();
+  os << "\n - resume: " << resume();
+  os << "\n - reject: " << reject();
   os << "\n - state: " << state();
   os << "\n - wasm_to_js_counter: " << wasm_to_js_counter();
   os << "\n";
@@ -2206,7 +2227,7 @@ void WasmInstanceObject::WasmInstanceObjectPrint(std::ostream& os) {
   PRINT_WASM_INSTANCE_FIELD(module_object, Brief);
   PRINT_WASM_INSTANCE_FIELD(exports_object, Brief);
   PRINT_WASM_INSTANCE_FIELD(native_context, Brief);
-  PRINT_OPTIONAL_WASM_INSTANCE_FIELD(memory_object, Brief);
+  PRINT_WASM_INSTANCE_FIELD(memory_objects, Brief);
   PRINT_OPTIONAL_WASM_INSTANCE_FIELD(untagged_globals_buffer, Brief);
   PRINT_OPTIONAL_WASM_INSTANCE_FIELD(tagged_globals_buffer, Brief);
   PRINT_OPTIONAL_WASM_INSTANCE_FIELD(imported_mutable_globals_buffers, Brief);
@@ -2241,6 +2262,7 @@ void WasmInstanceObject::WasmInstanceObjectPrint(std::ostream& os) {
   PRINT_WASM_INSTANCE_FIELD(element_segments, Brief);
   PRINT_WASM_INSTANCE_FIELD(hook_on_function_call_address, to_void_ptr);
   PRINT_WASM_INSTANCE_FIELD(tiering_budget_array, to_void_ptr);
+  PRINT_WASM_INSTANCE_FIELD(memory_bases_and_sizes, Brief);
   PRINT_WASM_INSTANCE_FIELD(break_on_entry, static_cast<int>);
   JSObjectPrintBody(os, *this);
   os << "\n";
@@ -2868,7 +2890,8 @@ void Map::MapPrint(std::ostream& os) {
   if (is_dictionary_map()) os << "\n - dictionary_map";
   if (has_named_interceptor()) os << "\n - named_interceptor";
   if (has_indexed_interceptor()) os << "\n - indexed_interceptor";
-  if (may_have_interesting_symbols()) os << "\n - may_have_interesting_symbols";
+  if (may_have_interesting_properties())
+    os << "\n - may_have_interesting_properties";
   if (is_undetectable()) os << "\n - undetectable";
   if (is_callable()) os << "\n - callable";
   if (is_constructor()) os << "\n - constructor";

@@ -166,8 +166,10 @@ MaybeHandle<Code> Factory::CodeBuilder::BuildInternal(
       DisallowGarbageCollection no_gc;
       InstructionStream raw_istream = *istream;
       CodePageMemoryModificationScope memory_modification_scope(raw_istream);
-      raw_istream.set_body_size(code_desc_.instruction_size() +
-                                code_desc_.metadata_size());
+      int body_size = code_desc_.body_size();
+      ThreadIsolation::RegisterInstructionStreamAllocation(
+          raw_istream.address(), InstructionStream::SizeFor(body_size));
+      raw_istream.set_body_size(body_size);
       raw_istream.initialize_code_to_smi_zero(kReleaseStore);
       raw_istream.set_relocation_info(*reloc_info);
       raw_istream.clear_padding();
@@ -451,7 +453,7 @@ Handle<Tuple2> Factory::NewTuple2(Handle<Object> value1, Handle<Object> value2,
 
 Handle<Oddball> Factory::NewOddball(Handle<Map> map, const char* to_string,
                                     Handle<Object> to_number,
-                                    const char* type_of, byte kind) {
+                                    const char* type_of, uint8_t kind) {
   Handle<Oddball> oddball(Oddball::cast(New(map, AllocationType::kReadOnly)),
                           isolate());
   Oddball::Initialize(isolate(), oddball, to_string, to_number, type_of, kind);
@@ -1811,7 +1813,7 @@ Handle<WasmArray> Factory::NewWasmArray(const wasm::ArrayType* type,
       wasm::WasmValue packed = initial_value.Packed(type->element_type());
       for (uint32_t i = 0; i < length; i++) {
         Address address = result.ElementAddress(i);
-        packed.CopyTo(reinterpret_cast<byte*>(address));
+        packed.CopyTo(reinterpret_cast<uint8_t*>(address));
       }
     }
   } else {
@@ -1833,7 +1835,7 @@ Handle<WasmArray> Factory::NewWasmArrayFromElements(
       Address address = result.ElementAddress(i);
       elements[i]
           .Packed(type->element_type())
-          .CopyTo(reinterpret_cast<byte*>(address));
+          .CopyTo(reinterpret_cast<uint8_t*>(address));
     }
   } else {
     for (uint32_t i = 0; i < length; i++) {
@@ -1899,7 +1901,9 @@ Handle<WasmStruct> Factory::NewWasmStruct(const wasm::StructType* type,
     int offset = type->field_offset(i);
     if (type->field(i).is_numeric()) {
       Address address = result.RawFieldAddress(offset);
-      args[i].Packed(type->field(i)).CopyTo(reinterpret_cast<byte*>(address));
+      args[i]
+          .Packed(type->field(i))
+          .CopyTo(reinterpret_cast<uint8_t*>(address));
     } else {
       offset += WasmStruct::kHeaderSize;
       TaggedField<Object>::store(result, offset, *args[i].to_ref());
@@ -2106,7 +2110,10 @@ Map Factory::InitializeMap(Map map, InstanceType type, int instance_size,
   map.init_prototype_and_constructor_or_back_pointer(ro_roots);
   map.set_instance_size(instance_size);
   if (map.IsJSObjectMap()) {
-    DCHECK(!ReadOnlyHeap::Contains(map));
+    // Shared space JS objects have fixed layout and can have RO maps. No other
+    // JS objects have RO maps.
+    DCHECK_IMPLIES(!map.IsAlwaysSharedSpaceJSObjectMap(),
+                   !ReadOnlyHeap::Contains(map));
     map.SetInObjectPropertiesStartInWords(instance_size / kTaggedSize -
                                           inobject_properties);
     DCHECK_EQ(map.GetInObjectProperties(), inobject_properties);
@@ -2514,12 +2521,6 @@ Handle<JSObject> Factory::NewExternal(void* value) {
   return external;
 }
 
-Handle<DeoptimizationLiteralArray> Factory::NewDeoptimizationLiteralArray(
-    int length) {
-  return Handle<DeoptimizationLiteralArray>::cast(
-      NewWeakFixedArray(length, AllocationType::kOld));
-}
-
 Handle<Code> Factory::NewCodeObjectForEmbeddedBuiltin(Handle<Code> code,
                                                       Address off_heap_entry) {
   CHECK_NOT_NULL(isolate()->embedded_blob_code());
@@ -2595,7 +2596,6 @@ Handle<BytecodeArray> Factory::CopyBytecodeArray(Handle<BytecodeArray> source) {
   copy.set_handler_table(raw_source.handler_table());
   copy.set_source_position_table(raw_source.source_position_table(kAcquireLoad),
                                  kReleaseStore);
-  copy.set_bytecode_age(raw_source.bytecode_age());
   raw_source.CopyBytecodesTo(copy);
   return handle(copy, isolate());
 }
@@ -2671,7 +2671,7 @@ Handle<JSGlobalObject> Factory::NewJSGlobalObject(
   // Create a new map for the global object.
   Handle<Map> new_map = Map::CopyDropDescriptors(isolate(), map);
   Map raw_map = *new_map;
-  raw_map.set_may_have_interesting_symbols(true);
+  raw_map.set_may_have_interesting_properties(true);
   raw_map.set_is_dictionary_map(true);
   LOG(isolate(), MapDetails(raw_map));
 
@@ -3357,7 +3357,7 @@ Handle<JSGlobalProxy> Factory::NewUninitializedJSGlobalProxy(int size) {
     DisallowGarbageCollection no_gc;
     Map raw = *map;
     raw.set_is_access_check_needed(true);
-    raw.set_may_have_interesting_symbols(true);
+    raw.set_may_have_interesting_properties(true);
     LOG(isolate(), MapDetails(raw));
   }
   Handle<JSGlobalProxy> proxy = Handle<JSGlobalProxy>::cast(
@@ -4114,7 +4114,7 @@ Handle<JSSharedArray> Factory::NewJSSharedArray(Handle<JSFunction> constructor,
 
 Handle<JSAtomicsMutex> Factory::NewJSAtomicsMutex() {
   SharedObjectSafePublishGuard publish_guard;
-  Handle<Map> map = isolate()->js_atomics_mutex_map();
+  Handle<Map> map = read_only_roots().js_atomics_mutex_map_handle();
   Handle<JSAtomicsMutex> mutex = Handle<JSAtomicsMutex>::cast(
       NewJSObjectFromMap(map, AllocationType::kSharedOld));
   mutex->set_state(JSAtomicsMutex::kUnlocked);
@@ -4124,7 +4124,7 @@ Handle<JSAtomicsMutex> Factory::NewJSAtomicsMutex() {
 
 Handle<JSAtomicsCondition> Factory::NewJSAtomicsCondition() {
   SharedObjectSafePublishGuard publish_guard;
-  Handle<Map> map = isolate()->js_atomics_condition_map();
+  Handle<Map> map = read_only_roots().js_atomics_condition_map_handle();
   Handle<JSAtomicsCondition> cond = Handle<JSAtomicsCondition>::cast(
       NewJSObjectFromMap(map, AllocationType::kSharedOld));
   cond->set_state(JSAtomicsCondition::kEmptyState);
