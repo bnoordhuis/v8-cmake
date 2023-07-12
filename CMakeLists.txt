@@ -112,6 +112,12 @@ set(enable-exceptions
   $<$<CXX_COMPILER_ID:GNU>:-fexceptions>
 )
 
+set(enable-fpic
+  $<$<CXX_COMPILER_ID:AppleClang>:-fPIC>
+  $<$<CXX_COMPILER_ID:Clang>:-fPIC>
+  $<$<CXX_COMPILER_ID:GNU>:-fPIC>
+)
+
 #
 # d8
 #
@@ -130,6 +136,9 @@ add_executable(
 
 target_compile_definitions(d8 PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 target_compile_options(d8 PRIVATE ${disable-exceptions})
+if(enable-fPIC)
+  target_compile_options(d8 PRIVATE ${enable-fpic})
+endif()
 
 target_include_directories(d8
   PUBLIC
@@ -436,6 +445,9 @@ set_property(SOURCE v8/src/diagnostics/unwinding-info-win64.cc
 
 target_compile_definitions(v8_base_without_compiler PRIVATE ${v8_defines} $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 target_compile_options(v8_base_without_compiler PRIVATE ${disable-exceptions})
+if(enable-fPIC)
+  target_compile_options(v8_base_without_compiler PRIVATE ${enable-fpic})
+endif()
 
 target_include_directories(v8_base_without_compiler
   PRIVATE
@@ -469,6 +481,9 @@ add_library(v8_compiler STATIC)
 target_sources(v8_compiler PRIVATE ${compiler-sources})
 target_compile_definitions(v8_compiler PRIVATE ${v8_defines} $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 target_compile_options(v8_compiler PRIVATE ${disable-exceptions})
+if(enable-fPIC)
+  target_compile_options(v8_compiler PRIVATE ${enable-fpic})
+endif()
 
 target_include_directories(v8_compiler
   PUBLIC
@@ -547,6 +562,9 @@ add_library(
 
 target_compile_definitions(v8_initializers PRIVATE ${v8_defines} $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 target_compile_options(v8_initializers PRIVATE ${disable-exceptions})
+if(enable-fPIC)
+  target_compile_options(v8_initializers PRIVATE ${enable-fpic})
+endif()
 
 target_include_directories(v8_initializers
   PRIVATE
@@ -571,6 +589,9 @@ add_library(
 
 target_compile_definitions(v8_snapshot PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 target_compile_options(v8_snapshot PRIVATE ${disable-exceptions})
+if(enable-fPIC)
+  target_compile_options(v8_snapshot PRIVATE ${enable-fpic})
+endif()
 target_include_directories(v8_snapshot PRIVATE ${PROJECT_SOURCE_DIR}/v8)
 
 target_link_libraries(v8_snapshot
@@ -652,6 +673,9 @@ add_library(v8_inspector STATIC
 
 target_compile_features(v8_inspector PUBLIC cxx_std_17)
 target_compile_options(v8_inspector PRIVATE ${disable-exceptions})
+if(enable-fPIC)
+  target_compile_options(v8_inspector PRIVATE ${enable-fpic})
+endif()
 target_compile_definitions(v8_inspector PUBLIC $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 
 target_include_directories(v8_inspector
@@ -722,6 +746,10 @@ target_sources(v8_libplatform
 
 target_compile_definitions(v8_libplatform PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 target_compile_options(v8_libplatform PRIVATE ${disable-exceptions})
+if(enable-fPIC)
+  target_compile_options(v8_libplatform PRIVATE ${enable-fpic})
+endif()
+
 target_include_directories(v8_libplatform
   PUBLIC
     ${PROJECT_SOURCE_DIR}/v8/include
@@ -745,6 +773,9 @@ target_include_directories(v8_libsampler
 
 target_compile_definitions(v8_libsampler PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 target_compile_options(v8_libsampler PRIVATE ${disable-exceptions})
+if(enable-fPIC)
+  target_compile_options(v8_libsampler PRIVATE ${enable-fpic})
+endif()
 target_include_directories(v8_libsampler PRIVATE ${PROJECT_SOURCE_DIR}/v8)
 target_link_libraries(v8_libsampler PRIVATE v8_libbase)
 
@@ -793,6 +824,9 @@ set_property(SOURCE v8/src/base/utils/random-number-generator.cc
 
 target_compile_definitions(v8_libbase PRIVATE $<${is-win}:UNICODE> $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 target_compile_options(v8_libbase PRIVATE ${disable-exceptions})
+if(enable-fPIC)
+  target_compile_options(v8_libbase PRIVATE ${enable-fpic})
+endif()
 target_include_directories(v8_libbase PRIVATE ${PROJECT_SOURCE_DIR}/v8)
 target_link_libraries(v8_libbase
   PRIVATE
@@ -925,6 +959,9 @@ add_library(
 
 target_compile_definitions(v8_torque_generated PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 target_compile_options(v8_torque_generated PRIVATE ${disable-exceptions})
+if(enable-fPIC)
+  target_compile_options(v8_torque_generated PRIVATE ${enable-fpic})
+endif()
 target_link_libraries(v8_torque_generated PRIVATE v8-bytecodes-builtin-list)
 
 target_include_directories(v8_torque_generated
