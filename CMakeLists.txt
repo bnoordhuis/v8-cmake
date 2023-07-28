@@ -977,16 +977,58 @@ add_custom_command(
     -o ${PROJECT_BINARY_DIR}/torque-generated
     -v8-root ${PROJECT_SOURCE_DIR}/v8
     ${torque_files}
-  COMMAND
-    ${CMAKE_COMMAND} -E touch ${torque-outputs} ${torque_outputs}
   DEPENDS
     torque
     ${torque_dirs}
     ${torque_files_abs}
-  OUTPUT
-    ${torque-outputs}
-    ${torque_outputs}
+  TARGET
+    v8_torque_generated
 )
+
+if(WIN32)
+  # Windows has a limit on the number of command line arguments. To work around
+  # Split the files into groups of 200 and touch them in groups.
+
+  set(torque_outputs_per_command 200)
+  set(torque_outputs_full ${torque_outputs} ${torque-outputs})
+  list(LENGTH torque_outputs_full torque_outputs_full_length)
+  math(EXPR torque_outputs_last_index "${torque_outputs_full_length} - 1")
+
+  foreach (start RANGE 0 ${torque_outputs_last_index} ${torque_outputs_per_command})
+    list(SUBLIST torque_outputs_full ${start} ${torque_outputs_per_command} torque_outputs_full_sublist)
+
+    add_custom_command(
+      COMMAND
+        ${CMAKE_COMMAND} -E touch ${torque_outputs_full_sublist}
+      DEPENDS
+        torque
+        ${torque_dirs}
+        ${torque_files_abs}
+      OUTPUT
+        ${torque_outputs_full_sublist}
+    )
+  endforeach()
+
+else()
+
+  add_custom_command(
+    COMMAND
+      torque
+      -o ${PROJECT_BINARY_DIR}/torque-generated
+      -v8-root ${PROJECT_SOURCE_DIR}/v8
+      ${torque_files}
+    COMMAND
+      ${CMAKE_COMMAND} -E touch ${torque-outputs} ${torque_outputs}
+    DEPENDS
+      torque
+      ${torque_dirs}
+      ${torque_files_abs}
+    OUTPUT
+      ${torque-outputs}
+      ${torque_outputs}
+  )
+
+endif ()
 
 add_custom_command(
   COMMAND
