@@ -72,6 +72,14 @@ set(is-ia32 0)
 set(is-mips 0)
 set(is-mips64 0)
 set(is-ppc 0)
+set(is-ppc64 0)
+if (CMAKE_SYSTEM_PROCESSOR MATCHES "^(ppc|powerpc)")
+  if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+    set(is-ppc64 1)
+  else()
+    set(is-ppc 1)
+  endif()
+endif ()
 
 set(is-s390 $<STREQUAL:${CMAKE_SYSTEM_PROCESSOR},S390>)
 string(CONCAT is-x64 $<OR:
@@ -92,6 +100,8 @@ set(
   $<${is-win}:V8_TARGET_OS_WIN>
   $<${is-x64}:V8_TARGET_ARCH_X64>
   $<${is-arm64}:V8_TARGET_ARCH_ARM64>
+  $<${is-ppc}:V8_TARGET_ARCH_PPC>
+  $<${is-ppc64}:V8_TARGET_ARCH_PPC64>
   $<${is-win}:NOMINMAX>
   $<$<AND:${is-win},${is-x64}>:V8_OS_WIN_X64>
   $<$<BOOL:${V8_ENABLE_CONCURRENT_MARKING}>:V8_CONCURRENT_MARKING>
@@ -357,6 +367,21 @@ add_library(v8_base_without_compiler STATIC
   $<${is-arm64}:v8/src/diagnostics/arm64/eh-frame-arm64.cc>
   $<${is-arm64}:v8/src/execution/arm64/frame-constants-arm64.cc>
   $<${is-arm64}:v8/src/regexp/arm64/regexp-macro-assembler-arm64.cc>
+  $<$<AND:${is-ppc},${is-ppc64}>:v8/src/codegen/ppc/assembler-ppc.cc>
+  $<$<AND:${is-ppc},${is-ppc64}>:v8/src/codegen/ppc/constants-ppc.cc>
+  $<$<AND:${is-ppc},${is-ppc64}>:v8/src/codegen/ppc/cpu-ppc.cc>
+  $<$<AND:${is-ppc},${is-ppc64}>:v8/src/codegen/ppc/macro-assembler-ppc.cc>
+  $<$<AND:${is-ppc},${is-ppc64}>:v8/src/compiler/backend/ppc/code-generator-ppc.cc>
+  $<$<AND:${is-ppc},${is-ppc64}>:v8/src/compiler/backend/ppc/instruction-scheduler-ppc.cc>
+  $<$<AND:${is-ppc},${is-ppc64}>:v8/src/compiler/backend/ppc/instruction-selector-ppc.cc>
+  $<$<AND:${is-ppc},${is-ppc64}>:v8/src/compiler/backend/ppc/unwinding-info-writer-ppc.cc>
+  $<$<AND:${is-ppc},${is-ppc64}>:v8/src/deoptimizer/ppc/deoptimizer-ppc.cc>
+  $<$<AND:${is-ppc},${is-ppc64}>:v8/src/diagnostics/ppc/disasm-ppc.cc>
+  $<$<AND:${is-ppc},${is-ppc64}>:v8/src/diagnostics/ppc/eh-frame-ppc.cc>
+  $<$<AND:${is-ppc},${is-ppc64}>:v8/src/diagnostics/ppc/unwinder-ppc.cc>
+  $<$<AND:${is-ppc},${is-ppc64}>:v8/src/execution/ppc/frame-constants-ppc.cc>
+  $<$<AND:${is-ppc},${is-ppc64}>:v8/src/execution/ppc/simulator-ppc.cc>
+  $<$<AND:${is-ppc},${is-ppc64}>:v8/src/regexp/ppc/regexp-macro-assembler-ppc.cc>
   $<$<BOOL:${V8_ENABLE_I18N}>:$<TARGET_OBJECTS:v8-i18n-support>>
   ${api-sources}
   ${asmjs-sources}
@@ -606,7 +631,10 @@ add_custom_command(
     mksnapshot
     --embedded_src ${PROJECT_BINARY_DIR}/embedded.S
     --startup_src ${PROJECT_BINARY_DIR}/snapshot.cc
+    $<${is-arm64}:--target_arch=arm64>
     $<${is-x64}:--target_arch=x64>
+    $<${is-ppc}:--target_arch=ppc>
+    $<${is-ppc64}:--target_arch=ppc64>
     $<$<PLATFORM_ID:Darwin>:--target_os=mac>
     $<$<PLATFORM_ID:Linux>:--target_os=linux>
     $<$<PLATFORM_ID:Windows>:--target_os=win>
