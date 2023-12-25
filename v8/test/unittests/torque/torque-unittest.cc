@@ -84,7 +84,7 @@ type string constexpr 'const char*';
 type RawPtr generates 'TNode<RawPtrT>' constexpr 'void*';
 type ExternalPointer
     generates 'TNode<ExternalPointerT>' constexpr 'ExternalPointer_t';
-type Code extends HeapObject generates 'TNode<Code>';
+type InstructionStream extends HeapObject generates 'TNode<InstructionStream>';
 type BuiltinPtr extends Smi generates 'TNode<BuiltinPtr>';
 type Context extends HeapObject generates 'TNode<Context>';
 type NativeContext extends Context;
@@ -973,6 +973,41 @@ TEST(Torque, ImplicitTemplateParameterInference) {
     }
   )",
       HasSubstr("ambiguous callable"));
+}
+
+TEST(Torque, BuiltinReturnsNever) {
+  ExpectFailingCompilation(
+      "builtin Never(): never {}",
+      HasSubstr("control reaches end of builtin, expected return of a value"));
+  ExpectFailingCompilation(
+      "builtin Never(): never { return 1; }",
+      HasSubstr("cannot return from a function with return type never"));
+  ExpectFailingCompilation(
+      R"(
+    extern macro Throw(): never;
+    builtin Never(): never {
+      Throw();
+    }
+    builtin CallsNever(): Smi {
+      Never();
+      return 1;
+    }
+  )",
+      HasSubstr("statement after non-returning statement"));
+
+  ExpectSuccessfulCompilation(
+      "extern macro Throw(): never;"
+      "builtin Never(): never { Throw(); }");
+  ExpectSuccessfulCompilation(R"(
+    extern macro Throw(): never;
+    builtin Never(implicit c: Context, a: int32)(): never {
+      if(a == 1) {
+        Throw();
+      } else {
+        Throw();
+      }
+    }
+  )");
 }
 
 }  // namespace torque

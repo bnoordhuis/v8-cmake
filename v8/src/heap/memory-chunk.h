@@ -12,8 +12,6 @@
 #include "src/common/globals.h"
 #include "src/heap/base/active-system-pages.h"
 #include "src/heap/basic-memory-chunk.h"
-#include "src/heap/heap.h"
-#include "src/heap/invalidated-slots.h"
 #include "src/heap/list.h"
 #include "src/heap/marking.h"
 #include "src/heap/memory-chunk-layout.h"
@@ -24,6 +22,7 @@ namespace internal {
 
 class CodeObjectRegistry;
 class FreeListCategory;
+class Space;
 
 // MemoryChunk represents a memory region owned by a specific space.
 // It is divided into the header and the body. Chunk start is always
@@ -50,9 +49,6 @@ class MemoryChunk : public BasicMemoryChunk {
   // Page size in bytes.  This must be a multiple of the OS page size.
   static const int kPageSize = 1 << kPageSizeBits;
 
-  // Maximum number of nested code memory modification scopes.
-  static const int kMaxWriteUnprotectCounter = 3;
-
   MemoryChunk(Heap* heap, BaseSpace* space, size_t size, Address area_start,
               Address area_end, VirtualMemory reservation,
               Executability executable, PageSize page_size);
@@ -68,7 +64,7 @@ class MemoryChunk : public BasicMemoryChunk {
   }
 
   static MemoryChunk* cast(BasicMemoryChunk* chunk) {
-    SLOW_DCHECK(!chunk->InReadOnlySpace());
+    SLOW_DCHECK(!chunk || !chunk->InReadOnlySpace());
     return static_cast<MemoryChunk*>(chunk);
   }
 
@@ -88,7 +84,8 @@ class MemoryChunk : public BasicMemoryChunk {
 
   void DiscardUnusedMemory(Address addr, size_t size);
 
-  base::Mutex* mutex() { return mutex_; }
+  base::Mutex* mutex() const { return mutex_; }
+  base::SharedMutex* shared_mutex() const { return shared_mutex_; }
 
   void set_concurrent_sweeping_state(ConcurrentSweepingState state) {
     concurrent_sweeping_ = state;
@@ -102,58 +99,42 @@ class MemoryChunk : public BasicMemoryChunk {
     return concurrent_sweeping_ == ConcurrentSweepingState::kDone;
   }
 
-  template <RememberedSetType type>
-  bool ContainsSlots() {
-    return slot_set<type>() != nullptr || typed_slot_set<type>() != nullptr ||
-           invalidated_slots<type>() != nullptr;
-  }
-
   template <RememberedSetType type, AccessMode access_mode = AccessMode::ATOMIC>
   SlotSet* slot_set() {
-    if (access_mode == AccessMode::ATOMIC)
+    if constexpr (access_mode == AccessMode::ATOMIC)
       return base::AsAtomicPointer::Acquire_Load(&slot_set_[type]);
     return slot_set_[type];
   }
 
   template <RememberedSetType type, AccessMode access_mode = AccessMode::ATOMIC>
+  const SlotSet* slot_set() const {
+    return const_cast<MemoryChunk*>(this)->slot_set<type, access_mode>();
+  }
+
+  template <RememberedSetType type, AccessMode access_mode = AccessMode::ATOMIC>
   TypedSlotSet* typed_slot_set() {
-    if (access_mode == AccessMode::ATOMIC)
+    if constexpr (access_mode == AccessMode::ATOMIC)
       return base::AsAtomicPointer::Acquire_Load(&typed_slot_set_[type]);
     return typed_slot_set_[type];
   }
 
-  template <RememberedSetType type>
-  V8_EXPORT_PRIVATE SlotSet* AllocateSlotSet();
-  SlotSet* AllocateSweepingSlotSet();
-  SlotSet* AllocateSlotSet(SlotSet** slot_set);
-
-  // Not safe to be called concurrently.
-  template <RememberedSetType type>
-  void ReleaseSlotSet();
-  void ReleaseSlotSet(SlotSet** slot_set);
-
-  template <RememberedSetType type>
-  TypedSlotSet* AllocateTypedSlotSet();
-  // Not safe to be called concurrently.
-  template <RememberedSetType type>
-  void ReleaseTypedSlotSet();
-
-  template <RememberedSetType type>
-  InvalidatedSlots* AllocateInvalidatedSlots();
-  template <RememberedSetType type>
-  void ReleaseInvalidatedSlots();
-  template <RememberedSetType type>
-  V8_EXPORT_PRIVATE void RegisterObjectWithInvalidatedSlots(HeapObject object);
-  void InvalidateRecordedSlots(HeapObject object);
-  template <RememberedSetType type>
-  bool RegisteredObjectWithInvalidatedSlots(HeapObject object);
-  template <RememberedSetType type>
-  InvalidatedSlots* invalidated_slots() {
-    return invalidated_slots_[type];
+  template <RememberedSetType type, AccessMode access_mode = AccessMode::ATOMIC>
+  const TypedSlotSet* typed_slot_set() const {
+    return const_cast<MemoryChunk*>(this)->typed_slot_set<type, access_mode>();
   }
 
-  void AllocateYoungGenerationBitmap();
-  void ReleaseYoungGenerationBitmap();
+  template <RememberedSetType type>
+  bool ContainsSlots() const {
+    return slot_set<type>() != nullptr || typed_slot_set<type>() != nullptr;
+  }
+  bool ContainsAnySlots() const;
+
+  V8_EXPORT_PRIVATE SlotSet* AllocateSlotSet(RememberedSetType type);
+  // Not safe to be called concurrently.
+  void ReleaseSlotSet(RememberedSetType type);
+  TypedSlotSet* AllocateTypedSlotSet(RememberedSetType type);
+  // Not safe to be called concurrently.
+  void ReleaseTypedSlotSet(RememberedSetType type);
 
   int FreeListsLength();
 
@@ -188,14 +169,23 @@ class MemoryChunk : public BasicMemoryChunk {
   void InitializationMemoryFence();
 
   static PageAllocator::Permission GetCodeModificationPermission() {
-    return FLAG_write_code_using_rwx ? PageAllocator::kReadWriteExecute
-                                     : PageAllocator::kReadWrite;
+    DCHECK(!V8_HEAP_USE_PTHREAD_JIT_WRITE_PROTECT);
+    // On MacOS on ARM64 RWX permissions are allowed to be set only when
+    // fast W^X is enabled (see V8_HEAP_USE_PTHREAD_JIT_WRITE_PROTECT).
+    return !V8_HAS_PTHREAD_JIT_WRITE_PROTECT && v8_flags.write_code_using_rwx
+               ? PageAllocator::kReadWriteExecute
+               : PageAllocator::kReadWrite;
   }
 
   V8_EXPORT_PRIVATE void SetReadable();
   V8_EXPORT_PRIVATE void SetReadAndExecutable();
 
-  V8_EXPORT_PRIVATE void SetCodeModificationPermissions();
+  // Used by the mprotect version of CodePageMemoryModificationScope to toggle
+  // the writable permission bit of the MemoryChunk.
+  // The returned MutexGuard protects the page from concurrent access. The
+  // caller needs to call SetDefaultCodePermissions before releasing the
+  // MutexGuard.
+  V8_EXPORT_PRIVATE base::MutexGuard SetCodeModificationPermissions();
   V8_EXPORT_PRIVATE void SetDefaultCodePermissions();
 
   heap::ListNode<MemoryChunk>& list_node() { return list_node_; }
@@ -211,9 +201,27 @@ class MemoryChunk : public BasicMemoryChunk {
   // read-only space chunks.
   void ReleaseAllocatedMemoryNeededForWritableChunk();
 
-#ifdef V8_ENABLE_CONSERVATIVE_STACK_SCANNING
-  ObjectStartBitmap* object_start_bitmap() { return &object_start_bitmap_; }
-#endif
+  void IncreaseAllocatedLabSize(size_t bytes) { allocated_lab_size_ += bytes; }
+  void DecreaseAllocatedLabSize(size_t bytes) {
+    DCHECK_GE(allocated_lab_size_, bytes);
+    allocated_lab_size_ -= bytes;
+  }
+  size_t AllocatedLabSize() const { return allocated_lab_size_; }
+
+  void ResetAllocationStatistics() {
+    BasicMemoryChunk::ResetAllocationStatistics();
+    allocated_lab_size_ = 0;
+  }
+
+  MarkingBitmap* marking_bitmap() {
+    DCHECK(!InReadOnlySpace());
+    return &marking_bitmap_;
+  }
+
+  const MarkingBitmap* marking_bitmap() const {
+    DCHECK(!InReadOnlySpace());
+    return &marking_bitmap_;
+  }
 
  protected:
   // Release all memory allocated by the chunk. Should be called when memory
@@ -225,82 +233,72 @@ class MemoryChunk : public BasicMemoryChunk {
   void DecrementWriteUnprotectCounterAndMaybeSetPermissions(
       PageAllocator::Permission permission);
 
-  template <AccessMode mode>
-  ConcurrentBitmap<mode>* young_generation_bitmap() const {
-    return reinterpret_cast<ConcurrentBitmap<mode>*>(young_generation_bitmap_);
-  }
 #ifdef DEBUG
   static void ValidateOffsets(MemoryChunk* chunk);
 #endif
 
+  template <RememberedSetType type, AccessMode access_mode = AccessMode::ATOMIC>
+  void set_slot_set(SlotSet* slot_set) {
+    if (access_mode == AccessMode::ATOMIC) {
+      base::AsAtomicPointer::Release_Store(&slot_set_[type], slot_set);
+      return;
+    }
+    slot_set_[type] = slot_set;
+  }
+
   // A single slot set for small pages (of size kPageSize) or an array of slot
   // set for large pages. In the latter case the number of entries in the array
   // is ceil(size() / kPageSize).
-  SlotSet* slot_set_[NUMBER_OF_REMEMBERED_SET_TYPES];
+  SlotSet* slot_set_[NUMBER_OF_REMEMBERED_SET_TYPES] = {nullptr};
+  // A single slot set for small pages (of size kPageSize) or an array of slot
+  // set for large pages. In the latter case the number of entries in the array
+  // is ceil(size() / kPageSize).
+  TypedSlotSet* typed_slot_set_[NUMBER_OF_REMEMBERED_SET_TYPES] = {nullptr};
 
   // Used by the marker to keep track of the scanning progress in large objects
   // that have a progress bar and are scanned in increments.
   class ProgressBar progress_bar_;
 
   // Count of bytes marked black on page.
-  std::atomic<intptr_t> live_byte_count_;
-
-  // A single slot set for small pages (of size kPageSize) or an array of slot
-  // set for large pages. In the latter case the number of entries in the array
-  // is ceil(size() / kPageSize).
-  TypedSlotSet* typed_slot_set_[NUMBER_OF_REMEMBERED_SET_TYPES];
-  InvalidatedSlots* invalidated_slots_[NUMBER_OF_REMEMBERED_SET_TYPES];
+  std::atomic<intptr_t> live_byte_count_{0};
 
   base::Mutex* mutex_;
-
-  std::atomic<ConcurrentSweepingState> concurrent_sweeping_;
-
+  base::SharedMutex* shared_mutex_;
   base::Mutex* page_protection_change_mutex_;
 
-  // This field is only relevant for code pages. It depicts the number of
-  // times a component requested this page to be read+writeable. The
-  // counter is decremented when a component resets to read+executable.
-  // If Value() == 0 => The memory is read and executable.
-  // If Value() >= 1 => The Memory is read and writable (and maybe executable).
-  // The maximum value is limited by {kMaxWriteUnprotectCounter} to prevent
-  // excessive nesting of scopes.
-  // All executable MemoryChunks are allocated rw based on the assumption that
-  // they will be used immediately for an allocation. They are initialized
-  // with the number of open CodeSpaceMemoryModificationScopes. The caller
-  // that triggers the page allocation is responsible for decrementing the
-  // counter.
-  uintptr_t write_unprotect_counter_;
+  std::atomic<ConcurrentSweepingState> concurrent_sweeping_{
+      ConcurrentSweepingState::kDone};
 
   // Tracks off-heap memory used by this memory chunk.
-  std::atomic<size_t> external_backing_store_bytes_[kNumTypes];
+  std::atomic<size_t> external_backing_store_bytes_[kNumTypes] = {0};
 
   heap::ListNode<MemoryChunk> list_node_;
 
-  FreeListCategory** categories_;
-
-  std::atomic<intptr_t> young_generation_live_byte_count_;
-  Bitmap* young_generation_bitmap_;
+  FreeListCategory** categories_ = nullptr;
 
   CodeObjectRegistry* code_object_registry_;
 
   PossiblyEmptyBuckets possibly_empty_buckets_;
 
-  ActiveSystemPages active_system_pages_;
+  ActiveSystemPages* active_system_pages_;
 
-#ifdef V8_ENABLE_CONSERVATIVE_STACK_SCANNING
-  ObjectStartBitmap object_start_bitmap_;
-#endif
+  // Counts overall allocated LAB size on the page since the last GC. Used
+  // only for new space pages.
+  size_t allocated_lab_size_ = 0;
+
+  MarkingBitmap marking_bitmap_;
 
  private:
   friend class ConcurrentMarkingState;
-  friend class MajorMarkingState;
-  friend class MajorAtomicMarkingState;
-  friend class MajorNonAtomicMarkingState;
+  friend class MarkingState;
+  friend class AtomicMarkingState;
+  friend class NonAtomicMarkingState;
   friend class MemoryAllocator;
   friend class MemoryChunkValidator;
-  friend class MinorMarkingState;
-  friend class MinorNonAtomicMarkingState;
   friend class PagedSpace;
+  template <RememberedSetType>
+  friend class RememberedSet;
+  friend class YoungGenerationMarkingState;
 };
 
 }  // namespace internal

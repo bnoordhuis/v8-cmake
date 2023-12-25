@@ -13,6 +13,7 @@
 #include "src/diagnostics/code-tracer.h"
 #include "src/ic/ic.h"
 #include "src/init/bootstrapper.h"
+#include "src/objects/abstract-code-inl.h"
 #include "src/objects/feedback-cell-inl.h"
 #include "src/objects/map-updater.h"
 #include "src/objects/shared-function-info-inl.h"
@@ -34,9 +35,9 @@ ACCESSORS(JSFunction, raw_feedback_cell, FeedbackCell, kFeedbackCellOffset)
 RELEASE_ACQUIRE_ACCESSORS(JSFunction, raw_feedback_cell, FeedbackCell,
                           kFeedbackCellOffset)
 
-FeedbackVector JSFunction::feedback_vector() const {
-  DCHECK(has_feedback_vector());
-  return FeedbackVector::cast(raw_feedback_cell().value());
+DEF_GETTER(JSFunction, feedback_vector, FeedbackVector) {
+  DCHECK(has_feedback_vector(cage_base));
+  return FeedbackVector::cast(raw_feedback_cell(cage_base).value(cage_base));
 }
 
 ClosureFeedbackCellArray JSFunction::closure_feedback_cell_array() const {
@@ -63,27 +64,25 @@ AbstractCode JSFunction::abstract_code(IsolateT* isolate) {
   if (ActiveTierIsIgnition()) {
     return AbstractCode::cast(shared().GetBytecodeArray(isolate));
   } else {
-    return AbstractCode::cast(FromCodeT(code(kAcquireLoad)));
+    return AbstractCode::cast(code(kAcquireLoad));
   }
 }
 
 int JSFunction::length() { return shared().length(); }
 
-ACCESSORS_RELAXED(JSFunction, code, CodeT, kCodeOffset)
-RELEASE_ACQUIRE_ACCESSORS(JSFunction, code, CodeT, kCodeOffset)
-
-#ifdef V8_EXTERNAL_CODE_SPACE
-void JSFunction::set_code(Code code, ReleaseStoreTag, WriteBarrierMode mode) {
-  set_code(ToCodeT(code), kReleaseStore, mode);
-}
-#endif
-
-Address JSFunction::code_entry_point() const {
-  if (V8_EXTERNAL_CODE_SPACE_BOOL) {
-    return CodeDataContainer::cast(code()).code_entry_point();
-  } else {
-    return code().InstructionStart();
+ACCESSORS_RELAXED(JSFunction, code, Code, kCodeOffset)
+RELEASE_ACQUIRE_GETTER_CHECKED(JSFunction, code, Code, kCodeOffset, true)
+void JSFunction::set_code(Code value, ReleaseStoreTag, WriteBarrierMode mode) {
+  TaggedField<Code, kCodeOffset>::Release_Store(*this, value);
+  CONDITIONAL_WRITE_BARRIER(*this, kCodeOffset, value, mode);
+  if (V8_UNLIKELY(v8_flags.log_function_events && has_feedback_vector())) {
+    feedback_vector().set_log_next_execution(true);
   }
+}
+RELEASE_ACQUIRE_ACCESSORS(JSFunction, context, Context, kContextOffset)
+
+Address JSFunction::instruction_start() const {
+  return Code::cast(code()).instruction_start();
 }
 
 // TODO(ishell): Why relaxed read but release store?
@@ -123,9 +122,10 @@ void JSFunction::set_osr_tiering_state(TieringState marker) {
   feedback_vector().set_osr_tiering_state(marker);
 }
 
-bool JSFunction::has_feedback_vector() const {
-  return shared().is_compiled() &&
-         raw_feedback_cell().value().IsFeedbackVector();
+DEF_GETTER(JSFunction, has_feedback_vector, bool) {
+  return shared(cage_base).is_compiled() &&
+         raw_feedback_cell(cage_base).value(cage_base).IsFeedbackVector(
+             cage_base);
 }
 
 bool JSFunction::has_closure_feedback_cell_array() const {
@@ -205,12 +205,9 @@ DEF_GETTER(JSFunction, prototype, Object) {
   DCHECK(has_prototype(cage_base));
   // If the function's prototype property has been set to a non-JSReceiver
   // value, that value is stored in the constructor field of the map.
-  if (map(cage_base).has_non_instance_prototype()) {
-    Object prototype = map(cage_base).GetConstructor(cage_base);
-    // The map must have a prototype in that field, not a back pointer.
-    DCHECK(!prototype.IsMap(cage_base));
-    DCHECK(!prototype.IsFunctionTemplateInfo(cage_base));
-    return prototype;
+  Map map = this->map(cage_base);
+  if (map.has_non_instance_prototype()) {
+    return map.GetNonInstancePrototype(cage_base);
   }
   return instance_prototype(cage_base);
 }
@@ -225,8 +222,8 @@ bool JSFunction::ShouldFlushBaselineCode(
   if (!IsBaselineCodeFlushingEnabled(code_flush_mode)) return false;
   // Do a raw read for shared and code fields here since this function may be
   // called on a concurrent thread. JSFunction itself should be fully
-  // initialized here but the SharedFunctionInfo, Code objects may not be
-  // initialized. We read using acquire loads to defend against that.
+  // initialized here but the SharedFunctionInfo, InstructionStream objects may
+  // not be initialized. We read using acquire loads to defend against that.
   Object maybe_shared = ACQUIRE_READ_FIELD(*this, kSharedFunctionInfoOffset);
   if (!maybe_shared.IsSharedFunctionInfo()) return false;
 
@@ -234,8 +231,13 @@ bool JSFunction::ShouldFlushBaselineCode(
   // code field. We don't use release stores when copying code pointers from
   // SFI / FV to JSFunction but it is safe in practice.
   Object maybe_code = ACQUIRE_READ_FIELD(*this, kCodeOffset);
-  if (!maybe_code.IsCodeT()) return false;
-  CodeT code = CodeT::cast(maybe_code);
+#ifdef THREAD_SANITIZER
+  // This is needed because TSAN does not process the memory fence
+  // emitted after page initialization.
+  BasicMemoryChunk::FromAddress(maybe_code.ptr())->SynchronizedHeapLoad();
+#endif
+  if (!maybe_code.IsCode()) return false;
+  Code code = Code::cast(maybe_code);
   if (code.kind() != CodeKind::BASELINE) return false;
 
   SharedFunctionInfo shared = SharedFunctionInfo::cast(maybe_shared);
@@ -245,14 +247,14 @@ bool JSFunction::ShouldFlushBaselineCode(
 bool JSFunction::NeedsResetDueToFlushedBytecode() {
   // Do a raw read for shared and code fields here since this function may be
   // called on a concurrent thread. JSFunction itself should be fully
-  // initialized here but the SharedFunctionInfo, Code objects may not be
-  // initialized. We read using acquire loads to defend against that.
+  // initialized here but the SharedFunctionInfo, InstructionStream objects may
+  // not be initialized. We read using acquire loads to defend against that.
   Object maybe_shared = ACQUIRE_READ_FIELD(*this, kSharedFunctionInfoOffset);
   if (!maybe_shared.IsSharedFunctionInfo()) return false;
 
   Object maybe_code = ACQUIRE_READ_FIELD(*this, kCodeOffset);
-  if (!maybe_code.IsCodeT()) return false;
-  CodeT code = CodeT::cast(maybe_code);
+  if (!maybe_code.IsCode()) return false;
+  Code code = Code::cast(maybe_code);
 
   SharedFunctionInfo shared = SharedFunctionInfo::cast(maybe_shared);
   return !shared.is_compiled() && code.builtin_id() != Builtin::kCompileLazy;
@@ -266,9 +268,10 @@ void JSFunction::ResetIfCodeFlushed(
     base::Optional<std::function<void(HeapObject object, ObjectSlot slot,
                                       HeapObject target)>>
         gc_notify_updated_slot) {
-  const bool kBytecodeCanFlush = FLAG_flush_bytecode || FLAG_stress_snapshot;
+  const bool kBytecodeCanFlush =
+      v8_flags.flush_bytecode || v8_flags.stress_snapshot;
   const bool kBaselineCodeCanFlush =
-      FLAG_flush_baseline_code || FLAG_stress_snapshot;
+      v8_flags.flush_baseline_code || v8_flags.stress_snapshot;
   if (!kBytecodeCanFlush && !kBaselineCodeCanFlush) return;
 
   DCHECK_IMPLIES(NeedsResetDueToFlushedBytecode(), kBytecodeCanFlush);

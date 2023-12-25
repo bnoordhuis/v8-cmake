@@ -16,12 +16,12 @@
 #include "src/base/optional.h"
 #include "src/common/message-template.h"
 #include "src/handles/handles.h"
+#include "src/handles/maybe-handles.h"
 
 namespace v8 {
+class Value;
+
 namespace internal {
-namespace wasm {
-class WasmCode;
-}  // namespace wasm
 
 // Forward declarations.
 class AbstractCode;
@@ -113,21 +113,42 @@ class ErrorUtils : public AllStatic {
                                              Handle<Object> object,
                                              MaybeHandle<Object> key);
 
-  static MaybeHandle<Object> GetFormattedStack(Isolate* isolate,
-                                               Handle<JSObject> error_object);
-  static void SetFormattedStack(Isolate* isolate, Handle<JSObject> error_object,
+  // Returns true if given object has own |error_stack_symbol| property.
+  static bool HasErrorStackSymbolOwnProperty(Isolate* isolate,
+                                             Handle<JSObject> object);
+
+  struct StackPropertyLookupResult {
+    // The holder of the |error_stack_symbol| or empty handle.
+    MaybeHandle<JSObject> error_stack_symbol_holder;
+    // The value of the |error_stack_symbol| property or |undefined_value|.
+    Handle<Object> error_stack;
+  };
+  // Gets |error_stack_symbol| property value by looking up the prototype chain.
+  static StackPropertyLookupResult GetErrorStackProperty(
+      Isolate* isolate, Handle<JSReceiver> maybe_error_object);
+
+  static MaybeHandle<Object> GetFormattedStack(
+      Isolate* isolate, Handle<JSObject> maybe_error_object);
+  static void SetFormattedStack(Isolate* isolate,
+                                Handle<JSObject> maybe_error_object,
                                 Handle<Object> formatted_stack);
+
+  // Collects the stack trace and installs the stack property accessors.
+  static MaybeHandle<Object> CaptureStackTrace(Isolate* isolate,
+                                               Handle<JSObject> object,
+                                               FrameSkipMode mode,
+                                               Handle<Object> caller);
 };
 
 class MessageFormatter {
  public:
   V8_EXPORT_PRIVATE static const char* TemplateString(MessageTemplate index);
 
-  V8_EXPORT_PRIVATE static MaybeHandle<String> Format(Isolate* isolate,
-                                                      MessageTemplate index,
-                                                      Handle<String> arg0,
-                                                      Handle<String> arg1,
-                                                      Handle<String> arg2);
+  V8_EXPORT_PRIVATE static MaybeHandle<String> TryFormat(Isolate* isolate,
+                                                         MessageTemplate index,
+                                                         Handle<String> arg0,
+                                                         Handle<String> arg1,
+                                                         Handle<String> arg2);
 
   static Handle<String> Format(Isolate* isolate, MessageTemplate index,
                                Handle<Object> arg0,

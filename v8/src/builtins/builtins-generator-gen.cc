@@ -227,7 +227,7 @@ TF_BUILTIN(SuspendGeneratorBaseline, GeneratorBuiltinsAssembler) {
   TNode<FixedArray> parameters_and_registers =
       LoadJSGeneratorObjectParametersAndRegisters(generator);
   auto parameters_and_registers_length =
-      SmiUntag(LoadFixedArrayBaseLength(parameters_and_registers));
+      LoadAndUntagFixedArrayBaseLength(parameters_and_registers);
 
   // Copy over the function parameters
   auto parameter_base_index = IntPtrConstant(
@@ -243,7 +243,7 @@ TF_BUILTIN(SuspendGeneratorBaseline, GeneratorBuiltinsAssembler) {
                                              TimesSystemPointerSize(reg_index));
         UnsafeStoreFixedArrayElement(parameters_and_registers, index, value);
       },
-      1, IndexAdvanceMode::kPost);
+      1, LoopUnrollingMode::kNo, IndexAdvanceMode::kPost);
 
   // Iterate over register file and write values into array.
   // The mapping of register to array index must match that used in
@@ -262,7 +262,7 @@ TF_BUILTIN(SuspendGeneratorBaseline, GeneratorBuiltinsAssembler) {
                                              TimesSystemPointerSize(reg_index));
         UnsafeStoreFixedArrayElement(parameters_and_registers, index, value);
       },
-      1, IndexAdvanceMode::kPost);
+      1, LoopUnrollingMode::kNo, IndexAdvanceMode::kPost);
 
   // The return value is unused, defaulting to undefined.
   Return(UndefinedConstant());
@@ -289,7 +289,7 @@ TF_BUILTIN(ResumeGeneratorBaseline, GeneratorBuiltinsAssembler) {
   auto register_count = UncheckedParameter<IntPtrT>(Descriptor::kRegisterCount);
   auto end_index = IntPtrAdd(formal_parameter_count, register_count);
   auto parameters_and_registers_length =
-      SmiUntag(LoadFixedArrayBaseLength(parameters_and_registers));
+      LoadAndUntagFixedArrayBaseLength(parameters_and_registers);
   CSA_CHECK(this, UintPtrLessThan(end_index, parameters_and_registers_length));
   auto parent_frame_pointer = LoadParentFramePointer();
   BuildFastLoop<IntPtrT>(
@@ -304,7 +304,7 @@ TF_BUILTIN(ResumeGeneratorBaseline, GeneratorBuiltinsAssembler) {
                                      StaleRegisterConstant(),
                                      SKIP_WRITE_BARRIER);
       },
-      1, IndexAdvanceMode::kPost);
+      1, LoopUnrollingMode::kNo, IndexAdvanceMode::kPost);
 
   Return(LoadJSGeneratorObjectInputOrDebugPos(generator));
 }

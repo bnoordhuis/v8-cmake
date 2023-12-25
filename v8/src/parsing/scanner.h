@@ -44,7 +44,9 @@ class Utf16CharacterStream {
   virtual ~Utf16CharacterStream() = default;
 
   V8_INLINE void set_parser_error() {
-    buffer_cursor_ = buffer_end_;
+    // source_pos() returns one previous position of the cursor.
+    // Offset 1 cancels this out and makes it return exactly buffer_end_.
+    buffer_cursor_ = buffer_end_ + 1;
     has_parser_error_ = true;
   }
   V8_INLINE void reset_parser_error_flag() { has_parser_error_ = false; }
@@ -245,7 +247,9 @@ class V8_EXPORT_PRIVATE Scanner {
     if (!has_parser_error()) {
       c0_ = kEndOfInput;
       source_->set_parser_error();
-      for (TokenDesc& desc : token_storage_) desc.token = Token::ILLEGAL;
+      for (TokenDesc& desc : token_storage_) {
+        if (desc.token != Token::UNINITIALIZED) desc.token = Token::ILLEGAL;
+      }
     }
   }
   V8_INLINE void reset_parser_error_flag() {
@@ -336,6 +340,9 @@ class V8_EXPORT_PRIVATE Scanner {
       AstValueFactory* ast_value_factory) const;
 
   double DoubleValue();
+  base::Vector<const uint8_t> BigIntLiteral() const {
+    return literal_one_byte_string();
+  }
 
   const char* CurrentLiteralAsCString(Zone* zone) const;
 
@@ -415,6 +422,10 @@ class V8_EXPORT_PRIVATE Scanner {
   template <typename IsolateT>
   Handle<String> SourceMappingUrl(IsolateT* isolate) const;
 
+  bool SawMagicCommentCompileHintsAll() const {
+    return saw_magic_comment_compile_hints_all_;
+  }
+
   bool FoundHtmlComment() const { return found_html_comment_; }
 
   const Utf16CharacterStream* stream() const { return source_; }
@@ -479,7 +490,7 @@ class V8_EXPORT_PRIVATE Scanner {
   // Call this after setting source_ to the input.
   void Init() {
     // Set c0_ (one character ahead)
-    STATIC_ASSERT(kCharacterLookaheadBufferSize == 1);
+    static_assert(kCharacterLookaheadBufferSize == 1);
     Advance();
 
     current_ = &token_storage_[0];
@@ -647,8 +658,8 @@ class V8_EXPORT_PRIVATE Scanner {
   V8_INLINE Token::Value SkipWhiteSpace();
   Token::Value SkipSingleHTMLComment();
   Token::Value SkipSingleLineComment();
-  Token::Value SkipSourceURLComment();
-  void TryToParseSourceURLComment();
+  Token::Value SkipMagicComment();
+  void TryToParseMagicComment();
   Token::Value SkipMultiLineComment();
   // Scans a possible HTML comment -- begins with '<!'.
   Token::Value ScanHtmlComment();
@@ -734,6 +745,7 @@ class V8_EXPORT_PRIVATE Scanner {
   // Values parsed from magic comments.
   LiteralBuffer source_url_;
   LiteralBuffer source_mapping_url_;
+  bool saw_magic_comment_compile_hints_all_ = false;
 
   // Last-seen positions of potentially problematic tokens.
   Location octal_pos_;

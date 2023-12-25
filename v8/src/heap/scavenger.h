@@ -7,10 +7,13 @@
 
 #include "src/base/platform/condition-variable.h"
 #include "src/heap/base/worklist.h"
+#include "src/heap/ephemeron-remembered-set.h"
 #include "src/heap/evacuation-allocator.h"
 #include "src/heap/index-generator.h"
+#include "src/heap/memory-chunk.h"
 #include "src/heap/objects-visiting.h"
 #include "src/heap/parallel-work-item.h"
+#include "src/heap/pretenuring-handler.h"
 #include "src/heap/slot-set.h"
 
 namespace v8 {
@@ -18,6 +21,7 @@ namespace internal {
 
 class RootScavengeVisitor;
 class Scavenger;
+class ScavengeVisitor;
 
 enum class CopyAndForwardResult {
   SUCCESS_YOUNG_GENERATION,
@@ -29,10 +33,6 @@ using ObjectAndSize = std::pair<HeapObject, int>;
 using SurvivingNewLargeObjectsMap =
     std::unordered_map<HeapObject, Map, Object::Hasher>;
 using SurvivingNewLargeObjectMapEntry = std::pair<HeapObject, Map>;
-
-constexpr int kEphemeronTableListSegmentSize = 128;
-using EphemeronTableList =
-    ::heap::base::Worklist<EphemeronHashTable, kEphemeronTableListSegmentSize>;
 
 class ScavengerCollector;
 
@@ -90,7 +90,8 @@ class Scavenger {
   Scavenger(ScavengerCollector* collector, Heap* heap, bool is_logging,
             EmptyChunksList* empty_chunks, CopiedList* copied_list,
             PromotionList* promotion_list,
-            EphemeronTableList* ephemeron_table_list, int task_id);
+            EphemeronRememberedSet::TableList* ephemeron_table_list,
+            int task_id);
 
   // Entry point for scavenging an old generation page. For scavenging single
   // objects see RootScavengingVisitor and ScavengeVisitor below.
@@ -115,7 +116,6 @@ class Scavenger {
   // Number of objects to process before interrupting for potentially waking
   // up other tasks.
   static const int kInterruptThreshold = 128;
-  static const int kInitialLocalPretenuringFeedbackCapacity = 256;
 
   inline Heap* heap() { return heap_; }
 
@@ -127,6 +127,13 @@ class Scavenger {
   // indeed a HeapObject and resides in from space.
   template <typename TSlot>
   inline SlotCallbackResult CheckAndScavengeObject(Heap* heap, TSlot slot);
+
+  template <typename TSlot>
+  inline void CheckOldToNewSlotForSharedUntyped(MemoryChunk* chunk, TSlot slot);
+  inline void CheckOldToNewSlotForSharedTyped(MemoryChunk* chunk,
+                                              SlotType slot_type,
+                                              Address slot_address,
+                                              MaybeObject new_target);
 
   // Scavenges an object |object| referenced from slot |p|. |object| is required
   // to be in from space.
@@ -192,20 +199,22 @@ class Scavenger {
   EmptyChunksList::Local empty_chunks_local_;
   PromotionList::Local promotion_list_local_;
   CopiedList::Local copied_list_local_;
-  EphemeronTableList::Local ephemeron_table_list_local_;
-  Heap::PretenuringFeedbackMap local_pretenuring_feedback_;
+  EphemeronRememberedSet::TableList::Local ephemeron_table_list_local_;
+  PretenuringHandler* const pretenuring_handler_;
+  PretenuringHandler::PretenuringFeedbackMap local_pretenuring_feedback_;
   size_t copied_size_;
   size_t promoted_size_;
   EvacuationAllocator allocator_;
   std::unique_ptr<ConcurrentAllocator> shared_old_allocator_;
   SurvivingNewLargeObjectsMap surviving_new_large_objects_;
 
-  EphemeronRememberedSet ephemeron_remembered_set_;
+  EphemeronRememberedSet::TableMap ephemeron_remembered_set_;
   const bool is_logging_;
   const bool is_incremental_marking_;
   const bool is_compacting_;
-  const bool is_compacting_including_map_space_;
   const bool shared_string_table_;
+  const bool mark_shared_heap_;
+  const bool shortcut_strings_;
 
   friend class IterateAndScavengePromotedObjectsVisitor;
   friend class RootScavengeVisitor;
@@ -225,32 +234,6 @@ class RootScavengeVisitor final : public RootVisitor {
 
  private:
   void ScavengePointer(FullObjectSlot p);
-
-  Scavenger* const scavenger_;
-};
-
-class ScavengeVisitor final : public NewSpaceVisitor<ScavengeVisitor> {
- public:
-  explicit ScavengeVisitor(Scavenger* scavenger);
-
-  V8_INLINE void VisitPointers(HeapObject host, ObjectSlot start,
-                               ObjectSlot end) final;
-
-  V8_INLINE void VisitPointers(HeapObject host, MaybeObjectSlot start,
-                               MaybeObjectSlot end) final;
-  V8_INLINE void VisitCodePointer(HeapObject host, CodeObjectSlot slot) final;
-
-  V8_INLINE void VisitCodeTarget(Code host, RelocInfo* rinfo) final;
-  V8_INLINE void VisitEmbeddedPointer(Code host, RelocInfo* rinfo) final;
-  V8_INLINE int VisitEphemeronHashTable(Map map, EphemeronHashTable object);
-  V8_INLINE int VisitJSArrayBuffer(Map map, JSArrayBuffer object);
-
- private:
-  template <typename TSlot>
-  V8_INLINE void VisitHeapObjectImpl(TSlot slot, HeapObject heap_object);
-
-  template <typename TSlot>
-  V8_INLINE void VisitPointersImpl(HeapObject host, TSlot start, TSlot end);
 
   Scavenger* const scavenger_;
 };
@@ -297,8 +280,10 @@ class ScavengerCollector {
 
   int NumberOfScavengeTasks();
 
-  void ProcessWeakReferences(EphemeronTableList* ephemeron_table_list);
-  void ClearYoungEphemerons(EphemeronTableList* ephemeron_table_list);
+  void ProcessWeakReferences(
+      EphemeronRememberedSet::TableList* ephemeron_table_list);
+  void ClearYoungEphemerons(
+      EphemeronRememberedSet::TableList* ephemeron_table_list);
   void ClearOldEphemerons();
   void HandleSurvivingNewLargeObjects();
 

@@ -8,7 +8,6 @@
 
 #include <limits>
 
-#include "include/v8config.h"
 #include "src/base/bits.h"
 #include "src/base/ieee754.h"
 #include "src/base/safe_conversions.h"
@@ -153,7 +152,7 @@ void uint64_to_float32_wrapper(Address data) {
     // the second MSB (a.k.a '<< 23'). The encoded exponent itself is
     // ('actual exponent' - 127).
     int32_t multiplier_bits = ((shift_back - 127) & 0xff) << 23;
-    result *= bit_cast<float>(multiplier_bits);
+    result *= base::bit_cast<float>(multiplier_bits);
     WriteUnalignedValue<float>(data, result);
     return;
   }
@@ -460,8 +459,9 @@ class V8_NODISCARD ThreadNotInWasmScope {
 #endif
 };
 
-inline byte* EffectiveAddress(WasmInstanceObject instance, uintptr_t index) {
-  return instance.memory_start() + index;
+inline uint8_t* EffectiveAddress(WasmInstanceObject instance, uintptr_t index) {
+  // TODO(13918): Support multiple memories.
+  return instance.memory0_start() + index;
 }
 
 template <typename V>
@@ -486,14 +486,15 @@ int32_t memory_init_wrapper(Address data) {
   uint32_t seg_index = ReadAndIncrementOffset<uint32_t>(data, &offset);
   uint32_t size = ReadAndIncrementOffset<uint32_t>(data, &offset);
 
-  uint64_t mem_size = instance.memory_size();
+  // TODO(13918): Support multiple memories.
+  uint64_t mem_size = instance.memory0_size();
   if (!base::IsInBounds<uint64_t>(dst, size, mem_size)) return kOutOfBounds;
 
-  uint32_t seg_size = instance.data_segment_sizes()[seg_index];
+  uint32_t seg_size = instance.data_segment_sizes().get(seg_index);
   if (!base::IsInBounds<uint32_t>(src, size, seg_size)) return kOutOfBounds;
 
-  byte* seg_start =
-      reinterpret_cast<byte*>(instance.data_segment_starts()[seg_index]);
+  uint8_t* seg_start =
+      reinterpret_cast<uint8_t*>(instance.data_segment_starts().get(seg_index));
   std::memcpy(EffectiveAddress(instance, dst), seg_start + src, size);
   return kSuccess;
 }
@@ -508,7 +509,8 @@ int32_t memory_copy_wrapper(Address data) {
   uintptr_t src = ReadAndIncrementOffset<uintptr_t>(data, &offset);
   uintptr_t size = ReadAndIncrementOffset<uintptr_t>(data, &offset);
 
-  uint64_t mem_size = instance.memory_size();
+  // TODO(13918): Support multiple memories.
+  uint64_t mem_size = instance.memory0_size();
   if (!base::IsInBounds<uint64_t>(dst, size, mem_size)) return kOutOfBounds;
   if (!base::IsInBounds<uint64_t>(src, size, mem_size)) return kOutOfBounds;
 
@@ -530,7 +532,8 @@ int32_t memory_fill_wrapper(Address data) {
       static_cast<uint8_t>(ReadAndIncrementOffset<uint32_t>(data, &offset));
   uintptr_t size = ReadAndIncrementOffset<uintptr_t>(data, &offset);
 
-  uint64_t mem_size = instance.memory_size();
+  // TODO(13918): Support multiple memories.
+  uint64_t mem_size = instance.memory0_size();
   if (!base::IsInBounds<uint64_t>(dst, size, mem_size)) return kOutOfBounds;
 
   std::memset(EffectiveAddress(instance, dst), value, size);
@@ -538,10 +541,14 @@ int32_t memory_fill_wrapper(Address data) {
 }
 
 namespace {
+inline void* ArrayElementAddress(Address array, uint32_t index,
+                                 int element_size_bytes) {
+  return reinterpret_cast<void*>(array + WasmArray::kHeaderSize -
+                                 kHeapObjectTag + index * element_size_bytes);
+}
 inline void* ArrayElementAddress(WasmArray array, uint32_t index,
                                  int element_size_bytes) {
-  return reinterpret_cast<void*>(array.ptr() + WasmArray::kHeaderSize -
-                                 kHeapObjectTag + index * element_size_bytes);
+  return ArrayElementAddress(array.ptr(), index, element_size_bytes);
 }
 }  // namespace
 
@@ -562,7 +569,7 @@ void array_copy_wrapper(Address raw_instance, Address raw_dst_array,
   if (element_type.is_reference()) {
     WasmInstanceObject instance =
         WasmInstanceObject::cast(Object(raw_instance));
-    Isolate* isolate = Isolate::FromRootAddress(instance.isolate_root());
+    Isolate* isolate = instance.GetIsolate();
     ObjectSlot dst_slot = dst_array.ElementSlot(dst_index);
     ObjectSlot src_slot = src_array.ElementSlot(src_index);
     if (overlapping_ranges) {
@@ -583,6 +590,99 @@ void array_copy_wrapper(Address raw_instance, Address raw_dst_array,
       MemCopy(dst, src, copy_size);
     }
   }
+}
+
+void array_fill_wrapper(Address raw_array, uint32_t index, uint32_t length,
+                        uint32_t emit_write_barrier, uint32_t raw_type,
+                        Address initial_value_addr) {
+  ThreadNotInWasmScope thread_not_in_wasm_scope;
+  DisallowGarbageCollection no_gc;
+  ValueType type = ValueType::FromRawBitField(raw_type);
+  int8_t* initial_element_address = reinterpret_cast<int8_t*>(
+      ArrayElementAddress(raw_array, index, type.value_kind_size()));
+  int64_t initial_value = *reinterpret_cast<int64_t*>(initial_value_addr);
+  const int bytes_to_set = length * type.value_kind_size();
+
+  // If the initial value is zero, we memset the array.
+  if (type.is_numeric() && initial_value == 0) {
+    std::memset(initial_element_address, 0, bytes_to_set);
+    return;
+  }
+
+  // We implement the general case by setting the first 8 bytes manually, then
+  // filling the rest by exponentially growing {memcpy}s.
+
+  DCHECK_GE(static_cast<size_t>(bytes_to_set), sizeof(int64_t));
+
+  switch (type.kind()) {
+    case kI64:
+    case kF64: {
+      *reinterpret_cast<int64_t*>(initial_element_address) = initial_value;
+      break;
+    }
+    case kI32:
+    case kF32: {
+      int32_t* base = reinterpret_cast<int32_t*>(initial_element_address);
+      base[0] = base[1] = static_cast<int32_t>(initial_value);
+      break;
+    }
+    case kI16: {
+      int16_t* base = reinterpret_cast<int16_t*>(initial_element_address);
+      base[0] = base[1] = base[2] = base[3] =
+          static_cast<int16_t>(initial_value);
+      break;
+    }
+    case kI8: {
+      int8_t* base = reinterpret_cast<int8_t*>(initial_element_address);
+      for (size_t i = 0; i < sizeof(int64_t); i++) {
+        base[i] = static_cast<int8_t>(initial_value);
+      }
+      break;
+    }
+    case kRefNull:
+    case kRef:
+      if constexpr (kTaggedSize == 4) {
+        int32_t* base = reinterpret_cast<int32_t*>(initial_element_address);
+        base[0] = base[1] = static_cast<int32_t>(initial_value);
+      } else {
+        *reinterpret_cast<int64_t*>(initial_element_address) = initial_value;
+      }
+      break;
+    case kS128:
+    case kRtt:
+    case kVoid:
+    case kBottom:
+      UNREACHABLE();
+  }
+
+  int bytes_already_set = sizeof(int64_t);
+
+  while (bytes_already_set * 2 <= bytes_to_set) {
+    std::memcpy(initial_element_address + bytes_already_set,
+                initial_element_address, bytes_already_set);
+    bytes_already_set *= 2;
+  }
+
+  if (bytes_already_set < bytes_to_set) {
+    std::memcpy(initial_element_address + bytes_already_set,
+                initial_element_address, bytes_to_set - bytes_already_set);
+  }
+
+  if (emit_write_barrier) {
+    DCHECK(type.is_reference());
+    WasmArray array = WasmArray::cast(Object(raw_array));
+    Isolate* isolate = array.GetIsolate();
+    ObjectSlot start(reinterpret_cast<Address>(initial_element_address));
+    ObjectSlot end(
+        reinterpret_cast<Address>(initial_element_address + bytes_to_set));
+    isolate->heap()->WriteBarrierForRange(array, start, end);
+  }
+}
+
+double flat_string_to_f64(Address string_address) {
+  String s = String::cast(Object(string_address));
+  return FlatStringToDouble(s, ALLOW_TRAILING_JUNK,
+                            std::numeric_limits<double>::quiet_NaN());
 }
 
 static WasmTrapCallbackForTesting wasm_trap_callback_for_testing = nullptr;

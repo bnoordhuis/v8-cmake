@@ -49,8 +49,7 @@ struct InvokeParams {
       MaybeHandle<Object>* exception_out, bool reschedule_terminate);
 
   static InvokeParams SetUpForRunMicrotasks(Isolate* isolate,
-                                            MicrotaskQueue* microtask_queue,
-                                            MaybeHandle<Object>* exception_out);
+                                            MicrotaskQueue* microtask_queue);
 
   bool IsScript() const {
     if (!target->IsJSFunction()) return false;
@@ -152,8 +151,7 @@ InvokeParams InvokeParams::SetUpForTryCall(
 
 // static
 InvokeParams InvokeParams::SetUpForRunMicrotasks(
-    Isolate* isolate, MicrotaskQueue* microtask_queue,
-    MaybeHandle<Object>* exception_out) {
+    Isolate* isolate, MicrotaskQueue* microtask_queue) {
   auto undefined = isolate->factory()->undefined_value();
   InvokeParams params;
   params.target = undefined;
@@ -163,15 +161,15 @@ InvokeParams InvokeParams::SetUpForRunMicrotasks(
   params.new_target = undefined;
   params.microtask_queue = microtask_queue;
   params.message_handling = Execution::MessageHandling::kReport;
-  params.exception_out = exception_out;
+  params.exception_out = nullptr;
   params.is_construct = false;
   params.execution_target = Execution::Target::kRunMicrotasks;
   params.reschedule_terminate = true;
   return params;
 }
 
-Handle<CodeT> JSEntry(Isolate* isolate, Execution::Target execution_target,
-                      bool is_construct) {
+Handle<Code> JSEntry(Isolate* isolate, Execution::Target execution_target,
+                     bool is_construct) {
   if (is_construct) {
     DCHECK_EQ(Execution::Target::kCallable, execution_target);
     return BUILTIN_CODE(isolate, JSConstructEntry);
@@ -191,7 +189,7 @@ MaybeHandle<Context> NewScriptContext(Isolate* isolate,
   // TODO(cbruni, 1244145): Use passed in host_defined_options.
   // Creating a script context is a side effect, so abort if that's not
   // allowed.
-  if (isolate->debug_execution_mode() == DebugInfo::kSideEffects) {
+  if (isolate->should_check_side_effects()) {
     isolate->Throw(*isolate->factory()->NewEvalError(
         MessageTemplate::kNoSideEffectDebugEvaluate));
     return MaybeHandle<Context>();
@@ -282,8 +280,6 @@ V8_WARN_UNUSED_RESULT MaybeHandle<Object> Invoke(Isolate* isolate,
   DCHECK_LE(params.argc, FixedArray::kMaxLength);
 
 #if V8_ENABLE_WEBASSEMBLY
-  // When executing JS code, there should be no {CodeSpaceWriteScope} open.
-  DCHECK(!wasm::CodeSpaceWriteScope::IsInScope());
   // If we have PKU support for Wasm, ensure that code is currently write
   // protected for this thread.
   DCHECK_IMPLIES(wasm::GetWasmCodeManager()->HasMemoryProtectionKeySupport(),
@@ -318,8 +314,10 @@ V8_WARN_UNUSED_RESULT MaybeHandle<Object> Invoke(Isolate* isolate,
       Handle<Object> receiver = params.is_construct
                                     ? isolate->factory()->the_hole_value()
                                     : params.receiver;
+      Handle<FunctionTemplateInfo> fun_data(
+          function->shared().get_api_func_data(), isolate);
       auto value = Builtins::InvokeApiFunction(
-          isolate, params.is_construct, function, receiver, params.argc,
+          isolate, params.is_construct, fun_data, receiver, params.argc,
           params.argv, Handle<HeapObject>::cast(params.new_target));
       bool has_exception = value.is_null();
       DCHECK(has_exception == isolate->has_pending_exception());
@@ -365,7 +363,9 @@ V8_WARN_UNUSED_RESULT MaybeHandle<Object> Invoke(Isolate* isolate,
 
   // Entering JavaScript.
   VMState<JS> state(isolate);
-  CHECK(AllowJavascriptExecution::IsAllowed(isolate));
+  if (!AllowJavascriptExecution::IsAllowed(isolate)) {
+    GRACEFUL_FATAL("Invoke in DisallowJavascriptExecutionScope");
+  }
   if (!ThrowOnJavascriptExecution::IsAllowed(isolate)) {
     isolate->ThrowIllegalOperation();
     if (params.message_handling == Execution::MessageHandling::kReport) {
@@ -377,6 +377,7 @@ V8_WARN_UNUSED_RESULT MaybeHandle<Object> Invoke(Isolate* isolate,
     V8::GetCurrentPlatform()->DumpWithoutCrashing();
     return isolate->factory()->undefined_value();
   }
+  isolate->IncrementJavascriptExecutionCounter();
 
   if (params.execution_target == Execution::Target::kCallable) {
     Handle<Context> context = isolate->native_context();
@@ -396,7 +397,7 @@ V8_WARN_UNUSED_RESULT MaybeHandle<Object> Invoke(Isolate* isolate,
 
   // Placeholder for return value.
   Object value;
-  Handle<CodeT> code =
+  Handle<Code> code =
       JSEntry(isolate, params.execution_target, params.is_construct);
   {
     // Save and restore context around invocation and block the
@@ -404,7 +405,8 @@ V8_WARN_UNUSED_RESULT MaybeHandle<Object> Invoke(Isolate* isolate,
     SaveContext save(isolate);
     SealHandleScope shs(isolate);
 
-    if (FLAG_clear_exceptions_on_js_entry) isolate->clear_pending_exception();
+    if (v8_flags.clear_exceptions_on_js_entry)
+      isolate->clear_pending_exception();
 
     if (params.execution_target == Execution::Target::kCallable) {
       // clang-format off
@@ -415,7 +417,7 @@ V8_WARN_UNUSED_RESULT MaybeHandle<Object> Invoke(Isolate* isolate,
           Address receiver, intptr_t argc, Address** argv)>;
       // clang-format on
       JSEntryFunction stub_entry =
-          JSEntryFunction::FromAddress(isolate, code->InstructionStart());
+          JSEntryFunction::FromAddress(isolate, code->instruction_start());
 
       Address orig_func = params.new_target->ptr();
       Address func = params.target->ptr();
@@ -435,7 +437,7 @@ V8_WARN_UNUSED_RESULT MaybeHandle<Object> Invoke(Isolate* isolate,
           Address root_register_value, MicrotaskQueue* microtask_queue)>;
       // clang-format on
       JSEntryFunction stub_entry =
-          JSEntryFunction::FromAddress(isolate, code->InstructionStart());
+          JSEntryFunction::FromAddress(isolate, code->instruction_start());
 
       RCS_SCOPE(isolate, RuntimeCallCounterId::kJS_Execution);
       value = Object(stub_entry.Call(isolate->isolate_data()->isolate_root(),
@@ -444,7 +446,7 @@ V8_WARN_UNUSED_RESULT MaybeHandle<Object> Invoke(Isolate* isolate,
   }
 
 #ifdef VERIFY_HEAP
-  if (FLAG_verify_heap) {
+  if (v8_flags.verify_heap) {
     value.ObjectVerify(isolate);
   }
 #endif
@@ -466,6 +468,8 @@ V8_WARN_UNUSED_RESULT MaybeHandle<Object> Invoke(Isolate* isolate,
 
 MaybeHandle<Object> InvokeWithTryCatch(Isolate* isolate,
                                        const InvokeParams& params) {
+  DCHECK_IMPLIES(v8_flags.strict_termination_checks,
+                 !isolate->is_execution_terminating());
   bool is_termination = false;
   MaybeHandle<Object> maybe_result;
   if (params.exception_out != nullptr) {
@@ -500,6 +504,8 @@ MaybeHandle<Object> InvokeWithTryCatch(Isolate* isolate,
           isolate->OptionalRescheduleException(true);
         }
       }
+    } else {
+      DCHECK(!isolate->has_pending_exception());
     }
   }
 
@@ -591,31 +597,29 @@ MaybeHandle<Object> Execution::TryCall(
 
 // static
 MaybeHandle<Object> Execution::TryRunMicrotasks(
-    Isolate* isolate, MicrotaskQueue* microtask_queue,
-    MaybeHandle<Object>* exception_out) {
+    Isolate* isolate, MicrotaskQueue* microtask_queue) {
   return InvokeWithTryCatch(
-      isolate, InvokeParams::SetUpForRunMicrotasks(isolate, microtask_queue,
-                                                   exception_out));
+      isolate, InvokeParams::SetUpForRunMicrotasks(isolate, microtask_queue));
 }
 
 struct StackHandlerMarker {
   Address next;
   Address padding;
 };
-STATIC_ASSERT(offsetof(StackHandlerMarker, next) ==
+static_assert(offsetof(StackHandlerMarker, next) ==
               StackHandlerConstants::kNextOffset);
-STATIC_ASSERT(offsetof(StackHandlerMarker, padding) ==
+static_assert(offsetof(StackHandlerMarker, padding) ==
               StackHandlerConstants::kPaddingOffset);
-STATIC_ASSERT(sizeof(StackHandlerMarker) == StackHandlerConstants::kSize);
+static_assert(sizeof(StackHandlerMarker) == StackHandlerConstants::kSize);
 
 #if V8_ENABLE_WEBASSEMBLY
-void Execution::CallWasm(Isolate* isolate, Handle<CodeT> wrapper_code,
+void Execution::CallWasm(Isolate* isolate, Handle<Code> wrapper_code,
                          Address wasm_call_target, Handle<Object> object_ref,
                          Address packed_args) {
   using WasmEntryStub = GeneratedCode<Address(
       Address target, Address object_ref, Address argv, Address c_entry_fp)>;
   WasmEntryStub stub_entry =
-      WasmEntryStub::FromAddress(isolate, wrapper_code->InstructionStart());
+      WasmEntryStub::FromAddress(isolate, wrapper_code->instruction_start());
 
   // Save and restore context around invocation and block the
   // allocation of handles without explicit handle scopes.
@@ -640,10 +644,10 @@ void Execution::CallWasm(Isolate* isolate, Handle<CodeT> wrapper_code,
 
   {
     RCS_SCOPE(isolate, RuntimeCallCounterId::kJS_Execution);
-    STATIC_ASSERT(compiler::CWasmEntryParameters::kCodeEntry == 0);
-    STATIC_ASSERT(compiler::CWasmEntryParameters::kObjectRef == 1);
-    STATIC_ASSERT(compiler::CWasmEntryParameters::kArgumentsBuffer == 2);
-    STATIC_ASSERT(compiler::CWasmEntryParameters::kCEntryFp == 3);
+    static_assert(compiler::CWasmEntryParameters::kCodeEntry == 0);
+    static_assert(compiler::CWasmEntryParameters::kObjectRef == 1);
+    static_assert(compiler::CWasmEntryParameters::kArgumentsBuffer == 2);
+    static_assert(compiler::CWasmEntryParameters::kCEntryFp == 3);
     Address result = stub_entry.Call(wasm_call_target, object_ref->ptr(),
                                      packed_args, saved_c_entry_fp);
     if (result != kNullAddress) {

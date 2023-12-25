@@ -23,7 +23,8 @@ class PhaseScope;
 class PipelineStatistics : public Malloced {
  public:
   PipelineStatistics(OptimizedCompilationInfo* info,
-                     CompilationStatistics* turbo_stats, ZoneStats* zone_stats);
+                     std::shared_ptr<CompilationStatistics> turbo_stats,
+                     ZoneStats* zone_stats);
   ~PipelineStatistics();
   PipelineStatistics(const PipelineStatistics&) = delete;
   PipelineStatistics& operator=(const PipelineStatistics&) = delete;
@@ -56,6 +57,7 @@ class PipelineStatistics : public Malloced {
     base::ElapsedTimer timer_;
     size_t outer_zone_initial_size_;
     size_t allocated_bytes_at_start_;
+    size_t graph_size_at_start_ = 0;
   };
 
   bool InPhaseKind() { return !!phase_kind_stats_.scope_; }
@@ -67,7 +69,7 @@ class PipelineStatistics : public Malloced {
 
   Zone* outer_zone_;
   ZoneStats* zone_stats_;
-  CompilationStatistics* compilation_stats_;
+  std::shared_ptr<CompilationStatistics> compilation_stats_;
   CodeKind code_kind_;
   std::string function_name_;
 

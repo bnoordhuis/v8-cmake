@@ -6,7 +6,7 @@
 #include "src/objects/objects-inl.h"
 #include "test/cctest/cctest.h"
 #include "test/cctest/compiler/codegen-tester.h"
-#include "test/cctest/compiler/value-helper.h"
+#include "test/common/value-helper.h"
 
 namespace v8 {
 namespace internal {
@@ -15,7 +15,7 @@ namespace compiler {
 #if V8_TARGET_LITTLE_ENDIAN
 #define LSB(addr, bytes) addr
 #elif V8_TARGET_BIG_ENDIAN
-#define LSB(addr, bytes) reinterpret_cast<byte*>(addr + 1) - (bytes)
+#define LSB(addr, bytes) reinterpret_cast<uint8_t*>(addr + 1) - (bytes)
 #else
 #error "Unknown Architecture"
 #endif
@@ -254,7 +254,7 @@ void AtomicStoreTagged(MachineType type, AtomicMemoryOrder order) {
   uintptr_t zap_data[] = {kZapValue, kZapValue};
   TaggedT zap_value;
 
-  STATIC_ASSERT(sizeof(TaggedT) <= sizeof(zap_data));
+  static_assert(sizeof(TaggedT) <= sizeof(zap_data));
   MemCopy(&zap_value, &zap_data, sizeof(TaggedT));
   InitBuffer(in_buffer, kNumElems, type);
 

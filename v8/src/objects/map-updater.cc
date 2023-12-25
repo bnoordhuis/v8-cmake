@@ -10,6 +10,7 @@
 #include "src/execution/frames.h"
 #include "src/execution/isolate.h"
 #include "src/handles/handles.h"
+#include "src/heap/parked-scope.h"
 #include "src/objects/field-type.h"
 #include "src/objects/objects-inl.h"
 #include "src/objects/objects.h"
@@ -182,8 +183,9 @@ Handle<Map> MapUpdater::ReconfigureToDataField(InternalIndex descriptor,
   DCHECK(descriptor.is_found());
   DCHECK(!old_map_->is_dictionary_map());
 
-  base::SharedMutexGuard<base::kExclusive> mutex_guard(
-      isolate_->map_updater_access());
+  ParkedSharedMutexGuardIf<base::kExclusive> mutex_guard(
+      isolate_->main_thread_local_isolate(), isolate_->map_updater_access(),
+      true);
 
   modified_descriptor_ = descriptor;
   new_kind_ = PropertyKind::kData;
@@ -254,7 +256,7 @@ Handle<Map> MapUpdater::ReconfigureElementsKind(ElementsKind elements_kind) {
 Handle<Map> MapUpdater::UpdateMapNoLock(Isolate* isolate, Handle<Map> map) {
   if (!map->is_deprecated()) return map;
   // TODO(ishell): support fast map updating if we enable it.
-  CHECK(!FLAG_fast_map_update);
+  CHECK(!v8_flags.fast_map_update);
   MapUpdater mu(isolate, map);
   // Update map without locking the Isolate::map_updater_access mutex.
   return mu.UpdateImpl();
@@ -276,7 +278,7 @@ Handle<Map> MapUpdater::UpdateImpl() {
     ConstructNewMapWithIntegrityLevelTransition();
   }
   DCHECK_EQ(kEnd, state_);
-  if (FLAG_fast_map_update) {
+  if (v8_flags.fast_map_update) {
     TransitionsAccessor::SetMigrationTarget(isolate_, old_map_, *result_map_);
   }
   return result_map_;
@@ -366,12 +368,12 @@ base::Optional<Map> MapUpdater::TryUpdateNoLock(Isolate* isolate, Map old_map,
     info = DetectIntegrityLevelTransitions(old_map, isolate, &no_gc, cmode);
     // Bail out if there were some private symbol transitions mixed up
     // with the integrity level transitions.
-    if (!info.has_integrity_level_transition) return Map();
+    if (!info.has_integrity_level_transition) return {};
     // Make sure to replay the original elements kind transitions, before
     // the integrity level transition sets the elements to dictionary mode.
     DCHECK(to_kind == DICTIONARY_ELEMENTS ||
            to_kind == SLOW_STRING_WRAPPER_ELEMENTS ||
-           IsTypedArrayElementsKind(to_kind) ||
+           IsTypedArrayOrRabGsabTypedArrayElementsKind(to_kind) ||
            IsAnyHoleyNonextensibleElementsKind(to_kind));
     to_kind = info.integrity_level_source_map.elements_kind();
   }
@@ -487,7 +489,7 @@ MapUpdater::State MapUpdater::TryReconfigureToDataFieldInplace() {
   DCHECK_EQ(new_kind_, old_details.kind());
   DCHECK_EQ(new_attributes_, old_details.attributes());
   DCHECK_EQ(PropertyLocation::kField, old_details.location());
-  if (FLAG_trace_generalization) {
+  if (v8_flags.trace_generalization) {
     PrintGeneralization(
         isolate_, old_map_, stdout, "uninitialized field", modified_descriptor_,
         old_nof_, old_nof_, false, old_representation, new_representation_,
@@ -584,7 +586,7 @@ MapUpdater::State MapUpdater::FindRootMap() {
     // the seal transitions), so change {to_kind} accordingly.
     DCHECK(to_kind == DICTIONARY_ELEMENTS ||
            to_kind == SLOW_STRING_WRAPPER_ELEMENTS ||
-           IsTypedArrayElementsKind(to_kind) ||
+           IsTypedArrayOrRabGsabTypedArrayElementsKind(to_kind) ||
            IsAnyNonextensibleElementsKind(to_kind));
     to_kind = integrity_source_map_->elements_kind();
   }
@@ -993,7 +995,7 @@ MapUpdater::State MapUpdater::ConstructNewMap() {
 
   old_map_->NotifyLeafMapLayoutChange(isolate_);
 
-  if (FLAG_trace_generalization && modified_descriptor_.is_found()) {
+  if (v8_flags.trace_generalization && modified_descriptor_.is_found()) {
     PropertyDetails old_details =
         old_descriptors_->GetDetails(modified_descriptor_);
     PropertyDetails new_details =
@@ -1101,7 +1103,7 @@ Handle<Map> MapUpdater::ReconfigureExistingProperty(
                           "Normalize_AttributesMismatchProtoMap");
   }
 
-  if (FLAG_trace_generalization) {
+  if (v8_flags.trace_generalization) {
     PrintReconfiguration(isolate, map, stdout, descriptor, kind, attributes);
   }
 
@@ -1222,10 +1224,9 @@ void MapUpdater::GeneralizeField(Isolate* isolate, Handle<Map> map,
     dep_groups |= DependentCode::kFieldRepresentationGroup;
   }
 
-  field_owner->dependent_code().DeoptimizeDependentCodeGroup(isolate,
-                                                             dep_groups);
+  DependentCode::DeoptimizeDependencyGroups(isolate, *field_owner, dep_groups);
 
-  if (FLAG_trace_generalization) {
+  if (v8_flags.trace_generalization) {
     PrintGeneralization(
         isolate, map, stdout, "field type generalization", modify_index,
         map->NumberOfOwnDescriptors(), map->NumberOfOwnDescriptors(), false,

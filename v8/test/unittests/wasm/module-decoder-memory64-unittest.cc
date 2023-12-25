@@ -10,10 +10,7 @@
 #include "test/common/wasm/wasm-macro-gen.h"
 #include "test/unittests/test-utils.h"
 
-namespace v8 {
-namespace internal {
-namespace wasm {
-namespace module_decoder_unittest {
+namespace v8::internal::wasm {
 
 #define EXPECT_OK(result)                                        \
   do {                                                           \
@@ -31,12 +28,9 @@ class Memory64DecodingTest : public TestWithIsolateAndZone {
     module_bytes.insert(module_bytes.end(), module_body_bytes);
     static constexpr WasmFeatures kEnabledFeatures{
         WasmFeature::kFeature_memory64};
-    return DecodeWasmModule(
-        kEnabledFeatures, module_bytes.data(),
-        module_bytes.data() + module_bytes.size(), false, kWasmOrigin,
-        isolate()->counters(), isolate()->metrics_recorder(),
-        v8::metrics::Recorder::ContextId::Empty(), DecodingMethod::kSync,
-        wasm::GetWasmEngine()->allocator());
+    bool kValidateFunctions = true;
+    return DecodeWasmModule(kEnabledFeatures, base::VectorOf(module_bytes),
+                            kValidateFunctions, kWasmOrigin);
   }
 };
 
@@ -75,7 +69,4 @@ TEST_F(Memory64DecodingTest, MemoryLimitLEB64) {
   // supported.
 }
 
-}  // namespace module_decoder_unittest
-}  // namespace wasm
-}  // namespace internal
-}  // namespace v8
+}  // namespace v8::internal::wasm

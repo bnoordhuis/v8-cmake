@@ -8,8 +8,7 @@
 #include "src/base/vlq.h"
 #include "src/common/globals.h"
 #include "src/interpreter/bytecode-array-iterator.h"
-#include "src/objects/code.h"
-#include "src/objects/fixed-array.h"
+#include "src/objects/bytecode-array.h"
 
 namespace v8 {
 namespace internal {
@@ -66,7 +65,8 @@ class V8_EXPORT_PRIVATE BytecodeOffsetIterator {
     return current_bytecode_offset_;
   }
 
-  static void UpdatePointersCallback(void* iterator) {
+  static void UpdatePointersCallback(LocalIsolate*, GCType, GCCallbackFlags,
+                                     void* iterator) {
     reinterpret_cast<BytecodeOffsetIterator*>(iterator)->UpdatePointers();
   }
 

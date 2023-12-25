@@ -12,16 +12,13 @@
 #include "src/builtins/accessors.h"
 #include "src/common/message-template.h"
 #include "src/heap/local-factory-inl.h"
-#include "src/init/bootstrapper.h"
 #include "src/logging/runtime-call-stats-scope.h"
-#include "src/objects/module-inl.h"
-#include "src/objects/objects-inl.h"
 #include "src/objects/scope-info.h"
-#include "src/objects/string-set-inl.h"
+#include "src/objects/string-inl.h"
+#include "src/objects/string-set.h"
 #include "src/parsing/parse-info.h"
 #include "src/parsing/parser.h"
 #include "src/parsing/preparse-data.h"
-#include "src/zone/zone-list-inl.h"
 #include "src/zone/zone.h"
 
 namespace v8 {
@@ -255,7 +252,7 @@ Scope::Scope(Zone* zone, ScopeType scope_type,
   must_use_preparsed_scope_data_ = true;
 
   if (scope_type == BLOCK_SCOPE) {
-    // Set is_block_scope_for_object_literal_ based on the existince of the home
+    // Set is_block_scope_for_object_literal_ based on the existence of the home
     // object variable (we don't store it explicitly).
     DCHECK_NOT_NULL(ast_value_factory);
     int home_object_index = scope_info->ContextSlotIndex(
@@ -635,7 +632,8 @@ void DeclarationScope::HoistSloppyBlockFunctions(AstNodeFactory* factory) {
     // scope and we terminate the iteration there anyway.
     do {
       Variable* var = query_scope->LookupInScopeOrScopeInfo(name, query_scope);
-      if (var != nullptr && IsLexicalVariableMode(var->mode())) {
+      if (var != nullptr && IsLexicalVariableMode(var->mode()) &&
+          !var->is_sloppy_block_function()) {
         should_hoist = false;
         break;
       }
@@ -652,6 +650,19 @@ void DeclarationScope::HoistSloppyBlockFunctions(AstNodeFactory* factory) {
       auto declaration = factory->NewVariableDeclaration(pos);
       // Based on the preceding checks, it doesn't matter what we pass as
       // sloppy_mode_block_scope_function_redefinition.
+      //
+      // This synthesized var for Annex B functions-in-block (FiB) may be
+      // declared multiple times for the same var scope, such as in the case of
+      // shadowed functions-in-block like the following:
+      //
+      // {
+      //    function f() {}
+      //    { function f() {} }
+      // }
+      //
+      // Redeclarations for vars do not create new bindings, but the
+      // redeclarations' initializers are still run. That is, shadowed FiB will
+      // result in multiple assignments to the same synthesized var.
       Variable* var = DeclareVariable(
           declaration, name, pos, VariableMode::kVar, NORMAL_VARIABLE,
           Variable::DefaultInitializationFlag(VariableMode::kVar), &was_added,
@@ -718,7 +729,7 @@ bool DeclarationScope::Analyze(ParseInfo* info) {
   scope->GetScriptScope()->RewriteReplGlobalVariables();
 
 #ifdef DEBUG
-  if (FLAG_print_scopes) {
+  if (v8_flags.print_scopes) {
     PrintF("Global scope:\n");
     scope->Print();
   }
@@ -888,9 +899,8 @@ void DeclarationScope::AddLocal(Variable* var) {
 }
 
 void Scope::Snapshot::Reparent(DeclarationScope* new_parent) {
-  DCHECK(!IsCleared());
-  DCHECK_EQ(new_parent, outer_scope_and_calls_eval_.GetPointer()->inner_scope_);
-  DCHECK_EQ(new_parent->outer_scope_, outer_scope_and_calls_eval_.GetPointer());
+  DCHECK_EQ(new_parent, outer_scope_->inner_scope_);
+  DCHECK_EQ(new_parent->outer_scope_, outer_scope_);
   DCHECK_EQ(new_parent, new_parent->GetClosureScope());
   DCHECK_NULL(new_parent->inner_scope_);
   DCHECK(new_parent->unresolved_list_.is_empty());
@@ -915,12 +925,11 @@ void Scope::Snapshot::Reparent(DeclarationScope* new_parent) {
     new_parent->sibling_ = top_inner_scope_;
   }
 
-  Scope* outer_scope = outer_scope_and_calls_eval_.GetPointer();
-  new_parent->unresolved_list_.MoveTail(&outer_scope->unresolved_list_,
+  new_parent->unresolved_list_.MoveTail(&outer_scope_->unresolved_list_,
                                         top_unresolved_);
 
   // Move temporaries allocated for complex parameter initializers.
-  DeclarationScope* outer_closure = outer_scope->GetClosureScope();
+  DeclarationScope* outer_closure = outer_scope_->GetClosureScope();
   for (auto it = top_local_; it != outer_closure->locals()->end(); ++it) {
     Variable* local = *it;
     DCHECK_EQ(VariableMode::kTemporary, local->mode());
@@ -932,16 +941,11 @@ void Scope::Snapshot::Reparent(DeclarationScope* new_parent) {
   outer_closure->locals_.Rewind(top_local_);
 
   // Move eval calls since Snapshot's creation into new_parent.
-  if (outer_scope_and_calls_eval_->calls_eval_) {
-    new_parent->RecordDeclarationScopeEvalCall();
-    new_parent->inner_scope_calls_eval_ = true;
+  if (outer_scope_->calls_eval_) {
+    new_parent->RecordEvalCall();
+    outer_scope_->calls_eval_ = false;
+    declaration_scope_->sloppy_eval_can_extend_vars_ = false;
   }
-
-  // We are in the arrow function case. The calls eval we may have recorded
-  // is intended for the inner scope and we should simply restore the
-  // original "calls eval" flag of the outer scope.
-  RestoreEvalFlag();
-  Clear();
 }
 
 void Scope::ReplaceOuterScope(Scope* outer) {
@@ -1240,10 +1244,6 @@ Variable* DeclarationScope::DeclareDynamicGlobal(const AstRawString* name,
   // TODO(neis): Mark variable as maybe-assigned?
 }
 
-bool Scope::RemoveUnresolved(VariableProxy* var) {
-  return unresolved_list_.Remove(var);
-}
-
 void Scope::DeleteUnresolved(VariableProxy* var) {
   DCHECK(unresolved_list_.Contains(var));
   var->mark_removed_from_unresolved();
@@ -1273,8 +1273,9 @@ Declaration* DeclarationScope::CheckConflictingVarDeclarations(
     if (decl->IsVariableDeclaration() &&
         decl->AsVariableDeclaration()->AsNested() != nullptr) {
       Scope* current = decl->AsVariableDeclaration()->AsNested()->scope();
-      DCHECK(decl->var()->mode() == VariableMode::kVar ||
-             decl->var()->mode() == VariableMode::kDynamic);
+      if (decl->var()->mode() != VariableMode::kVar &&
+          decl->var()->mode() != VariableMode::kDynamic)
+        continue;
       // Iterate through all scopes until the declaration scope.
       do {
         // There is a conflict if there exists a non-VAR binding.
@@ -1596,50 +1597,18 @@ bool Scope::IsOuterScopeOf(Scope* other) const {
   return false;
 }
 
-void Scope::CollectNonLocals(DeclarationScope* max_outer_scope,
-                             Isolate* isolate, Handle<StringSet>* non_locals) {
-  this->ForEach([max_outer_scope, isolate, non_locals](Scope* scope) {
-    // Module variables must be allocated before variable resolution
-    // to ensure that UpdateNeedsHoleCheck() can detect import variables.
-    if (scope->is_module_scope()) {
-      scope->AsModuleScope()->AllocateModuleVariables();
-    }
-
-    // Lazy parsed declaration scopes are already partially analyzed. If there
-    // are unresolved references remaining, they just need to be resolved in
-    // outer scopes.
-    Scope* lookup = WasLazilyParsed(scope) ? scope->outer_scope() : scope;
-
-    for (VariableProxy* proxy : scope->unresolved_list_) {
-      DCHECK(!proxy->is_resolved());
-      Variable* var =
-          Lookup<kParsedScope>(proxy, lookup, max_outer_scope->outer_scope());
-      if (var == nullptr) {
-        *non_locals = StringSet::Add(isolate, *non_locals, proxy->name());
-      } else {
-        // In this case we need to leave scopes in a way that they can be
-        // allocated. If we resolved variables from lazy parsed scopes, we need
-        // to context allocate the var.
-        scope->ResolveTo(proxy, var);
-        if (!var->is_dynamic() && lookup != scope)
-          var->ForceContextAllocation();
-      }
-    }
-
-    // Clear unresolved_list_ as it's in an inconsistent state.
-    scope->unresolved_list_.Clear();
-    return Iteration::kDescend;
-  });
-}
-
 void Scope::AnalyzePartially(DeclarationScope* max_outer_scope,
                              AstNodeFactory* ast_node_factory,
                              UnresolvedList* new_unresolved_list,
                              bool maybe_in_arrowhead) {
   this->ForEach([max_outer_scope, ast_node_factory, new_unresolved_list,
                  maybe_in_arrowhead](Scope* scope) {
-    DCHECK_IMPLIES(scope->is_declaration_scope(),
-                   !scope->AsDeclarationScope()->was_lazily_parsed());
+    // Skip already lazily parsed scopes. This can only happen to functions
+    // inside arrowheads.
+    if (WasLazilyParsed(scope)) {
+      DCHECK(max_outer_scope->is_arrow_scope());
+      return Iteration::kContinue;
+    }
 
     for (VariableProxy* proxy = scope->unresolved_list_.first();
          proxy != nullptr; proxy = proxy->next_unresolved()) {
@@ -1666,12 +1635,6 @@ void Scope::AnalyzePartially(DeclarationScope* max_outer_scope,
     scope->unresolved_list_.Clear();
     return Iteration::kDescend;
   });
-}
-
-Handle<StringSet> DeclarationScope::CollectNonLocals(
-    Isolate* isolate, Handle<StringSet> non_locals) {
-  Scope::CollectNonLocals(this, isolate, &non_locals);
-  return non_locals;
 }
 
 void DeclarationScope::ResetAfterPreparsing(AstValueFactory* ast_value_factory,
@@ -1729,7 +1692,10 @@ bool Scope::IsSkippableFunctionScope() {
 
 void Scope::SavePreparseData(Parser* parser) {
   this->ForEach([parser](Scope* scope) {
-    if (scope->IsSkippableFunctionScope()) {
+    // Save preparse data for every skippable scope, unless it was already
+    // previously saved (this can happen with functions inside arrowheads).
+    if (scope->IsSkippableFunctionScope() &&
+        !scope->AsDeclarationScope()->was_lazily_parsed()) {
       scope->AsDeclarationScope()->SavePreparseDataForDeclarationScope(parser);
     }
     return Iteration::kDescend;
@@ -1746,10 +1712,28 @@ void DeclarationScope::AnalyzePartially(Parser* parser,
                                         bool maybe_in_arrowhead) {
   DCHECK(!force_eager_compilation_);
   UnresolvedList new_unresolved_list;
-  if (!IsArrowFunction(function_kind_) &&
-      (!outer_scope_->is_script_scope() || maybe_in_arrowhead ||
-       (preparse_data_builder_ != nullptr &&
-        preparse_data_builder_->HasInnerFunctions()))) {
+
+  // We don't need to do partial analysis for top level functions, since they
+  // can only access values in the global scope, and we can't track assignments
+  // for these since they're accessible across scripts.
+  //
+  // If the top level function has inner functions though, we do still want to
+  // analyze those to save their preparse data.
+  //
+  // Additionally, functions in potential arrowheads _need_ to be analyzed, in
+  // case they do end up being in an arrowhead and the arrow function needs to
+  // know about context acceses. For example, in
+  //
+  //     (a, b=function foo(){ a = 1 }) => { b(); return a}
+  //
+  // `function foo(){ a = 1 }` is "maybe_in_arrowhead" but still top-level when
+  // parsed, and is re-scoped to the arrow function when that one is parsed. The
+  // arrow function needs to know that `a` needs to be context allocated, so
+  // that the call to `b()` correctly updates the `a` parameter.
+  const bool is_top_level_function = outer_scope_->is_script_scope();
+  const bool has_inner_functions = preparse_data_builder_ != nullptr &&
+                                   preparse_data_builder_->HasInnerFunctions();
+  if (maybe_in_arrowhead || !is_top_level_function || has_inner_functions) {
     // Try to resolve unresolved variables for this Scope and migrate those
     // which cannot be resolved inside. It doesn't make sense to try to resolve
     // them in the outer Scopes here, because they are incomplete.
@@ -1765,7 +1749,7 @@ void DeclarationScope::AnalyzePartially(Parser* parser,
   }
 
 #ifdef DEBUG
-  if (FLAG_print_scopes) {
+  if (v8_flags.print_scopes) {
     PrintF("Inner function scope:\n");
     Print();
   }
@@ -1806,6 +1790,8 @@ const char* Header(ScopeType scope_type, FunctionKind function_kind,
     case CLASS_SCOPE:
       return "class";
     case WITH_SCOPE: return "with";
+    case SHADOW_REALM_SCOPE:
+      return "shadowrealm";
   }
   UNREACHABLE();
 }
@@ -2068,6 +2054,15 @@ Variable* Scope::NonLocal(const AstRawString* name, VariableMode mode) {
   return var;
 }
 
+void Scope::ForceDynamicLookup(VariableProxy* proxy) {
+  // At the moment this is only used for looking up private names dynamically
+  // in debug-evaluate from top-level scope.
+  DCHECK(proxy->IsPrivateName());
+  DCHECK(is_script_scope() || is_module_scope() || is_eval_scope());
+  Variable* dynamic = NonLocal(proxy->raw_name(), VariableMode::kDynamic);
+  proxy->BindTo(dynamic);
+}
+
 // static
 template <Scope::ScopeLookupMode mode>
 Variable* Scope::Lookup(VariableProxy* proxy, Scope* scope,
@@ -2297,7 +2292,7 @@ void UpdateNeedsHoleCheck(Variable* var, VariableProxy* proxy, Scope* scope) {
     // Dynamically introduced variables never need a hole check (since they're
     // VariableMode::kVar bindings, either from var or function declarations),
     // but the variable they shadow might need a hole check, which we want to do
-    // if we decide that no shadowing variable was dynamically introoduced.
+    // if we decide that no shadowing variable was dynamically introduced.
     DCHECK_EQ(kCreatedInitialized, var->initialization_flag());
     return UpdateNeedsHoleCheck(var->local_if_not_shadowed(), proxy, scope);
   }
@@ -2308,7 +2303,8 @@ void UpdateNeedsHoleCheck(Variable* var, VariableProxy* proxy, Scope* scope) {
   // unknown at compilation time whether the binding referred to in the
   // exporting module itself requires hole checks.
   if (var->location() == VariableLocation::MODULE && !var->IsExport()) {
-    return SetNeedsHoleCheck(var, proxy);
+    SetNeedsHoleCheck(var, proxy);
+    return;
   }
 
   // Check if the binding really needs an initialization check. The check
@@ -2330,7 +2326,8 @@ void UpdateNeedsHoleCheck(Variable* var, VariableProxy* proxy, Scope* scope) {
   // The scope of the variable needs to be checked, in case the use is
   // in a sub-block which may be linear.
   if (var->scope()->GetClosureScope() != scope->GetClosureScope()) {
-    return SetNeedsHoleCheck(var, proxy);
+    SetNeedsHoleCheck(var, proxy);
+    return;
   }
 
   // We should always have valid source positions.
@@ -2339,7 +2336,8 @@ void UpdateNeedsHoleCheck(Variable* var, VariableProxy* proxy, Scope* scope) {
 
   if (var->scope()->is_nonlinear() ||
       var->initializer_position() >= proxy->position()) {
-    return SetNeedsHoleCheck(var, proxy);
+    SetNeedsHoleCheck(var, proxy);
+    return;
   }
 }
 
@@ -2579,6 +2577,9 @@ void Scope::AllocateVariablesRecursively() {
   this->ForEach([](Scope* scope) -> Iteration {
     DCHECK(!scope->already_resolved_);
     if (WasLazilyParsed(scope)) return Iteration::kContinue;
+    if (scope->sloppy_eval_can_extend_vars_) {
+      scope->num_heap_slots_ = Context::MIN_CONTEXT_EXTENDED_SLOTS;
+    }
     DCHECK_EQ(scope->ContextHeaderLength(), scope->num_heap_slots_);
 
     // Allocate variables for this scope.
@@ -2798,7 +2799,7 @@ bool IsComplementaryAccessorPair(VariableMode a, VariableMode b) {
 void ClassScope::FinalizeReparsedClassScope(
     Isolate* isolate, MaybeHandle<ScopeInfo> maybe_scope_info,
     AstValueFactory* ast_value_factory, bool needs_allocation_fixup) {
-  // Set this bit so that DelcarationScope::Analyze recognizes
+  // Set this bit so that DeclarationScope::Analyze recognizes
   // the reparsed instance member initializer scope.
 #ifdef DEBUG
   is_reparsed_class_scope_ = true;
@@ -2949,7 +2950,7 @@ Variable* ClassScope::LookupPrivateName(VariableProxy* proxy) {
        scope_iter.Next()) {
     ClassScope* scope = scope_iter.GetScope();
     // Try finding it in the private name map first, if it can't be found,
-    // try the deseralized scope info.
+    // try the deserialized scope info.
     Variable* var = scope->LookupLocalPrivateName(proxy->raw_name());
     if (var == nullptr && !scope->scope_info_.is_null()) {
       var = scope->LookupPrivateNameInScopeInfo(proxy->raw_name());
@@ -3041,7 +3042,7 @@ VariableProxy* ClassScope::ResolvePrivateNamesPartially() {
       }
 
       // The private name may be found later in the outer private name scope, so
-      // push it to the outer sopce.
+      // push it to the outer scope.
       private_name_scope_iter.AddUnresolvedPrivateName(proxy);
     }
 
@@ -3116,6 +3117,13 @@ void PrivateNameScopeIterator::AddUnresolvedPrivateName(VariableProxy* proxy) {
   // be new.
   DCHECK(!proxy->is_resolved());
   DCHECK(proxy->IsPrivateName());
+
+  // Use dynamic lookup for top-level scopes in debug-evaluate.
+  if (Done()) {
+    start_scope_->ForceDynamicLookup(proxy);
+    return;
+  }
+
   GetScope()->EnsureRareData()->unresolved_private_names.Add(proxy);
   // Any closure scope that contain uses of private names that skips over a
   // class scope due to heritage expressions need private name context chain

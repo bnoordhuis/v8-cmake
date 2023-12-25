@@ -7,19 +7,24 @@
 #include <iomanip>
 
 #include "src/base/memory.h"
+#include "src/base/v8-fallthrough.h"
+#include "src/common/assert-scope.h"
 #include "src/deoptimizer/deoptimizer.h"
 #include "src/deoptimizer/materialized-object-store.h"
 #include "src/deoptimizer/translation-opcode.h"
 #include "src/diagnostics/disasm.h"
 #include "src/execution/frames.h"
 #include "src/execution/isolate.h"
+#include "src/heap/heap.h"
 #include "src/numbers/conversions.h"
 #include "src/objects/arguments.h"
 #include "src/objects/heap-number-inl.h"
+#include "src/objects/heap-object.h"
 #include "src/objects/oddball.h"
 
 // Has to be the last include (doesn't have include guards)
 #include "src/objects/object-macros.h"
+#include "src/objects/string.h"
 
 namespace v8 {
 
@@ -35,32 +40,41 @@ void TranslationArrayPrintSingleFrame(
   TranslationArrayIterator iterator(translation_array, translation_index);
   disasm::NameConverter converter;
 
-  TranslationOpcode opcode = TranslationOpcodeFromInt(iterator.Next());
-  DCHECK(TranslationOpcode::BEGIN == opcode);
-  int frame_count = iterator.Next();
-  int jsframe_count = iterator.Next();
-  int update_feedback_count = iterator.Next();
+  TranslationOpcode opcode = iterator.NextOpcode();
+  DCHECK(TranslationOpcodeIsBegin(opcode));
+  iterator.NextOperand();  // Skip the lookback distance.
+  int frame_count = iterator.NextOperand();
+  int jsframe_count = iterator.NextOperand();
   os << "  " << TranslationOpcodeToString(opcode)
      << " {frame count=" << frame_count << ", js frame count=" << jsframe_count
-     << ", update_feedback_count=" << update_feedback_count << "}\n";
+     << "}\n";
 
-  while (iterator.HasNext()) {
-    opcode = TranslationOpcodeFromInt(iterator.Next());
-    if (opcode == TranslationOpcode::BEGIN) break;
+  while (iterator.HasNextOpcode()) {
+    opcode = iterator.NextOpcode();
+    if (TranslationOpcodeIsBegin(opcode)) break;
 
     os << std::setw(31) << "    " << TranslationOpcodeToString(opcode) << " ";
 
     switch (opcode) {
-      case TranslationOpcode::BEGIN:
+      case TranslationOpcode::BEGIN_WITH_FEEDBACK:
+      case TranslationOpcode::BEGIN_WITHOUT_FEEDBACK:
+      case TranslationOpcode::MATCH_PREVIOUS_TRANSLATION:
         UNREACHABLE();
 
-      case TranslationOpcode::INTERPRETED_FRAME: {
-        DCHECK_EQ(TranslationOpcodeOperandCount(opcode), 5);
-        int bytecode_offset = iterator.Next();
-        int shared_info_id = iterator.Next();
-        unsigned height = iterator.Next();
-        int return_value_offset = iterator.Next();
-        int return_value_count = iterator.Next();
+      case TranslationOpcode::INTERPRETED_FRAME_WITH_RETURN:
+      case TranslationOpcode::INTERPRETED_FRAME_WITHOUT_RETURN: {
+        int bytecode_offset = iterator.NextOperand();
+        int shared_info_id = iterator.NextOperand();
+        unsigned height = iterator.NextOperand();
+        int return_value_offset = 0;
+        int return_value_count = 0;
+        if (opcode == TranslationOpcode::INTERPRETED_FRAME_WITH_RETURN) {
+          DCHECK_EQ(TranslationOpcodeOperandCount(opcode), 5);
+          return_value_offset = iterator.NextOperand();
+          return_value_count = iterator.NextOperand();
+        } else {
+          DCHECK_EQ(TranslationOpcodeOperandCount(opcode), 3);
+        }
         Object shared_info = literal_array.get(shared_info_id);
         os << "{bytecode_offset=" << bytecode_offset << ", function="
            << SharedFunctionInfo::cast(shared_info).DebugNameCStr().get()
@@ -69,12 +83,15 @@ void TranslationArrayPrintSingleFrame(
         break;
       }
 
+#if V8_ENABLE_WEBASSEMBLY
+      case TranslationOpcode::WASM_INLINED_INTO_JS_FRAME:
+#endif
       case TranslationOpcode::CONSTRUCT_STUB_FRAME: {
         DCHECK_EQ(TranslationOpcodeOperandCount(opcode), 3);
-        int bailout_id = iterator.Next();
-        int shared_info_id = iterator.Next();
+        int bailout_id = iterator.NextOperand();
+        int shared_info_id = iterator.NextOperand();
         Object shared_info = literal_array.get(shared_info_id);
-        unsigned height = iterator.Next();
+        unsigned height = iterator.NextOperand();
         os << "{bailout_id=" << bailout_id << ", function="
            << SharedFunctionInfo::cast(shared_info).DebugNameCStr().get()
            << ", height=" << height << "}";
@@ -86,10 +103,10 @@ void TranslationArrayPrintSingleFrame(
       case TranslationOpcode::
           JAVA_SCRIPT_BUILTIN_CONTINUATION_WITH_CATCH_FRAME: {
         DCHECK_EQ(TranslationOpcodeOperandCount(opcode), 3);
-        int bailout_id = iterator.Next();
-        int shared_info_id = iterator.Next();
+        int bailout_id = iterator.NextOperand();
+        int shared_info_id = iterator.NextOperand();
         Object shared_info = literal_array.get(shared_info_id);
-        unsigned height = iterator.Next();
+        unsigned height = iterator.NextOperand();
         os << "{bailout_id=" << bailout_id << ", function="
            << SharedFunctionInfo::cast(shared_info).DebugNameCStr().get()
            << ", height=" << height << "}";
@@ -99,11 +116,11 @@ void TranslationArrayPrintSingleFrame(
 #if V8_ENABLE_WEBASSEMBLY
       case TranslationOpcode::JS_TO_WASM_BUILTIN_CONTINUATION_FRAME: {
         DCHECK_EQ(TranslationOpcodeOperandCount(opcode), 4);
-        int bailout_id = iterator.Next();
-        int shared_info_id = iterator.Next();
+        int bailout_id = iterator.NextOperand();
+        int shared_info_id = iterator.NextOperand();
         Object shared_info = literal_array.get(shared_info_id);
-        unsigned height = iterator.Next();
-        int wasm_return_type = iterator.Next();
+        unsigned height = iterator.NextOperand();
+        int wasm_return_type = iterator.NextOperand();
         os << "{bailout_id=" << bailout_id << ", function="
            << SharedFunctionInfo::cast(shared_info).DebugNameCStr().get()
            << ", height=" << height << ", wasm_return_type=" << wasm_return_type
@@ -112,11 +129,11 @@ void TranslationArrayPrintSingleFrame(
       }
 #endif  // V8_ENABLE_WEBASSEMBLY
 
-      case TranslationOpcode::ARGUMENTS_ADAPTOR_FRAME: {
+      case TranslationOpcode::INLINED_EXTRA_ARGUMENTS: {
         DCHECK_EQ(TranslationOpcodeOperandCount(opcode), 2);
-        int shared_info_id = iterator.Next();
+        int shared_info_id = iterator.NextOperand();
         Object shared_info = literal_array.get(shared_info_id);
-        unsigned height = iterator.Next();
+        unsigned height = iterator.NextOperand();
         os << "{function="
            << SharedFunctionInfo::cast(shared_info).DebugNameCStr().get()
            << ", height=" << height << "}";
@@ -125,28 +142,44 @@ void TranslationArrayPrintSingleFrame(
 
       case TranslationOpcode::REGISTER: {
         DCHECK_EQ(TranslationOpcodeOperandCount(opcode), 1);
-        int reg_code = iterator.Next();
+        int reg_code = iterator.NextOperandUnsigned();
         os << "{input=" << converter.NameOfCPURegister(reg_code) << "}";
         break;
       }
 
       case TranslationOpcode::INT32_REGISTER: {
         DCHECK_EQ(TranslationOpcodeOperandCount(opcode), 1);
-        int reg_code = iterator.Next();
+        int reg_code = iterator.NextOperandUnsigned();
         os << "{input=" << converter.NameOfCPURegister(reg_code) << " (int32)}";
         break;
       }
 
       case TranslationOpcode::INT64_REGISTER: {
         DCHECK_EQ(TranslationOpcodeOperandCount(opcode), 1);
-        int reg_code = iterator.Next();
+        int reg_code = iterator.NextOperandUnsigned();
         os << "{input=" << converter.NameOfCPURegister(reg_code) << " (int64)}";
+        break;
+      }
+
+      case TranslationOpcode::SIGNED_BIGINT64_REGISTER: {
+        DCHECK_EQ(TranslationOpcodeOperandCount(opcode), 1);
+        int reg_code = iterator.NextOperandUnsigned();
+        os << "{input=" << converter.NameOfCPURegister(reg_code)
+           << " (signed bigint64)}";
+        break;
+      }
+
+      case TranslationOpcode::UNSIGNED_BIGINT64_REGISTER: {
+        DCHECK_EQ(TranslationOpcodeOperandCount(opcode), 1);
+        int reg_code = iterator.NextOperandUnsigned();
+        os << "{input=" << converter.NameOfCPURegister(reg_code)
+           << " (unsigned bigint64)}";
         break;
       }
 
       case TranslationOpcode::UINT32_REGISTER: {
         DCHECK_EQ(TranslationOpcodeOperandCount(opcode), 1);
-        int reg_code = iterator.Next();
+        int reg_code = iterator.NextOperandUnsigned();
         os << "{input=" << converter.NameOfCPURegister(reg_code)
            << " (uint32)}";
         break;
@@ -154,56 +187,77 @@ void TranslationArrayPrintSingleFrame(
 
       case TranslationOpcode::BOOL_REGISTER: {
         DCHECK_EQ(TranslationOpcodeOperandCount(opcode), 1);
-        int reg_code = iterator.Next();
+        int reg_code = iterator.NextOperandUnsigned();
         os << "{input=" << converter.NameOfCPURegister(reg_code) << " (bool)}";
         break;
       }
 
       case TranslationOpcode::FLOAT_REGISTER: {
         DCHECK_EQ(TranslationOpcodeOperandCount(opcode), 1);
-        int reg_code = iterator.Next();
+        int reg_code = iterator.NextOperandUnsigned();
         os << "{input=" << FloatRegister::from_code(reg_code) << "}";
         break;
       }
 
       case TranslationOpcode::DOUBLE_REGISTER: {
         DCHECK_EQ(TranslationOpcodeOperandCount(opcode), 1);
-        int reg_code = iterator.Next();
+        int reg_code = iterator.NextOperandUnsigned();
         os << "{input=" << DoubleRegister::from_code(reg_code) << "}";
         break;
       }
 
-      case TranslationOpcode::STACK_SLOT: {
+      case TranslationOpcode::HOLEY_DOUBLE_REGISTER: {
         DCHECK_EQ(TranslationOpcodeOperandCount(opcode), 1);
-        int input_slot_index = iterator.Next();
+        int reg_code = iterator.NextOperandUnsigned();
+        os << "{input=" << DoubleRegister::from_code(reg_code) << " (holey)}";
+        break;
+      }
+
+      case TranslationOpcode::TAGGED_STACK_SLOT: {
+        DCHECK_EQ(TranslationOpcodeOperandCount(opcode), 1);
+        int input_slot_index = iterator.NextOperand();
         os << "{input=" << input_slot_index << "}";
         break;
       }
 
       case TranslationOpcode::INT32_STACK_SLOT: {
         DCHECK_EQ(TranslationOpcodeOperandCount(opcode), 1);
-        int input_slot_index = iterator.Next();
+        int input_slot_index = iterator.NextOperand();
         os << "{input=" << input_slot_index << " (int32)}";
         break;
       }
 
       case TranslationOpcode::INT64_STACK_SLOT: {
         DCHECK_EQ(TranslationOpcodeOperandCount(opcode), 1);
-        int input_slot_index = iterator.Next();
+        int input_slot_index = iterator.NextOperand();
         os << "{input=" << input_slot_index << " (int64)}";
+        break;
+      }
+
+      case TranslationOpcode::SIGNED_BIGINT64_STACK_SLOT: {
+        DCHECK_EQ(TranslationOpcodeOperandCount(opcode), 1);
+        int input_slot_index = iterator.NextOperand();
+        os << "{input=" << input_slot_index << " (signed bigint64)}";
+        break;
+      }
+
+      case TranslationOpcode::UNSIGNED_BIGINT64_STACK_SLOT: {
+        DCHECK_EQ(TranslationOpcodeOperandCount(opcode), 1);
+        int input_slot_index = iterator.NextOperand();
+        os << "{input=" << input_slot_index << " (unsigned bigint64)}";
         break;
       }
 
       case TranslationOpcode::UINT32_STACK_SLOT: {
         DCHECK_EQ(TranslationOpcodeOperandCount(opcode), 1);
-        int input_slot_index = iterator.Next();
+        int input_slot_index = iterator.NextOperand();
         os << "{input=" << input_slot_index << " (uint32)}";
         break;
       }
 
       case TranslationOpcode::BOOL_STACK_SLOT: {
         DCHECK_EQ(TranslationOpcodeOperandCount(opcode), 1);
-        int input_slot_index = iterator.Next();
+        int input_slot_index = iterator.NextOperand();
         os << "{input=" << input_slot_index << " (bool)}";
         break;
       }
@@ -211,14 +265,27 @@ void TranslationArrayPrintSingleFrame(
       case TranslationOpcode::FLOAT_STACK_SLOT:
       case TranslationOpcode::DOUBLE_STACK_SLOT: {
         DCHECK_EQ(TranslationOpcodeOperandCount(opcode), 1);
-        int input_slot_index = iterator.Next();
+        int input_slot_index = iterator.NextOperand();
         os << "{input=" << input_slot_index << "}";
+        break;
+      }
+
+      case TranslationOpcode::HOLEY_DOUBLE_STACK_SLOT: {
+        DCHECK_EQ(TranslationOpcodeOperandCount(opcode), 1);
+        int input_slot_index = iterator.NextOperand();
+        os << "{input=" << input_slot_index << " (holey)}";
+        break;
+      }
+
+      case TranslationOpcode::OPTIMIZED_OUT: {
+        DCHECK_EQ(TranslationOpcodeOperandCount(opcode), 0);
+        os << "{optimized_out}}";
         break;
       }
 
       case TranslationOpcode::LITERAL: {
         DCHECK_EQ(TranslationOpcodeOperandCount(opcode), 1);
-        int literal_index = iterator.Next();
+        int literal_index = iterator.NextOperand();
         Object literal_value = literal_array.get(literal_index);
         os << "{literal_id=" << literal_index << " (" << Brief(literal_value)
            << ")}";
@@ -227,7 +294,7 @@ void TranslationArrayPrintSingleFrame(
 
       case TranslationOpcode::DUPLICATED_OBJECT: {
         DCHECK_EQ(TranslationOpcodeOperandCount(opcode), 1);
-        int object_index = iterator.Next();
+        int object_index = iterator.NextOperand();
         os << "{object_index=" << object_index << "}";
         break;
       }
@@ -235,7 +302,7 @@ void TranslationArrayPrintSingleFrame(
       case TranslationOpcode::ARGUMENTS_ELEMENTS: {
         DCHECK_EQ(TranslationOpcodeOperandCount(opcode), 1);
         CreateArgumentsType arguments_type =
-            static_cast<CreateArgumentsType>(iterator.Next());
+            static_cast<CreateArgumentsType>(iterator.NextOperand());
         os << "{arguments_type=" << arguments_type << "}";
         break;
       }
@@ -247,15 +314,15 @@ void TranslationArrayPrintSingleFrame(
 
       case TranslationOpcode::CAPTURED_OBJECT: {
         DCHECK_EQ(TranslationOpcodeOperandCount(opcode), 1);
-        int args_length = iterator.Next();
+        int args_length = iterator.NextOperand();
         os << "{length=" << args_length << "}";
         break;
       }
 
       case TranslationOpcode::UPDATE_FEEDBACK: {
         DCHECK_EQ(TranslationOpcodeOperandCount(opcode), 2);
-        int literal_index = iterator.Next();
-        FeedbackSlot slot(iterator.Next());
+        int literal_index = iterator.NextOperand();
+        FeedbackSlot slot(iterator.NextOperand());
         os << "{feedback={vector_index=" << literal_index << ", slot=" << slot
            << "}}";
         break;
@@ -299,6 +366,14 @@ TranslatedValue TranslatedValue::NewDouble(TranslatedState* container,
 }
 
 // static
+TranslatedValue TranslatedValue::NewHoleyDouble(TranslatedState* container,
+                                                Float64 value) {
+  TranslatedValue slot(container, kHoleyDouble);
+  slot.double_value_ = value;
+  return slot;
+}
+
+// static
 TranslatedValue TranslatedValue::NewInt32(TranslatedState* container,
                                           int32_t value) {
   TranslatedValue slot(container, kInt32);
@@ -319,6 +394,14 @@ TranslatedValue TranslatedValue::NewInt64ToBigInt(TranslatedState* container,
                                                   int64_t value) {
   TranslatedValue slot(container, kInt64ToBigInt);
   slot.int64_value_ = value;
+  return slot;
+}
+
+// static
+TranslatedValue TranslatedValue::NewUint64ToBigInt(TranslatedState* container,
+                                                   uint64_t value) {
+  TranslatedValue slot(container, kUint64ToBigInt);
+  slot.uint64_value_ = value;
   return slot;
 }
 
@@ -368,6 +451,11 @@ int64_t TranslatedValue::int64_value() const {
   return int64_value_;
 }
 
+uint64_t TranslatedValue::uint64_value() const {
+  DCHECK(kUint64ToBigInt == kind());
+  return uint64_value_;
+}
+
 uint32_t TranslatedValue::uint32_value() const {
   DCHECK(kind() == kUInt32 || kind() == kBoolBit);
   return uint32_value_;
@@ -379,7 +467,7 @@ Float32 TranslatedValue::float_value() const {
 }
 
 Float64 TranslatedValue::double_value() const {
-  DCHECK_EQ(kDouble, kind());
+  DCHECK(kDouble == kind() || kHoleyDouble == kind());
   return double_value_;
 }
 
@@ -406,8 +494,55 @@ Object TranslatedValue::GetRawValue() const {
 
   // Otherwise, do a best effort to get the value without allocation.
   switch (kind()) {
-    case kTagged:
-      return raw_literal();
+    case kTagged: {
+      Object object = raw_literal();
+      if (object.IsSlicedString()) {
+        // If {object} is a sliced string of length smaller than
+        // SlicedString::kMinLength, then trim the underlying SeqString and
+        // return it. This assumes that such sliced strings are only built by
+        // the fast string builder optimization of Turbofan's
+        // StringBuilderOptimizer/EffectControlLinearizer.
+        SlicedString string = SlicedString::cast(object);
+        if (string.length() < SlicedString::kMinLength) {
+          String backing_store = string.parent();
+          CHECK(backing_store.IsSeqString());
+
+          // Creating filler at the end of the backing store if needed.
+          int string_size =
+              backing_store.IsSeqOneByteString()
+                  ? SeqOneByteString::SizeFor(backing_store.length())
+                  : SeqTwoByteString::SizeFor(backing_store.length());
+          int needed_size = backing_store.IsSeqOneByteString()
+                                ? SeqOneByteString::SizeFor(string.length())
+                                : SeqTwoByteString::SizeFor(string.length());
+          if (needed_size < string_size) {
+            Address new_end = backing_store.address() + needed_size;
+            isolate()->heap()->CreateFillerObjectAt(
+                new_end, (string_size - needed_size));
+          }
+
+          // Updating backing store's length, effectively trimming it.
+          backing_store.set_length(string.length());
+
+          // Zeroing the padding bytes of {backing_store}.
+          SeqString::DataAndPaddingSizes sz =
+              SeqString::cast(backing_store).GetDataAndPaddingSizes();
+          auto padding =
+              reinterpret_cast<char*>(backing_store.address() + sz.data_size);
+          for (int i = 0; i < sz.padding_size; ++i) {
+            padding[i] = 0;
+          }
+
+          // Overwriting {string} with a filler, so that we don't leave around a
+          // potentially-too-small SlicedString.
+          isolate()->heap()->CreateFillerObjectAt(string.address(),
+                                                  SlicedString::kSize);
+
+          return backing_store;
+        }
+      }
+      return object;
+    }
 
     case kInt32: {
       bool is_smi = Smi::IsValid(int32_value());
@@ -454,6 +589,15 @@ Object TranslatedValue::GetRawValue() const {
       }
       break;
     }
+
+    case kHoleyDouble:
+      if (double_value().is_hole_nan()) {
+        // Hole NaNs that made it to here represent the undefined value.
+        return ReadOnlyRoots(isolate()).undefined_value();
+      }
+      // If this is not the hole nan, then this is a normal double value, so
+      // fall through to that.
+      V8_FALLTHROUGH;
 
     case kDouble: {
       int smi;
@@ -516,8 +660,8 @@ Handle<Object> TranslatedValue::GetValue() {
     // headers.
     // TODO(hpayer): Find a cleaner way to support a group of
     // non-fully-initialized objects.
-    isolate()->heap()->mark_compact_collector()->EnsureSweepingCompleted(
-        MarkCompactCollector::SweepingForcedFinalizationMode::kV8Only);
+    isolate()->heap()->EnsureSweepingCompleted(
+        Heap::SweepingForcedFinalizationMode::kV8Only);
 
     // 2. Initialize the objects. If we have allocated only byte arrays
     //    for some objects, we now overwrite the byte arrays with the
@@ -540,6 +684,9 @@ Handle<Object> TranslatedValue::GetValue() {
     case TranslatedValue::kInt64ToBigInt:
       heap_object = BigInt::FromInt64(isolate(), int64_value());
       break;
+    case TranslatedValue::kUint64ToBigInt:
+      heap_object = BigInt::FromUint64(isolate(), uint64_value());
+      break;
     case TranslatedValue::kUInt32:
       number = uint32_value();
       heap_object = isolate()->factory()->NewHeapNumber(number);
@@ -549,13 +696,17 @@ Handle<Object> TranslatedValue::GetValue() {
       heap_object = isolate()->factory()->NewHeapNumber(number);
       break;
     case TranslatedValue::kDouble:
+    // We shouldn't have hole values by now, so treat holey double as normal
+    // double.s
+    case TranslatedValue::kHoleyDouble:
       number = double_value().get_scalar();
       heap_object = isolate()->factory()->NewHeapNumber(number);
       break;
     default:
       UNREACHABLE();
   }
-  DCHECK(!IsSmiDouble(number) || kind() == TranslatedValue::kInt64ToBigInt);
+  DCHECK(!IsSmiDouble(number) || kind() == TranslatedValue::kInt64ToBigInt ||
+         kind() == TranslatedValue::kUint64ToBigInt);
   set_initialized_storage(heap_object);
   return storage_;
 }
@@ -572,7 +723,7 @@ bool TranslatedValue::IsMaterializedObject() const {
 
 bool TranslatedValue::IsMaterializableByDebugger() const {
   // At the moment, we only allow materialization of doubles.
-  return (kind() == kDouble);
+  return (kind() == kDouble || kind() == kHoleyDouble);
 }
 
 int TranslatedValue::GetChildrenCount() const {
@@ -629,9 +780,9 @@ TranslatedFrame TranslatedFrame::UnoptimizedFrame(
   return frame;
 }
 
-TranslatedFrame TranslatedFrame::ArgumentsAdaptorFrame(
+TranslatedFrame TranslatedFrame::InlinedExtraArguments(
     SharedFunctionInfo shared_info, int height) {
-  return TranslatedFrame(kArgumentsAdaptor, shared_info, height);
+  return TranslatedFrame(kInlinedExtraArguments, shared_info, height);
 }
 
 TranslatedFrame TranslatedFrame::ConstructStubFrame(
@@ -651,6 +802,14 @@ TranslatedFrame TranslatedFrame::BuiltinContinuationFrame(
 }
 
 #if V8_ENABLE_WEBASSEMBLY
+TranslatedFrame TranslatedFrame::WasmInlinedIntoJSFrame(
+    BytecodeOffset bytecode_offset, SharedFunctionInfo shared_info,
+    int height) {
+  TranslatedFrame frame(kWasmInlinedIntoJS, shared_info, height);
+  frame.bytecode_offset_ = bytecode_offset;
+  return frame;
+}
+
 TranslatedFrame TranslatedFrame::JSToWasmBuiltinContinuationFrame(
     BytecodeOffset bytecode_offset, SharedFunctionInfo shared_info, int height,
     base::Optional<wasm::ValueKind> return_kind) {
@@ -693,7 +852,7 @@ int TranslatedFrame::GetValueCount() {
              kTheAccumulator;
     }
 
-    case kArgumentsAdaptor:
+    case kInlinedExtraArguments:
       return height() + kTheFunction;
 
     case kConstructStub:
@@ -706,6 +865,12 @@ int TranslatedFrame::GetValueCount() {
       static constexpr int kTheContext = 1;
       return height() + kTheContext + kTheFunction;
     }
+#if V8_ENABLE_WEBASSEMBLY
+    case kWasmInlinedIntoJS: {
+      static constexpr int kTheContext = 1;
+      return height() + kTheContext + kTheFunction;
+    }
+#endif  // V8_ENABLE_WEBASSEMBLY
 
     case kInvalid:
       UNREACHABLE();
@@ -713,10 +878,9 @@ int TranslatedFrame::GetValueCount() {
   UNREACHABLE();
 }
 
-void TranslatedFrame::Handlify() {
+void TranslatedFrame::Handlify(Isolate* isolate) {
   if (!raw_shared_info_.is_null()) {
-    shared_info_ = Handle<SharedFunctionInfo>(raw_shared_info_,
-                                              raw_shared_info_.GetIsolate());
+    shared_info_ = handle(raw_shared_info_, isolate);
     raw_shared_info_ = SharedFunctionInfo();
   }
   for (auto& value : values_) {
@@ -727,15 +891,20 @@ void TranslatedFrame::Handlify() {
 TranslatedFrame TranslatedState::CreateNextTranslatedFrame(
     TranslationArrayIterator* iterator,
     DeoptimizationLiteralArray literal_array, Address fp, FILE* trace_file) {
-  TranslationOpcode opcode = TranslationOpcodeFromInt(iterator->Next());
+  TranslationOpcode opcode = iterator->NextOpcode();
   switch (opcode) {
-    case TranslationOpcode::INTERPRETED_FRAME: {
-      BytecodeOffset bytecode_offset = BytecodeOffset(iterator->Next());
+    case TranslationOpcode::INTERPRETED_FRAME_WITH_RETURN:
+    case TranslationOpcode::INTERPRETED_FRAME_WITHOUT_RETURN: {
+      BytecodeOffset bytecode_offset = BytecodeOffset(iterator->NextOperand());
       SharedFunctionInfo shared_info =
-          SharedFunctionInfo::cast(literal_array.get(iterator->Next()));
-      int height = iterator->Next();
-      int return_value_offset = iterator->Next();
-      int return_value_count = iterator->Next();
+          SharedFunctionInfo::cast(literal_array.get(iterator->NextOperand()));
+      int height = iterator->NextOperand();
+      int return_value_offset = 0;
+      int return_value_count = 0;
+      if (opcode == TranslationOpcode::INTERPRETED_FRAME_WITH_RETURN) {
+        return_value_offset = iterator->NextOperand();
+        return_value_count = iterator->NextOperand();
+      }
       if (trace_file != nullptr) {
         std::unique_ptr<char[]> name = shared_info.DebugNameCStr();
         PrintF(trace_file, "  reading input frame %s", name.get());
@@ -752,23 +921,23 @@ TranslatedFrame TranslatedState::CreateNextTranslatedFrame(
                                                return_value_count);
     }
 
-    case TranslationOpcode::ARGUMENTS_ADAPTOR_FRAME: {
+    case TranslationOpcode::INLINED_EXTRA_ARGUMENTS: {
       SharedFunctionInfo shared_info =
-          SharedFunctionInfo::cast(literal_array.get(iterator->Next()));
-      int height = iterator->Next();
+          SharedFunctionInfo::cast(literal_array.get(iterator->NextOperand()));
+      int height = iterator->NextOperand();
       if (trace_file != nullptr) {
         std::unique_ptr<char[]> name = shared_info.DebugNameCStr();
-        PrintF(trace_file, "  reading arguments adaptor frame %s", name.get());
+        PrintF(trace_file, "  reading inlined arguments frame %s", name.get());
         PrintF(trace_file, " => height=%d; inputs:\n", height);
       }
-      return TranslatedFrame::ArgumentsAdaptorFrame(shared_info, height);
+      return TranslatedFrame::InlinedExtraArguments(shared_info, height);
     }
 
     case TranslationOpcode::CONSTRUCT_STUB_FRAME: {
-      BytecodeOffset bytecode_offset = BytecodeOffset(iterator->Next());
+      BytecodeOffset bytecode_offset = BytecodeOffset(iterator->NextOperand());
       SharedFunctionInfo shared_info =
-          SharedFunctionInfo::cast(literal_array.get(iterator->Next()));
-      int height = iterator->Next();
+          SharedFunctionInfo::cast(literal_array.get(iterator->NextOperand()));
+      int height = iterator->NextOperand();
       if (trace_file != nullptr) {
         std::unique_ptr<char[]> name = shared_info.DebugNameCStr();
         PrintF(trace_file, "  reading construct stub frame %s", name.get());
@@ -780,10 +949,10 @@ TranslatedFrame TranslatedState::CreateNextTranslatedFrame(
     }
 
     case TranslationOpcode::BUILTIN_CONTINUATION_FRAME: {
-      BytecodeOffset bytecode_offset = BytecodeOffset(iterator->Next());
+      BytecodeOffset bytecode_offset = BytecodeOffset(iterator->NextOperand());
       SharedFunctionInfo shared_info =
-          SharedFunctionInfo::cast(literal_array.get(iterator->Next()));
-      int height = iterator->Next();
+          SharedFunctionInfo::cast(literal_array.get(iterator->NextOperand()));
+      int height = iterator->NextOperand();
       if (trace_file != nullptr) {
         std::unique_ptr<char[]> name = shared_info.DebugNameCStr();
         PrintF(trace_file, "  reading builtin continuation frame %s",
@@ -796,12 +965,28 @@ TranslatedFrame TranslatedState::CreateNextTranslatedFrame(
     }
 
 #if V8_ENABLE_WEBASSEMBLY
-    case TranslationOpcode::JS_TO_WASM_BUILTIN_CONTINUATION_FRAME: {
-      BytecodeOffset bailout_id = BytecodeOffset(iterator->Next());
+    case TranslationOpcode::WASM_INLINED_INTO_JS_FRAME: {
+      BytecodeOffset bailout_id = BytecodeOffset(iterator->NextOperand());
       SharedFunctionInfo shared_info =
-          SharedFunctionInfo::cast(literal_array.get(iterator->Next()));
-      int height = iterator->Next();
-      int return_kind_code = iterator->Next();
+          SharedFunctionInfo::cast(literal_array.get(iterator->NextOperand()));
+      int height = iterator->NextOperand();
+      if (trace_file != nullptr) {
+        std::unique_ptr<char[]> name = shared_info.DebugNameCStr();
+        PrintF(trace_file, "  reading Wasm inlined into JS frame %s",
+               name.get());
+        PrintF(trace_file, " => bailout_id=%d, height=%d ; inputs:\n",
+               bailout_id.ToInt(), height);
+      }
+      return TranslatedFrame::WasmInlinedIntoJSFrame(bailout_id, shared_info,
+                                                     height);
+    }
+
+    case TranslationOpcode::JS_TO_WASM_BUILTIN_CONTINUATION_FRAME: {
+      BytecodeOffset bailout_id = BytecodeOffset(iterator->NextOperand());
+      SharedFunctionInfo shared_info =
+          SharedFunctionInfo::cast(literal_array.get(iterator->NextOperand()));
+      int height = iterator->NextOperand();
+      int return_kind_code = iterator->NextOperand();
       base::Optional<wasm::ValueKind> return_kind;
       if (return_kind_code != kNoWasmReturnKind) {
         return_kind = static_cast<wasm::ValueKind>(return_kind_code);
@@ -821,10 +1006,10 @@ TranslatedFrame TranslatedState::CreateNextTranslatedFrame(
 #endif  // V8_ENABLE_WEBASSEMBLY
 
     case TranslationOpcode::JAVA_SCRIPT_BUILTIN_CONTINUATION_FRAME: {
-      BytecodeOffset bytecode_offset = BytecodeOffset(iterator->Next());
+      BytecodeOffset bytecode_offset = BytecodeOffset(iterator->NextOperand());
       SharedFunctionInfo shared_info =
-          SharedFunctionInfo::cast(literal_array.get(iterator->Next()));
-      int height = iterator->Next();
+          SharedFunctionInfo::cast(literal_array.get(iterator->NextOperand()));
+      int height = iterator->NextOperand();
       if (trace_file != nullptr) {
         std::unique_ptr<char[]> name = shared_info.DebugNameCStr();
         PrintF(trace_file, "  reading JavaScript builtin continuation frame %s",
@@ -837,10 +1022,10 @@ TranslatedFrame TranslatedState::CreateNextTranslatedFrame(
     }
 
     case TranslationOpcode::JAVA_SCRIPT_BUILTIN_CONTINUATION_WITH_CATCH_FRAME: {
-      BytecodeOffset bytecode_offset = BytecodeOffset(iterator->Next());
+      BytecodeOffset bytecode_offset = BytecodeOffset(iterator->NextOperand());
       SharedFunctionInfo shared_info =
-          SharedFunctionInfo::cast(literal_array.get(iterator->Next()));
-      int height = iterator->Next();
+          SharedFunctionInfo::cast(literal_array.get(iterator->NextOperand()));
+      int height = iterator->NextOperand();
       if (trace_file != nullptr) {
         std::unique_ptr<char[]> name = shared_info.DebugNameCStr();
         PrintF(trace_file,
@@ -853,7 +1038,8 @@ TranslatedFrame TranslatedState::CreateNextTranslatedFrame(
           bytecode_offset, shared_info, height);
     }
     case TranslationOpcode::UPDATE_FEEDBACK:
-    case TranslationOpcode::BEGIN:
+    case TranslationOpcode::BEGIN_WITH_FEEDBACK:
+    case TranslationOpcode::BEGIN_WITHOUT_FEEDBACK:
     case TranslationOpcode::DUPLICATED_OBJECT:
     case TranslationOpcode::ARGUMENTS_ELEMENTS:
     case TranslationOpcode::ARGUMENTS_LENGTH:
@@ -861,18 +1047,26 @@ TranslatedFrame TranslatedState::CreateNextTranslatedFrame(
     case TranslationOpcode::REGISTER:
     case TranslationOpcode::INT32_REGISTER:
     case TranslationOpcode::INT64_REGISTER:
+    case TranslationOpcode::SIGNED_BIGINT64_REGISTER:
+    case TranslationOpcode::UNSIGNED_BIGINT64_REGISTER:
     case TranslationOpcode::UINT32_REGISTER:
     case TranslationOpcode::BOOL_REGISTER:
     case TranslationOpcode::FLOAT_REGISTER:
     case TranslationOpcode::DOUBLE_REGISTER:
-    case TranslationOpcode::STACK_SLOT:
+    case TranslationOpcode::HOLEY_DOUBLE_REGISTER:
+    case TranslationOpcode::TAGGED_STACK_SLOT:
     case TranslationOpcode::INT32_STACK_SLOT:
     case TranslationOpcode::INT64_STACK_SLOT:
+    case TranslationOpcode::SIGNED_BIGINT64_STACK_SLOT:
+    case TranslationOpcode::UNSIGNED_BIGINT64_STACK_SLOT:
     case TranslationOpcode::UINT32_STACK_SLOT:
     case TranslationOpcode::BOOL_STACK_SLOT:
     case TranslationOpcode::FLOAT_STACK_SLOT:
     case TranslationOpcode::DOUBLE_STACK_SLOT:
+    case TranslationOpcode::HOLEY_DOUBLE_STACK_SLOT:
     case TranslationOpcode::LITERAL:
+    case TranslationOpcode::OPTIMIZED_OUT:
+    case TranslationOpcode::MATCH_PREVIOUS_TRANSLATION:
       break;
   }
   UNREACHABLE();
@@ -966,24 +1160,28 @@ int TranslatedState::CreateNextTranslatedValue(
   TranslatedFrame& frame = frames_[frame_index];
   int value_index = static_cast<int>(frame.values_.size());
 
-  TranslationOpcode opcode = TranslationOpcodeFromInt(iterator->Next());
+  TranslationOpcode opcode = iterator->NextOpcode();
   switch (opcode) {
-    case TranslationOpcode::BEGIN:
-    case TranslationOpcode::INTERPRETED_FRAME:
-    case TranslationOpcode::ARGUMENTS_ADAPTOR_FRAME:
+    case TranslationOpcode::BEGIN_WITH_FEEDBACK:
+    case TranslationOpcode::BEGIN_WITHOUT_FEEDBACK:
+    case TranslationOpcode::INTERPRETED_FRAME_WITH_RETURN:
+    case TranslationOpcode::INTERPRETED_FRAME_WITHOUT_RETURN:
+    case TranslationOpcode::INLINED_EXTRA_ARGUMENTS:
     case TranslationOpcode::CONSTRUCT_STUB_FRAME:
     case TranslationOpcode::JAVA_SCRIPT_BUILTIN_CONTINUATION_FRAME:
     case TranslationOpcode::JAVA_SCRIPT_BUILTIN_CONTINUATION_WITH_CATCH_FRAME:
     case TranslationOpcode::BUILTIN_CONTINUATION_FRAME:
 #if V8_ENABLE_WEBASSEMBLY
+    case TranslationOpcode::WASM_INLINED_INTO_JS_FRAME:
     case TranslationOpcode::JS_TO_WASM_BUILTIN_CONTINUATION_FRAME:
 #endif  // V8_ENABLE_WEBASSEMBLY
     case TranslationOpcode::UPDATE_FEEDBACK:
+    case TranslationOpcode::MATCH_PREVIOUS_TRANSLATION:
       // Peeled off before getting here.
       break;
 
     case TranslationOpcode::DUPLICATED_OBJECT: {
-      int object_id = iterator->Next();
+      int object_id = iterator->NextOperand();
       if (trace_file != nullptr) {
         PrintF(trace_file, "duplicated object #%d", object_id);
       }
@@ -996,7 +1194,7 @@ int TranslatedState::CreateNextTranslatedValue(
 
     case TranslationOpcode::ARGUMENTS_ELEMENTS: {
       CreateArgumentsType arguments_type =
-          static_cast<CreateArgumentsType>(iterator->Next());
+          static_cast<CreateArgumentsType>(iterator->NextOperand());
       CreateArgumentsElementsTranslatedValues(frame_index, fp, arguments_type,
                                               trace_file);
       return 0;
@@ -1012,7 +1210,7 @@ int TranslatedState::CreateNextTranslatedValue(
     }
 
     case TranslationOpcode::CAPTURED_OBJECT: {
-      int field_count = iterator->Next();
+      int field_count = iterator->NextOperand();
       int object_index = static_cast<int>(object_positions_.size());
       if (trace_file != nullptr) {
         PrintF(trace_file, "captured object #%d (length = %d)", object_index,
@@ -1026,7 +1224,7 @@ int TranslatedState::CreateNextTranslatedValue(
     }
 
     case TranslationOpcode::REGISTER: {
-      int input_reg = iterator->Next();
+      int input_reg = iterator->NextOperandUnsigned();
       if (registers == nullptr) {
         TranslatedValue translated_value = TranslatedValue::NewInvalid(this);
         frame.Add(translated_value);
@@ -1046,7 +1244,7 @@ int TranslatedState::CreateNextTranslatedValue(
     }
 
     case TranslationOpcode::INT32_REGISTER: {
-      int input_reg = iterator->Next();
+      int input_reg = iterator->NextOperandUnsigned();
       if (registers == nullptr) {
         TranslatedValue translated_value = TranslatedValue::NewInvalid(this);
         frame.Add(translated_value);
@@ -1064,7 +1262,7 @@ int TranslatedState::CreateNextTranslatedValue(
     }
 
     case TranslationOpcode::INT64_REGISTER: {
-      int input_reg = iterator->Next();
+      int input_reg = iterator->NextOperandUnsigned();
       if (registers == nullptr) {
         TranslatedValue translated_value = TranslatedValue::NewInvalid(this);
         frame.Add(translated_value);
@@ -1081,8 +1279,44 @@ int TranslatedState::CreateNextTranslatedValue(
       return translated_value.GetChildrenCount();
     }
 
+    case TranslationOpcode::SIGNED_BIGINT64_REGISTER: {
+      int input_reg = iterator->NextOperandUnsigned();
+      if (registers == nullptr) {
+        TranslatedValue translated_value = TranslatedValue::NewInvalid(this);
+        frame.Add(translated_value);
+        return translated_value.GetChildrenCount();
+      }
+      intptr_t value = registers->GetRegister(input_reg);
+      if (trace_file != nullptr) {
+        PrintF(trace_file, "%" V8PRIdPTR " ; %s (signed bigint64)", value,
+               converter.NameOfCPURegister(input_reg));
+      }
+      TranslatedValue translated_value =
+          TranslatedValue::NewInt64ToBigInt(this, value);
+      frame.Add(translated_value);
+      return translated_value.GetChildrenCount();
+    }
+
+    case TranslationOpcode::UNSIGNED_BIGINT64_REGISTER: {
+      int input_reg = iterator->NextOperandUnsigned();
+      if (registers == nullptr) {
+        TranslatedValue translated_value = TranslatedValue::NewInvalid(this);
+        frame.Add(translated_value);
+        return translated_value.GetChildrenCount();
+      }
+      intptr_t value = registers->GetRegister(input_reg);
+      if (trace_file != nullptr) {
+        PrintF(trace_file, "%" V8PRIdPTR " ; %s (unsigned bigint64)", value,
+               converter.NameOfCPURegister(input_reg));
+      }
+      TranslatedValue translated_value =
+          TranslatedValue::NewUint64ToBigInt(this, value);
+      frame.Add(translated_value);
+      return translated_value.GetChildrenCount();
+    }
+
     case TranslationOpcode::UINT32_REGISTER: {
-      int input_reg = iterator->Next();
+      int input_reg = iterator->NextOperandUnsigned();
       if (registers == nullptr) {
         TranslatedValue translated_value = TranslatedValue::NewInvalid(this);
         frame.Add(translated_value);
@@ -1100,7 +1334,7 @@ int TranslatedState::CreateNextTranslatedValue(
     }
 
     case TranslationOpcode::BOOL_REGISTER: {
-      int input_reg = iterator->Next();
+      int input_reg = iterator->NextOperandUnsigned();
       if (registers == nullptr) {
         TranslatedValue translated_value = TranslatedValue::NewInvalid(this);
         frame.Add(translated_value);
@@ -1118,7 +1352,7 @@ int TranslatedState::CreateNextTranslatedValue(
     }
 
     case TranslationOpcode::FLOAT_REGISTER: {
-      int input_reg = iterator->Next();
+      int input_reg = iterator->NextOperandUnsigned();
       if (registers == nullptr) {
         TranslatedValue translated_value = TranslatedValue::NewInvalid(this);
         frame.Add(translated_value);
@@ -1135,7 +1369,7 @@ int TranslatedState::CreateNextTranslatedValue(
     }
 
     case TranslationOpcode::DOUBLE_REGISTER: {
-      int input_reg = iterator->Next();
+      int input_reg = iterator->NextOperandUnsigned();
       if (registers == nullptr) {
         TranslatedValue translated_value = TranslatedValue::NewInvalid(this);
         frame.Add(translated_value);
@@ -1152,9 +1386,32 @@ int TranslatedState::CreateNextTranslatedValue(
       return translated_value.GetChildrenCount();
     }
 
-    case TranslationOpcode::STACK_SLOT: {
+    case TranslationOpcode::HOLEY_DOUBLE_REGISTER: {
+      int input_reg = iterator->NextOperandUnsigned();
+      if (registers == nullptr) {
+        TranslatedValue translated_value = TranslatedValue::NewInvalid(this);
+        frame.Add(translated_value);
+        return translated_value.GetChildrenCount();
+      }
+      Float64 value = registers->GetDoubleRegister(input_reg);
+      if (trace_file != nullptr) {
+        if (value.is_hole_nan()) {
+          PrintF(trace_file, "the hole");
+        } else {
+          PrintF(trace_file, "%e", value.get_scalar());
+        }
+        PrintF(trace_file, " ; %s (holey double)",
+               RegisterName(DoubleRegister::from_code(input_reg)));
+      }
+      TranslatedValue translated_value =
+          TranslatedValue::NewHoleyDouble(this, value);
+      frame.Add(translated_value);
+      return translated_value.GetChildrenCount();
+    }
+
+    case TranslationOpcode::TAGGED_STACK_SLOT: {
       int slot_offset =
-          OptimizedFrame::StackSlotOffsetRelativeToFp(iterator->Next());
+          OptimizedFrame::StackSlotOffsetRelativeToFp(iterator->NextOperand());
       intptr_t value = *(reinterpret_cast<intptr_t*>(fp + slot_offset));
       Address uncompressed_value = DecompressIfNeeded(value);
       if (trace_file != nullptr) {
@@ -1171,7 +1428,7 @@ int TranslatedState::CreateNextTranslatedValue(
 
     case TranslationOpcode::INT32_STACK_SLOT: {
       int slot_offset =
-          OptimizedFrame::StackSlotOffsetRelativeToFp(iterator->Next());
+          OptimizedFrame::StackSlotOffsetRelativeToFp(iterator->NextOperand());
       uint32_t value = GetUInt32Slot(fp, slot_offset);
       if (trace_file != nullptr) {
         PrintF(trace_file, "%d ; (int32) [fp %c %3d] ",
@@ -1185,7 +1442,7 @@ int TranslatedState::CreateNextTranslatedValue(
 
     case TranslationOpcode::INT64_STACK_SLOT: {
       int slot_offset =
-          OptimizedFrame::StackSlotOffsetRelativeToFp(iterator->Next());
+          OptimizedFrame::StackSlotOffsetRelativeToFp(iterator->NextOperand());
       uint64_t value = GetUInt64Slot(fp, slot_offset);
       if (trace_file != nullptr) {
         PrintF(trace_file, "%" V8PRIdPTR " ; (int64) [fp %c %3d] ",
@@ -1197,9 +1454,39 @@ int TranslatedState::CreateNextTranslatedValue(
       return translated_value.GetChildrenCount();
     }
 
+    case TranslationOpcode::SIGNED_BIGINT64_STACK_SLOT: {
+      int slot_offset =
+          OptimizedFrame::StackSlotOffsetRelativeToFp(iterator->NextOperand());
+      uint64_t value = GetUInt64Slot(fp, slot_offset);
+      if (trace_file != nullptr) {
+        PrintF(trace_file, "%" V8PRIdPTR " ; (signed bigint64) [fp %c %3d] ",
+               static_cast<intptr_t>(value), slot_offset < 0 ? '-' : '+',
+               std::abs(slot_offset));
+      }
+      TranslatedValue translated_value =
+          TranslatedValue::NewInt64ToBigInt(this, value);
+      frame.Add(translated_value);
+      return translated_value.GetChildrenCount();
+    }
+
+    case TranslationOpcode::UNSIGNED_BIGINT64_STACK_SLOT: {
+      int slot_offset =
+          OptimizedFrame::StackSlotOffsetRelativeToFp(iterator->NextOperand());
+      uint64_t value = GetUInt64Slot(fp, slot_offset);
+      if (trace_file != nullptr) {
+        PrintF(trace_file, "%" V8PRIdPTR " ; (unsigned bigint64) [fp %c %3d] ",
+               static_cast<intptr_t>(value), slot_offset < 0 ? '-' : '+',
+               std::abs(slot_offset));
+      }
+      TranslatedValue translated_value =
+          TranslatedValue::NewUint64ToBigInt(this, value);
+      frame.Add(translated_value);
+      return translated_value.GetChildrenCount();
+    }
+
     case TranslationOpcode::UINT32_STACK_SLOT: {
       int slot_offset =
-          OptimizedFrame::StackSlotOffsetRelativeToFp(iterator->Next());
+          OptimizedFrame::StackSlotOffsetRelativeToFp(iterator->NextOperand());
       uint32_t value = GetUInt32Slot(fp, slot_offset);
       if (trace_file != nullptr) {
         PrintF(trace_file, "%u ; (uint32) [fp %c %3d] ", value,
@@ -1213,7 +1500,7 @@ int TranslatedState::CreateNextTranslatedValue(
 
     case TranslationOpcode::BOOL_STACK_SLOT: {
       int slot_offset =
-          OptimizedFrame::StackSlotOffsetRelativeToFp(iterator->Next());
+          OptimizedFrame::StackSlotOffsetRelativeToFp(iterator->NextOperand());
       uint32_t value = GetUInt32Slot(fp, slot_offset);
       if (trace_file != nullptr) {
         PrintF(trace_file, "%u ; (bool) [fp %c %3d] ", value,
@@ -1226,7 +1513,7 @@ int TranslatedState::CreateNextTranslatedValue(
 
     case TranslationOpcode::FLOAT_STACK_SLOT: {
       int slot_offset =
-          OptimizedFrame::StackSlotOffsetRelativeToFp(iterator->Next());
+          OptimizedFrame::StackSlotOffsetRelativeToFp(iterator->NextOperand());
       Float32 value = GetFloatSlot(fp, slot_offset);
       if (trace_file != nullptr) {
         PrintF(trace_file, "%e ; (float) [fp %c %3d] ", value.get_scalar(),
@@ -1239,7 +1526,7 @@ int TranslatedState::CreateNextTranslatedValue(
 
     case TranslationOpcode::DOUBLE_STACK_SLOT: {
       int slot_offset =
-          OptimizedFrame::StackSlotOffsetRelativeToFp(iterator->Next());
+          OptimizedFrame::StackSlotOffsetRelativeToFp(iterator->NextOperand());
       Float64 value = GetDoubleSlot(fp, slot_offset);
       if (trace_file != nullptr) {
         PrintF(trace_file, "%e ; (double) [fp %c %d] ", value.get_scalar(),
@@ -1251,8 +1538,27 @@ int TranslatedState::CreateNextTranslatedValue(
       return translated_value.GetChildrenCount();
     }
 
+    case TranslationOpcode::HOLEY_DOUBLE_STACK_SLOT: {
+      int slot_offset =
+          OptimizedFrame::StackSlotOffsetRelativeToFp(iterator->NextOperand());
+      Float64 value = GetDoubleSlot(fp, slot_offset);
+      if (trace_file != nullptr) {
+        if (value.is_hole_nan()) {
+          PrintF(trace_file, "the hole");
+        } else {
+          PrintF(trace_file, "%e", value.get_scalar());
+        }
+        PrintF(trace_file, " ; (holey double) [fp %c %d] ",
+               slot_offset < 0 ? '-' : '+', std::abs(slot_offset));
+      }
+      TranslatedValue translated_value =
+          TranslatedValue::NewHoleyDouble(this, value);
+      frame.Add(translated_value);
+      return translated_value.GetChildrenCount();
+    }
+
     case TranslationOpcode::LITERAL: {
-      int literal_index = iterator->Next();
+      int literal_index = iterator->NextOperand();
       Object value = literal_array.get(literal_index);
       if (trace_file != nullptr) {
         PrintF(trace_file, V8PRIxPTR_FMT " ; (literal %2d) ", value.ptr(),
@@ -1265,6 +1571,17 @@ int TranslatedState::CreateNextTranslatedValue(
       frame.Add(translated_value);
       return translated_value.GetChildrenCount();
     }
+
+    case TranslationOpcode::OPTIMIZED_OUT: {
+      if (trace_file != nullptr) {
+        PrintF(trace_file, "(optimized out)");
+      }
+
+      TranslatedValue translated_value = TranslatedValue::NewTagged(
+          this, ReadOnlyRoots(isolate_).optimized_out());
+      frame.Add(translated_value);
+      return translated_value.GetChildrenCount();
+    }
   }
 
   FATAL("We should never get here - unexpected deopt info.");
@@ -1272,7 +1589,8 @@ int TranslatedState::CreateNextTranslatedValue(
 
 Address TranslatedState::DecompressIfNeeded(intptr_t value) {
   if (COMPRESS_POINTERS_BOOL) {
-    return DecompressTaggedAny(isolate(), static_cast<uint32_t>(value));
+    return V8HeapCompressionScheme::DecompressTagged(
+        isolate(), static_cast<uint32_t>(value));
   } else {
     return value;
   }
@@ -1311,17 +1629,14 @@ void TranslatedState::Init(Isolate* isolate, Address input_frame_pointer,
   isolate_ = isolate;
 
   // Read out the 'header' translation.
-  TranslationOpcode opcode = TranslationOpcodeFromInt(iterator->Next());
-  CHECK(opcode == TranslationOpcode::BEGIN);
-
-  int count = iterator->Next();
+  TranslationOpcode opcode = iterator->NextOpcode();
+  CHECK(TranslationOpcodeIsBegin(opcode));
+  iterator->NextOperand();  // Skip the lookback distance.
+  int count = iterator->NextOperand();
   frames_.reserve(count);
-  iterator->Next();  // Drop JS frames count.
-  int update_feedback_count = iterator->Next();
-  CHECK_GE(update_feedback_count, 0);
-  CHECK_LE(update_feedback_count, 1);
+  iterator->NextOperand();  // Drop JS frames count.
 
-  if (update_feedback_count == 1) {
+  if (opcode == TranslationOpcode::BEGIN_WITH_FEEDBACK) {
     ReadUpdateFeedback(iterator, literal_array, trace_file);
   }
 
@@ -1373,16 +1688,17 @@ void TranslatedState::Init(Isolate* isolate, Address input_frame_pointer,
     }
   }
 
-  CHECK(!iterator->HasNext() ||
-        TranslationOpcodeFromInt(iterator->Next()) == TranslationOpcode::BEGIN);
+  CHECK(!iterator->HasNextOpcode() ||
+        TranslationOpcodeIsBegin(iterator->NextOpcode()));
 }
 
 void TranslatedState::Prepare(Address stack_frame_pointer) {
-  for (auto& frame : frames_) frame.Handlify();
+  for (auto& frame : frames_) {
+    frame.Handlify(isolate());
+  }
 
   if (!feedback_vector_.is_null()) {
-    feedback_vector_handle_ =
-        Handle<FeedbackVector>(feedback_vector_, isolate());
+    feedback_vector_handle_ = handle(feedback_vector_, isolate());
     feedback_vector_ = FeedbackVector();
   }
   stack_frame_pointer_ = stack_frame_pointer;
@@ -1763,17 +2079,20 @@ void TranslatedState::EnsurePropertiesAllocatedAndMarked(
   properties_slot->mark_allocated();
   properties_slot->set_storage(object_storage);
 
+  DisallowGarbageCollection no_gc;
+  auto raw_map = *map;
+  auto raw_object_storage = *object_storage;
+
   // Set markers for out-of-object properties.
-  Handle<DescriptorArray> descriptors(map->instance_descriptors(isolate()),
-                                      isolate());
+  DescriptorArray descriptors = map->instance_descriptors(isolate());
   for (InternalIndex i : map->IterateOwnDescriptors()) {
-    FieldIndex index = FieldIndex::ForDescriptor(*map, i);
-    Representation representation = descriptors->GetDetails(i).representation();
+    FieldIndex index = FieldIndex::ForDescriptor(raw_map, i);
+    Representation representation = descriptors.GetDetails(i).representation();
     if (!index.is_inobject() &&
         (representation.IsDouble() || representation.IsHeapObject())) {
       int outobject_index = index.outobject_array_index();
       int array_index = outobject_index * kTaggedSize;
-      object_storage->set(array_index, kStoreHeapObject);
+      raw_object_storage.set(array_index, kStoreHeapObject);
     }
   }
 }
@@ -1785,8 +2104,10 @@ Handle<ByteArray> TranslatedState::AllocateStorageFor(TranslatedValue* slot) {
   // does not visit them.
   Handle<ByteArray> object_storage =
       isolate()->factory()->NewByteArray(allocate_size, AllocationType::kOld);
+  DisallowGarbageCollection no_gc;
+  auto raw_object_storage = *object_storage;
   for (int i = 0; i < object_storage->length(); i++) {
-    object_storage->set(i, kStoreTagged);
+    raw_object_storage.set(i, kStoreTagged);
   }
   return object_storage;
 }
@@ -1797,19 +2118,22 @@ void TranslatedState::EnsureJSObjectAllocated(TranslatedValue* slot,
   CHECK_EQ(map->instance_size(), slot->GetChildrenCount() * kTaggedSize);
 
   Handle<ByteArray> object_storage = AllocateStorageFor(slot);
+
   // Now we handle the interesting (JSObject) case.
-  Handle<DescriptorArray> descriptors(map->instance_descriptors(isolate()),
-                                      isolate());
+  DisallowGarbageCollection no_gc;
+  auto raw_map = *map;
+  auto raw_object_storage = *object_storage;
+  DescriptorArray descriptors = map->instance_descriptors(isolate());
 
   // Set markers for in-object properties.
-  for (InternalIndex i : map->IterateOwnDescriptors()) {
-    FieldIndex index = FieldIndex::ForDescriptor(*map, i);
-    Representation representation = descriptors->GetDetails(i).representation();
+  for (InternalIndex i : raw_map.IterateOwnDescriptors()) {
+    FieldIndex index = FieldIndex::ForDescriptor(raw_map, i);
+    Representation representation = descriptors.GetDetails(i).representation();
     if (index.is_inobject() &&
         (representation.IsDouble() || representation.IsHeapObject())) {
       CHECK_GE(index.index(), FixedArray::kHeaderSize / kTaggedSize);
       int array_index = index.index() * kTaggedSize - FixedArray::kHeaderSize;
-      object_storage->set(array_index, kStoreHeapObject);
+      raw_object_storage.set(array_index, kStoreHeapObject);
     }
   }
   slot->set_storage(object_storage);
@@ -1849,8 +2173,18 @@ void TranslatedState::InitializeJSObjectAt(
   // The object should have at least a map and some payload.
   CHECK_GE(children_count, 2);
 
+#if DEBUG
+  // No need to invalidate slots in object because no slot was recorded yet.
+  // Verify this here.
+  Address object_start = object_storage->address();
+  Address object_end = object_start + children_count * kTaggedSize;
+  isolate()->heap()->VerifySlotRangeHasNoRecordedSlots(object_start,
+                                                       object_end);
+#endif  // DEBUG
+
   // Notify the concurrent marker about the layout change.
-  isolate()->heap()->NotifyObjectLayoutChange(*object_storage, no_gc);
+  isolate()->heap()->NotifyObjectLayoutChange(*object_storage, no_gc,
+                                              InvalidateRecordedSlots::kNo);
 
   // Fill the property array field.
   {
@@ -1901,8 +2235,18 @@ void TranslatedState::InitializeObjectWithTaggedFieldsAt(
     return;
   }
 
+#if DEBUG
+  // No need to invalidate slots in object because no slot was recorded yet.
+  // Verify this here.
+  Address object_start = object_storage->address();
+  Address object_end = object_start + children_count * kTaggedSize;
+  isolate()->heap()->VerifySlotRangeHasNoRecordedSlots(object_start,
+                                                       object_end);
+#endif  // DEBUG
+
   // Notify the concurrent marker about the layout change.
-  isolate()->heap()->NotifyObjectLayoutChange(*object_storage, no_gc);
+  isolate()->heap()->NotifyObjectLayoutChange(*object_storage, no_gc,
+                                              InvalidateRecordedSlots::kNo);
 
   // Write the fields to the object.
   for (int i = 1; i < children_count; i++) {
@@ -1962,7 +2306,7 @@ TranslatedFrame* TranslatedState::GetArgumentsInfoFromJSFrameIndex(
         // We have the JS function frame, now check if it has arguments
         // adaptor.
         if (i > 0 &&
-            frames_[i - 1].kind() == TranslatedFrame::kArgumentsAdaptor) {
+            frames_[i - 1].kind() == TranslatedFrame::kInlinedExtraArguments) {
           *args_count = frames_[i - 1].height();
           return &(frames_[i - 1]);
         }
@@ -2094,6 +2438,7 @@ void TranslatedState::UpdateFromPreviouslyMaterializedObjects() {
 
 void TranslatedState::VerifyMaterializedObjects() {
 #if VERIFY_HEAP
+  if (!v8_flags.verify_heap) return;
   int length = static_cast<int>(object_positions_.size());
   for (int i = 0; i < length; i++) {
     TranslatedValue* slot = GetValueByObjectIndex(i);
@@ -2124,10 +2469,10 @@ bool TranslatedState::DoUpdateFeedback() {
 void TranslatedState::ReadUpdateFeedback(
     TranslationArrayIterator* iterator,
     DeoptimizationLiteralArray literal_array, FILE* trace_file) {
-  CHECK_EQ(TranslationOpcode::UPDATE_FEEDBACK,
-           TranslationOpcodeFromInt(iterator->Next()));
-  feedback_vector_ = FeedbackVector::cast(literal_array.get(iterator->Next()));
-  feedback_slot_ = FeedbackSlot(iterator->Next());
+  CHECK_EQ(TranslationOpcode::UPDATE_FEEDBACK, iterator->NextOpcode());
+  feedback_vector_ =
+      FeedbackVector::cast(literal_array.get(iterator->NextOperand()));
+  feedback_slot_ = FeedbackSlot(iterator->NextOperand());
   if (trace_file != nullptr) {
     PrintF(trace_file, "  reading FeedbackVector (slot %d)\n",
            feedback_slot_.ToInt());

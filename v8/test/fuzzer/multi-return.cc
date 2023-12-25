@@ -16,8 +16,6 @@
 #include "src/compiler/raw-machine-assembler.h"
 #include "src/compiler/wasm-compiler.h"
 #include "src/execution/simulator.h"
-#include "src/objects/objects-inl.h"
-#include "src/objects/objects.h"
 #include "src/wasm/wasm-engine.h"
 #include "src/wasm/wasm-features.h"
 #include "src/wasm/wasm-limits.h"
@@ -136,7 +134,7 @@ CallDescriptor* CreateRandomCallDescriptor(Zone* zone, size_t return_count,
 
 std::shared_ptr<wasm::NativeModule> AllocateNativeModule(i::Isolate* isolate,
                                                          size_t code_size) {
-  std::shared_ptr<wasm::WasmModule> module(new wasm::WasmModule);
+  auto module = std::make_shared<wasm::WasmModule>(wasm::kWasmOrigin);
   module->num_declared_functions = 1;
 
   // We have to add the code object to a NativeModule, because the
@@ -170,7 +168,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
   CallDescriptor* desc =
       CreateRandomCallDescriptor(&zone, return_count, param_count, &input);
 
-  if (FLAG_wasm_fuzzer_gen_test) {
+  if (v8_flags.wasm_fuzzer_gen_test) {
     // Print some debugging output which describes the produced signature.
     printf("[");
     for (size_t j = 0; j < param_count; ++j) {
@@ -248,9 +246,9 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
           .ToHandleChecked();
 
   std::shared_ptr<wasm::NativeModule> module =
-      AllocateNativeModule(i_isolate, code->raw_instruction_size());
+      AllocateNativeModule(i_isolate, code->instruction_size());
   wasm::WasmCodeRefScope wasm_code_ref_scope;
-  byte* code_start = module->AddCodeForTesting(code)->instructions().begin();
+  uint8_t* code_start = module->AddCodeForTesting(code)->instructions().begin();
   // Generate wrapper.
   int expect = 0;
 
@@ -293,7 +291,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
           AssemblerOptions::Default(i_isolate), caller.ExportForTest())
           .ToHandleChecked();
 
-  auto fn = GeneratedCode<int32_t>::FromCode(*wrapper_code);
+  auto fn = GeneratedCode<int32_t>::FromCode(i_isolate, *wrapper_code);
   int result = fn.Call();
 
   CHECK_EQ(expect, result);

@@ -36,14 +36,14 @@ void ExpectSharedFunctionInfoState(SharedFunctionInfo sfi,
   switch (expectedState) {
     case SfiState::Compiled:
       CHECK(function_data.IsBytecodeArray() ||
-            (function_data.IsCodeT() &&
-             CodeT::cast(function_data).kind() == CodeKind::BASELINE));
+            (function_data.IsCode() &&
+             Code::cast(function_data).kind() == CodeKind::BASELINE));
       CHECK(script_or_debug_info.IsScript());
       break;
     case SfiState::DebugInfo:
       CHECK(function_data.IsBytecodeArray() ||
-            (function_data.IsCodeT() &&
-             CodeT::cast(function_data).kind() == CodeKind::BASELINE));
+            (function_data.IsCode() &&
+             Code::cast(function_data).kind() == CodeKind::BASELINE));
       CHECK(script_or_debug_info.IsDebugInfo());
       {
         DebugInfo debug_info = DebugInfo::cast(script_or_debug_info);
@@ -91,7 +91,7 @@ class BackgroundCompilationThread final : public v8::base::Thread {
 };
 
 TEST(TestConcurrentSharedFunctionInfo) {
-  FlagScope<bool> allow_natives_syntax(&i::FLAG_allow_natives_syntax, true);
+  FlagScope<bool> allow_natives_syntax(&i::v8_flags.allow_natives_syntax, true);
 
   HandleAndZoneScope scope;
   Isolate* isolate = scope.main_isolate();
@@ -145,8 +145,7 @@ TEST(TestConcurrentSharedFunctionInfo) {
   // Prepare job.
   {
     CompilationHandleScope compilation(isolate, job->compilation_info());
-    CanonicalHandleScopeForTurbofan canonical(isolate, job->compilation_info());
-    job->compilation_info()->ReopenHandlesInNewHandleScope(isolate);
+    job->compilation_info()->ReopenAndCanonicalizeHandlesInNewScope(isolate);
     const CompilationJob::Status status = job->PrepareJob(isolate);
     CHECK_EQ(status, CompilationJob::SUCCEEDED);
   }

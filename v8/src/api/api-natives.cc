@@ -10,9 +10,7 @@
 #include "src/heap/heap-inl.h"
 #include "src/logging/runtime-call-stats-scope.h"
 #include "src/objects/api-callbacks.h"
-#include "src/objects/hash-table-inl.h"
 #include "src/objects/lookup.h"
-#include "src/objects/property-cell.h"
 #include "src/objects/templates.h"
 
 namespace v8 {
@@ -86,6 +84,8 @@ MaybeHandle<Object> DefineAccessorProperty(Isolate* isolate,
         InstantiateFunction(isolate,
                             Handle<FunctionTemplateInfo>::cast(getter)),
         Object);
+    Handle<Code> trampoline = BUILTIN_CODE(isolate, DebugBreakTrampoline);
+    Handle<JSFunction>::cast(getter)->set_code(*trampoline);
   }
   if (setter->IsFunctionTemplateInfo() &&
       FunctionTemplateInfo::cast(*setter).BreakAtEntry()) {
@@ -94,11 +94,13 @@ MaybeHandle<Object> DefineAccessorProperty(Isolate* isolate,
         InstantiateFunction(isolate,
                             Handle<FunctionTemplateInfo>::cast(setter)),
         Object);
+    Handle<Code> trampoline = BUILTIN_CODE(isolate, DebugBreakTrampoline);
+    Handle<JSFunction>::cast(setter)->set_code(*trampoline);
   }
-  RETURN_ON_EXCEPTION(
-      isolate,
-      JSObject::DefineAccessor(object, name, getter, setter, attributes),
-      Object);
+  RETURN_ON_EXCEPTION(isolate,
+                      JSObject::DefineOwnAccessorIgnoreAttributes(
+                          object, name, getter, setter, attributes),
+                      Object);
   return object;
 }
 
@@ -532,7 +534,7 @@ MaybeHandle<JSFunction> InstantiateFunction(
   if (!data->needs_access_check() &&
       data->GetNamedPropertyHandler().IsUndefined(isolate) &&
       data->GetIndexedPropertyHandler().IsUndefined(isolate)) {
-    function_type = FLAG_embedder_instance_types && data->HasInstanceType()
+    function_type = v8_flags.embedder_instance_types && data->HasInstanceType()
                         ? static_cast<InstanceType>(data->InstanceType())
                         : JS_API_OBJECT_TYPE;
   }
@@ -576,6 +578,19 @@ void AddPropertyToPropertyList(Isolate* isolate, Handle<TemplateInfo> templ,
 }
 
 }  // namespace
+
+// static
+i::Handle<i::FunctionTemplateInfo>
+ApiNatives::CreateAccessorFunctionTemplateInfo(
+    i::Isolate* i_isolate, FunctionCallback callback, int length,
+    SideEffectType side_effect_type) {
+  // TODO(v8:5962): move FunctionTemplateNew() from api.cc here.
+  auto isolate = reinterpret_cast<v8::Isolate*>(i_isolate);
+  Local<FunctionTemplate> func_template = FunctionTemplate::New(
+      isolate, callback, v8::Local<Value>{}, v8::Local<v8::Signature>{}, length,
+      v8::ConstructorBehavior::kThrow, side_effect_type);
+  return Utils::OpenHandle(*func_template);
+}
 
 MaybeHandle<JSFunction> ApiNatives::InstantiateFunction(
     Isolate* isolate, Handle<NativeContext> native_context,

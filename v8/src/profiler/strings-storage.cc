@@ -6,6 +6,7 @@
 
 #include <memory>
 
+#include "src/base/bits.h"
 #include "src/base/strings.h"
 #include "src/objects/objects-inl.h"
 #include "src/utils/allocation.h"
@@ -81,7 +82,8 @@ const char* StringsStorage::GetSymbol(Symbol sym) {
     return "<symbol>";
   }
   String description = String::cast(sym.description());
-  int length = std::min(FLAG_heap_snapshot_string_limit, description.length());
+  int length = std::min(v8_flags.heap_snapshot_string_limit.value(),
+                        description.length());
   auto data = description.ToCString(DISALLOW_NULLS, ROBUST_STRING_TRAVERSAL, 0,
                                     length, &length);
   if (sym.is_private_name()) {
@@ -96,7 +98,8 @@ const char* StringsStorage::GetSymbol(Symbol sym) {
 const char* StringsStorage::GetName(Name name) {
   if (name.IsString()) {
     String str = String::cast(name);
-    int length = std::min(FLAG_heap_snapshot_string_limit, str.length());
+    int length =
+        std::min(v8_flags.heap_snapshot_string_limit.value(), str.length());
     int actual_length = 0;
     std::unique_ptr<char[]> data = str.ToCString(
         DISALLOW_NULLS, ROBUST_STRING_TRAVERSAL, 0, length, &actual_length);
@@ -114,7 +117,8 @@ const char* StringsStorage::GetName(int index) {
 const char* StringsStorage::GetConsName(const char* prefix, Name name) {
   if (name.IsString()) {
     String str = String::cast(name);
-    int length = std::min(FLAG_heap_snapshot_string_limit, str.length());
+    int length =
+        std::min(v8_flags.heap_snapshot_string_limit.value(), str.length());
     int actual_length = 0;
     std::unique_ptr<char[]> data = str.ToCString(
         DISALLOW_NULLS, ROBUST_STRING_TRAVERSAL, 0, length, &actual_length);
@@ -133,8 +137,8 @@ const char* StringsStorage::GetConsName(const char* prefix, Name name) {
 namespace {
 
 inline uint32_t ComputeStringHash(const char* str, int len) {
-  uint32_t raw_hash_field =
-      StringHasher::HashSequentialString(str, len, kZeroHashSeed);
+  uint32_t raw_hash_field = base::bits::RotateLeft32(
+      StringHasher::HashSequentialString(str, len, kZeroHashSeed), 2);
   return Name::HashBits::decode(raw_hash_field);
 }
 

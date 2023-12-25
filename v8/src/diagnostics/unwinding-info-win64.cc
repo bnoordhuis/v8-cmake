@@ -10,7 +10,6 @@
 #if defined(V8_OS_WIN_X64)
 #include "src/codegen/x64/assembler-x64.h"
 #elif defined(V8_OS_WIN_ARM64)
-#include "src/base/platform/wrappers.h"
 #include "src/codegen/arm64/assembler-arm64-inl.h"
 #include "src/codegen/arm64/macro-assembler-arm64-inl.h"
 #else
@@ -26,18 +25,18 @@ namespace v8 {
 namespace internal {
 namespace win64_unwindinfo {
 
-bool CanEmitUnwindInfoForBuiltins() { return FLAG_win64_unwinding_info; }
+bool CanEmitUnwindInfoForBuiltins() { return v8_flags.win64_unwinding_info; }
 
 bool CanRegisterUnwindInfoForNonABICompliantCodeRange() {
-  return !FLAG_jitless;
+  return !v8_flags.jitless;
 }
 
 bool RegisterUnwindInfoForExceptionHandlingOnly() {
   DCHECK(CanRegisterUnwindInfoForNonABICompliantCodeRange());
 #if defined(V8_OS_WIN_ARM64)
-  return !FLAG_win64_unwinding_info;
+  return !v8_flags.win64_unwinding_info;
 #else
-  return !IsWindows8OrGreater() || !FLAG_win64_unwinding_info;
+  return !IsWindows8OrGreater() || !v8_flags.win64_unwinding_info;
 #endif
 }
 
@@ -287,7 +286,7 @@ struct V8UnwindData {
     // error is acceptable when the unwinding info for the caller frame also
     // depends on fp rather than sp, as is the case for V8 builtins and runtime-
     // generated code.
-    STATIC_ASSERT(kNumberOfUnwindCodeWords >= 1);
+    static_assert(kNumberOfUnwindCodeWords >= 1);
     unwind_codes[0] = Combine8BitUnwindCodes(
         OpSetFp, MakeOpSaveFpLrX(-CommonFrameConstants::kCallerSPOffset),
         OpEnd);
@@ -346,7 +345,7 @@ std::vector<uint8_t> GetUnwindInfoForBuiltinFunction(
 
   if (fp_adjustment.IsDefault()) {
     // One code word is plenty.
-    STATIC_ASSERT(kDefaultNumberOfUnwindCodeWords <
+    static_assert(kDefaultNumberOfUnwindCodeWords <
                   kMaxNumberOfUnwindCodeWords);
     xdata.unwind_info.CodeWords = kDefaultNumberOfUnwindCodeWords;
   } else {
@@ -448,7 +447,7 @@ void InitUnwindingRecord(Record* record, size_t code_size_in_bytes) {
   // Hardcoded thunk.
   AssemblerOptions options;
   options.record_reloc_info_for_serialization = false;
-  TurboAssembler masm(nullptr, options, CodeObjectRequired::kNo,
+  MacroAssembler masm(nullptr, options, CodeObjectRequired::kNo,
                       NewAssemblerBuffer(64));
   masm.Mov(x16,
            Operand(reinterpret_cast<uint64_t>(&CRASH_HANDLER_FUNCTION_NAME)));

@@ -23,6 +23,7 @@
 #include "src/execution/frames.h"
 #include "src/handles/global-handles.h"
 #include "src/init/bootstrapper.h"
+#include "src/objects/code-inl.h"
 #include "src/objects/objects.h"
 #include "src/utils/ostreams.h"
 #include "src/zone/zone-chunk-list.h"
@@ -53,7 +54,7 @@ class Writer {
       : debug_object_(debug_object),
         position_(0),
         capacity_(1024),
-        buffer_(reinterpret_cast<byte*>(base::Malloc(capacity_))) {}
+        buffer_(reinterpret_cast<uint8_t*>(base::Malloc(capacity_))) {}
 
   ~Writer() { base::Free(buffer_); }
 
@@ -106,13 +107,13 @@ class Writer {
   void Ensure(uintptr_t pos) {
     if (capacity_ < pos) {
       while (capacity_ < pos) capacity_ *= 2;
-      buffer_ = reinterpret_cast<byte*>(base::Realloc(buffer_, capacity_));
+      buffer_ = reinterpret_cast<uint8_t*>(base::Realloc(buffer_, capacity_));
     }
   }
 
   DebugObject* debug_object() { return debug_object_; }
 
-  byte* buffer() { return buffer_; }
+  uint8_t* buffer() { return buffer_; }
 
   void Align(uintptr_t align) {
     uintptr_t delta = position_ % align;
@@ -173,7 +174,7 @@ class Writer {
   DebugObject* debug_object_;
   uintptr_t position_;
   uintptr_t capacity_;
-  byte* buffer_;
+  uint8_t* buffer_;
 };
 
 class ELFStringTable;
@@ -1985,14 +1986,14 @@ static void AddJITCodeEntry(CodeMap* map, const base::AddressRegion region,
                             const char* name_hint) {
 #if defined(DEBUG) && !V8_OS_WIN
   static int file_num = 0;
-  if (FLAG_gdbjit_dump && dump_if_enabled) {
+  if (v8_flags.gdbjit_dump && dump_if_enabled) {
     static const int kMaxFileNameSize = 64;
     char file_name[64];
 
     SNPrintF(base::Vector<char>(file_name, kMaxFileNameSize),
              "/tmp/elfdump%s%d.o", (name_hint != nullptr) ? name_hint : "",
              file_num++);
-    WriteBytes(file_name, reinterpret_cast<byte*>(entry->symfile_addr_),
+    WriteBytes(file_name, reinterpret_cast<uint8_t*>(entry->symfile_addr_),
                static_cast<int>(entry->symfile_size_));
   }
 #endif
@@ -2013,7 +2014,7 @@ static void AddCode(const char* name, base::AddressRegion region,
   CodeMap* code_map = GetCodeMap();
   RemoveJITCodeEntries(code_map, region);
 
-  if (!FLAG_gdbjit_full && !code_desc.IsLineInfoAvailable()) {
+  if (!v8_flags.gdbjit_full && !code_desc.IsLineInfoAvailable()) {
     delete lineinfo;
     return;
   }
@@ -2025,12 +2026,12 @@ static void AddCode(const char* name, base::AddressRegion region,
 
   const char* name_hint = nullptr;
   bool should_dump = false;
-  if (FLAG_gdbjit_dump) {
-    if (strlen(FLAG_gdbjit_dump_filter) == 0) {
+  if (v8_flags.gdbjit_dump) {
+    if (strlen(v8_flags.gdbjit_dump_filter) == 0) {
       name_hint = name;
       should_dump = true;
     } else if (name != nullptr) {
-      name_hint = strstr(name, FLAG_gdbjit_dump_filter);
+      name_hint = strstr(name, v8_flags.gdbjit_dump_filter);
       should_dump = (name_hint != nullptr);
     }
   }
@@ -2038,7 +2039,7 @@ static void AddCode(const char* name, base::AddressRegion region,
 }
 
 void EventHandler(const v8::JitCodeEvent* event) {
-  if (!FLAG_gdbjit) return;
+  if (!v8_flags.gdbjit) return;
   if ((event->code_type != v8::JitCodeEvent::JIT_CODE) &&
       (event->code_type != v8::JitCodeEvent::WASM_CODE)) {
     return;
@@ -2063,8 +2064,8 @@ void EventHandler(const v8::JitCodeEvent* event) {
       // use event->code_type here instead of finding the Code.
       // TODO(zhin): Rename is_function to be more accurate.
       if (event->code_type == v8::JitCodeEvent::JIT_CODE) {
-        Code code = isolate->heap()->GcSafeFindCodeForInnerPointer(addr);
-        is_function = CodeKindIsOptimizedJSFunction(code.kind());
+        Code lookup_result = isolate->heap()->FindCodeForInnerPointer(addr);
+        is_function = CodeKindIsOptimizedJSFunction(lookup_result.kind());
       }
       AddCode(event_name.c_str(), {addr, event->code_len}, shared, lineinfo,
               isolate, is_function);

@@ -5,10 +5,10 @@
 #ifndef V8_OBJECTS_PROPERTY_CELL_INL_H_
 #define V8_OBJECTS_PROPERTY_CELL_INL_H_
 
-#include "src/objects/property-cell.h"
-
 #include "src/heap/heap-write-barrier-inl.h"
-#include "src/objects/code-inl.h"
+#include "src/objects/dependent-code-inl.h"
+#include "src/objects/objects-inl.h"
+#include "src/objects/property-cell.h"
 
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
@@ -49,8 +49,8 @@ void PropertyCell::UpdatePropertyDetailsExceptCellType(
   if (!old_details.IsReadOnly() && details.IsReadOnly()) {
     // TODO(11527): pass Isolate as an argument.
     Isolate* isolate = GetIsolateFromWritableObject(*this);
-    dependent_code().DeoptimizeDependentCodeGroup(
-        isolate, DependentCode::kPropertyCellChangedGroup);
+    DependentCode::DeoptimizeDependencyGroups(
+        isolate, *this, DependentCode::kPropertyCellChangedGroup);
   }
 }
 

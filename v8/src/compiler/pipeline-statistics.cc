@@ -7,9 +7,9 @@
 #include <memory>
 
 #include "src/codegen/optimized-compilation-info.h"
+#include "src/compiler/turboshaft/phase.h"
 #include "src/compiler/zone-stats.h"
 #include "src/objects/shared-function-info.h"
-#include "src/objects/string.h"
 
 namespace v8 {
 namespace internal {
@@ -21,12 +21,16 @@ void PipelineStatistics::CommonStats::Begin(
     PipelineStatistics* pipeline_stats) {
   DCHECK(!scope_);
   scope_.reset(new ZoneStats::StatsScope(pipeline_stats->zone_stats_));
-  timer_.Start();
   outer_zone_initial_size_ = pipeline_stats->OuterZoneSize();
   allocated_bytes_at_start_ =
       outer_zone_initial_size_ -
       pipeline_stats->total_stats_.outer_zone_initial_size_ +
       pipeline_stats->zone_stats_->GetCurrentAllocatedBytes();
+  if (turboshaft::PipelineData::HasScope()) {
+    graph_size_at_start_ =
+        turboshaft::PipelineData::Get().graph().number_of_operations();
+  }
+  timer_.Start();
 }
 
 
@@ -43,13 +47,19 @@ void PipelineStatistics::CommonStats::End(
       diff->max_allocated_bytes_ + allocated_bytes_at_start_;
   diff->total_allocated_bytes_ =
       outer_zone_diff + scope_->GetTotalAllocatedBytes();
+  diff->input_graph_size_ = graph_size_at_start_;
+  if (turboshaft::PipelineData::HasScope()) {
+    diff->output_graph_size_ =
+        turboshaft::PipelineData::Get().graph().number_of_operations();
+  }
   scope_.reset();
   timer_.Stop();
 }
 
-PipelineStatistics::PipelineStatistics(OptimizedCompilationInfo* info,
-                                       CompilationStatistics* compilation_stats,
-                                       ZoneStats* zone_stats)
+PipelineStatistics::PipelineStatistics(
+    OptimizedCompilationInfo* info,
+    std::shared_ptr<CompilationStatistics> compilation_stats,
+    ZoneStats* zone_stats)
     : outer_zone_(info->zone()),
       zone_stats_(zone_stats),
       compilation_stats_(compilation_stats),

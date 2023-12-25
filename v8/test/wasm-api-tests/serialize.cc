@@ -25,7 +25,7 @@ TEST_F(WasmCapiTest, Serialize) {
   FunctionSig sig(0, 0, nullptr);
   uint32_t callback_index =
       builder()->AddImport(base::CStrVector("callback"), &sig);
-  byte code[] = {WASM_CALL_FUNCTION0(callback_index)};
+  uint8_t code[] = {WASM_CALL_FUNCTION0(callback_index)};
   AddExportedFunction(base::CStrVector("run"), code, sizeof(code), &sig);
   Compile();
 
@@ -35,14 +35,12 @@ TEST_F(WasmCapiTest, Serialize) {
   // We reset the module and collect it to make sure the NativeModuleCache does
   // not contain it anymore. Otherwise deserialization will not happen.
   ResetModule();
-  i::Isolate* isolate =
-      reinterpret_cast<::wasm::StoreImpl*>(store())->i_isolate();
-  isolate->heap()->PreciseCollectAllGarbage(
-      i::Heap::kForcedGC, i::GarbageCollectionReason::kTesting,
-      v8::kNoGCCallbackFlags);
-  isolate->heap()->PreciseCollectAllGarbage(
-      i::Heap::kForcedGC, i::GarbageCollectionReason::kTesting,
-      v8::kNoGCCallbackFlags);
+  Heap* heap =
+      reinterpret_cast<::wasm::StoreImpl*>(store())->i_isolate()->heap();
+  heap->PreciseCollectAllGarbage(GCFlag::kForced,
+                                 GarbageCollectionReason::kTesting);
+  heap->PreciseCollectAllGarbage(GCFlag::kForced,
+                                 GarbageCollectionReason::kTesting);
   own<Module> deserialized = Module::deserialize(store(), serialized);
 
   // Try to serialize the module again. This can fail if deserialization does

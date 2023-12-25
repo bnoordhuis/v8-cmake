@@ -127,6 +127,8 @@ class V8_EXPORT_PRIVATE Type : public TypeBase {
     return IsAbstractName(CONSTEXPR_BOOL_TYPE_STRING);
   }
   bool IsVoidOrNever() const { return IsVoid() || IsNever(); }
+  bool IsFloat32() const { return IsAbstractName(FLOAT32_TYPE_STRING); }
+  bool IsFloat64() const { return IsAbstractName(FLOAT64_TYPE_STRING); }
   std::string GetGeneratedTypeName() const;
   std::string GetGeneratedTNodeTypeName() const;
   virtual bool IsConstexpr() const {
@@ -521,6 +523,8 @@ class V8_EXPORT_PRIVATE BitFieldStructType final : public Type {
 
   const BitField& LookupField(const std::string& name) const;
 
+  const SourcePosition GetPosition() const { return decl_->pos; }
+
  private:
   friend class TypeOracle;
   BitFieldStructType(Namespace* nspace, const Type* parent,
@@ -738,7 +742,7 @@ class ClassType final : public AggregateType {
   // what kind of GC visiting the individual slots require.
   std::vector<ObjectSlotKind> ComputeHeaderSlotKinds() const;
   base::Optional<ObjectSlotKind> ComputeArraySlotKind() const;
-  bool HasNoPointerSlots() const;
+  bool HasNoPointerSlotsExceptMap() const;
   bool HasIndexedFieldsIncludingInParents() const;
   const Field* GetFieldPreceding(size_t field_index) const;
 

@@ -6,27 +6,11 @@
 #define HEAP_HEAP_UTILS_H_
 
 #include "src/api/api-inl.h"
+#include "src/flags/flags.h"
 #include "src/heap/heap.h"
+#include "test/cctest/cctest.h"
 
-namespace v8 {
-namespace internal {
-namespace heap {
-
-class V8_NODISCARD TemporaryEmbedderHeapTracerScope {
- public:
-  TemporaryEmbedderHeapTracerScope(v8::Isolate* isolate,
-                                   v8::EmbedderHeapTracer* tracer)
-      : isolate_(isolate) {
-    isolate_->SetEmbedderHeapTracer(tracer);
-  }
-
-  ~TemporaryEmbedderHeapTracerScope() {
-    isolate_->SetEmbedderHeapTracer(nullptr);
-  }
-
- private:
-  v8::Isolate* const isolate_;
-};
+namespace v8::internal::heap {
 
 void SealCurrentObjects(Heap* heap);
 
@@ -42,16 +26,12 @@ std::vector<Handle<FixedArray>> CreatePadding(
     Heap* heap, int padding_size, AllocationType allocation,
     int object_size = kMaxRegularHeapObjectSize);
 
-bool FillCurrentPage(v8::internal::NewSpace* space,
+void FillCurrentPage(v8::internal::NewSpace* space,
                      std::vector<Handle<FixedArray>>* out_handles = nullptr);
 
-bool FillCurrentPageButNBytes(
+void FillCurrentPageButNBytes(
     v8::internal::NewSpace* space, int extra_bytes,
     std::vector<Handle<FixedArray>>* out_handles = nullptr);
-
-// Helper function that simulates a full new-space in the heap.
-void SimulateFullSpace(v8::internal::NewSpace* space,
-                       std::vector<Handle<FixedArray>>* out_handles = nullptr);
 
 // Helper function that simulates many incremental marking steps until
 // marking is completed.
@@ -62,13 +42,17 @@ void SimulateFullSpace(v8::internal::PagedSpace* space);
 
 void AbandonCurrentlyFreeMemory(PagedSpace* space);
 
+void CollectGarbage(Heap* heap, AllocationSpace space);
+void CollectAllGarbage(Heap* heap);
+void CollectAllAvailableGarbage(Heap* heap);
+void PreciseCollectAllGarbage(Heap* heap);
+void CollectSharedGarbage(Heap* heap);
+
 void GcAndSweep(Heap* heap, AllocationSpace space);
 
+void EmptyNewSpaceUsingGC(Heap* heap);
+
 void ForceEvacuationCandidate(Page* page);
-
-void InvokeScavenge(Isolate* isolate = nullptr);
-
-void InvokeMarkSweep(Isolate* isolate = nullptr);
 
 void GrowNewSpace(Heap* heap);
 
@@ -91,8 +75,22 @@ bool InCorrectGeneration(v8::Isolate* isolate,
   return InCorrectGeneration(*v8::Utils::OpenHandle(*tmp));
 }
 
-}  // namespace heap
-}  // namespace internal
-}  // namespace v8
+class ManualEvacuationCandidatesSelectionScope {
+ public:
+  // Marking a page as an evacuation candidate update the page flags which may
+  // race with reading the page flag during concurrent marking.
+  explicit ManualEvacuationCandidatesSelectionScope(ManualGCScope&) {
+    DCHECK(!v8_flags.manual_evacuation_candidates_selection);
+    v8_flags.manual_evacuation_candidates_selection = true;
+  }
+  ~ManualEvacuationCandidatesSelectionScope() {
+    DCHECK(v8_flags.manual_evacuation_candidates_selection);
+    v8_flags.manual_evacuation_candidates_selection = false;
+  }
+
+ private:
+};
+
+}  // namespace v8::internal::heap
 
 #endif  // HEAP_HEAP_UTILS_H_

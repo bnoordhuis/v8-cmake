@@ -7,6 +7,7 @@
 
 #include "src/base/macros.h"
 #include "src/common/globals.h"
+#include "src/heap/allocation-result.h"
 #include "src/heap/memory-chunk.h"
 #include "src/objects/free-space.h"
 #include "src/objects/map.h"
@@ -64,7 +65,8 @@ class FreeListCategory {
   // Performs a single try to pick a node of at least |minimum_size| from the
   // category. Stores the actual size in |node_size|. Returns nullptr if no
   // node is found.
-  FreeSpace PickNodeFromList(size_t minimum_size, size_t* node_size);
+  V8_EXPORT_PRIVATE FreeSpace PickNodeFromList(size_t minimum_size,
+                                               size_t* node_size);
 
   // Picks a node of at least |minimum_size| from the category. Stores the
   // actual size in |node_size|. Returns nullptr if no node is found.
@@ -76,6 +78,14 @@ class FreeListCategory {
 
   size_t SumFreeList();
   int FreeListLength();
+
+  template <typename Callback>
+  void IterateNodesForTesting(Callback callback) {
+    for (FreeSpace cur_node = top(); !cur_node.is_null();
+         cur_node = cur_node.next()) {
+      callback(cur_node);
+    }
+  }
 
  private:
   // For debug builds we accurately compute free lists lengths up until
@@ -121,8 +131,11 @@ class FreeListCategory {
 // categories would scatter allocation more.
 class FreeList {
  public:
-  // Creates a Freelist of the default class (FreeListLegacy for now).
-  V8_EXPORT_PRIVATE static FreeList* CreateFreeList();
+  // Creates a Freelist of the default class.
+  V8_EXPORT_PRIVATE static std::unique_ptr<FreeList> CreateFreeList();
+  // Creates a Freelist for new space.
+  V8_EXPORT_PRIVATE static std::unique_ptr<FreeList>
+  CreateFreeListForNewSpace();
 
   virtual ~FreeList() = default;
 
@@ -138,7 +151,7 @@ class FreeList {
   // and the size should be a non-zero multiple of the word size.
   virtual size_t Free(Address start, size_t size_in_bytes, FreeMode mode);
 
-  // Allocates a free space node frome the free list of at least size_in_bytes
+  // Allocates a free space node from the free list of at least size_in_bytes
   // bytes. Returns the actual node size in node_size which can be bigger than
   // size_in_bytes. This method returns null if the allocation request cannot be
   // handled by the free list.
@@ -153,13 +166,17 @@ class FreeList {
 
   // Return the number of bytes available on the free list.
   size_t Available() {
-    DCHECK(available_ == SumFreeLists());
+    VerifyAvailable();
     return available_;
   }
 
   // Update number of available  bytes on the Freelists.
   void IncreaseAvailableBytes(size_t bytes) { available_ += bytes; }
   void DecreaseAvailableBytes(size_t bytes) { available_ -= bytes; }
+
+  size_t wasted_bytes() const { return wasted_bytes_; }
+  void increase_wasted_bytes(size_t bytes) { wasted_bytes_ += bytes; }
+  void decrease_wasted_bytes(size_t bytes) { wasted_bytes_ -= bytes; }
 
   bool IsEmpty() {
     bool empty = true;
@@ -177,7 +194,7 @@ class FreeList {
   int number_of_categories() { return number_of_categories_; }
   FreeListCategoryType last_category() { return last_category_; }
 
-  size_t wasted_bytes() { return wasted_bytes_; }
+  size_t min_block_size() const { return min_block_size_; }
 
   template <typename Callback>
   void ForAllFreeListCategories(FreeListCategoryType type, Callback callback) {
@@ -221,8 +238,12 @@ class FreeList {
 
 #ifdef DEBUG
   V8_EXPORT_PRIVATE size_t SumFreeLists();
-  bool IsVeryLong();
+  V8_EXPORT_PRIVATE bool IsVeryLong();
 #endif
+
+  void VerifyAvailable() {
+    DCHECK(IsVeryLong() || available_ == SumFreeLists());
+  }
 
   // Tries to retrieve a node from the first category in a given |type|.
   // Returns nullptr if the category is empty or the top entry is smaller
@@ -249,42 +270,19 @@ class FreeList {
   FreeListCategoryType last_category_ = 0;
   size_t min_block_size_ = 0;
 
-  std::atomic<size_t> wasted_bytes_{0};
   FreeListCategory** categories_ = nullptr;
 
-  // |available_|: The number of bytes in this freelist.
+  // The number of bytes in this freelist that are available for allocation.
   size_t available_ = 0;
+  // Number of wasted bytes in this free list that are not available for
+  // allocation.
+  size_t wasted_bytes_ = 0;
 
   friend class FreeListCategory;
   friend class Page;
   friend class MemoryChunk;
   friend class ReadOnlyPage;
   friend class MapSpace;
-};
-
-// FreeList used for spaces that don't have freelists
-// (only the LargeObject space for now).
-class NoFreeList final : public FreeList {
- public:
-  size_t GuaranteedAllocatable(size_t maximum_freed) final {
-    FATAL("NoFreeList can't be used as a standard FreeList. ");
-  }
-  size_t Free(Address start, size_t size_in_bytes, FreeMode mode) final {
-    FATAL("NoFreeList can't be used as a standard FreeList.");
-  }
-  V8_WARN_UNUSED_RESULT FreeSpace Allocate(size_t size_in_bytes,
-                                           size_t* node_size,
-                                           AllocationOrigin origin) final {
-    FATAL("NoFreeList can't be used as a standard FreeList.");
-  }
-  Page* GetPageForSize(size_t size_in_bytes) final {
-    FATAL("NoFreeList can't be used as a standard FreeList.");
-  }
-
- private:
-  FreeListCategoryType SelectFreeListCategoryType(size_t size_in_bytes) final {
-    FATAL("NoFreeList can't be used as a standard FreeList.");
-  }
 };
 
 // Use 24 Freelists: on per 16 bytes between 24 and 256, and then a few ones for
@@ -433,8 +431,18 @@ class V8_EXPORT_PRIVATE FreeListManyCached : public FreeListMany {
 // FreeListMany), which makes its fast path less fast in the Scavenger. This is
 // done on purpose, since this class's only purpose is to be used by
 // FreeListManyCachedOrigin, which is precise for the scavenger.
-class V8_EXPORT_PRIVATE FreeListManyCachedFastPath : public FreeListManyCached {
+class V8_EXPORT_PRIVATE FreeListManyCachedFastPathBase
+    : public FreeListManyCached {
  public:
+  enum class SmallBlocksMode { kAllow, kProhibit };
+
+  FreeListManyCachedFastPathBase(SmallBlocksMode small_blocks_mode)
+      : small_blocks_mode_(small_blocks_mode) {
+    if (small_blocks_mode_ == SmallBlocksMode::kProhibit) {
+      min_block_size_ = kFastPathStart;
+    }
+  }
+
   V8_WARN_UNUSED_RESULT FreeSpace Allocate(size_t size_in_bytes,
                                            size_t* node_size,
                                            AllocationOrigin origin) override;
@@ -448,8 +456,8 @@ class V8_EXPORT_PRIVATE FreeListManyCachedFastPath : public FreeListManyCached {
   // Objects in the 15th category are at least 256 bytes
   static const FreeListCategoryType kFastPathFallBackTiny = 15;
 
-  STATIC_ASSERT(categories_min[kFastPathFirstCategory] == kFastPathStart);
-  STATIC_ASSERT(categories_min[kFastPathFallBackTiny] ==
+  static_assert(categories_min[kFastPathFirstCategory] == kFastPathStart);
+  static_assert(categories_min[kFastPathFallBackTiny] ==
                 kTinyObjectMaxSize * 2);
 
   FreeListCategoryType SelectFastAllocationFreeListCategoryType(
@@ -467,13 +475,29 @@ class V8_EXPORT_PRIVATE FreeListManyCachedFastPath : public FreeListManyCached {
     return last_category_;
   }
 
+ private:
+  SmallBlocksMode small_blocks_mode_;
+
   FRIEND_TEST(
       SpacesTest,
       FreeListManyCachedFastPathSelectFastAllocationFreeListCategoryType);
 };
 
+class FreeListManyCachedFastPath : public FreeListManyCachedFastPathBase {
+ public:
+  FreeListManyCachedFastPath()
+      : FreeListManyCachedFastPathBase(SmallBlocksMode::kAllow) {}
+};
+
+class FreeListManyCachedFastPathForNewSpace
+    : public FreeListManyCachedFastPathBase {
+ public:
+  FreeListManyCachedFastPathForNewSpace()
+      : FreeListManyCachedFastPathBase(SmallBlocksMode::kProhibit) {}
+};
+
 // Uses FreeListManyCached if in the GC; FreeListManyCachedFastPath otherwise.
-// The reasonning behind this FreeList is the following: the GC runs in
+// The reasoning behind this FreeList is the following: the GC runs in
 // parallel, and therefore, more expensive allocations there are less
 // noticeable. On the other hand, the generated code and runtime need to be very
 // fast. Therefore, the strategy for the former is one that is not very

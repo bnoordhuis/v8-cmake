@@ -36,6 +36,7 @@ class Zone;
 
 namespace compiler {
 class NodeObserver;
+class JSHeapBroker;
 }
 
 namespace wasm {
@@ -95,14 +96,13 @@ class V8_EXPORT_PRIVATE OptimizedCompilationInfo final {
   OptimizedCompilationInfo(Zone* zone, Isolate* isolate,
                            Handle<SharedFunctionInfo> shared,
                            Handle<JSFunction> closure, CodeKind code_kind,
-                           BytecodeOffset osr_offset,
-                           JavaScriptFrame* osr_frame);
+                           BytecodeOffset osr_offset);
   // For testing.
   OptimizedCompilationInfo(Zone* zone, Isolate* isolate,
                            Handle<SharedFunctionInfo> shared,
                            Handle<JSFunction> closure, CodeKind code_kind)
       : OptimizedCompilationInfo(zone, isolate, shared, closure, code_kind,
-                                 BytecodeOffset::None(), nullptr) {}
+                                 BytecodeOffset::None()) {}
   // Construct a compilation info for stub compilation, Wasm, and testing.
   OptimizedCompilationInfo(base::Vector<const char> debug_name, Zone* zone,
                            CodeKind code_kind);
@@ -124,7 +124,6 @@ class V8_EXPORT_PRIVATE OptimizedCompilationInfo final {
   Builtin builtin() const { return builtin_; }
   void set_builtin(Builtin builtin) { builtin_ = builtin; }
   BytecodeOffset osr_offset() const { return osr_offset_; }
-  JavaScriptFrame* osr_frame() const { return osr_frame_; }
   void SetNodeObserver(compiler::NodeObserver* observer) {
     DCHECK_NULL(node_observer_);
     node_observer_ = observer;
@@ -171,7 +170,18 @@ class V8_EXPORT_PRIVATE OptimizedCompilationInfo final {
     DCHECK_NOT_NULL(canonical_handles_);
   }
 
-  void ReopenHandlesInNewHandleScope(Isolate* isolate);
+  template <typename T>
+  Handle<T> CanonicalHandle(T object, Isolate* isolate) {
+    DCHECK_NOT_NULL(canonical_handles_);
+    DCHECK(PersistentHandlesScope::IsActive(isolate));
+    auto find_result = canonical_handles_->FindOrInsert(object);
+    if (!find_result.already_exists) {
+      *find_result.entry = Handle<T>(object, isolate).location();
+    }
+    return Handle<T>(*find_result.entry);
+  }
+
+  void ReopenAndCanonicalizeHandlesInNewScope(Isolate* isolate);
 
   void AbortOptimization(BailoutReason reason);
 
@@ -249,8 +259,19 @@ class V8_EXPORT_PRIVATE OptimizedCompilationInfo final {
 
   void SetTracingFlags(bool passes_filter);
 
+  // Storing the raw pointer to the CanonicalHandlesMap is generally not safe.
+  // Use DetachCanonicalHandles() to transfer ownership instead.
+  // We explicitly allow the JSHeapBroker to store the raw pointer as it is
+  // guaranteed that the OptimizedCompilationInfo's lifetime exceeds the
+  // lifetime of the broker.
+  CanonicalHandlesMap* canonical_handles() { return canonical_handles_.get(); }
+  friend class compiler::JSHeapBroker;
+
   // Compilation flags.
   unsigned flags_ = 0;
+
+  // Take care when accessing this on any background thread.
+  Isolate* const isolate_unsafe_;
 
   const CodeKind code_kind_;
   Builtin builtin_ = Builtin::kNoBuiltinId;
@@ -274,8 +295,6 @@ class V8_EXPORT_PRIVATE OptimizedCompilationInfo final {
 
   // Entry point when compiling for OSR, {BytecodeOffset::None} otherwise.
   const BytecodeOffset osr_offset_ = BytecodeOffset::None();
-  // The current OSR frame for specialization or {nullptr}.
-  JavaScriptFrame* const osr_frame_ = nullptr;
 
   // The zone from which the compilation pipeline working on this
   // OptimizedCompilationInfo allocates.

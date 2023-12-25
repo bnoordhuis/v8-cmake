@@ -8,7 +8,6 @@
 #include <queue>
 
 #include "include/libplatform/libplatform.h"
-#include "src/base/bounded-page-allocator.h"
 #include "src/base/debug/stack_trace.h"
 #include "src/base/logging.h"
 #include "src/base/page-allocator.h"
@@ -227,7 +226,7 @@ bool DefaultPlatform::IdleTasksEnabled(Isolate* isolate) {
   return idle_task_support_ == IdleTaskSupport::kEnabled;
 }
 
-std::unique_ptr<JobHandle> DefaultPlatform::PostJob(
+std::unique_ptr<JobHandle> DefaultPlatform::CreateJob(
     TaskPriority priority, std::unique_ptr<JobTask> job_task) {
   size_t num_worker_threads = NumberOfWorkerThreads();
   if (priority == TaskPriority::kBestEffort && num_worker_threads > 2) {
@@ -266,13 +265,24 @@ v8::PageAllocator* DefaultPlatform::GetPageAllocator() {
   return page_allocator_.get();
 }
 
-void DefaultPlatform::NotifyIsolateShutdown(Isolate* isolate) {
-  base::MutexGuard guard(&lock_);
-  auto it = foreground_task_runner_map_.find(isolate);
-  if (it != foreground_task_runner_map_.end()) {
-    it->second->Terminate();
-    foreground_task_runner_map_.erase(it);
+v8::ThreadIsolatedAllocator* DefaultPlatform::GetThreadIsolatedAllocator() {
+  if (thread_isolated_allocator_.Valid()) {
+    return &thread_isolated_allocator_;
   }
+  return nullptr;
+}
+
+void DefaultPlatform::NotifyIsolateShutdown(Isolate* isolate) {
+  std::shared_ptr<DefaultForegroundTaskRunner> taskrunner;
+  {
+    base::MutexGuard guard(&lock_);
+    auto it = foreground_task_runner_map_.find(isolate);
+    if (it != foreground_task_runner_map_.end()) {
+      taskrunner = it->second;
+      foreground_task_runner_map_.erase(it);
+    }
+  }
+  taskrunner->Terminate();
 }
 
 }  // namespace platform

@@ -13,17 +13,18 @@ namespace v8 {
 namespace internal {
 
 class PersistentHandles;
+class BackgroundMergeTask;
 
 class V8_EXPORT_PRIVATE AlignedCachedData {
  public:
-  AlignedCachedData(const byte* data, int length);
+  AlignedCachedData(const uint8_t* data, int length);
   ~AlignedCachedData() {
     if (owns_data_) DeleteArray(data_);
   }
   AlignedCachedData(const AlignedCachedData&) = delete;
   AlignedCachedData& operator=(const AlignedCachedData&) = delete;
 
-  const byte* data() const { return data_; }
+  const uint8_t* data() const { return data_; }
   int length() const { return length_; }
   bool rejected() const { return rejected_; }
 
@@ -44,7 +45,7 @@ class V8_EXPORT_PRIVATE AlignedCachedData {
  private:
   bool owns_data_ : 1;
   bool rejected_ : 1;
-  const byte* data_;
+  const uint8_t* data_;
   int length_;
 };
 
@@ -62,6 +63,10 @@ enum class SerializedCodeSanityCheckResult {
 class CodeSerializer : public Serializer {
  public:
   struct OffThreadDeserializeData {
+   public:
+    bool HasResult() const { return !maybe_result.is_null(); }
+    Handle<Script> GetOnlyScript(LocalHeap* heap);
+
    private:
     friend class CodeSerializer;
     MaybeHandle<SharedFunctionInfo> maybe_result;
@@ -73,24 +78,26 @@ class CodeSerializer : public Serializer {
   CodeSerializer(const CodeSerializer&) = delete;
   CodeSerializer& operator=(const CodeSerializer&) = delete;
   V8_EXPORT_PRIVATE static ScriptCompiler::CachedData* Serialize(
-      Handle<SharedFunctionInfo> info);
+      Isolate* isolate, Handle<SharedFunctionInfo> info);
 
   AlignedCachedData* SerializeSharedFunctionInfo(
       Handle<SharedFunctionInfo> info);
 
   V8_WARN_UNUSED_RESULT static MaybeHandle<SharedFunctionInfo> Deserialize(
       Isolate* isolate, AlignedCachedData* cached_data, Handle<String> source,
-      ScriptOriginOptions origin_options);
+      ScriptOriginOptions origin_options,
+      MaybeHandle<Script> maybe_cached_script = {});
 
   V8_WARN_UNUSED_RESULT static OffThreadDeserializeData
   StartDeserializeOffThread(LocalIsolate* isolate,
                             AlignedCachedData* cached_data);
 
   V8_WARN_UNUSED_RESULT static MaybeHandle<SharedFunctionInfo>
-  FinishOffThreadDeserialize(Isolate* isolate, OffThreadDeserializeData&& data,
-                             AlignedCachedData* cached_data,
-                             Handle<String> source,
-                             ScriptOriginOptions origin_options);
+  FinishOffThreadDeserialize(
+      Isolate* isolate, OffThreadDeserializeData&& data,
+      AlignedCachedData* cached_data, Handle<String> source,
+      ScriptOriginOptions origin_options,
+      BackgroundMergeTask* background_merge_task = nullptr);
 
   uint32_t source_hash() const { return source_hash_; }
 
@@ -99,13 +106,10 @@ class CodeSerializer : public Serializer {
   ~CodeSerializer() override { OutputStatistics("CodeSerializer"); }
 
   virtual bool ElideObject(Object obj) { return false; }
-  void SerializeGeneric(Handle<HeapObject> heap_object);
+  void SerializeGeneric(Handle<HeapObject> heap_object, SlotType slot_type);
 
  private:
-  void SerializeObjectImpl(Handle<HeapObject> o) override;
-
-  bool SerializeReadOnlyObject(HeapObject obj,
-                               const DisallowGarbageCollection& no_gc);
+  void SerializeObjectImpl(Handle<HeapObject> o, SlotType slot_type) override;
 
   DISALLOW_GARBAGE_COLLECTION(no_gc_)
   uint32_t source_hash_;
@@ -147,24 +151,25 @@ class SerializedCodeData : public SerializedData {
       SerializedCodeSanityCheckResult* rejection_result);
 
   // Used when producing.
-  SerializedCodeData(const std::vector<byte>* payload,
+  SerializedCodeData(const std::vector<uint8_t>* payload,
                      const CodeSerializer* cs);
 
   // Return ScriptData object and relinquish ownership over it to the caller.
   AlignedCachedData* GetScriptData();
 
-  base::Vector<const byte> Payload() const;
+  base::Vector<const uint8_t> Payload() const;
 
   static uint32_t SourceHash(Handle<String> source,
                              ScriptOriginOptions origin_options);
 
  private:
   explicit SerializedCodeData(AlignedCachedData* data);
-  SerializedCodeData(const byte* data, int size)
-      : SerializedData(const_cast<byte*>(data), size) {}
+  SerializedCodeData(const uint8_t* data, int size)
+      : SerializedData(const_cast<uint8_t*>(data), size) {}
 
-  base::Vector<const byte> ChecksummedContent() const {
-    return base::Vector<const byte>(data_ + kHeaderSize, size_ - kHeaderSize);
+  base::Vector<const uint8_t> ChecksummedContent() const {
+    return base::Vector<const uint8_t>(data_ + kHeaderSize,
+                                       size_ - kHeaderSize);
   }
 
   SerializedCodeSanityCheckResult SanityCheck(

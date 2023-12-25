@@ -17,22 +17,19 @@ template <typename ReturnType, typename... ParamTypes>
 class Memory64Runner : public WasmRunner<ReturnType, ParamTypes...> {
  public:
   explicit Memory64Runner(TestExecutionTier execution_tier)
-      : WasmRunner<ReturnType, ParamTypes...>(execution_tier, nullptr, "main",
-                                              kNoRuntimeExceptionSupport,
-                                              kMemory64) {
+      : WasmRunner<ReturnType, ParamTypes...>(
+            execution_tier, kWasmOrigin, nullptr, "main",
+            kNoRuntimeExceptionSupport, kMemory64) {
     this->builder().EnableFeature(kFeature_memory64);
   }
 };
 
 WASM_EXEC_TEST(Load) {
-  // TODO(clemensb): Implement memory64 in the interpreter.
-  if (execution_tier == TestExecutionTier::kInterpreter) return;
-
   Memory64Runner<uint32_t, uint64_t> r(execution_tier);
   uint32_t* memory =
       r.builder().AddMemoryElems<uint32_t>(kWasmPageSize / sizeof(int32_t));
 
-  BUILD(r, WASM_LOAD_MEM(MachineType::Int32(), WASM_LOCAL_GET(0)));
+  r.Build({WASM_LOAD_MEM(MachineType::Int32(), WASM_LOCAL_GET(0))});
 
   CHECK_EQ(0, r.Call(0));
 
@@ -63,7 +60,7 @@ WASM_EXEC_TEST(InitExpression) {
 
   ErrorThrower thrower(isolate, "TestMemory64InitExpression");
 
-  const byte data[] = {
+  const uint8_t data[] = {
       WASM_MODULE_HEADER,                     //
       SECTION(Memory,                         //
               ENTRY_COUNT(1),                 //
@@ -87,27 +84,21 @@ WASM_EXEC_TEST(InitExpression) {
 }
 
 WASM_EXEC_TEST(MemorySize) {
-  // TODO(clemensb): Implement memory64 in the interpreter.
-  if (execution_tier == TestExecutionTier::kInterpreter) return;
-
   Memory64Runner<uint64_t> r(execution_tier);
   constexpr int kNumPages = 13;
   r.builder().AddMemoryElems<uint8_t>(kNumPages * kWasmPageSize);
 
-  BUILD(r, WASM_MEMORY_SIZE);
+  r.Build({WASM_MEMORY_SIZE});
 
   CHECK_EQ(kNumPages, r.Call());
 }
 
 WASM_EXEC_TEST(MemoryGrow) {
-  // TODO(clemensb): Implement memory64 in the interpreter.
-  if (execution_tier == TestExecutionTier::kInterpreter) return;
-
   Memory64Runner<int64_t, int64_t> r(execution_tier);
   r.builder().SetMaxMemPages(13);
   r.builder().AddMemory(kWasmPageSize);
 
-  BUILD(r, WASM_MEMORY_GROW(WASM_LOCAL_GET(0)));
+  r.Build({WASM_MEMORY_GROW(WASM_LOCAL_GET(0))});
   CHECK_EQ(1, r.Call(6));
   CHECK_EQ(7, r.Call(1));
   CHECK_EQ(-1, r.Call(-1));

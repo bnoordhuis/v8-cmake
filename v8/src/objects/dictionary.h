@@ -40,11 +40,18 @@ class EXPORT_TEMPLATE_DECLARE(V8_EXPORT_PRIVATE) Dictionary
   using Key = typename Shape::Key;
   inline Object ValueAt(InternalIndex entry);
   inline Object ValueAt(PtrComprCageBase cage_base, InternalIndex entry);
+  inline Object ValueAt(InternalIndex entry, SeqCstAccessTag);
+  inline Object ValueAt(PtrComprCageBase cage_base, InternalIndex entry,
+                        SeqCstAccessTag);
   // Returns {} if we would be reading out of the bounds of the object.
   inline base::Optional<Object> TryValueAt(InternalIndex entry);
 
   // Set the value for entry.
   inline void ValueAtPut(InternalIndex entry, Object value);
+  inline void ValueAtPut(InternalIndex entry, Object value, SeqCstAccessTag);
+
+  // Swap the value for the entry.
+  inline Object ValueAtSwap(InternalIndex entry, Object value, SeqCstAccessTag);
 
   // Returns the property details for the property at entry.
   inline PropertyDetails DetailsAt(InternalIndex entry);
@@ -78,14 +85,30 @@ class EXPORT_TEMPLATE_DECLARE(V8_EXPORT_PRIVATE) Dictionary
   // Garbage collection support.
   inline ObjectSlot RawFieldOfValueAt(InternalIndex entry);
 
-  template <typename IsolateT>
+  template <typename IsolateT, AllocationType key_allocation =
+                                   std::is_same<IsolateT, Isolate>::value
+                                       ? AllocationType::kYoung
+                                       : AllocationType::kOld>
   V8_WARN_UNUSED_RESULT static Handle<Derived> Add(
       IsolateT* isolate, Handle<Derived> dictionary, Key key,
       Handle<Object> value, PropertyDetails details,
       InternalIndex* entry_out = nullptr);
 
-  static Handle<Derived> ShallowCopy(Isolate* isolate,
-                                     Handle<Derived> dictionary);
+  // This method is only safe to use when it is guaranteed that the dictionary
+  // doesn't need to grow.
+  // The number of elements stored is not updated. Use
+  // |SetInitialNumberOfElements| to update the number in one go.
+  template <typename IsolateT, AllocationType key_allocation =
+                                   std::is_same<IsolateT, Isolate>::value
+                                       ? AllocationType::kYoung
+                                       : AllocationType::kOld>
+  static void UncheckedAdd(IsolateT* isolate, Handle<Derived> dictionary,
+                           Key key, Handle<Object> value,
+                           PropertyDetails details);
+
+  static Handle<Derived> ShallowCopy(
+      Isolate* isolate, Handle<Derived> dictionary,
+      AllocationType allocation = AllocationType::kYoung);
 
  protected:
   // Generic at put operation.
@@ -94,6 +117,9 @@ class EXPORT_TEMPLATE_DECLARE(V8_EXPORT_PRIVATE) Dictionary
                                                      Key key,
                                                      Handle<Object> value,
                                                      PropertyDetails details);
+  static void UncheckedAtPut(Isolate* isolate, Handle<Derived> dictionary,
+                             Key key, Handle<Object> value,
+                             PropertyDetails details);
 
   OBJECT_CONSTRUCTORS(Dictionary, HashTable<Derived, Shape>);
 };
@@ -115,17 +141,23 @@ class BaseDictionaryShape : public BaseShape<Key> {
                                   PropertyDetails value);
 };
 
-class NameDictionaryShape : public BaseDictionaryShape<Handle<Name>> {
+class BaseNameDictionaryShape : public BaseDictionaryShape<Handle<Name>> {
  public:
   static inline bool IsMatch(Handle<Name> key, Object other);
   static inline uint32_t Hash(ReadOnlyRoots roots, Handle<Name> key);
   static inline uint32_t HashForObject(ReadOnlyRoots roots, Object object);
+  template <AllocationType allocation = AllocationType::kYoung>
   static inline Handle<Object> AsHandle(Isolate* isolate, Handle<Name> key);
+  template <AllocationType allocation = AllocationType::kOld>
   static inline Handle<Object> AsHandle(LocalIsolate* isolate,
                                         Handle<Name> key);
-  static const int kPrefixSize = 2;
-  static const int kEntrySize = 3;
   static const int kEntryValueIndex = 1;
+};
+
+class NameDictionaryShape : public BaseNameDictionaryShape {
+ public:
+  static const int kPrefixSize = 3;
+  static const int kEntrySize = 3;
   static const bool kMatchNeedsHoleCheck = false;
 };
 
@@ -172,6 +204,10 @@ class EXPORT_TEMPLATE_DECLARE(V8_EXPORT_PRIVATE) BaseNameDictionary
       Handle<Object> value, PropertyDetails details,
       InternalIndex* entry_out = nullptr);
 
+  // Exposed for NameDictionaryLookupForwardedString slow path for forwarded
+  // strings.
+  using Dictionary<Derived, Shape>::FindInsertionEntry;
+
   OBJECT_CONSTRUCTORS(BaseNameDictionary, Dictionary<Derived, Shape>);
 };
 
@@ -190,6 +226,7 @@ class V8_EXPORT_PRIVATE NameDictionary
   DECL_CAST(NameDictionary)
   DECL_PRINTER(NameDictionary)
 
+  static const int kFlagsIndex = kObjectHashIndex + 1;
   static const int kEntryValueIndex = 1;
   static const int kEntryDetailsIndex = 2;
   static const int kInitialCapacity = 2;
@@ -200,17 +237,34 @@ class V8_EXPORT_PRIVATE NameDictionary
   inline void set_hash(int hash);
   inline int hash() const;
 
+  // Note: Flags are stored as smi, so only 31 bits are usable.
+  using MayHaveInterestingSymbolsBit = base::BitField<bool, 0, 1, uint32_t>;
+  DECL_BOOLEAN_ACCESSORS(may_have_interesting_symbols)
+
+  static constexpr int kFlagsDefault = 0;
+
+  inline uint32_t flags() const;
+  inline void set_flags(uint32_t flags);
+
+  // Creates a new NameDictionary.
+  template <typename IsolateT>
+  V8_WARN_UNUSED_RESULT static Handle<NameDictionary> New(
+      IsolateT* isolate, int at_least_space_for,
+      AllocationType allocation = AllocationType::kYoung,
+      MinimumCapacity capacity_option = USE_DEFAULT_MINIMUM_CAPACITY);
+
   OBJECT_CONSTRUCTORS(NameDictionary,
                       BaseNameDictionary<NameDictionary, NameDictionaryShape>);
 };
 
-class V8_EXPORT_PRIVATE GlobalDictionaryShape : public NameDictionaryShape {
+class V8_EXPORT_PRIVATE GlobalDictionaryShape : public BaseNameDictionaryShape {
  public:
   static inline bool IsMatch(Handle<Name> key, Object other);
   static inline uint32_t HashForObject(ReadOnlyRoots roots, Object object);
 
-  static const int kEntrySize = 1;  // Overrides NameDictionaryShape::kEntrySize
   static const bool kMatchNeedsHoleCheck = true;
+  static const int kPrefixSize = 2;
+  static const int kEntrySize = 1;
 
   template <typename Dictionary>
   static inline PropertyDetails DetailsAt(Dictionary dict, InternalIndex entry);
@@ -254,7 +308,9 @@ class V8_EXPORT_PRIVATE GlobalDictionary
 class NumberDictionaryBaseShape : public BaseDictionaryShape<uint32_t> {
  public:
   static inline bool IsMatch(uint32_t key, Object other);
+  template <AllocationType allocation = AllocationType::kYoung>
   static inline Handle<Object> AsHandle(Isolate* isolate, uint32_t key);
+  template <AllocationType allocation = AllocationType::kOld>
   static inline Handle<Object> AsHandle(LocalIsolate* isolate, uint32_t key);
 
   static inline uint32_t Hash(ReadOnlyRoots roots, uint32_t key);
@@ -327,6 +383,14 @@ class NumberDictionary
       Handle<Object> value,
       Handle<JSObject> dictionary_holder = Handle<JSObject>::null(),
       PropertyDetails details = PropertyDetails::Empty());
+  // This method is only safe to use when it is guaranteed that the dictionary
+  // doesn't need to grow.
+  // The number of elements stored and the maximum index is not updated. Use
+  // |SetInitialNumberOfElements| and |UpdateMaxNumberKey| to update the number
+  // in one go.
+  static void UncheckedSet(Isolate* isolate,
+                           Handle<NumberDictionary> dictionary, uint32_t key,
+                           Handle<Object> value);
 
   static const int kMaxNumberKeyIndex = kPrefixStartIndex;
   void UpdateMaxNumberKey(uint32_t key, Handle<JSObject> dictionary_holder);

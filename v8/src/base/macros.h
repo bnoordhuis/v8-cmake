@@ -10,7 +10,6 @@
 
 #include "src/base/compiler-specific.h"
 #include "src/base/logging.h"
-#include "src/base/platform/wrappers.h"
 
 // No-op macro which is used to work around MSVC's funky VA_ARGS support.
 #define EXPAND(x) x
@@ -23,12 +22,7 @@
 // Creates an unique identifier. Useful for scopes to avoid shadowing names.
 #define UNIQUE_IDENTIFIER(base) CONCAT(base, __COUNTER__)
 
-// TODO(all) Replace all uses of this macro with C++'s offsetof. To do that, we
-// have to make sure that only standard-layout types and simple field
-// designators are used.
-#define OFFSET_OF(type, field) \
-  (reinterpret_cast<intptr_t>(&(reinterpret_cast<type*>(16)->field)) - 16)
-
+#define OFFSET_OF(type, field) offsetof(type, field)
 
 // The arraysize(arr) macro returns the # of elements in an array arr.
 // The expression is a compile-time constant, and therefore can be
@@ -105,6 +99,7 @@ char (&ArraySizeHelper(const T (&array)[N]))[N];
 //
 // WARNING: if Dest or Source is a non-POD type, the result of the memcpy
 // is likely to surprise you.
+namespace v8::base {
 template <class Dest, class Source>
 V8_INLINE Dest bit_cast(Source const& source) {
   static_assert(sizeof(Dest) == sizeof(Source),
@@ -113,6 +108,7 @@ V8_INLINE Dest bit_cast(Source const& source) {
   memcpy(&dest, &source, sizeof(dest));
   return dest;
 }
+}  // namespace v8::base
 
 // Explicitly declare the assignment operator as deleted.
 // Note: This macro is deprecated and will be removed soon. Please explicitly
@@ -188,11 +184,6 @@ V8_INLINE Dest bit_cast(Source const& source) {
 #define DISABLE_CFI_ICALL V8_CLANG_NO_SANITIZE("cfi-icall")
 #endif
 
-// A convenience wrapper around static_assert without a string message argument.
-// Once C++17 becomes the default, this macro can be removed in favor of the
-// new static_assert(condition) overload.
-#define STATIC_ASSERT(test) static_assert(test, #test)
-
 namespace v8 {
 namespace base {
 
@@ -243,7 +234,7 @@ struct is_trivially_copyable {
 // The arguments are guaranteed to be evaluated from left to right.
 struct Use {
   template <typename T>
-  Use(T&&) {}  // NOLINT(runtime/explicit)
+  constexpr Use(T&&) {}  // NOLINT(runtime/explicit)
 };
 #define USE(...)                                                   \
   do {                                                             \
@@ -324,28 +315,33 @@ inline uint64_t make_uint64(uint32_t high, uint32_t low) {
 // Return the largest multiple of m which is <= x.
 template <typename T>
 inline T RoundDown(T x, intptr_t m) {
-  STATIC_ASSERT(std::is_integral<T>::value);
+  static_assert(std::is_integral<T>::value);
   // m must be a power of two.
   DCHECK(m != 0 && ((m & (m - 1)) == 0));
   return x & static_cast<T>(-m);
 }
 template <intptr_t m, typename T>
 constexpr inline T RoundDown(T x) {
-  STATIC_ASSERT(std::is_integral<T>::value);
+  static_assert(std::is_integral<T>::value);
   // m must be a power of two.
-  STATIC_ASSERT(m != 0 && ((m & (m - 1)) == 0));
+  static_assert(m != 0 && ((m & (m - 1)) == 0));
   return x & static_cast<T>(-m);
 }
 
 // Return the smallest multiple of m which is >= x.
 template <typename T>
 inline T RoundUp(T x, intptr_t m) {
-  STATIC_ASSERT(std::is_integral<T>::value);
-  return RoundDown<T>(static_cast<T>(x + m - 1), m);
+  static_assert(std::is_integral<T>::value);
+  DCHECK_GE(x, 0);
+  DCHECK_GE(std::numeric_limits<T>::max() - x, m - 1);  // Overflow check.
+  return RoundDown<T>(static_cast<T>(x + (m - 1)), m);
 }
+
 template <intptr_t m, typename T>
 constexpr inline T RoundUp(T x) {
-  STATIC_ASSERT(std::is_integral<T>::value);
+  static_assert(std::is_integral<T>::value);
+  DCHECK_GE(x, 0);
+  DCHECK_GE(std::numeric_limits<T>::max() - x, m - 1);  // Overflow check.
   return RoundDown<m, T>(static_cast<T>(x + (m - 1)));
 }
 
@@ -427,6 +423,15 @@ bool is_inbounds(float_t v) {
 #else
 #define IF_TSAN(V, ...)
 #endif  // V8_ENABLE_WEBASSEMBLY
+
+// Defines IF_TARGET_ARCH_64_BIT, to be used in macro lists for elements that
+// should only be there if the target architecture is a 64-bit one.
+#if V8_TARGET_ARCH_64_BIT
+// EXPAND is needed to work around MSVC's broken __VA_ARGS__ expansion.
+#define IF_TARGET_ARCH_64_BIT(V, ...) EXPAND(V(__VA_ARGS__))
+#else
+#define IF_TARGET_ARCH_64_BIT(V, ...)
+#endif
 
 #ifdef GOOGLE3
 // Disable FRIEND_TEST macro in Google3.

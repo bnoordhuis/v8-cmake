@@ -11,7 +11,6 @@
 #include "src/compiler/graph-reducer.h"
 #include "src/compiler/simplified-operator.h"
 #include "src/handles/maybe-handles.h"
-#include "src/zone/zone-handle-set.h"
 
 namespace v8 {
 namespace internal {
@@ -30,8 +29,12 @@ class JSGraph;
 class V8_EXPORT_PRIVATE LoadElimination final
     : public NON_EXPORTED_BASE(AdvancedReducer) {
  public:
-  LoadElimination(Editor* editor, JSGraph* jsgraph, Zone* zone)
-      : AdvancedReducer(editor), node_states_(zone), jsgraph_(jsgraph) {}
+  LoadElimination(Editor* editor, JSHeapBroker* broker, JSGraph* jsgraph,
+                  Zone* zone)
+      : AdvancedReducer(editor),
+        broker_(broker),
+        node_states_(zone),
+        jsgraph_(jsgraph) {}
   ~LoadElimination() final = default;
   LoadElimination(const LoadElimination&) = delete;
   LoadElimination& operator=(const LoadElimination&) = delete;
@@ -136,8 +139,12 @@ class V8_EXPORT_PRIVATE LoadElimination final
 
     AbstractField const* Extend(Node* object, FieldInfo info,
                                 Zone* zone) const {
-      AbstractField* that = zone->New<AbstractField>(zone);
-      that->info_for_node_ = this->info_for_node_;
+      AbstractField* that = zone->New<AbstractField>(*this);
+      if (that->info_for_node_.size() >= kMaxTrackedObjects) {
+        // We are tracking too many objects, which leads to bad performance.
+        // Delete one to avoid the map from becoming bigger.
+        that->info_for_node_.erase(that->info_for_node_.begin());
+      }
       that->info_for_node_[object] = info;
       return that;
     }
@@ -171,17 +178,18 @@ class V8_EXPORT_PRIVATE LoadElimination final
   };
 
   static size_t const kMaxTrackedFields = 32;
+  static size_t const kMaxTrackedObjects = 100;
 
   // Abstract state to approximate the current map of an object along the
   // effect paths through the graph.
   class AbstractMaps final : public ZoneObject {
    public:
     explicit AbstractMaps(Zone* zone);
-    AbstractMaps(Node* object, ZoneHandleSet<Map> maps, Zone* zone);
+    AbstractMaps(Node* object, ZoneRefSet<Map> maps, Zone* zone);
 
-    AbstractMaps const* Extend(Node* object, ZoneHandleSet<Map> maps,
+    AbstractMaps const* Extend(Node* object, ZoneRefSet<Map> maps,
                                Zone* zone) const;
-    bool Lookup(Node* object, ZoneHandleSet<Map>* object_maps) const;
+    bool Lookup(Node* object, ZoneRefSet<Map>* object_maps) const;
     AbstractMaps const* Kill(const AliasStateInfo& alias_info,
                              Zone* zone) const;
     bool Equals(AbstractMaps const* that) const {
@@ -192,7 +200,7 @@ class V8_EXPORT_PRIVATE LoadElimination final
     void Print() const;
 
    private:
-    ZoneMap<Node*, ZoneHandleSet<Map>> info_for_node_;
+    ZoneMap<Node*, ZoneRefSet<Map>> info_for_node_;
   };
 
   class IndexRange {
@@ -206,10 +214,10 @@ class V8_EXPORT_PRIVATE LoadElimination final
     }
     static IndexRange Invalid() { return IndexRange(); }
 
-    bool operator==(const IndexRange& other) {
+    bool operator==(const IndexRange& other) const {
       return begin_ == other.begin_ && end_ == other.end_;
     }
-    bool operator!=(const IndexRange& other) { return !(*this == other); }
+    bool operator!=(const IndexRange& other) const { return !(*this == other); }
 
     struct Iterator {
       int i;
@@ -233,12 +241,12 @@ class V8_EXPORT_PRIVATE LoadElimination final
     bool Equals(AbstractState const* that) const;
     void Merge(AbstractState const* that, Zone* zone);
 
-    AbstractState const* SetMaps(Node* object, ZoneHandleSet<Map> maps,
+    AbstractState const* SetMaps(Node* object, ZoneRefSet<Map> maps,
                                  Zone* zone) const;
     AbstractState const* KillMaps(Node* object, Zone* zone) const;
     AbstractState const* KillMaps(const AliasStateInfo& alias_info,
                                   Zone* zone) const;
-    bool LookupMaps(Node* object, ZoneHandleSet<Map>* object_maps) const;
+    bool LookupMaps(Node* object, ZoneRefSet<Map>* object_maps) const;
 
     AbstractState const* AddField(Node* object, IndexRange index,
                                   FieldInfo info, Zone* zone) const;
@@ -289,7 +297,7 @@ class V8_EXPORT_PRIVATE LoadElimination final
     AbstractState const* Get(Node* node) const;
     void Set(Node* node, AbstractState const* state);
 
-    Zone* zone() const { return info_for_node_.get_allocator().zone(); }
+    Zone* zone() const { return info_for_node_.zone(); }
 
    private:
     ZoneVector<AbstractState const*> info_for_node_;
@@ -333,8 +341,10 @@ class V8_EXPORT_PRIVATE LoadElimination final
   Factory* factory() const;
   Graph* graph() const;
   JSGraph* jsgraph() const { return jsgraph_; }
+  JSHeapBroker* broker() const { return broker_; }
   Zone* zone() const { return node_states_.zone(); }
 
+  JSHeapBroker* broker_;
   AbstractStateForEffectNodes node_states_;
   JSGraph* const jsgraph_;
 };

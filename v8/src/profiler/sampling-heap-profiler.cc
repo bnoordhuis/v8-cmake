@@ -25,7 +25,7 @@ namespace internal {
 // Let u be a uniformly distributed random number between 0 and 1, then
 // next_sample = (- ln u) / λ
 intptr_t SamplingHeapProfiler::Observer::GetNextSampleInterval(uint64_t rate) {
-  if (FLAG_sampling_heap_profiler_suppress_randomness)
+  if (v8_flags.sampling_heap_profiler_suppress_randomness)
     return static_cast<intptr_t>(rate);
   double u = random_->NextDouble();
   double next = (-base::ieee754::log(u)) * rate;
@@ -81,7 +81,12 @@ void SamplingHeapProfiler::SampleObject(Address soon_object, size_t size) {
   HeapObject heap_object = HeapObject::FromAddress(soon_object);
   Handle<Object> obj(heap_object, isolate_);
 
-  Local<v8::Value> loc = v8::Utils::ToLocal(obj);
+  // Since soon_object can be in code space we can't use v8::Utils::ToLocal.
+  DCHECK(obj.is_null() ||
+         (obj->IsSmi() ||
+          (V8_EXTERNAL_CODE_SPACE_BOOL && IsCodeSpaceObject(heap_object)) ||
+          !obj->IsTheHole()));
+  auto loc = Local<v8::Value>::FromSlot(obj.location());
 
   AllocationNode* node = AddStack();
   node->allocations_[size]++;
@@ -95,6 +100,19 @@ void SamplingHeapProfiler::SampleObject(Address soon_object, size_t size) {
 void SamplingHeapProfiler::OnWeakCallback(
     const WeakCallbackInfo<Sample>& data) {
   Sample* sample = data.GetParameter();
+  Heap* heap = reinterpret_cast<Isolate*>(data.GetIsolate())->heap();
+  bool is_minor_gc = Heap::IsYoungGenerationCollector(
+      heap->current_or_last_garbage_collector());
+  bool should_keep_sample =
+      is_minor_gc
+          ? (sample->profiler->flags_ &
+             v8::HeapProfiler::kSamplingIncludeObjectsCollectedByMinorGC)
+          : (sample->profiler->flags_ &
+             v8::HeapProfiler::kSamplingIncludeObjectsCollectedByMajorGC);
+  if (should_keep_sample) {
+    sample->global.Reset();
+    return;
+  }
   AllocationNode* node = sample->owner;
   DCHECK_GT(node->allocations_[sample->size], 0);
   node->allocations_[sample->size]--;
@@ -132,7 +150,7 @@ SamplingHeapProfiler::AllocationNode* SamplingHeapProfiler::AddStack() {
   AllocationNode* node = &profile_root_;
 
   std::vector<SharedFunctionInfo> stack;
-  JavaScriptFrameIterator frame_it(isolate_);
+  JavaScriptStackFrameIterator frame_it(isolate_);
   int frames_captured = 0;
   bool found_arguments_marker_frames = false;
   while (!frame_it.done() && frames_captured < stack_depth_) {
@@ -228,8 +246,10 @@ v8::AllocationProfile::Node* SamplingHeapProfiler::TranslateAllocationNode(
         script_name = ToApiHandle<v8::String>(
             isolate_->factory()->InternalizeUtf8String(names_->GetName(name)));
       }
-      line = 1 + Script::GetLineNumber(script, node->script_position_);
-      column = 1 + Script::GetColumnNumber(script, node->script_position_);
+      Script::PositionInfo pos_info;
+      Script::GetPositionInfo(script, node->script_position_, &pos_info);
+      line = pos_info.line + 1;
+      column = pos_info.column + 1;
     }
   }
   for (auto alloc : node->allocations_) {
@@ -257,7 +277,7 @@ v8::AllocationProfile::Node* SamplingHeapProfiler::TranslateAllocationNode(
 v8::AllocationProfile* SamplingHeapProfiler::GetAllocationProfile() {
   if (flags_ & v8::HeapProfiler::kSamplingForceGC) {
     isolate_->heap()->CollectAllGarbage(
-        Heap::kNoGCFlags, GarbageCollectionReason::kSamplingProfiler);
+        GCFlag::kNoFlags, GarbageCollectionReason::kSamplingProfiler);
   }
   // To resolve positions to line/column numbers, we will need to look up
   // scripts. Build a map to allow fast mapping from script id to script.

@@ -9,13 +9,12 @@
 #include "src/execution/isolate.h"
 #include "src/flags/flags.h"
 #include "src/handles/persistent-handles.h"
+#include "src/maglev/maglev-code-generator.h"
 #include "src/maglev/maglev-compilation-unit.h"
-#include "src/maglev/maglev-compiler.h"
 #include "src/maglev/maglev-concurrent-dispatcher.h"
 #include "src/maglev/maglev-graph-labeller.h"
 #include "src/objects/js-function-inl.h"
 #include "src/utils/identity-map.h"
-#include "src/utils/locked-queue-inl.h"
 
 namespace v8 {
 namespace internal {
@@ -29,11 +28,8 @@ class V8_NODISCARD MaglevCompilationHandleScope final {
  public:
   MaglevCompilationHandleScope(Isolate* isolate,
                                maglev::MaglevCompilationInfo* info)
-      : info_(info),
-        persistent_(isolate),
-        exported_info_(info),
-        canonical_(isolate, &exported_info_) {
-    info->ReopenHandlesInNewHandleScope(isolate);
+      : info_(info), persistent_(isolate), exported_info_(info) {
+    info->ReopenAndCanonicalizeHandlesInNewScope(isolate);
   }
 
   ~MaglevCompilationHandleScope() {
@@ -44,24 +40,38 @@ class V8_NODISCARD MaglevCompilationHandleScope final {
   maglev::MaglevCompilationInfo* const info_;
   PersistentHandlesScope persistent_;
   ExportedMaglevCompilationInfo exported_info_;
-  CanonicalHandleScopeForMaglev canonical_;
 };
 
 }  // namespace
 
 MaglevCompilationInfo::MaglevCompilationInfo(Isolate* isolate,
-                                             Handle<JSFunction> function)
+                                             Handle<JSFunction> function,
+                                             BytecodeOffset osr_offset)
     : zone_(isolate->allocator(), kMaglevZoneName),
-      isolate_(isolate),
       broker_(new compiler::JSHeapBroker(
-          isolate, zone(), FLAG_trace_heap_broker, CodeKind::MAGLEV)),
-      shared_(function->shared(), isolate),
-      function_(function)
-#define V(Name) , Name##_(FLAG_##Name)
+          isolate, zone(), v8_flags.trace_heap_broker, CodeKind::MAGLEV)),
+      toplevel_function_(function),
+      osr_offset_(osr_offset)
+#define V(Name) , Name##_(v8_flags.Name)
           MAGLEV_COMPILATION_FLAG_LIST(V)
 #undef V
-{
-  DCHECK(FLAG_maglev);
+      ,
+      specialize_to_function_context_(
+          osr_offset == BytecodeOffset::None() &&
+          v8_flags.maglev_function_context_specialization &&
+          function->raw_feedback_cell().map() ==
+              ReadOnlyRoots(isolate).one_closure_cell_map()) {
+  DCHECK(v8_flags.maglev);
+  DCHECK_IMPLIES(osr_offset != BytecodeOffset::None(), v8_flags.maglev_osr);
+  canonical_handles_ = std::make_unique<CanonicalHandlesMap>(
+      isolate->heap(), ZoneAllocationPolicy(&zone_));
+  compiler::CurrentHeapBrokerScope current_broker(broker_.get());
+
+  collect_source_positions_ = isolate->NeedsDetailedOptimizedCodeLineInfo();
+  if (collect_source_positions_) {
+    SharedFunctionInfo::EnsureSourcePositionsAvailable(
+        isolate, handle(function->shared(), isolate));
+  }
 
   MaglevCompilationHandleScope compilation(isolate, this);
 
@@ -69,12 +79,12 @@ MaglevCompilationInfo::MaglevCompilationInfo(Isolate* isolate,
       zone()->New<compiler::CompilationDependencies>(broker(), zone());
   USE(deps);  // The deps register themselves in the heap broker.
 
+  broker()->AttachCompilationInfo(this);
+
   // Heap broker initialization may already use IsPendingAllocation.
   isolate->heap()->PublishPendingAllocations();
-
-  broker()->SetTargetNativeContextRef(
+  broker()->InitializeAndStartSerializing(
       handle(function->native_context(), isolate));
-  broker()->InitializeAndStartSerializing();
   broker()->StopSerializing();
 
   // Serialization may have allocated.
@@ -91,11 +101,29 @@ void MaglevCompilationInfo::set_graph_labeller(
   graph_labeller_.reset(graph_labeller);
 }
 
-void MaglevCompilationInfo::ReopenHandlesInNewHandleScope(Isolate* isolate) {
-  DCHECK(!shared_.is_null());
-  shared_ = handle(*shared_, isolate);
-  DCHECK(!function_.is_null());
-  function_ = handle(*function_, isolate);
+void MaglevCompilationInfo::set_code_generator(
+    std::unique_ptr<MaglevCodeGenerator> code_generator) {
+  code_generator_ = std::move(code_generator);
+}
+
+namespace {
+template <typename T>
+Handle<T> CanonicalHandle(CanonicalHandlesMap* canonical_handles, T object,
+                          Isolate* isolate) {
+  DCHECK_NOT_NULL(canonical_handles);
+  DCHECK(PersistentHandlesScope::IsActive(isolate));
+  auto find_result = canonical_handles->FindOrInsert(object);
+  if (!find_result.already_exists) {
+    *find_result.entry = Handle<T>(object, isolate).location();
+  }
+  return Handle<T>(*find_result.entry);
+}
+}  // namespace
+
+void MaglevCompilationInfo::ReopenAndCanonicalizeHandlesInNewScope(
+    Isolate* isolate) {
+  toplevel_function_ =
+      CanonicalHandle(canonical_handles_.get(), *toplevel_function_, isolate);
 }
 
 void MaglevCompilationInfo::set_persistent_handles(

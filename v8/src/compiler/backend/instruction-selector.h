@@ -8,7 +8,6 @@
 #include <map>
 
 #include "src/codegen/cpu-features.h"
-#include "src/common/globals.h"
 #include "src/compiler/backend/instruction-scheduler.h"
 #include "src/compiler/backend/instruction.h"
 #include "src/compiler/common-operator.h"
@@ -16,6 +15,7 @@
 #include "src/compiler/linkage.h"
 #include "src/compiler/machine-operator.h"
 #include "src/compiler/node.h"
+#include "src/utils/bit-vector.h"
 #include "src/zone/zone-containers.h"
 
 #if V8_ENABLE_WEBASSEMBLY
@@ -79,8 +79,8 @@ class FlagsContinuation final {
 
   // Creates a new flags continuation for a wasm trap.
   static FlagsContinuation ForTrap(FlagsCondition condition, TrapId trap_id,
-                                   Node* result) {
-    return FlagsContinuation(condition, trap_id, result);
+                                   NodeId node_id, Node* frame_state) {
+    return FlagsContinuation(condition, trap_id, node_id, frame_state);
   }
 
   static FlagsContinuation ForSelect(FlagsCondition condition, Node* result,
@@ -103,7 +103,7 @@ class FlagsContinuation final {
     return reason_;
   }
   NodeId node_id() const {
-    DCHECK(IsDeoptimize());
+    DCHECK(IsDeoptimize() || IsTrap());
     return node_id_;
   }
   FeedbackSource const& feedback() const {
@@ -111,7 +111,7 @@ class FlagsContinuation final {
     return feedback_;
   }
   Node* frame_state() const {
-    DCHECK(IsDeoptimize());
+    DCHECK(IsDeoptimize() || IsTrap());
     return frame_state_or_result_;
   }
   Node* result() const {
@@ -218,13 +218,13 @@ class FlagsContinuation final {
     DCHECK_NOT_NULL(result);
   }
 
-  FlagsContinuation(FlagsCondition condition, TrapId trap_id, Node* result)
+  FlagsContinuation(FlagsCondition condition, TrapId trap_id, NodeId node_id,
+                    Node* frame_state)
       : mode_(kFlags_trap),
         condition_(condition),
-        frame_state_or_result_(result),
-        trap_id_(trap_id) {
-    DCHECK_NOT_NULL(result);
-  }
+        node_id_(node_id),
+        frame_state_or_result_(frame_state),
+        trap_id_(trap_id) {}
 
   FlagsContinuation(FlagsCondition condition, Node* result, Node* true_value,
                     Node* false_value)
@@ -292,7 +292,7 @@ class V8_EXPORT_PRIVATE InstructionSelector final {
       size_t* max_pushed_argument_count,
       SourcePositionMode source_position_mode = kCallSourcePositions,
       Features features = SupportedFeatures(),
-      EnableScheduling enable_scheduling = FLAG_turbo_instruction_scheduling
+      EnableScheduling enable_scheduling = v8_flags.turbo_instruction_scheduling
                                                ? kEnableScheduling
                                                : kDisableScheduling,
       EnableRootsRelativeAddressing enable_roots_relative_addressing =
@@ -300,7 +300,7 @@ class V8_EXPORT_PRIVATE InstructionSelector final {
       EnableTraceTurboJson trace_turbo = kDisableTraceTurboJson);
 
   // Visit code for the entire graph with the included schedule.
-  bool SelectInstructions();
+  base::Optional<BailoutReason> SelectInstructions();
 
   void StartBlock(RpoNumber rpo);
   void EndBlock(RpoNumber rpo);
@@ -407,15 +407,12 @@ class V8_EXPORT_PRIVATE InstructionSelector final {
   // Used in pattern matching during code generation.
   // Check if {node} can be covered while generating code for the current
   // instruction. A node can be covered if the {user} of the node has the only
-  // edge and the two are in the same basic block.
-  // Before fusing two instructions a and b, it is useful to check that
-  // CanCover(a, b) holds. If this is not the case, code for b must still be
-  // generated for other users, and fusing is unlikely to improve performance.
+  // edge, the two are in the same basic block, and there are no side-effects
+  // in-between. The last check is crucial for soundness.
+  // For pure nodes, CanCover(a,b) is checked to avoid duplicated execution:
+  // If this is not the case, code for b must still be generated for other
+  // users, and fusing is unlikely to improve performance.
   bool CanCover(Node* user, Node* node) const;
-  // CanCover is not transitive.  The counter example are Nodes A,B,C such that
-  // CanCover(A, B) and CanCover(B,C) and B is pure: The the effect level of A
-  // and B might differ. CanCoverTransitively does the additional checks.
-  bool CanCoverTransitively(Node* user, Node* node, Node* node_input) const;
 
   // Used in pattern matching during code generation.
   // This function checks that {node} and {user} are in the same basic block,
@@ -487,7 +484,8 @@ class V8_EXPORT_PRIVATE InstructionSelector final {
   void AppendDeoptimizeArguments(InstructionOperandVector* args,
                                  DeoptimizeReason reason, NodeId node_id,
                                  FeedbackSource const& feedback,
-                                 FrameState frame_state);
+                                 FrameState frame_state,
+                                 DeoptimizeKind kind = DeoptimizeKind::kEager);
 
   void EmitTableSwitch(const SwitchInfo& sw,
                        InstructionOperand const& index_operand);
@@ -527,6 +525,9 @@ class V8_EXPORT_PRIVATE InstructionSelector final {
   }
   void MarkAsSimd128(Node* node) {
     MarkAsRepresentation(MachineRepresentation::kSimd128, node);
+  }
+  void MarkAsSimd256(Node* node) {
+    MarkAsRepresentation(MachineRepresentation::kSimd256, node);
   }
   void MarkAsTagged(Node* node) {
     MarkAsRepresentation(MachineRepresentation::kTagged, node);
@@ -598,7 +599,8 @@ class V8_EXPORT_PRIVATE InstructionSelector final {
 
 #define DECLARE_GENERATOR(x) void Visit##x(Node* node);
   MACHINE_OP_LIST(DECLARE_GENERATOR)
-  MACHINE_SIMD_OP_LIST(DECLARE_GENERATOR)
+  MACHINE_SIMD128_OP_LIST(DECLARE_GENERATOR)
+  MACHINE_SIMD256_OP_LIST(DECLARE_GENERATOR)
 #undef DECLARE_GENERATOR
 
   // Visit the load node with a value and opcode to replace with.
@@ -631,6 +633,8 @@ class V8_EXPORT_PRIVATE InstructionSelector final {
   void VisitStaticAssert(Node* node);
   void VisitDeadValue(Node* node);
 
+  void TryPrepareScheduleFirstProjection(Node* maybe_projection);
+
   void VisitStackPointerGreaterThan(Node* node, FlagsContinuation* cont);
 
   void VisitWordCompareZero(Node* user, Node* value, FlagsContinuation* cont);
@@ -639,6 +643,16 @@ class V8_EXPORT_PRIVATE InstructionSelector final {
                             const CallDescriptor* call_descriptor, Node* node);
   void EmitPrepareResults(ZoneVector<compiler::PushParameter>* results,
                           const CallDescriptor* call_descriptor, Node* node);
+
+  // In LOONG64, calling convention uses free GP param register to pass
+  // floating-point arguments when no FP param register is available. But
+  // gap does not support moving from FPR to GPR, so we add EmitMoveFPRToParam
+  // to complete movement.
+  void EmitMoveFPRToParam(InstructionOperand* op, LinkageLocation location);
+  // Moving floating-point param from GP param register to FPR to participate in
+  // subsequent operations, whether CallCFunction or normal floating-point
+  // operations.
+  void EmitMoveParamToFPR(Node* node, int index);
 
   bool CanProduceSignalingNaN(Node* node);
 
@@ -736,9 +750,10 @@ class V8_EXPORT_PRIVATE InstructionSelector final {
   InstructionOperandVector continuation_inputs_;
   InstructionOperandVector continuation_outputs_;
   InstructionOperandVector continuation_temps_;
-  BoolVector defined_;
-  BoolVector used_;
+  BitVector defined_;
+  BitVector used_;
   IntVector effect_level_;
+  int current_effect_level_;
   IntVector virtual_registers_;
   IntVector virtual_register_rename_;
   InstructionScheduler* scheduler_;

@@ -25,7 +25,7 @@ class MaglevCompilationInfo;
 // that should still be addressed soon:
 // - Full tracing support through --trace-opt.
 // - Concurrent codegen.
-// - Concurrent Code object creation (optional?).
+// - Concurrent InstructionStream object creation (optional?).
 // - Test support for concurrency (see %FinalizeOptimization).
 
 // Exports needed functionality without exposing implementation details.
@@ -46,8 +46,9 @@ class ExportedMaglevCompilationInfo final {
 class MaglevCompilationJob final : public OptimizedCompilationJob {
  public:
   static std::unique_ptr<MaglevCompilationJob> New(Isolate* isolate,
-                                                   Handle<JSFunction> function);
-  virtual ~MaglevCompilationJob();
+                                                   Handle<JSFunction> function,
+                                                   BytecodeOffset osr_offset);
+  ~MaglevCompilationJob() override;
 
   Status PrepareJobImpl(Isolate* isolate) override;
   Status ExecuteJobImpl(RuntimeCallStats* stats,
@@ -55,6 +56,15 @@ class MaglevCompilationJob final : public OptimizedCompilationJob {
   Status FinalizeJobImpl(Isolate* isolate) override;
 
   Handle<JSFunction> function() const;
+  BytecodeOffset osr_offset() const;
+
+  bool specialize_to_function_context() const;
+
+  base::TimeDelta time_taken_to_prepare() { return time_taken_to_prepare_; }
+  base::TimeDelta time_taken_to_execute() { return time_taken_to_execute_; }
+  base::TimeDelta time_taken_to_finalize() { return time_taken_to_finalize_; }
+
+  void RecordCompilationStats(Isolate* isolate) const;
 
  private:
   explicit MaglevCompilationJob(std::unique_ptr<MaglevCompilationInfo>&& info);
@@ -66,7 +76,7 @@ class MaglevCompilationJob final : public OptimizedCompilationJob {
 
 // The public API for Maglev concurrent compilation.
 // Keep this as minimal as possible.
-class MaglevConcurrentDispatcher final {
+class V8_EXPORT_PRIVATE MaglevConcurrentDispatcher final {
   class JobTask;
 
   // TODO(jgruber): There's no reason to use locking queues here, we only use
@@ -82,6 +92,8 @@ class MaglevConcurrentDispatcher final {
 
   // Called from the main thread.
   void FinalizeFinishedJobs();
+
+  void AwaitCompileJobs();
 
   bool is_enabled() const { return static_cast<bool>(job_handle_); }
 

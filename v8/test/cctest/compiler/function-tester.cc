@@ -22,8 +22,7 @@ namespace compiler {
 
 FunctionTester::FunctionTester(const char* source, uint32_t flags)
     : isolate(main_isolate()),
-      canonical(isolate),
-      function((FLAG_allow_natives_syntax = true, NewFunction(source))),
+      function((v8_flags.allow_natives_syntax = true, NewFunction(source))),
       flags_(flags) {
   Compile(function);
   const uint32_t supported_flags = OptimizedCompilationInfo::kInlining;
@@ -32,7 +31,6 @@ FunctionTester::FunctionTester(const char* source, uint32_t flags)
 
 FunctionTester::FunctionTester(Graph* graph, int param_count)
     : isolate(main_isolate()),
-      canonical(isolate),
       function(NewFunction(BuildFunction(param_count).c_str())),
       flags_(0) {
   CompileGraph(graph);
@@ -40,13 +38,13 @@ FunctionTester::FunctionTester(Graph* graph, int param_count)
 
 FunctionTester::FunctionTester(Handle<Code> code, int param_count)
     : isolate(main_isolate()),
-      canonical(isolate),
-      function((FLAG_allow_natives_syntax = true,
+      function((v8_flags.allow_natives_syntax = true,
                 NewFunction(BuildFunction(param_count).c_str()))),
       flags_(0) {
   CHECK(!code.is_null());
+  CHECK(code->IsCode());
   Compile(function);
-  function->set_code(ToCodeT(*code), kReleaseStore);
+  function->set_code(*code, kReleaseStore);
 }
 
 FunctionTester::FunctionTester(Handle<Code> code) : FunctionTester(code, 0) {}

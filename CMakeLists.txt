@@ -9,14 +9,14 @@ if(MSVC)
   enable_language(ASM_MASM)
   set_property(
     SOURCE ${PROJECT_BINARY_DIR}/embedded.S
-           v8/src/heap/base/asm/arm64/push_registers_masm.S
-           v8/src/heap/base/asm/ia32/push_registers_masm.S
-           v8/src/heap/base/asm/x64/push_registers_masm.S
+           v8/src/heap/base/asm/arm64/push_registers_masm.asm
+           v8/src/heap/base/asm/ia32/push_registers_masm.asm
+           v8/src/heap/base/asm/x64/push_registers_masm.asm
     PROPERTY LANGUAGE ASM_MASM)
 
 endif()
 
-add_definitions("-DV8_ENABLE_WEBASSEMBLY -DV8_ADVANCED_BIGINT_ALGORITHMS")
+add_definitions("-DV8_ENABLE_WEBASSEMBLY -DV8_ADVANCED_BIGINT_ALGORITHMS -DV8_ENABLE_WASM_SIMD256_REVEC")
 if(WIN32)
   add_definitions("-DNOMINMAX -DV8_ENABLE_SYSTEM_INSTRUMENTATION")
   # todo: for zlib, need to extract zlib when refactor
@@ -65,13 +65,21 @@ set(is-msvc $<CXX_COMPILER_ID:MSVC>)
 # FIXME obviously
 set(is-arm 0)
 set(is-arm64 0)
-if (CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "arm64")
+if (CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "arm64" OR CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "aarch64")
   set(is-arm64 1)
 endif ()
 set(is-ia32 0)
 set(is-mips 0)
 set(is-mips64 0)
 set(is-ppc 0)
+set(is-ppc64 0)
+if (CMAKE_SYSTEM_PROCESSOR MATCHES "^(ppc|powerpc)")
+  if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+    set(is-ppc64 1)
+  else()
+    set(is-ppc 1)
+  endif()
+endif ()
 
 set(is-s390 $<STREQUAL:${CMAKE_SYSTEM_PROCESSOR},S390>)
 string(CONCAT is-x64 $<OR:
@@ -92,6 +100,8 @@ set(
   $<${is-win}:V8_TARGET_OS_WIN>
   $<${is-x64}:V8_TARGET_ARCH_X64>
   $<${is-arm64}:V8_TARGET_ARCH_ARM64>
+  $<${is-ppc}:V8_TARGET_ARCH_PPC>
+  $<${is-ppc64}:V8_TARGET_ARCH_PPC64>
   $<${is-win}:NOMINMAX>
   $<$<AND:${is-win},${is-x64}>:V8_OS_WIN_X64>
   $<$<BOOL:${V8_ENABLE_CONCURRENT_MARKING}>:V8_CONCURRENT_MARKING>
@@ -112,6 +122,12 @@ set(enable-exceptions
   $<$<CXX_COMPILER_ID:GNU>:-fexceptions>
 )
 
+set(enable-fpic
+  $<$<CXX_COMPILER_ID:AppleClang>:-fPIC>
+  $<$<CXX_COMPILER_ID:Clang>:-fPIC>
+  $<$<CXX_COMPILER_ID:GNU>:-fPIC>
+)
+
 #
 # d8
 #
@@ -130,6 +146,9 @@ add_executable(
 
 target_compile_definitions(d8 PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 target_compile_options(d8 PRIVATE ${disable-exceptions})
+if(enable-fPIC)
+  target_compile_options(d8 PRIVATE ${enable-fpic})
+endif()
 
 target_include_directories(d8
   PUBLIC
@@ -148,6 +167,47 @@ target_link_libraries(d8
     v8_libplatform
 )
 
+# add shell and hello-world
+add_executable(
+        shell
+        v8/samples/shell.cc
+)
+target_include_directories(shell
+        PUBLIC
+        $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/v8/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+        PRIVATE
+        $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/v8>
+        )
+target_link_libraries(shell
+        PRIVATE
+        v8_base_without_compiler
+        v8_compiler
+        v8_snapshot
+        v8_inspector
+        v8_libplatform
+        )
+
+add_executable(
+        hello-world
+        v8/samples/hello-world.cc
+)
+target_include_directories(hello-world
+        PUBLIC
+        $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/v8/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+        PRIVATE
+        $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/v8>
+        )
+target_link_libraries(hello-world
+        PRIVATE
+        v8_base_without_compiler
+        v8_compiler
+        v8_snapshot
+        v8_inspector
+        v8_libplatform
+        )
+
 # more granular library support
 add_library(v8-i18n-support OBJECT)
 set_property(TARGET v8-i18n-support PROPERTY EXCLUDE_FROM_ALL ON)
@@ -158,6 +218,7 @@ list(APPEND i18n-sources
   v8/src/objects/js-break-iterator.cc
   v8/src/objects/js-collator.cc
   v8/src/objects/js-date-time-format.cc
+  v8/src/objects/js-duration-format.cc
   v8/src/objects/js-display-names.cc
   v8/src/objects/js-list-format.cc
   v8/src/objects/js-locale.cc
@@ -230,9 +291,9 @@ list(REMOVE_ITEM heap-sources
 
 if(WIN32)
   list(APPEND heap-sources
-    $<${is-arm64}:v8/src/heap/base/asm/arm64/push_registers_masm.S>
-    $<${is-ia32}:v8/src/heap/base/asm/ia32/push_registers_masm.S>
-    $<${is-x64}:v8/src/heap/base/asm/x64/push_registers_masm.S>
+    $<${is-arm64}:v8/src/heap/base/asm/arm64/push_registers_masm.asm>
+    $<${is-ia32}:v8/src/heap/base/asm/ia32/push_registers_masm.asm>
+    $<${is-x64}:v8/src/heap/base/asm/x64/push_registers_masm.asm>
   )
 else()
   list(APPEND heap-sources
@@ -252,8 +313,11 @@ list(REMOVE_ITEM builtin-sources
   v8/src/builtins/builtins-intl.cc
 )
 
-list(REMOVE_ITEM diagnostic-sources v8/src/diagnostics/unwinding-info-win64.cc)
-list(REMOVE_ITEM diagnostic-sources v8/src/diagnostics/system-jit-win.cc)
+if (NOT WIN32)
+  list(REMOVE_ITEM diagnostic-sources v8/src/diagnostics/unwinding-info-win64.cc)
+endif()
+list(REMOVE_ITEM diagnostic-sources v8/src/diagnostics/etw-jit-win.cc)
+
 list(REMOVE_ITEM object-sources ${i18n-sources})
 list(REMOVE_ITEM regexp-sources v8/src/regexp/gen-regexp-special-case.cc)
 list(REMOVE_ITEM runtime-sources v8/src/runtime/runtime-intl.cc)
@@ -271,7 +335,6 @@ add_library(v8_base_without_compiler STATIC
   $<${is-posix}:v8/src/trap-handler/handler-inside-posix.cc>
   $<${is-posix}:v8/src/trap-handler/handler-outside-posix.cc>
   $<$<AND:${is-x64},${is-win}>:v8/src/diagnostics/unwinding-info-win64.cc>
-  $<$<AND:${is-x64},${is-win}>:v8/src/diagnostics/system-jit-win.cc>
   $<$<AND:${is-x64},${is-win}>:v8/src/trap-handler/handler-inside-win.cc>
   $<$<AND:${is-x64},${is-win}>:v8/src/trap-handler/handler-outside-win.cc>
   $<${is-x64}:v8/src/codegen/x64/assembler-x64.cc>
@@ -304,6 +367,21 @@ add_library(v8_base_without_compiler STATIC
   $<${is-arm64}:v8/src/diagnostics/arm64/eh-frame-arm64.cc>
   $<${is-arm64}:v8/src/execution/arm64/frame-constants-arm64.cc>
   $<${is-arm64}:v8/src/regexp/arm64/regexp-macro-assembler-arm64.cc>
+  $<$<AND:${is-ppc},${is-ppc64}>:v8/src/codegen/ppc/assembler-ppc.cc>
+  $<$<AND:${is-ppc},${is-ppc64}>:v8/src/codegen/ppc/constants-ppc.cc>
+  $<$<AND:${is-ppc},${is-ppc64}>:v8/src/codegen/ppc/cpu-ppc.cc>
+  $<$<AND:${is-ppc},${is-ppc64}>:v8/src/codegen/ppc/macro-assembler-ppc.cc>
+  $<$<AND:${is-ppc},${is-ppc64}>:v8/src/compiler/backend/ppc/code-generator-ppc.cc>
+  $<$<AND:${is-ppc},${is-ppc64}>:v8/src/compiler/backend/ppc/instruction-scheduler-ppc.cc>
+  $<$<AND:${is-ppc},${is-ppc64}>:v8/src/compiler/backend/ppc/instruction-selector-ppc.cc>
+  $<$<AND:${is-ppc},${is-ppc64}>:v8/src/compiler/backend/ppc/unwinding-info-writer-ppc.cc>
+  $<$<AND:${is-ppc},${is-ppc64}>:v8/src/deoptimizer/ppc/deoptimizer-ppc.cc>
+  $<$<AND:${is-ppc},${is-ppc64}>:v8/src/diagnostics/ppc/disasm-ppc.cc>
+  $<$<AND:${is-ppc},${is-ppc64}>:v8/src/diagnostics/ppc/eh-frame-ppc.cc>
+  $<$<AND:${is-ppc},${is-ppc64}>:v8/src/diagnostics/ppc/unwinder-ppc.cc>
+  $<$<AND:${is-ppc},${is-ppc64}>:v8/src/execution/ppc/frame-constants-ppc.cc>
+  $<$<AND:${is-ppc},${is-ppc64}>:v8/src/execution/ppc/simulator-ppc.cc>
+  $<$<AND:${is-ppc},${is-ppc64}>:v8/src/regexp/ppc/regexp-macro-assembler-ppc.cc>
   $<$<BOOL:${V8_ENABLE_I18N}>:$<TARGET_OBJECTS:v8-i18n-support>>
   ${api-sources}
   ${asmjs-sources}
@@ -313,6 +391,7 @@ add_library(v8_base_without_compiler STATIC
   ${bigint-sources}
   ${codegen-sources}
   v8/src/common/assert-scope.cc
+  v8/src/common/code-memory-access.cc
   v8/src/compiler-dispatcher/lazy-compile-dispatcher.cc
   v8/src/compiler-dispatcher/optimizing-compile-dispatcher.cc
   v8/src/date/date.cc
@@ -356,7 +435,6 @@ add_library(v8_base_without_compiler STATIC
   v8/src/third_party/siphash/halfsiphash.cc
   v8/src/tracing/trace-event.cc
   v8/src/tracing/traced-value.cc
-  v8/src/web-snapshot/web-snapshot.cc
   v8/src/tracing/tracing-category-observer.cc
   v8/src/trap-handler/handler-inside.cc
   v8/src/trap-handler/handler-outside.cc
@@ -392,6 +470,9 @@ set_property(SOURCE v8/src/diagnostics/unwinding-info-win64.cc
 
 target_compile_definitions(v8_base_without_compiler PRIVATE ${v8_defines} $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 target_compile_options(v8_base_without_compiler PRIVATE ${disable-exceptions})
+if(enable-fPIC)
+  target_compile_options(v8_base_without_compiler PRIVATE ${enable-fpic})
+endif()
 
 target_include_directories(v8_base_without_compiler
   PRIVATE
@@ -425,6 +506,9 @@ add_library(v8_compiler STATIC)
 target_sources(v8_compiler PRIVATE ${compiler-sources})
 target_compile_definitions(v8_compiler PRIVATE ${v8_defines} $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 target_compile_options(v8_compiler PRIVATE ${disable-exceptions})
+if(enable-fPIC)
+  target_compile_options(v8_compiler PRIVATE ${enable-fpic})
+endif()
 
 target_include_directories(v8_compiler
   PUBLIC
@@ -503,6 +587,9 @@ add_library(
 
 target_compile_definitions(v8_initializers PRIVATE ${v8_defines} $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 target_compile_options(v8_initializers PRIVATE ${disable-exceptions})
+if(enable-fPIC)
+  target_compile_options(v8_initializers PRIVATE ${enable-fpic})
+endif()
 
 target_include_directories(v8_initializers
   PRIVATE
@@ -527,6 +614,9 @@ add_library(
 
 target_compile_definitions(v8_snapshot PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 target_compile_options(v8_snapshot PRIVATE ${disable-exceptions})
+if(enable-fPIC)
+  target_compile_options(v8_snapshot PRIVATE ${enable-fpic})
+endif()
 target_include_directories(v8_snapshot PRIVATE ${PROJECT_SOURCE_DIR}/v8)
 
 target_link_libraries(v8_snapshot
@@ -541,7 +631,10 @@ add_custom_command(
     mksnapshot
     --embedded_src ${PROJECT_BINARY_DIR}/embedded.S
     --startup_src ${PROJECT_BINARY_DIR}/snapshot.cc
+    $<${is-arm64}:--target_arch=arm64>
     $<${is-x64}:--target_arch=x64>
+    $<${is-ppc}:--target_arch=ppc>
+    $<${is-ppc64}:--target_arch=ppc64>
     $<$<PLATFORM_ID:Darwin>:--target_os=mac>
     $<$<PLATFORM_ID:Linux>:--target_os=linux>
     $<$<PLATFORM_ID:Windows>:--target_os=win>
@@ -608,6 +701,9 @@ add_library(v8_inspector STATIC
 
 target_compile_features(v8_inspector PUBLIC cxx_std_17)
 target_compile_options(v8_inspector PRIVATE ${disable-exceptions})
+if(enable-fPIC)
+  target_compile_options(v8_inspector PRIVATE ${enable-fpic})
+endif()
 target_compile_definitions(v8_inspector PUBLIC $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 
 target_include_directories(v8_inspector
@@ -664,6 +760,7 @@ target_sources(v8_libplatform
     v8/src/libplatform/default-foreground-task-runner.cc
     v8/src/libplatform/default-job.cc
     v8/src/libplatform/default-platform.cc
+    v8/src/libplatform/default-thread-isolated-allocator.cc
     v8/src/libplatform/default-worker-threads-task-runner.cc
     v8/src/libplatform/delayed-task-queue.cc
     v8/src/libplatform/task-queue.cc
@@ -677,6 +774,10 @@ target_sources(v8_libplatform
 
 target_compile_definitions(v8_libplatform PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 target_compile_options(v8_libplatform PRIVATE ${disable-exceptions})
+if(enable-fPIC)
+  target_compile_options(v8_libplatform PRIVATE ${enable-fpic})
+endif()
+
 target_include_directories(v8_libplatform
   PUBLIC
     ${PROJECT_SOURCE_DIR}/v8/include
@@ -700,6 +801,9 @@ target_include_directories(v8_libsampler
 
 target_compile_definitions(v8_libsampler PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 target_compile_options(v8_libsampler PRIVATE ${disable-exceptions})
+if(enable-fPIC)
+  target_compile_options(v8_libsampler PRIVATE ${enable-fpic})
+endif()
 target_include_directories(v8_libsampler PRIVATE ${PROJECT_SOURCE_DIR}/v8)
 target_link_libraries(v8_libsampler PRIVATE v8_libbase)
 
@@ -714,13 +818,14 @@ add_library(v8_libbase STATIC
   v8/src/base/debug/stack_trace.cc
   v8/src/base/division-by-constant.cc
   v8/src/base/file-utils.cc
-  v8/src/base/functional.cc
   v8/src/base/ieee754.cc
   v8/src/base/logging.cc
   v8/src/base/once.cc
   v8/src/base/page-allocator.cc
   v8/src/base/platform/condition-variable.cc
+  v8/src/base/platform/memory-protection-key.cc
   v8/src/base/platform/mutex.cc
+  v8/src/base/platform/platform.cc
   v8/src/base/platform/semaphore.cc
   v8/src/base/platform/time.cc
   v8/src/base/region-allocator.cc
@@ -735,7 +840,6 @@ add_library(v8_libbase STATIC
   $<${is-aix}:v8/src/base/debug/stack_trace_posix.cc>
   $<${is-aix}:v8/src/base/platform/platform-aix.cc>
   $<${is-darwin}:v8/src/base/debug/stack_trace_posix.cc>
-  $<${is-darwin}:v8/src/base/platform/platform-macos.cc>
   $<${is-darwin}:v8/src/base/platform/platform-darwin.cc>
   $<${is-linux}:v8/src/base/debug/stack_trace_posix.cc>
   $<${is-linux}:v8/src/base/platform/platform-linux.cc>
@@ -748,6 +852,9 @@ set_property(SOURCE v8/src/base/utils/random-number-generator.cc
 
 target_compile_definitions(v8_libbase PRIVATE $<${is-win}:UNICODE> $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 target_compile_options(v8_libbase PRIVATE ${disable-exceptions})
+if(enable-fPIC)
+  target_compile_options(v8_libbase PRIVATE ${enable-fpic})
+endif()
 target_include_directories(v8_libbase PRIVATE ${PROJECT_SOURCE_DIR}/v8)
 target_link_libraries(v8_libbase
   PRIVATE
@@ -814,6 +921,7 @@ if(NOT V8_ENABLE_I18N)
     src/objects/js-break-iterator.tq
     src/objects/js-collator.tq
     src/objects/js-date-time-format.tq
+    src/objects/js-duration-format.tq
     src/objects/js-display-names.tq
     src/objects/js-list-format.tq
     src/objects/js-locale.tq
@@ -879,6 +987,9 @@ add_library(
 
 target_compile_definitions(v8_torque_generated PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 target_compile_options(v8_torque_generated PRIVATE ${disable-exceptions})
+if(enable-fPIC)
+  target_compile_options(v8_torque_generated PRIVATE ${enable-fpic})
+endif()
 target_link_libraries(v8_torque_generated PRIVATE v8-bytecodes-builtin-list)
 
 target_include_directories(v8_torque_generated

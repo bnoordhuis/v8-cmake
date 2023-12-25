@@ -83,8 +83,8 @@ TEST(Run_WasmModule_Buffer_Externalized_GrowMem) {
     WasmModuleBuilder* builder = zone.New<WasmModuleBuilder>(&zone);
     WasmFunctionBuilder* f = builder->AddFunction(sigs.i_v());
     ExportAsMain(f);
-    byte code[] = {WASM_MEMORY_GROW(WASM_I32V_1(6)), WASM_DROP,
-                   WASM_MEMORY_SIZE};
+    uint8_t code[] = {WASM_MEMORY_GROW(WASM_I32V_1(6)), WASM_DROP,
+                      WASM_MEMORY_SIZE};
     EMIT_CODE_WITH_END(f, code);
 
     ZoneBuffer buffer(&zone);
@@ -114,8 +114,7 @@ TEST(Run_WasmModule_Buffer_Externalized_GrowMem) {
         handle(memory_object->array_buffer(), isolate));
 
     // Grow using an internal Wasm bytecode.
-    result = testing::CallWasmFunctionForTesting(isolate, instance, "main", 0,
-                                                 nullptr);
+    result = testing::CallWasmFunctionForTesting(isolate, instance, "main", {});
     CHECK_EQ(26, result);
     CHECK(external2.buffer_->was_detached());  // growing always detaches
     CHECK_EQ(0, external2.buffer_->byte_length());

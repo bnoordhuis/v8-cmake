@@ -268,6 +268,7 @@ bool Linkage::NeedsFrameStateInput(Runtime::FunctionId function) {
     case Runtime::kAbort:
     case Runtime::kAllocateInOldGeneration:
     case Runtime::kCreateIterResultObject:
+    case Runtime::kGrowableSharedArrayBufferByteLength:
     case Runtime::kIncBlockCounter:
     case Runtime::kIsFunction:
     case Runtime::kNewClosure:
@@ -380,7 +381,8 @@ CallDescriptor* Linkage::GetCEntryStubCallDescriptor(
 
 CallDescriptor* Linkage::GetJSCallDescriptor(Zone* zone, bool is_osr,
                                              int js_parameter_count,
-                                             CallDescriptor::Flags flags) {
+                                             CallDescriptor::Flags flags,
+                                             Operator::Properties properties) {
   const size_t return_count = 1;
   const size_t context_count = 1;
   const size_t new_target_count = 1;
@@ -415,20 +417,23 @@ CallDescriptor* Linkage::GetJSCallDescriptor(Zone* zone, bool is_osr,
   MachineType target_type = MachineType::AnyTagged();
   // When entering into an OSR function from unoptimized code the JSFunction
   // is not in a register, but it is on the stack in the marker spill slot.
-  LinkageLocation target_loc =
-      is_osr ? LinkageLocation::ForSavedCallerFunction()
-             : regloc(kJSFunctionRegister, MachineType::AnyTagged());
-  return zone->New<CallDescriptor>(     // --
-      CallDescriptor::kCallJSFunction,  // kind
-      target_type,                      // target MachineType
-      target_loc,                       // target location
-      locations.Build(),                // location_sig
-      js_parameter_count,               // stack_parameter_count
-      Operator::kNoProperties,          // properties
-      kNoCalleeSaved,                   // callee-saved
-      kNoCalleeSavedFp,                 // callee-saved fp
-      flags,                            // flags
-      "js-call");                       // debug name
+  // For kind == JSDescKind::kBuiltin, we should still use the regular
+  // kJSFunctionRegister, so that frame attribution for stack traces works.
+  LinkageLocation target_loc = is_osr
+                                   ? LinkageLocation::ForSavedCallerFunction()
+                                   : regloc(kJSFunctionRegister, target_type);
+  CallDescriptor::Kind descriptor_kind = CallDescriptor::kCallJSFunction;
+  return zone->New<CallDescriptor>(  // --
+      descriptor_kind,               // kind
+      target_type,                   // target MachineType
+      target_loc,                    // target location
+      locations.Build(),             // location_sig
+      js_parameter_count,            // stack_parameter_count
+      properties,                    // properties
+      kNoCalleeSaved,                // callee-saved
+      kNoCalleeSavedFp,              // callee-saved fp
+      flags,                         // flags
+      "js-call");                    // debug name
 }
 
 // TODO(turbofan): cache call descriptors for code stub calls.
@@ -538,9 +543,6 @@ CallDescriptor* Linkage::GetStubCallDescriptor(
       CallDescriptor::kCanUseRoots | flags,  // flags
       descriptor.DebugName(),                // debug name
       descriptor.GetStackArgumentOrder(),    // stack order
-#if V8_ENABLE_WEBASSEMBLY
-      nullptr,  // wasm function signature
-#endif
       allocatable_registers);
 }
 

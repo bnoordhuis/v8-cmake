@@ -4,6 +4,7 @@
 
 #include "src/maglev/maglev-compilation-unit.h"
 
+#include "src/compiler/heap-refs.h"
 #include "src/compiler/js-heap-broker.h"
 #include "src/maglev/maglev-compilation-info.h"
 #include "src/maglev/maglev-graph-labeller.h"
@@ -15,21 +16,29 @@ namespace maglev {
 
 MaglevCompilationUnit::MaglevCompilationUnit(MaglevCompilationInfo* info,
                                              Handle<JSFunction> function)
+    : MaglevCompilationUnit(
+          info, nullptr,
+          MakeRef(info->broker(), info->broker()->CanonicalPersistentHandle(
+                                      function->shared())),
+          MakeRef(info->broker(), info->broker()->CanonicalPersistentHandle(
+                                      function->feedback_vector()))) {}
+
+MaglevCompilationUnit::MaglevCompilationUnit(
+    MaglevCompilationInfo* info, const MaglevCompilationUnit* caller,
+    compiler::SharedFunctionInfoRef shared_function_info,
+    compiler::FeedbackVectorRef feedback_vector)
     : info_(info),
-      shared_function_info_(MakeRef(broker(), function->shared())),
-      bytecode_(shared_function_info_.GetBytecodeArray()),
-      feedback_(MakeRef(broker(), function->feedback_vector())),
-      bytecode_analysis_(bytecode_.object(), zone(), BytecodeOffset::None(),
-                         true),
+      caller_(caller),
+      shared_function_info_(shared_function_info),
+      bytecode_(shared_function_info_.GetBytecodeArray(broker())),
+      feedback_(feedback_vector),
       register_count_(bytecode_.register_count()),
       parameter_count_(bytecode_.parameter_count()),
-      stack_value_repr_(info->zone()) {}
+      inlining_depth_(caller == nullptr ? 0 : caller->inlining_depth_ + 1) {}
 
 compiler::JSHeapBroker* MaglevCompilationUnit::broker() const {
   return info_->broker();
 }
-
-Isolate* MaglevCompilationUnit::isolate() const { return info_->isolate(); }
 
 Zone* MaglevCompilationUnit::zone() const { return info_->zone(); }
 

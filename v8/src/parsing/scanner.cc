@@ -11,7 +11,6 @@
 #include <cmath>
 
 #include "src/ast/ast-value-factory.h"
-#include "src/base/platform/wrappers.h"
 #include "src/base/strings.h"
 #include "src/numbers/conversions-inl.h"
 #include "src/objects/bigint.h"
@@ -216,15 +215,15 @@ Token::Value Scanner::SkipSingleLineComment() {
   return Token::WHITESPACE;
 }
 
-Token::Value Scanner::SkipSourceURLComment() {
-  TryToParseSourceURLComment();
+Token::Value Scanner::SkipMagicComment() {
+  TryToParseMagicComment();
   if (unibrow::IsLineTerminator(c0_) || c0_ == kEndOfInput) {
     return Token::WHITESPACE;
   }
   return SkipSingleLineComment();
 }
 
-void Scanner::TryToParseSourceURLComment() {
+void Scanner::TryToParseMagicComment() {
   // Magic comments are of the form: //[#@]\s<name>=\s*<value>\s*.* and this
   // function will just return if it cannot parse a magic comment.
   DCHECK(!IsWhiteSpaceOrLineTerminator(kEndOfInput));
@@ -241,10 +240,15 @@ void Scanner::TryToParseSourceURLComment() {
   if (!name.is_one_byte()) return;
   base::Vector<const uint8_t> name_literal = name.one_byte_literal();
   LiteralBuffer* value;
+  LiteralBuffer compile_hints_value;
   if (name_literal == base::StaticOneByteVector("sourceURL")) {
     value = &source_url_;
   } else if (name_literal == base::StaticOneByteVector("sourceMappingURL")) {
     value = &source_mapping_url_;
+  } else if (v8_flags.compile_hints_magic &&
+             name_literal == base::StaticOneByteVector(
+                                 "experimentalChromiumCompileHints")) {
+    value = &compile_hints_value;
   } else {
     return;
   }
@@ -269,6 +273,13 @@ void Scanner::TryToParseSourceURLComment() {
       break;
     }
     Advance();
+  }
+  if (value == &compile_hints_value) {
+    base::Vector<const uint8_t> value_literal =
+        compile_hints_value.one_byte_literal();
+    if (value_literal == base::StaticOneByteVector("all")) {
+      saw_magic_comment_compile_hints_all_ = true;
+    }
   }
 }
 
@@ -938,7 +949,7 @@ Token::Value Scanner::ScanIdentifierOrKeywordInnerSlow(bool escaped,
 
     if (!escaped) return token;
 
-    STATIC_ASSERT(Token::LET + 1 == Token::STATIC);
+    static_assert(Token::LET + 1 == Token::STATIC);
     if (base::IsInRange(token, Token::LET, Token::STATIC)) {
       return Token::ESCAPED_STRICT_RESERVED_WORD;
     }
@@ -996,12 +1007,13 @@ base::Optional<RegExpFlags> Scanner::ScanRegExpFlags() {
   DCHECK_EQ(Token::REGEXP_LITERAL, next().token);
 
   RegExpFlags flags;
+  next().literal_chars.Start();
   while (IsIdentifierPart(c0_)) {
     base::Optional<RegExpFlag> maybe_flag = JSRegExp::FlagFromChar(c0_);
     if (!maybe_flag.has_value()) return {};
     RegExpFlag flag = maybe_flag.value();
     if (flags & flag) return {};
-    Advance();
+    AddLiteralCharAdvance();
     flags |= flag;
   }
 

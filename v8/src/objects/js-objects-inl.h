@@ -16,6 +16,7 @@
 #include "src/objects/js-objects.h"
 #include "src/objects/keys.h"
 #include "src/objects/lookup-inl.h"
+#include "src/objects/primitive-heap-object.h"
 #include "src/objects/property-array-inl.h"
 #include "src/objects/prototype-inl.h"
 #include "src/objects/shared-function-info.h"
@@ -44,6 +45,7 @@ JSIteratorResult::JSIteratorResult(Address ptr) : JSObject(ptr) {}
 TQ_OBJECT_CONSTRUCTORS_IMPL(JSMessageObject)
 TQ_OBJECT_CONSTRUCTORS_IMPL(JSPrimitiveWrapper)
 TQ_OBJECT_CONSTRUCTORS_IMPL(JSStringIterator)
+TQ_OBJECT_CONSTRUCTORS_IMPL(JSValidIteratorWrapper)
 
 NEVER_READ_ONLY_SPACE_IMPL(JSReceiver)
 
@@ -99,6 +101,7 @@ MaybeHandle<HeapObject> JSReceiver::GetPrototype(Isolate* isolate,
                                                  Handle<JSReceiver> receiver) {
   // We don't expect access checks to be needed on JSProxy objects.
   DCHECK(!receiver->IsAccessCheckNeeded() || receiver->IsJSObject());
+
   PrototypeIterator iter(isolate, receiver, kStartAtReceiver,
                          PrototypeIterator::END_AT_NON_HIDDEN);
   do {
@@ -116,8 +119,8 @@ MaybeHandle<Object> JSReceiver::GetProperty(Isolate* isolate,
 
 // static
 V8_WARN_UNUSED_RESULT MaybeHandle<FixedArray> JSReceiver::OwnPropertyKeys(
-    Handle<JSReceiver> object) {
-  return KeyAccumulator::GetKeys(object, KeyCollectionMode::kOwnOnly,
+    Isolate* isolate, Handle<JSReceiver> object) {
+  return KeyAccumulator::GetKeys(isolate, object, KeyCollectionMode::kOwnOnly,
                                  ALL_PROPERTIES,
                                  GetKeysConversion::kConvertToString);
 }
@@ -425,10 +428,7 @@ void JSObject::RawFastInobjectPropertyAtPut(FieldIndex index, Object value,
   DCHECK(index.is_inobject());
   DCHECK(value.IsShared());
   SEQ_CST_WRITE_FIELD(*this, index.offset(), value);
-  // JSSharedStructs are allocated in the shared old space, which is currently
-  // collected by stopping the world, so the incremental write barrier is not
-  // needed. They can only store Smis and other HeapObjects in the shared old
-  // space, so the generational write barrier is also not needed.
+  CONDITIONAL_WRITE_BARRIER(*this, index.offset(), value, UPDATE_WRITE_BARRIER);
 }
 
 void JSObject::FastPropertyAtPut(FieldIndex index, Object value,
@@ -455,15 +455,16 @@ void JSObject::WriteToField(InternalIndex descriptor, PropertyDetails details,
   DCHECK_EQ(PropertyLocation::kField, details.location());
   DCHECK_EQ(PropertyKind::kData, details.kind());
   DisallowGarbageCollection no_gc;
-  FieldIndex index = FieldIndex::ForDescriptor(map(), descriptor);
+  FieldIndex index = FieldIndex::ForDetails(map(), details);
   if (details.representation().IsDouble()) {
     // Manipulating the signaling NaN used for the hole and uninitialized
-    // double field sentinel in C++, e.g. with bit_cast or value()/set_value(),
-    // will change its value on ia32 (the x87 stack is used to return values
-    // and stores to the stack silently clear the signalling bit).
+    // double field sentinel in C++, e.g. with base::bit_cast or
+    // value()/set_value(), will change its value on ia32 (the x87 stack is used
+    // to return values and stores to the stack silently clear the signalling
+    // bit).
     uint64_t bits;
     if (value.IsSmi()) {
-      bits = bit_cast<uint64_t>(static_cast<double>(Smi::ToInt(value)));
+      bits = base::bit_cast<uint64_t>(static_cast<double>(Smi::ToInt(value)));
     } else if (value.IsUninitialized()) {
       bits = kHoleNanInt64;
     } else {
@@ -569,21 +570,8 @@ void JSObject::InitializeBody(Map map, int start_offset,
 
 TQ_OBJECT_CONSTRUCTORS_IMPL(JSExternalObject)
 
-DEF_GETTER(JSExternalObject, value, void*) {
-  Isolate* isolate = GetIsolateForSandbox(*this);
-  return reinterpret_cast<void*>(
-      ReadExternalPointerField(kValueOffset, isolate, kExternalObjectValueTag));
-}
-
-void JSExternalObject::AllocateExternalPointerEntries(Isolate* isolate) {
-  InitExternalPointerField(kValueOffset, isolate, kExternalObjectValueTag);
-}
-
-void JSExternalObject::set_value(Isolate* isolate, void* value) {
-  WriteExternalPointerField(kValueOffset, isolate,
-                            reinterpret_cast<Address>(value),
-                            kExternalObjectValueTag);
-}
+EXTERNAL_POINTER_ACCESSORS(JSExternalObject, value, void*, kValueOffset,
+                           kExternalObjectValueTag)
 
 DEF_GETTER(JSGlobalObject, native_context_unchecked, Object) {
   return TaggedField<Object, kNativeContextOffset>::Relaxed_Load(cage_base,
@@ -591,16 +579,28 @@ DEF_GETTER(JSGlobalObject, native_context_unchecked, Object) {
 }
 
 bool JSMessageObject::DidEnsureSourcePositionsAvailable() const {
-  return shared_info().IsUndefined();
+  return shared_info() == Smi::zero();
+}
+
+// static
+void JSMessageObject::EnsureSourcePositionsAvailable(
+    Isolate* isolate, Handle<JSMessageObject> message) {
+  if (message->DidEnsureSourcePositionsAvailable()) {
+    DCHECK(message->script().has_line_ends());
+  } else {
+    JSMessageObject::InitializeSourcePositions(isolate, message);
+  }
 }
 
 int JSMessageObject::GetStartPosition() const {
-  DCHECK(DidEnsureSourcePositionsAvailable());
+  // TODO(cbruni): make this DCHECK stricter (>= 0).
+  DCHECK_LE(-1, start_position());
   return start_position();
 }
 
 int JSMessageObject::GetEndPosition() const {
-  DCHECK(DidEnsureSourcePositionsAvailable());
+  // TODO(cbruni): make this DCHECK stricter (>= 0).
+  DCHECK_LE(-1, end_position());
   return end_position();
 }
 
@@ -612,7 +612,7 @@ void JSMessageObject::set_type(MessageTemplate value) {
   set_raw_type(static_cast<int>(value));
 }
 
-ACCESSORS(JSMessageObject, shared_info, HeapObject, kSharedInfoOffset)
+ACCESSORS(JSMessageObject, shared_info, Object, kSharedInfoOffset)
 ACCESSORS(JSMessageObject, bytecode_offset, Smi, kBytecodeOffsetOffset)
 SMI_ACCESSORS(JSMessageObject, start_position, kStartPositionOffset)
 SMI_ACCESSORS(JSMessageObject, end_position, kEndPositionOffset)
@@ -697,6 +697,10 @@ DEF_GETTER(JSObject, HasSealedElements, bool) {
   return IsSealedElementsKind(GetElementsKind(cage_base));
 }
 
+DEF_GETTER(JSObject, HasSharedArrayElements, bool) {
+  return GetElementsKind(cage_base) == SHARED_ARRAY_ELEMENTS;
+}
+
 DEF_GETTER(JSObject, HasNonextensibleElements, bool) {
   return IsNonextensibleElementsKind(GetElementsKind(cage_base));
 }
@@ -776,11 +780,14 @@ void JSReceiver::initialize_properties(Isolate* isolate) {
 }
 
 DEF_GETTER(JSReceiver, HasFastProperties, bool) {
-  DCHECK(raw_properties_or_hash(cage_base).IsSmi() ||
-         ((raw_properties_or_hash(cage_base).IsGlobalDictionary(cage_base) ||
-           raw_properties_or_hash(cage_base).IsNameDictionary(cage_base) ||
-           raw_properties_or_hash(cage_base).IsSwissNameDictionary(
-               cage_base)) == map(cage_base).is_dictionary_map()));
+  Object raw_properties_or_hash_obj =
+      raw_properties_or_hash(cage_base, kRelaxedLoad);
+  DCHECK(raw_properties_or_hash_obj.IsSmi() ||
+         ((raw_properties_or_hash_obj.IsGlobalDictionary(cage_base) ||
+           raw_properties_or_hash_obj.IsNameDictionary(cage_base) ||
+           raw_properties_or_hash_obj.IsSwissNameDictionary(cage_base)) ==
+          map(cage_base).is_dictionary_map()));
+  USE(raw_properties_or_hash_obj);
   return !map(cage_base).is_dictionary_map();
 }
 
@@ -915,7 +922,7 @@ static inline bool ShouldConvertToSlowElements(JSObject object,
                                                uint32_t capacity,
                                                uint32_t index,
                                                uint32_t* new_capacity) {
-  STATIC_ASSERT(JSObject::kMaxUncheckedOldFastElementsLength <=
+  static_assert(JSObject::kMaxUncheckedOldFastElementsLength <=
                 JSObject::kMaxUncheckedFastElementsLength);
   if (index < capacity) {
     *new_capacity = capacity;

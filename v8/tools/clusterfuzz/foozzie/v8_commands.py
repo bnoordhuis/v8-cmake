@@ -25,6 +25,9 @@ DEFAULT_FLAGS = [
     '--harmony',
     '--wasm-staging',
     '--no-wasm-async-compilation',
+    # Limit wasm memory to just below 2GiB, to avoid differences between 32-bit
+    # and 64-bit builds.
+    '--wasm-max-mem-pages=32767',
     '--suppress-asm-messages',
 ]
 
@@ -115,16 +118,12 @@ class Output(object):
 
 def Execute(args, cwd, timeout=None):
   popen_args = [c for c in args if c != ""]
-  kwargs = {}
-  if PYTHON3:
-    kwargs['encoding'] = 'utf-8'
   try:
     process = subprocess.Popen(
       args=popen_args,
       stdout=subprocess.PIPE,
       stderr=subprocess.PIPE,
       cwd=cwd,
-      **kwargs
     )
   except Exception as e:
     sys.stderr.write("Error executing: %s\n" % popen_args)
@@ -146,6 +145,12 @@ def Execute(args, cwd, timeout=None):
 
   if timeout_event.is_set():
     raise PassException('# V8 correctness - T-I-M-E-O-U-T')
+
+  if PYTHON3:
+    try:
+      stdout = stdout.decode('utf-8')
+    except UnicodeDecodeError:
+      stdout = stdout.decode('latin-1')
 
   return Output(
       process.returncode,

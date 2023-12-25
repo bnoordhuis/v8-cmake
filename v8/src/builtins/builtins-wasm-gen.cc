@@ -7,6 +7,7 @@
 #include "src/builtins/builtins-utils-gen.h"
 #include "src/codegen/code-stub-assembler.h"
 #include "src/codegen/interface-descriptors.h"
+#include "src/objects/map-inl.h"
 #include "src/objects/objects-inl.h"
 #include "src/wasm/wasm-objects.h"
 
@@ -15,6 +16,29 @@ namespace internal {
 
 TNode<WasmInstanceObject> WasmBuiltinsAssembler::LoadInstanceFromFrame() {
   return CAST(LoadFromParentFrame(WasmFrameConstants::kWasmInstanceOffset));
+}
+
+TNode<NativeContext> WasmBuiltinsAssembler::LoadContextFromWasmOrJsFrame() {
+  static_assert(BuiltinFrameConstants::kFunctionOffset ==
+                WasmFrameConstants::kWasmInstanceOffset);
+  TVARIABLE(NativeContext, context_result);
+  TNode<HeapObject> function_or_instance =
+      CAST(LoadFromParentFrame(WasmFrameConstants::kWasmInstanceOffset));
+  Label js(this);
+  Label done(this);
+  GotoIf(IsJSFunction(function_or_instance), &js);
+  context_result = LoadContextFromInstance(CAST(function_or_instance));
+  Goto(&done);
+
+  BIND(&js);
+  TNode<JSFunction> function = CAST(function_or_instance);
+  TNode<Context> context =
+      LoadObjectField<Context>(function, JSFunction::kContextOffset);
+  context_result = LoadNativeContext(context);
+  Goto(&done);
+
+  BIND(&done);
+  return context_result.value();
 }
 
 TNode<NativeContext> WasmBuiltinsAssembler::LoadContextFromInstance(
@@ -42,6 +66,22 @@ TNode<FixedArray> WasmBuiltinsAssembler::LoadManagedObjectMapsFromInstance(
       instance, WasmInstanceObject::kManagedObjectMapsOffset);
 }
 
+TNode<Float64T> WasmBuiltinsAssembler::StringToFloat64(TNode<String> input) {
+#ifdef V8_ENABLE_FP_PARAMS_IN_C_LINKAGE
+  TNode<ExternalReference> string_to_float64 =
+      ExternalConstant(ExternalReference::wasm_string_to_f64());
+  return TNode<Float64T>::UncheckedCast(
+      CallCFunction(string_to_float64, MachineType::Float64(),
+                    std::make_pair(MachineType::AnyTagged(), input)));
+#else
+  // We could support the fast path by passing the float via a stackslot, see
+  // MachineOperatorBuilder::StackSlot.
+  TNode<Object> result =
+      CallRuntime(Runtime::kStringParseFloat, NoContextConstant(), input);
+  return ChangeNumberToFloat64(CAST(result));
+#endif
+}
+
 TF_BUILTIN(WasmFloat32ToNumber, WasmBuiltinsAssembler) {
   auto val = UncheckedParameter<Float32T>(Descriptor::kValue);
   Return(ChangeFloat32ToTagged(val));
@@ -52,58 +92,13 @@ TF_BUILTIN(WasmFloat64ToNumber, WasmBuiltinsAssembler) {
   Return(ChangeFloat64ToTagged(val));
 }
 
-TF_BUILTIN(WasmI32AtomicWait32, WasmBuiltinsAssembler) {
-  if (!Is32()) {
-    Unreachable();
-    return;
-  }
-
-  auto address = UncheckedParameter<Uint32T>(Descriptor::kAddress);
-  TNode<Number> address_number = ChangeUint32ToTagged(address);
-
-  auto expected_value = UncheckedParameter<Int32T>(Descriptor::kExpectedValue);
-  TNode<Number> expected_value_number = ChangeInt32ToTagged(expected_value);
-
-  auto timeout_low = UncheckedParameter<IntPtrT>(Descriptor::kTimeoutLow);
-  auto timeout_high = UncheckedParameter<IntPtrT>(Descriptor::kTimeoutHigh);
-  TNode<BigInt> timeout = BigIntFromInt32Pair(timeout_low, timeout_high);
-
-  TNode<WasmInstanceObject> instance = LoadInstanceFromFrame();
-  TNode<Context> context = LoadContextFromInstance(instance);
-
-  TNode<Smi> result_smi =
-      CAST(CallRuntime(Runtime::kWasmI32AtomicWait, context, instance,
-                       address_number, expected_value_number, timeout));
-  Return(Unsigned(SmiToInt32(result_smi)));
-}
-
-TF_BUILTIN(WasmI64AtomicWait32, WasmBuiltinsAssembler) {
-  if (!Is32()) {
-    Unreachable();
-    return;
-  }
-
-  auto address = UncheckedParameter<Uint32T>(Descriptor::kAddress);
-  TNode<Number> address_number = ChangeUint32ToTagged(address);
-
-  auto expected_value_low =
-      UncheckedParameter<IntPtrT>(Descriptor::kExpectedValueLow);
-  auto expected_value_high =
-      UncheckedParameter<IntPtrT>(Descriptor::kExpectedValueHigh);
-  TNode<BigInt> expected_value =
-      BigIntFromInt32Pair(expected_value_low, expected_value_high);
-
-  auto timeout_low = UncheckedParameter<IntPtrT>(Descriptor::kTimeoutLow);
-  auto timeout_high = UncheckedParameter<IntPtrT>(Descriptor::kTimeoutHigh);
-  TNode<BigInt> timeout = BigIntFromInt32Pair(timeout_low, timeout_high);
-
-  TNode<WasmInstanceObject> instance = LoadInstanceFromFrame();
-  TNode<Context> context = LoadContextFromInstance(instance);
-
-  TNode<Smi> result_smi =
-      CAST(CallRuntime(Runtime::kWasmI64AtomicWait, context, instance,
-                       address_number, expected_value, timeout));
-  Return(Unsigned(SmiToInt32(result_smi)));
+TF_BUILTIN(WasmFloat64ToString, WasmBuiltinsAssembler) {
+  TNode<Float64T> val = UncheckedParameter<Float64T>(Descriptor::kValue);
+  // Having to allocate a HeapNumber is a bit unfortunate, but the subsequent
+  // runtime call will have to allocate a string anyway, which probably
+  // dwarfs the cost of one more small allocation here.
+  TNode<Number> tagged = ChangeFloat64ToTagged(val);
+  Return(NumberToString(tagged));
 }
 
 TF_BUILTIN(JSToWasmLazyDeoptContinuation, WasmBuiltinsAssembler) {

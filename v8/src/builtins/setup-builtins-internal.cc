@@ -8,6 +8,7 @@
 #include "src/codegen/interface-descriptors.h"
 #include "src/codegen/macro-assembler-inl.h"
 #include "src/codegen/macro-assembler.h"
+#include "src/codegen/reloc-info-inl.h"
 #include "src/compiler/code-assembler.h"
 #include "src/execution/isolate.h"
 #include "src/handles/handles-inl.h"
@@ -36,7 +37,6 @@ const int kBufferSize = 128 * KB;
 AssemblerOptions BuiltinAssemblerOptions(Isolate* isolate, Builtin builtin) {
   AssemblerOptions options = AssemblerOptions::Default(isolate);
   CHECK(!options.isolate_independent_code);
-  CHECK(!options.use_pc_relative_calls_and_jumps);
   CHECK(!options.collect_win64_unwind_info);
 
   if (!isolate->IsGeneratingEmbeddedBuiltins()) {
@@ -49,9 +49,27 @@ AssemblerOptions BuiltinAssemblerOptions(Isolate* isolate, Builtin builtin) {
       std::ceil(static_cast<float>(code_region.size() / MB)) <=
           kMaxPCRelativeCodeRangeInMB;
 
+  // Mksnapshot ensures that the code range is small enough to guarantee that
+  // PC-relative call/jump instructions can be used for builtin to builtin
+  // calls/tail calls. The embedded builtins blob generator also ensures that.
+  // However, there are serializer tests, where we force isolate creation at
+  // runtime and at this point, Code space isn't restricted to a
+  // size s.t. PC-relative calls may be used. So, we fall back to an indirect
+  // mode.
+  options.use_pc_relative_calls_and_jumps_for_mksnapshot =
+      pc_relative_calls_fit_in_code_range;
+
+  options.builtin_call_jump_mode = BuiltinCallJumpMode::kForMksnapshot;
   options.isolate_independent_code = true;
-  options.use_pc_relative_calls_and_jumps = pc_relative_calls_fit_in_code_range;
   options.collect_win64_unwind_info = true;
+
+  if (builtin == Builtin::kInterpreterEntryTrampolineForProfiling) {
+    // InterpreterEntryTrampolineForProfiling must be generated in a position
+    // independent way because it might be necessary to create a copy of the
+    // builtin in the code space if the v8_flags.interpreted_frames_native_stack
+    // is enabled.
+    options.builtin_call_jump_mode = BuiltinCallJumpMode::kIndirect;
+  }
 
   return options;
 }
@@ -85,9 +103,6 @@ Code BuildWithMacroAssembler(Isolate* isolate, Builtin builtin,
                              MacroAssemblerGenerator generator,
                              const char* s_name) {
   HandleScope scope(isolate);
-  // Canonicalize handles, so that we can share constant pool entries pointing
-  // to code targets without dereferencing their handles.
-  CanonicalHandleScope canonical(isolate);
   byte buffer[kBufferSize];
 
   MacroAssembler masm(isolate, BuiltinAssemblerOptions(isolate, builtin),
@@ -127,9 +142,6 @@ Code BuildWithMacroAssembler(Isolate* isolate, Builtin builtin,
 Code BuildAdaptor(Isolate* isolate, Builtin builtin, Address builtin_address,
                   const char* name) {
   HandleScope scope(isolate);
-  // Canonicalize handles, so that we can share constant pool entries pointing
-  // to code targets without dereferencing their handles.
-  CanonicalHandleScope canonical(isolate);
   byte buffer[kBufferSize];
   MacroAssembler masm(isolate, BuiltinAssemblerOptions(isolate, builtin),
                       CodeObjectRequired::kYes,
@@ -151,9 +163,6 @@ Code BuildWithCodeStubAssemblerJS(Isolate* isolate, Builtin builtin,
                                   CodeAssemblerGenerator generator, int argc,
                                   const char* name) {
   HandleScope scope(isolate);
-  // Canonicalize handles, so that we can share constant pool entries pointing
-  // to code targets without dereferencing their handles.
-  CanonicalHandleScope canonical(isolate);
 
   Zone zone(isolate->allocator(), ZONE_NAME, kCompressGraphZone);
   compiler::CodeAssemblerState state(isolate, &zone, argc, CodeKind::BUILTIN,
@@ -171,9 +180,6 @@ Code BuildWithCodeStubAssemblerCS(Isolate* isolate, Builtin builtin,
                                   CallDescriptors::Key interface_descriptor,
                                   const char* name) {
   HandleScope scope(isolate);
-  // Canonicalize handles, so that we can share constant pool entries pointing
-  // to code targets without dereferencing their handles.
-  CanonicalHandleScope canonical(isolate);
   Zone zone(isolate->allocator(), ZONE_NAME, kCompressGraphZone);
   // The interface descriptor with given key must be initialized at this point
   // and this construction just queries the details from the descriptors table.
@@ -195,7 +201,7 @@ Code BuildWithCodeStubAssemblerCS(Isolate* isolate, Builtin builtin,
 void SetupIsolateDelegate::AddBuiltin(Builtins* builtins, Builtin builtin,
                                       Code code) {
   DCHECK_EQ(builtin, code.builtin_id());
-  builtins->set_code(builtin, ToCodeT(code));
+  builtins->set_code(builtin, code);
 }
 
 // static
@@ -217,7 +223,6 @@ void SetupIsolateDelegate::ReplacePlaceholders(Isolate* isolate) {
   // Replace references from all builtin code objects to placeholders.
   Builtins* builtins = isolate->builtins();
   DisallowGarbageCollection no_gc;
-  CodePageCollectionMemoryModificationScope modification_scope(isolate->heap());
   static const int kRelocMask =
       RelocInfo::ModeMask(RelocInfo::CODE_TARGET) |
       RelocInfo::ModeMask(RelocInfo::FULL_EMBEDDED_OBJECT) |
@@ -226,35 +231,35 @@ void SetupIsolateDelegate::ReplacePlaceholders(Isolate* isolate) {
   PtrComprCageBase cage_base(isolate);
   for (Builtin builtin = Builtins::kFirst; builtin <= Builtins::kLast;
        ++builtin) {
-    Code code = FromCodeT(builtins->code(builtin));
-    isolate->heap()->UnprotectAndRegisterMemoryChunk(
-        code, UnprotectMemoryOrigin::kMainThread);
+    Code code = builtins->code(builtin);
+    InstructionStream istream = code.instruction_stream();
+    CodePageMemoryModificationScope code_modification_scope(istream);
     bool flush_icache = false;
     for (RelocIterator it(code, kRelocMask); !it.done(); it.next()) {
       RelocInfo* rinfo = it.rinfo();
       if (RelocInfo::IsCodeTargetMode(rinfo->rmode())) {
-        Code target = Code::GetCodeFromTargetAddress(rinfo->target_address());
-        DCHECK_IMPLIES(RelocInfo::IsRelativeCodeTarget(rinfo->rmode()),
-                       Builtins::IsIsolateIndependent(target.builtin_id()));
-        if (!target.is_builtin()) continue;
-        CodeT new_target = builtins->code(target.builtin_id());
-        rinfo->set_target_address(new_target.raw_instruction_start(),
+        Code target_code = Code::FromTargetAddress(rinfo->target_address());
+        DCHECK_IMPLIES(
+            RelocInfo::IsRelativeCodeTarget(rinfo->rmode()),
+            Builtins::IsIsolateIndependent(target_code.builtin_id()));
+        if (!target_code.is_builtin()) continue;
+        Code new_target = builtins->code(target_code.builtin_id());
+        rinfo->set_target_address(istream, new_target.instruction_start(),
                                   UPDATE_WRITE_BARRIER, SKIP_ICACHE_FLUSH);
       } else {
         DCHECK(RelocInfo::IsEmbeddedObjectMode(rinfo->rmode()));
         Object object = rinfo->target_object(cage_base);
-        if (!object.IsCodeT(cage_base)) continue;
-        CodeT target = CodeT::cast(object);
+        if (!object.IsCode(cage_base)) continue;
+        Code target = Code::cast(object);
         if (!target.is_builtin()) continue;
-        CodeT new_target = builtins->code(target.builtin_id());
-        rinfo->set_target_object(isolate->heap(), new_target,
-                                 UPDATE_WRITE_BARRIER, SKIP_ICACHE_FLUSH);
+        Code new_target = builtins->code(target.builtin_id());
+        rinfo->set_target_object(istream, new_target, UPDATE_WRITE_BARRIER,
+                                 SKIP_ICACHE_FLUSH);
       }
       flush_icache = true;
     }
     if (flush_icache) {
-      FlushInstructionCache(code.raw_instruction_start(),
-                            code.raw_instruction_size());
+      FlushInstructionCache(code.instruction_start(), code.instruction_size());
     }
   }
 }
@@ -346,13 +351,6 @@ void SetupIsolateDelegate::SetupBuiltinsInternal(Isolate* isolate) {
   CHECK_EQ(Builtins::kBuiltinCount, index);
 
   ReplacePlaceholders(isolate);
-
-// TODO(v8:11880): avoid roundtrips between cdc and code.
-#define SET_PROMISE_REJECTION_PREDICTION(Name) \
-  FromCodeT(builtins->code(Builtin::k##Name)).set_is_promise_rejection(true);
-
-  BUILTIN_PROMISE_REJECTION_PREDICTION_LIST(SET_PROMISE_REJECTION_PREDICTION)
-#undef SET_PROMISE_REJECTION_PREDICTION
 
   builtins->MarkInitialized();
 }

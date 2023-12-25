@@ -176,16 +176,14 @@ class JsHttpRequestProcessor : public HttpRequestProcessor {
 // --- P r o c e s s o r ---
 // -------------------------
 
-
-static void LogCallback(const v8::FunctionCallbackInfo<v8::Value>& args) {
-  if (args.Length() < 1) return;
-  Isolate* isolate = args.GetIsolate();
+static void LogCallback(const v8::FunctionCallbackInfo<v8::Value>& info) {
+  if (info.Length() < 1) return;
+  Isolate* isolate = info.GetIsolate();
   HandleScope scope(isolate);
-  Local<Value> arg = args[0];
+  Local<Value> arg = info[0];
   String::Utf8Value value(isolate, arg);
   HttpRequestProcessor::Log(*value);
 }
-
 
 // Execute the script and fetch the Process method.
 bool JsHttpRequestProcessor::Initialize(map<string, string>* opts,
@@ -703,12 +701,6 @@ int main(int argc, char* argv[]) {
   v8::V8::InitializeExternalStartupData(argv[0]);
   std::unique_ptr<v8::Platform> platform = v8::platform::NewDefaultPlatform();
   v8::V8::InitializePlatform(platform.get());
-#ifdef V8_SANDBOX
-  if (!v8::V8::InitializeSandbox()) {
-    fprintf(stderr, "Error initializing the V8 sandbox\n");
-    return 1;
-  }
-#endif
   v8::V8::Initialize();
   map<string, string> options;
   string file;

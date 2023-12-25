@@ -5,6 +5,7 @@
 #ifndef V8_OBJECTS_JS_OBJECTS_H_
 #define V8_OBJECTS_JS_OBJECTS_H_
 
+#include "src/base/optional.h"
 #include "src/objects/embedder-data-slot.h"
 // TODO(jkummerow): Consider forward-declaring instead.
 #include "src/objects/internal-index.h"
@@ -161,11 +162,11 @@ class JSReceiver : public TorqueGeneratedJSReceiver<JSReceiver, HeapObject> {
       Isolate* isolate, Handle<JSReceiver> object, Handle<Object> key,
       PropertyDescriptor* desc, Maybe<ShouldThrow> should_throw);
 
-  // Check if a data property can be created on the object. It will fail with
-  // an error when it cannot.
-  V8_WARN_UNUSED_RESULT static Maybe<bool> CheckIfCanDefine(
-      Isolate* isolate, LookupIterator* it, Handle<Object> value,
-      Maybe<ShouldThrow> should_throw);
+  // Check if private name property can be store on the object. It will return
+  // false with an error when it cannot but didn't throw, or a Nothing if
+  // it throws.
+  V8_WARN_UNUSED_RESULT static Maybe<bool> CheckPrivateNameStore(
+      LookupIterator* it, bool is_define);
 
   // ES6 7.3.4 (when passed kDontThrow)
   V8_WARN_UNUSED_RESULT static Maybe<bool> CreateDataProperty(
@@ -216,19 +217,20 @@ class JSReceiver : public TorqueGeneratedJSReceiver<JSReceiver, HeapObject> {
   // ES6 7.3.14 (when passed kDontThrow)
   // 'level' must be SEALED or FROZEN.
   V8_WARN_UNUSED_RESULT static Maybe<bool> SetIntegrityLevel(
-      Handle<JSReceiver> object, IntegrityLevel lvl, ShouldThrow should_throw);
+      Isolate* isolate, Handle<JSReceiver> object, IntegrityLevel lvl,
+      ShouldThrow should_throw);
 
   // ES6 7.3.15
   // 'level' must be SEALED or FROZEN.
   V8_WARN_UNUSED_RESULT static Maybe<bool> TestIntegrityLevel(
-      Handle<JSReceiver> object, IntegrityLevel lvl);
+      Isolate* isolate, Handle<JSReceiver> object, IntegrityLevel lvl);
 
   // ES6 [[PreventExtensions]] (when passed kDontThrow)
   V8_WARN_UNUSED_RESULT static Maybe<bool> PreventExtensions(
-      Handle<JSReceiver> object, ShouldThrow should_throw);
+      Isolate* isolate, Handle<JSReceiver> object, ShouldThrow should_throw);
 
   V8_WARN_UNUSED_RESULT static Maybe<bool> IsExtensible(
-      Handle<JSReceiver> object);
+      Isolate* isolate, Handle<JSReceiver> object);
 
   // Returns the class name.
   V8_EXPORT_PRIVATE String class_name();
@@ -245,6 +247,7 @@ class JSReceiver : public TorqueGeneratedJSReceiver<JSReceiver, HeapObject> {
   static Handle<String> GetConstructorName(Isolate* isolate,
                                            Handle<JSReceiver> receiver);
 
+  V8_EXPORT_PRIVATE base::Optional<NativeContext> GetCreationContextRaw();
   V8_EXPORT_PRIVATE MaybeHandle<NativeContext> GetCreationContext();
 
   V8_WARN_UNUSED_RESULT static inline Maybe<PropertyAttributes>
@@ -289,14 +292,14 @@ class JSReceiver : public TorqueGeneratedJSReceiver<JSReceiver, HeapObject> {
 
   // ES6 [[OwnPropertyKeys]] (modulo return type)
   V8_WARN_UNUSED_RESULT static inline MaybeHandle<FixedArray> OwnPropertyKeys(
-      Handle<JSReceiver> object);
+      Isolate* isolate, Handle<JSReceiver> object);
 
   V8_WARN_UNUSED_RESULT static MaybeHandle<FixedArray> GetOwnValues(
-      Handle<JSReceiver> object, PropertyFilter filter,
+      Isolate* isolate, Handle<JSReceiver> object, PropertyFilter filter,
       bool try_fast_path = true);
 
   V8_WARN_UNUSED_RESULT static MaybeHandle<FixedArray> GetOwnEntries(
-      Handle<JSReceiver> object, PropertyFilter filter,
+      Isolate* isolate, Handle<JSReceiver> object, PropertyFilter filter,
       bool try_fast_path = true);
 
   static const int kHashMask = PropertyArray::HashField::kMask;
@@ -325,6 +328,10 @@ class JSObject : public TorqueGeneratedJSObject<JSObject, JSReceiver> {
   V8_EXPORT_PRIVATE static V8_WARN_UNUSED_RESULT MaybeHandle<JSObject> New(
       Handle<JSFunction> constructor, Handle<JSReceiver> new_target,
       Handle<AllocationSite> site);
+
+  static MaybeHandle<JSObject> NewWithMap(Isolate* isolate,
+                                          Handle<Map> initial_map,
+                                          Handle<AllocationSite> site);
 
   // 9.1.12 ObjectCreate ( proto [ , internalSlotsList ] )
   // Notice: This is NOT 19.1.2.2 Object.create ( O, Properties )
@@ -377,6 +384,7 @@ class JSObject : public TorqueGeneratedJSObject<JSObject, JSReceiver> {
   DECL_GETTER(HasPackedElements, bool)
   DECL_GETTER(HasAnyNonextensibleElements, bool)
   DECL_GETTER(HasSealedElements, bool)
+  DECL_GETTER(HasSharedArrayElements, bool)
   DECL_GETTER(HasNonextensibleElements, bool)
 
   DECL_GETTER(HasTypedArrayOrRabGsabTypedArrayElements, bool)
@@ -524,18 +532,25 @@ class JSObject : public TorqueGeneratedJSObject<JSObject, JSReceiver> {
   GetPropertyAttributesWithFailedAccessCheck(LookupIterator* it);
 
   // Defines an AccessorPair property on the given object.
-  V8_EXPORT_PRIVATE static MaybeHandle<Object> DefineAccessor(
-      Handle<JSObject> object, Handle<Name> name, Handle<Object> getter,
-      Handle<Object> setter, PropertyAttributes attributes);
-  static MaybeHandle<Object> DefineAccessor(LookupIterator* it,
-                                            Handle<Object> getter,
-                                            Handle<Object> setter,
-                                            PropertyAttributes attributes);
+  V8_EXPORT_PRIVATE static MaybeHandle<Object>
+  DefineOwnAccessorIgnoreAttributes(Handle<JSObject> object, Handle<Name> name,
+                                    Handle<Object> getter,
+                                    Handle<Object> setter,
+                                    PropertyAttributes attributes);
+  static MaybeHandle<Object> DefineOwnAccessorIgnoreAttributes(
+      LookupIterator* it, Handle<Object> getter, Handle<Object> setter,
+      PropertyAttributes attributes);
 
   // Defines an AccessorInfo property on the given object.
   V8_WARN_UNUSED_RESULT static MaybeHandle<Object> SetAccessor(
       Handle<JSObject> object, Handle<Name> name, Handle<AccessorInfo> info,
       PropertyAttributes attributes);
+
+  // Check if a data property can be created on the object. It will fail with
+  // an error when it cannot.
+  V8_WARN_UNUSED_RESULT static Maybe<bool> CheckIfCanDefineAsConfigurable(
+      Isolate* isolate, LookupIterator* it, Handle<Object> value,
+      Maybe<ShouldThrow> should_throw);
 
   // The result must be checked first for exceptions. If there's no exception,
   // the output parameter |done| indicates whether the interceptor has a result
@@ -644,7 +659,15 @@ class JSObject : public TorqueGeneratedJSObject<JSObject, JSReceiver> {
   // an initial capacity for holding these properties.
   V8_EXPORT_PRIVATE static void NormalizeProperties(
       Isolate* isolate, Handle<JSObject> object, PropertyNormalizationMode mode,
-      int expected_additional_properties, const char* reason);
+      int expected_additional_properties, bool use_cache, const char* reason);
+
+  V8_EXPORT_PRIVATE static void NormalizeProperties(
+      Isolate* isolate, Handle<JSObject> object, PropertyNormalizationMode mode,
+      int expected_additional_properties, const char* reason) {
+    const bool kUseCache = true;
+    NormalizeProperties(isolate, object, mode, expected_additional_properties,
+                        kUseCache, reason);
+  }
 
   // Convert and update the elements backing store to be a
   // NumberDictionary dictionary.  Returns the backing after conversion.
@@ -738,12 +761,12 @@ class JSObject : public TorqueGeneratedJSObject<JSObject, JSReceiver> {
   bool ReferencesObject(Object obj);
 
   V8_WARN_UNUSED_RESULT static Maybe<bool> TestIntegrityLevel(
-      Handle<JSObject> object, IntegrityLevel lvl);
+      Isolate* isolate, Handle<JSObject> object, IntegrityLevel lvl);
 
   V8_WARN_UNUSED_RESULT static Maybe<bool> PreventExtensions(
-      Handle<JSObject> object, ShouldThrow should_throw);
+      Isolate* isolate, Handle<JSObject> object, ShouldThrow should_throw);
 
-  static bool IsExtensible(Handle<JSObject> object);
+  static bool IsExtensible(Isolate* isolate, Handle<JSObject> object);
 
   static MaybeHandle<Object> ReadFromOptionsBag(Handle<Object> options,
                                                 Handle<String> option_name,
@@ -833,19 +856,19 @@ class JSObject : public TorqueGeneratedJSObject<JSObject, JSReceiver> {
   // its size by more than the 1 entry necessary, so sequentially adding fields
   // to the same object requires fewer allocations and copies.
   static const int kFieldsAdded = 3;
-  STATIC_ASSERT(kMaxNumberOfDescriptors + kFieldsAdded <=
+  static_assert(kMaxNumberOfDescriptors + kFieldsAdded <=
                 PropertyArray::kMaxLength);
 
-  STATIC_ASSERT(kHeaderSize == Internals::kJSObjectHeaderSize);
+  static_assert(kHeaderSize == Internals::kJSObjectHeaderSize);
   static const int kMaxInObjectProperties =
       (kMaxInstanceSize - kHeaderSize) >> kTaggedSizeLog2;
-  STATIC_ASSERT(kMaxInObjectProperties <= kMaxNumberOfDescriptors);
+  static_assert(kMaxInObjectProperties <= kMaxNumberOfDescriptors);
 
   static const int kMaxFirstInobjectPropertyOffset =
       (1 << kFirstInobjectPropertyOffsetBitCount) - 1;
   static const int kMaxEmbedderFields =
       (kMaxFirstInobjectPropertyOffset - kHeaderSize) / kEmbedderDataSlotSize;
-  STATIC_ASSERT(kHeaderSize +
+  static_assert(kHeaderSize +
                     kMaxEmbedderFields * kEmbedderDataSlotSizeInTaggedSlots <=
                 kMaxInstanceSize);
 
@@ -886,7 +909,7 @@ class JSObject : public TorqueGeneratedJSObject<JSObject, JSReceiver> {
   // attrs is one of NONE, SEALED, or FROZEN (depending on the operation).
   template <PropertyAttributes attrs>
   V8_WARN_UNUSED_RESULT static Maybe<bool> PreventExtensionsWithTransition(
-      Handle<JSObject> object, ShouldThrow should_throw);
+      Isolate* isolate, Handle<JSObject> object, ShouldThrow should_throw);
 
   TQ_OBJECT_CONSTRUCTORS(JSObject)
 };
@@ -896,14 +919,12 @@ class JSObject : public TorqueGeneratedJSObject<JSObject, JSReceiver> {
 class JSExternalObject
     : public TorqueGeneratedJSExternalObject<JSExternalObject, JSObject> {
  public:
-  inline void AllocateExternalPointerEntries(Isolate* isolate);
-
   // [value]: field containing the pointer value.
-  DECL_GETTER(value, void*)
-
-  inline void set_value(Isolate* isolate, void* value);
+  DECL_EXTERNAL_POINTER_ACCESSORS(value, void*)
 
   static constexpr int kEndOfTaggedFieldsOffset = JSObject::kHeaderSize;
+
+  DECL_PRINTER(JSExternalObject)
 
   class BodyDescriptor;
 
@@ -916,7 +937,7 @@ class JSObjectWithEmbedderSlots
     : public TorqueGeneratedJSObjectWithEmbedderSlots<JSObjectWithEmbedderSlots,
                                                       JSObject> {
  public:
-  STATIC_ASSERT(kHeaderSize == JSObject::kHeaderSize);
+  static_assert(kHeaderSize == JSObject::kHeaderSize);
   TQ_OBJECT_CONSTRUCTORS(JSObjectWithEmbedderSlots)
 };
 
@@ -928,7 +949,7 @@ class JSCustomElementsObject
     : public TorqueGeneratedJSCustomElementsObject<JSCustomElementsObject,
                                                    JSObject> {
  public:
-  STATIC_ASSERT(kHeaderSize == JSObject::kHeaderSize);
+  static_assert(kHeaderSize == JSObject::kHeaderSize);
   TQ_OBJECT_CONSTRUCTORS(JSCustomElementsObject)
 };
 
@@ -941,7 +962,7 @@ class JSSpecialObject
     : public TorqueGeneratedJSSpecialObject<JSSpecialObject,
                                             JSCustomElementsObject> {
  public:
-  STATIC_ASSERT(kHeaderSize == JSObject::kHeaderSize);
+  static_assert(kHeaderSize == JSObject::kHeaderSize);
   TQ_OBJECT_CONSTRUCTORS(JSSpecialObject)
 };
 
@@ -1096,8 +1117,8 @@ class JSDate : public TorqueGeneratedJSDate<JSDate, JSObject> {
   static V8_WARN_UNUSED_RESULT MaybeHandle<JSDate> New(
       Handle<JSFunction> constructor, Handle<JSReceiver> new_target, double tv);
 
-  // Returns the time value (UTC) identifying the current time.
-  static double CurrentTimeValue(Isolate* isolate);
+  // Returns the time value (UTC) identifying the current time in milliseconds.
+  static int64_t CurrentTimeValue(Isolate* isolate);
 
   // Returns the date field with the specified index.
   // See FieldIndex for the list of date fields.
@@ -1173,8 +1194,8 @@ class JSMessageObject
   // called more than once. If called when stack space is exhausted, then the
   // source positions will be not be set and calling it again when there is more
   // stack space will not have any effect.
-  static void EnsureSourcePositionsAvailable(Isolate* isolate,
-                                             Handle<JSMessageObject> message);
+  static inline void EnsureSourcePositionsAvailable(
+      Isolate* isolate, Handle<JSMessageObject> message);
 
   // Gets the start and end positions for the message.
   // EnsureSourcePositionsAvailable must have been called before calling these.
@@ -1214,10 +1235,12 @@ class JSMessageObject
   friend class Factory;
 
   inline bool DidEnsureSourcePositionsAvailable() const;
+  static void V8_PRESERVE_MOST V8_EXPORT_PRIVATE
+  InitializeSourcePositions(Isolate* isolate, Handle<JSMessageObject> message);
 
   // [shared]: optional SharedFunctionInfo that can be used to reconstruct the
   // source position if not available when the message was generated.
-  DECL_ACCESSORS(shared_info, HeapObject)
+  DECL_ACCESSORS(shared_info, Object)
 
   // [bytecode_offset]: optional offset using along with |shared| to generation
   // source positions.
@@ -1265,6 +1288,18 @@ class JSStringIterator
   DECL_VERIFIER(JSStringIterator)
 
   TQ_OBJECT_CONSTRUCTORS(JSStringIterator)
+};
+
+// The valid iterator wrapper is the wrapper object created by
+// Iterator.from(obj), which attempts to wrap iterator-like objects into an
+// actual iterator with %Iterator.prototype%.
+class JSValidIteratorWrapper
+    : public TorqueGeneratedJSValidIteratorWrapper<JSValidIteratorWrapper,
+                                                   JSObject> {
+ public:
+  DECL_PRINTER(JSValidIteratorWrapper)
+
+  TQ_OBJECT_CONSTRUCTORS(JSValidIteratorWrapper)
 };
 
 }  // namespace internal

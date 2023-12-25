@@ -673,9 +673,12 @@ assertEq(get.call(tbl1, 0), null);
 assertEq(get.call(tbl1, 0, Infinity), null);
 assertEq(get.call(tbl1, 1), null);
 assertEq(get.call(tbl1, 1.5), null);
-assertThrows(() => get.call(tbl1, 2), RangeError, /invalid index \d+ into function table/);
 assertThrows(
-    () => get.call(tbl1, 2.5), RangeError, /invalid index \d+ into function table/);
+    () => get.call(tbl1, 2), RangeError,
+    /invalid index 2 into funcref table of size 2/);
+assertThrows(
+    () => get.call(tbl1, 2.5), RangeError,
+    /invalid index 2 into funcref table of size 2/);
 assertThrows(() => get.call(tbl1, -1), TypeError, /must be non-negative/);
 assertThrows(
     () => get.call(tbl1, Math.pow(2, 33)), TypeError,
@@ -691,7 +694,7 @@ assertTrue(setDesc.configurable);
 
 // 'WebAssembly.Table.prototype.set' method
 let set = setDesc.value;
-assertEq(set.length, 2);
+assertEq(set.length, 1);
 assertFalse(isConstructor(set));
 assertThrows(
     () => set.call(), TypeError, /Receiver is not a WebAssembly.Table/);
@@ -701,7 +704,8 @@ assertThrows(
     () => set.call(tbl1, undefined), TypeError,
     /must be convertible to a valid number/);
 assertThrows(
-    () => set.call(tbl1, 2, null), RangeError, /invalid index \d+ into function table/);
+    () => set.call(tbl1, 2, null), RangeError,
+    /invalid index 2 into funcref table of size 2/);
 assertThrows(
     () => set.call(tbl1, -1, null), TypeError, /must be non-negative/);
 assertThrows(
@@ -715,18 +719,19 @@ assertThrows(
   /must be convertible to a valid number/);
 assertThrows(
     () => set.call(tbl1, 0, undefined), TypeError,
-    /Argument 1 is invalid for table of type funcref/);
+    /Argument 1 is invalid for table: /);
 assertThrows(
     () => set.call(tbl1, undefined, undefined), TypeError,
     /must be convertible to a valid number/);
 assertThrows(
     () => set.call(tbl1, 0, {}), TypeError,
-    /Argument 1 is invalid for table of type funcref/);
-assertThrows(() => set.call(tbl1, 0, function() {}),
-             TypeError, /Argument 1 is invalid for table of type funcref/);
+    /Argument 1 is invalid for table:.*null.*or a Wasm function object/);
+assertThrows(
+    () => set.call(tbl1, 0, function() {}), TypeError,
+    /Argument 1 is invalid for table:.*null.*or a Wasm function object/);
 assertThrows(
     () => set.call(tbl1, 0, Math.sin), TypeError,
-    /Argument 1 is invalid for table of type funcref/);
+    /Argument 1 is invalid for table:.*null.*or a Wasm function object/);
 assertThrows(
     () => set.call(tbl1, {valueOf() { throw Error('hai') }}, null), Error,
     'hai');

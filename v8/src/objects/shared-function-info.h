@@ -37,17 +37,19 @@ class DebugInfo;
 class IsCompiledScope;
 template <typename>
 class Signature;
+class WasmFunctionData;
 class WasmCapiFunctionData;
 class WasmExportedFunctionData;
 class WasmJSFunctionData;
+class WasmResumeData;
 
-enum OSRCodeCacheStateOfSFI : uint8_t;
-
+#if V8_ENABLE_WEBASSEMBLY
 namespace wasm {
 struct WasmModule;
 class ValueType;
 using FunctionSig = Signature<ValueType>;
 }  // namespace wasm
+#endif
 
 #include "torque-generated/src/objects/shared-function-info-tq.inc"
 
@@ -79,9 +81,9 @@ class PreparseData
   inline int inner_start_offset() const;
   inline ObjectSlot inner_data_start() const;
 
-  inline byte get(int index) const;
-  inline void set(int index, byte value);
-  inline void copy_in(int index, const byte* buffer, int length);
+  inline uint8_t get(int index) const;
+  inline void set(int index, uint8_t value);
+  inline void copy_in(int index, const uint8_t* buffer, int length);
 
   inline PreparseData get_child(int index) const;
   inline void set_child(int index, PreparseData value,
@@ -186,7 +188,6 @@ class InterpreterData
 class SharedFunctionInfo
     : public TorqueGeneratedSharedFunctionInfo<SharedFunctionInfo, HeapObject> {
  public:
-  NEVER_READ_ONLY_SPACE
   DEFINE_TORQUE_GENERATED_SHARED_FUNCTION_INFO_FLAGS()
   DEFINE_TORQUE_GENERATED_SHARED_FUNCTION_INFO_FLAGS2()
 
@@ -205,12 +206,11 @@ class SharedFunctionInfo
   inline void SetName(String name);
 
   // Get the code object which represents the execution of this function.
-  V8_EXPORT_PRIVATE CodeT GetCode() const;
+  V8_EXPORT_PRIVATE Code GetCode(Isolate* isolate) const;
 
   // Get the abstract code associated with the function, which will either be
   // a Code object or a BytecodeArray.
-  template <typename IsolateT>
-  inline AbstractCode abstract_code(IsolateT* isolate);
+  inline AbstractCode abstract_code(Isolate* isolate);
 
   // Set up the link between shared function info and the script. The shared
   // function info is added to the list on the script.
@@ -253,9 +253,8 @@ class SharedFunctionInfo
   // Start position of this function in the script source.
   V8_EXPORT_PRIVATE int StartPosition() const;
 
-  // Set the start and end position of this function in the script source.
-  // Updates the scope info if available.
-  V8_EXPORT_PRIVATE void SetPosition(int start_position, int end_position);
+  V8_EXPORT_PRIVATE void UpdateFromFunctionLiteralForLiveEdit(
+      FunctionLiteral* lit);
 
   // [outer scope info | feedback metadata] Shared storage for outer scope info
   // (on uncompiled functions) and feedback metadata (on compiled functions).
@@ -328,38 +327,41 @@ class SharedFunctionInfo
   inline bool is_class_constructor() const;
   inline FunctionTemplateInfo get_api_func_data() const;
   inline void set_api_func_data(FunctionTemplateInfo data);
-  inline bool HasBytecodeArray() const;
+  DECL_GETTER(HasBytecodeArray, bool)
   template <typename IsolateT>
   inline BytecodeArray GetBytecodeArray(IsolateT* isolate) const;
 
   inline void set_bytecode_array(BytecodeArray bytecode);
-  inline CodeT InterpreterTrampoline() const;
-  inline bool HasInterpreterData() const;
-  inline InterpreterData interpreter_data() const;
+  DECL_GETTER(InterpreterTrampoline, Code)
+  DECL_GETTER(HasInterpreterData, bool)
+  DECL_GETTER(interpreter_data, InterpreterData)
   inline void set_interpreter_data(InterpreterData interpreter_data);
-  inline bool HasBaselineCode() const;
-  inline CodeT baseline_code(AcquireLoadTag) const;
-  inline void set_baseline_code(CodeT baseline_code, ReleaseStoreTag);
+  DECL_GETTER(HasBaselineCode, bool)
+  DECL_RELEASE_ACQUIRE_ACCESSORS(baseline_code, Code)
   inline void FlushBaselineCode();
   inline BytecodeArray GetActiveBytecodeArray() const;
   inline void SetActiveBytecodeArray(BytecodeArray bytecode);
 
 #if V8_ENABLE_WEBASSEMBLY
   inline bool HasAsmWasmData() const;
+  inline bool HasWasmFunctionData() const;
   inline bool HasWasmExportedFunctionData() const;
   inline bool HasWasmJSFunctionData() const;
   inline bool HasWasmCapiFunctionData() const;
-  inline bool HasWasmOnFulfilledData() const;
+  inline bool HasWasmResumeData() const;
   inline AsmWasmData asm_wasm_data() const;
   inline void set_asm_wasm_data(AsmWasmData data);
 
   V8_EXPORT_PRIVATE WasmExportedFunctionData
   wasm_exported_function_data() const;
+  WasmFunctionData wasm_function_data() const;
   WasmJSFunctionData wasm_js_function_data() const;
   WasmCapiFunctionData wasm_capi_function_data() const;
+  WasmResumeData wasm_resume_data() const;
 
   inline const wasm::WasmModule* wasm_module() const;
   inline const wasm::FunctionSig* wasm_function_signature() const;
+  inline int wasm_function_index() const;
 #endif  // V8_ENABLE_WEBASSEMBLY
 
   // builtin corresponds to the auto-generated Builtin enum.
@@ -386,7 +388,7 @@ class SharedFunctionInfo
   // code written in OO style, where almost all functions are anonymous but are
   // assigned to object properties.
   inline bool HasInferredName();
-  inline String inferred_name();
+  inline String inferred_name() const;
 
   // Break infos are contained in DebugInfo, this is a convenience method
   // to simplify access.
@@ -399,8 +401,9 @@ class SharedFunctionInfo
   CoverageInfo GetCoverageInfo() const;
 
   // The function's name if it is non-empty, otherwise the inferred name.
-  std::unique_ptr<char[]> DebugNameCStr();
-  static Handle<String> DebugName(Handle<SharedFunctionInfo>);
+  std::unique_ptr<char[]> DebugNameCStr() const;
+  static Handle<String> DebugName(Isolate* isolate,
+                                  Handle<SharedFunctionInfo> shared);
 
   // Used for flags such as --turbo-filter.
   bool PassesFilter(const char* raw_filter);
@@ -417,8 +420,8 @@ class SharedFunctionInfo
   inline bool is_repl_mode() const;
 
   // The function is subject to debugging if a debug info is attached.
-  inline bool HasDebugInfo() const;
-  inline DebugInfo GetDebugInfo() const;
+  DECL_GETTER(HasDebugInfo, bool)
+  DECL_GETTER(GetDebugInfo, DebugInfo)
   inline void SetDebugInfo(DebugInfo debug_info);
 
   // The offset of the 'function' token in the script source relative to the
@@ -443,11 +446,14 @@ class SharedFunctionInfo
   DECL_UINT8_ACCESSORS(flags2)
 
   // True if the outer class scope contains a private brand for
-  // private instance methdos.
+  // private instance methods.
   DECL_BOOLEAN_ACCESSORS(class_scope_has_private_brand)
   DECL_BOOLEAN_ACCESSORS(has_static_private_methods_or_accessors)
 
+  DECL_BOOLEAN_ACCESSORS(is_sparkplug_compiling)
   DECL_BOOLEAN_ACCESSORS(maglev_compilation_failed)
+
+  DECL_BOOLEAN_ACCESSORS(sparkplug_compiled)
 
   // Is this function a top-level function (scripts, evals).
   DECL_BOOLEAN_ACCESSORS(is_toplevel)
@@ -518,11 +524,7 @@ class SharedFunctionInfo
 
   // Disable (further) attempted optimization of all functions sharing this
   // shared function info.
-  void DisableOptimization(BailoutReason reason);
-
-  inline OSRCodeCacheStateOfSFI osr_code_cache_state() const;
-
-  inline void set_osr_code_cache_state(OSRCodeCacheStateOfSFI state);
+  void DisableOptimization(Isolate* isolate, BailoutReason reason);
 
   // This class constructor needs to call out to an instance fields
   // initializer. This flag is set when creating the
@@ -532,8 +534,10 @@ class SharedFunctionInfo
 
   // [source code]: Source code for the function.
   bool HasSourceCode() const;
-  static Handle<Object> GetSourceCode(Handle<SharedFunctionInfo> shared);
-  static Handle<Object> GetSourceCodeHarmony(Handle<SharedFunctionInfo> shared);
+  static Handle<Object> GetSourceCode(Isolate* isolate,
+                                      Handle<SharedFunctionInfo> shared);
+  static Handle<Object> GetSourceCodeHarmony(Isolate* isolate,
+                                             Handle<SharedFunctionInfo> shared);
 
   // Tells whether this function should be subject to debugging, e.g. for
   // - scope inspection
@@ -611,7 +615,7 @@ class SharedFunctionInfo
 
   static void EnsureBytecodeArrayAvailable(
       Isolate* isolate, Handle<SharedFunctionInfo> shared_info,
-      IsCompiledScope* is_compiled,
+      IsCompiledScope* is_compiled_scope,
       CreateSourcePositions flag = CreateSourcePositions::kNo);
 
   inline bool CanCollectSourcePosition(Isolate* isolate);
@@ -664,18 +668,18 @@ class SharedFunctionInfo
   // Constants.
   static const int kMaximumFunctionTokenOffset = kMaxUInt16 - 1;
   static const uint16_t kFunctionTokenOutOfRange = static_cast<uint16_t>(-1);
-  STATIC_ASSERT(kMaximumFunctionTokenOffset + 1 == kFunctionTokenOutOfRange);
+  static_assert(kMaximumFunctionTokenOffset + 1 == kFunctionTokenOutOfRange);
 
-  static const int kAlignedSize = OBJECT_POINTER_ALIGN(kSize);
+  static_assert(kSize % kTaggedSize == 0);
 
   class BodyDescriptor;
 
   // Bailout reasons must fit in the DisabledOptimizationReason bitfield.
-  STATIC_ASSERT(BailoutReason::kLastErrorMessage <=
+  static_assert(BailoutReason::kLastErrorMessage <=
                 DisabledOptimizationReasonBits::kMax);
 
-  STATIC_ASSERT(FunctionKind::kLastFunctionKind <= FunctionKindBits::kMax);
-  STATIC_ASSERT(FunctionSyntaxKind::kLastFunctionSyntaxKind <=
+  static_assert(FunctionKind::kLastFunctionKind <= FunctionKindBits::kMax);
+  static_assert(FunctionSyntaxKind::kLastFunctionSyntaxKind <=
                 FunctionSyntaxKindBits::kMax);
 
   // Sets the bytecode in {shared}'s DebugInfo as the bytecode to
@@ -689,8 +693,6 @@ class SharedFunctionInfo
                                      Isolate* isolate);
 
  private:
-  friend class WebSnapshotDeserializer;
-
 #ifdef VERIFY_HEAP
   void SharedFunctionInfoVerify(ReadOnlyRoots roots);
 #endif

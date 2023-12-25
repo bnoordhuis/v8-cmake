@@ -18,7 +18,7 @@ namespace internal {
 class LocalHeap;
 
 HandleBase::HandleBase(Address object, Isolate* isolate)
-    : location_(HandleScope::GetHandle(isolate, object)) {}
+    : location_(HandleScope::CreateHandle(isolate, object)) {}
 
 HandleBase::HandleBase(Address object, LocalIsolate* isolate)
     : location_(LocalHandleScope::GetHandle(isolate->heap(), object)) {}
@@ -115,7 +115,7 @@ HandleScope& HandleScope::operator=(HandleScope&& other) V8_NOEXCEPT {
 void HandleScope::CloseScope(Isolate* isolate, Address* prev_next,
                              Address* prev_limit) {
 #ifdef DEBUG
-  int before = FLAG_check_handle_count ? NumberOfHandles(isolate) : 0;
+  int before = v8_flags.check_handle_count ? NumberOfHandles(isolate) : 0;
 #endif
   DCHECK_NOT_NULL(isolate);
   HandleScopeData* current = isolate->handle_scope_data();
@@ -136,7 +136,7 @@ void HandleScope::CloseScope(Isolate* isolate, Address* prev_next,
       static_cast<size_t>(reinterpret_cast<Address>(limit) -
                           reinterpret_cast<Address>(current->next)));
 #ifdef DEBUG
-  int after = FLAG_check_handle_count ? NumberOfHandles(isolate) : 0;
+  int after = v8_flags.check_handle_count ? NumberOfHandles(isolate) : 0;
   DCHECK_LT(after - before, kCheckHandleThreshold);
   DCHECK_LT(before, kCheckHandleThreshold);
 #endif
@@ -161,9 +161,12 @@ Handle<T> HandleScope::CloseAndEscape(Handle<T> handle_value) {
 
 Address* HandleScope::CreateHandle(Isolate* isolate, Address value) {
   DCHECK(AllowHandleAllocation::IsAllowed());
+  DCHECK(isolate->main_thread_local_heap()->IsRunning());
+  DCHECK_WITH_MSG(isolate->thread_id() == ThreadId::Current(),
+                  "main-thread handle can only be created on the main thread.");
   HandleScopeData* data = isolate->handle_scope_data();
   Address* result = data->next;
-  if (result == data->limit) {
+  if (V8_UNLIKELY(result == data->limit)) {
     result = Extend(isolate);
   }
   // Update the current next field, set the value in the created handle,
@@ -174,16 +177,6 @@ Address* HandleScope::CreateHandle(Isolate* isolate, Address value) {
                                           sizeof(Address));
   *result = value;
   return result;
-}
-
-Address* HandleScope::GetHandle(Isolate* isolate, Address value) {
-  DCHECK(AllowHandleAllocation::IsAllowed());
-  DCHECK(isolate->main_thread_local_heap()->IsRunning());
-  DCHECK_WITH_MSG(isolate->thread_id() == ThreadId::Current(),
-                  "main-thread handle can only be created on the main thread.");
-  HandleScopeData* data = isolate->handle_scope_data();
-  CanonicalHandleScope* canonical = data->canonical_scope;
-  return canonical ? canonical->Lookup(value) : CreateHandle(isolate, value);
 }
 
 #ifdef DEBUG
