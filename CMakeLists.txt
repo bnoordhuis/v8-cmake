@@ -65,13 +65,21 @@ set(is-msvc $<CXX_COMPILER_ID:MSVC>)
 # FIXME obviously
 set(is-arm 0)
 set(is-arm64 0)
-if (CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "arm64")
+if (CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "arm64" OR CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "aarch64")
   set(is-arm64 1)
 endif ()
 set(is-ia32 0)
 set(is-mips 0)
 set(is-mips64 0)
 set(is-ppc 0)
+set(is-ppc64 0)
+if (CMAKE_SYSTEM_PROCESSOR MATCHES "^(ppc|powerpc)")
+  if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+    set(is-ppc64 1)
+  else()
+    set(is-ppc 1)
+  endif()
+endif ()
 
 set(is-s390 $<STREQUAL:${CMAKE_SYSTEM_PROCESSOR},S390>)
 string(CONCAT is-x64 $<OR:
@@ -92,6 +100,8 @@ set(
   $<${is-win}:V8_TARGET_OS_WIN>
   $<${is-x64}:V8_TARGET_ARCH_X64>
   $<${is-arm64}:V8_TARGET_ARCH_ARM64>
+  $<${is-ppc}:V8_TARGET_ARCH_PPC>
+  $<${is-ppc64}:V8_TARGET_ARCH_PPC64>
   $<${is-win}:NOMINMAX>
   $<$<AND:${is-win},${is-x64}>:V8_OS_WIN_X64>
   $<$<BOOL:${V8_ENABLE_CONCURRENT_MARKING}>:V8_CONCURRENT_MARKING>
@@ -112,6 +122,12 @@ set(enable-exceptions
   $<$<CXX_COMPILER_ID:GNU>:-fexceptions>
 )
 
+set(enable-fpic
+  $<$<CXX_COMPILER_ID:AppleClang>:-fPIC>
+  $<$<CXX_COMPILER_ID:Clang>:-fPIC>
+  $<$<CXX_COMPILER_ID:GNU>:-fPIC>
+)
+
 #
 # d8
 #
@@ -130,6 +146,9 @@ add_executable(
 
 target_compile_definitions(d8 PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 target_compile_options(d8 PRIVATE ${disable-exceptions})
+if(enable-fPIC)
+  target_compile_options(d8 PRIVATE ${enable-fpic})
+endif()
 
 target_include_directories(d8
   PUBLIC
@@ -348,6 +367,21 @@ add_library(v8_base_without_compiler STATIC
   $<${is-arm64}:v8/src/diagnostics/arm64/eh-frame-arm64.cc>
   $<${is-arm64}:v8/src/execution/arm64/frame-constants-arm64.cc>
   $<${is-arm64}:v8/src/regexp/arm64/regexp-macro-assembler-arm64.cc>
+  $<$<AND:${is-ppc},${is-ppc64}>:v8/src/codegen/ppc/assembler-ppc.cc>
+  $<$<AND:${is-ppc},${is-ppc64}>:v8/src/codegen/ppc/constants-ppc.cc>
+  $<$<AND:${is-ppc},${is-ppc64}>:v8/src/codegen/ppc/cpu-ppc.cc>
+  $<$<AND:${is-ppc},${is-ppc64}>:v8/src/codegen/ppc/macro-assembler-ppc.cc>
+  $<$<AND:${is-ppc},${is-ppc64}>:v8/src/compiler/backend/ppc/code-generator-ppc.cc>
+  $<$<AND:${is-ppc},${is-ppc64}>:v8/src/compiler/backend/ppc/instruction-scheduler-ppc.cc>
+  $<$<AND:${is-ppc},${is-ppc64}>:v8/src/compiler/backend/ppc/instruction-selector-ppc.cc>
+  $<$<AND:${is-ppc},${is-ppc64}>:v8/src/compiler/backend/ppc/unwinding-info-writer-ppc.cc>
+  $<$<AND:${is-ppc},${is-ppc64}>:v8/src/deoptimizer/ppc/deoptimizer-ppc.cc>
+  $<$<AND:${is-ppc},${is-ppc64}>:v8/src/diagnostics/ppc/disasm-ppc.cc>
+  $<$<AND:${is-ppc},${is-ppc64}>:v8/src/diagnostics/ppc/eh-frame-ppc.cc>
+  $<$<AND:${is-ppc},${is-ppc64}>:v8/src/diagnostics/ppc/unwinder-ppc.cc>
+  $<$<AND:${is-ppc},${is-ppc64}>:v8/src/execution/ppc/frame-constants-ppc.cc>
+  $<$<AND:${is-ppc},${is-ppc64}>:v8/src/execution/ppc/simulator-ppc.cc>
+  $<$<AND:${is-ppc},${is-ppc64}>:v8/src/regexp/ppc/regexp-macro-assembler-ppc.cc>
   $<$<BOOL:${V8_ENABLE_I18N}>:$<TARGET_OBJECTS:v8-i18n-support>>
   ${api-sources}
   ${asmjs-sources}
@@ -436,6 +470,9 @@ set_property(SOURCE v8/src/diagnostics/unwinding-info-win64.cc
 
 target_compile_definitions(v8_base_without_compiler PRIVATE ${v8_defines} $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 target_compile_options(v8_base_without_compiler PRIVATE ${disable-exceptions})
+if(enable-fPIC)
+  target_compile_options(v8_base_without_compiler PRIVATE ${enable-fpic})
+endif()
 
 target_include_directories(v8_base_without_compiler
   PRIVATE
@@ -469,6 +506,9 @@ add_library(v8_compiler STATIC)
 target_sources(v8_compiler PRIVATE ${compiler-sources})
 target_compile_definitions(v8_compiler PRIVATE ${v8_defines} $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 target_compile_options(v8_compiler PRIVATE ${disable-exceptions})
+if(enable-fPIC)
+  target_compile_options(v8_compiler PRIVATE ${enable-fpic})
+endif()
 
 target_include_directories(v8_compiler
   PUBLIC
@@ -547,6 +587,9 @@ add_library(
 
 target_compile_definitions(v8_initializers PRIVATE ${v8_defines} $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 target_compile_options(v8_initializers PRIVATE ${disable-exceptions})
+if(enable-fPIC)
+  target_compile_options(v8_initializers PRIVATE ${enable-fpic})
+endif()
 
 target_include_directories(v8_initializers
   PRIVATE
@@ -571,6 +614,9 @@ add_library(
 
 target_compile_definitions(v8_snapshot PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 target_compile_options(v8_snapshot PRIVATE ${disable-exceptions})
+if(enable-fPIC)
+  target_compile_options(v8_snapshot PRIVATE ${enable-fpic})
+endif()
 target_include_directories(v8_snapshot PRIVATE ${PROJECT_SOURCE_DIR}/v8)
 
 target_link_libraries(v8_snapshot
@@ -585,7 +631,10 @@ add_custom_command(
     mksnapshot
     --embedded_src ${PROJECT_BINARY_DIR}/embedded.S
     --startup_src ${PROJECT_BINARY_DIR}/snapshot.cc
+    $<${is-arm64}:--target_arch=arm64>
     $<${is-x64}:--target_arch=x64>
+    $<${is-ppc}:--target_arch=ppc>
+    $<${is-ppc64}:--target_arch=ppc64>
     $<$<PLATFORM_ID:Darwin>:--target_os=mac>
     $<$<PLATFORM_ID:Linux>:--target_os=linux>
     $<$<PLATFORM_ID:Windows>:--target_os=win>
@@ -652,6 +701,9 @@ add_library(v8_inspector STATIC
 
 target_compile_features(v8_inspector PUBLIC cxx_std_17)
 target_compile_options(v8_inspector PRIVATE ${disable-exceptions})
+if(enable-fPIC)
+  target_compile_options(v8_inspector PRIVATE ${enable-fpic})
+endif()
 target_compile_definitions(v8_inspector PUBLIC $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 
 target_include_directories(v8_inspector
@@ -722,6 +774,10 @@ target_sources(v8_libplatform
 
 target_compile_definitions(v8_libplatform PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 target_compile_options(v8_libplatform PRIVATE ${disable-exceptions})
+if(enable-fPIC)
+  target_compile_options(v8_libplatform PRIVATE ${enable-fpic})
+endif()
+
 target_include_directories(v8_libplatform
   PUBLIC
     ${PROJECT_SOURCE_DIR}/v8/include
@@ -745,6 +801,9 @@ target_include_directories(v8_libsampler
 
 target_compile_definitions(v8_libsampler PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 target_compile_options(v8_libsampler PRIVATE ${disable-exceptions})
+if(enable-fPIC)
+  target_compile_options(v8_libsampler PRIVATE ${enable-fpic})
+endif()
 target_include_directories(v8_libsampler PRIVATE ${PROJECT_SOURCE_DIR}/v8)
 target_link_libraries(v8_libsampler PRIVATE v8_libbase)
 
@@ -793,6 +852,9 @@ set_property(SOURCE v8/src/base/utils/random-number-generator.cc
 
 target_compile_definitions(v8_libbase PRIVATE $<${is-win}:UNICODE> $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 target_compile_options(v8_libbase PRIVATE ${disable-exceptions})
+if(enable-fPIC)
+  target_compile_options(v8_libbase PRIVATE ${enable-fpic})
+endif()
 target_include_directories(v8_libbase PRIVATE ${PROJECT_SOURCE_DIR}/v8)
 target_link_libraries(v8_libbase
   PRIVATE
@@ -925,6 +987,9 @@ add_library(
 
 target_compile_definitions(v8_torque_generated PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 target_compile_options(v8_torque_generated PRIVATE ${disable-exceptions})
+if(enable-fPIC)
+  target_compile_options(v8_torque_generated PRIVATE ${enable-fpic})
+endif()
 target_link_libraries(v8_torque_generated PRIVATE v8-bytecodes-builtin-list)
 
 target_include_directories(v8_torque_generated
