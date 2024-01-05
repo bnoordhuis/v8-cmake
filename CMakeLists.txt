@@ -1005,6 +1005,8 @@ add_custom_command(
     -o ${PROJECT_BINARY_DIR}/torque-generated
     -v8-root ${PROJECT_SOURCE_DIR}/v8
     ${torque_files}
+  COMMAND
+    ${CMAKE_COMMAND} -E touch ${torque-outputs} ${torque_outputs}
   DEPENDS
     torque
     ${torque_dirs}
@@ -1014,16 +1016,6 @@ add_custom_command(
     ${torque_outputs}
 )
 
-foreach(file IN LISTS torque_outputs)
-  add_custom_command(
-    OUTPUT ${file}
-    COMMAND ${CMAKE_COMMAND} -E touch ${file}
-    DEPENDS
-      torque
-      ${torque_dirs}
-      ${torque_files_abs}
-  )
-endforeach()
 
 add_custom_command(
   COMMAND
