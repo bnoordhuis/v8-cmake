@@ -1014,6 +1014,14 @@ add_custom_command(
     ${torque_outputs}
 )
 
+foreach(file IN LISTS torque_outputs)
+  add_custom_command(
+          OUTPUT ${file}
+          COMMAND ${CMAKE_COMMAND} -E touch ${file}
+          DEPENDS ${file}
+  )
+endforeach()
+
 add_custom_command(
   COMMAND
     ${CMAKE_COMMAND} -E make_directory ${torque_dirs}
