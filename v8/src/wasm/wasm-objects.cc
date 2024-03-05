@@ -708,27 +708,29 @@ void WasmIndirectFunctionTable::Resize(Isolate* isolate,
 
 namespace {
 
-void SetInstanceMemory(Handle<WasmInstanceObject> instance,
-                       Handle<JSArrayBuffer> buffer) {
-  bool is_wasm_module = instance->module()->origin == wasm::kWasmOrigin;
-  bool use_trap_handler =
-      instance->module_object().native_module()->bounds_checks() ==
-      wasm::kTrapHandler;
+void SetInstanceMemory(WasmInstanceObject instance, JSArrayBuffer buffer,
+                       int memory_index) {
+  DisallowHeapAllocation no_gc;
+  const wasm::WasmMemory& memory = instance.module()->memories[memory_index];
+
+  bool is_wasm_module = instance.module()->origin == wasm::kWasmOrigin;
+  bool use_trap_handler = memory.bounds_checks == wasm::kTrapHandler;
+  CHECK_IMPLIES(use_trap_handler, is_wasm_module);
   // Wasm modules compiled to use the trap handler don't have bounds checks,
   // so they must have a memory that has guard regions.
-  CHECK_IMPLIES(is_wasm_module && use_trap_handler,
-                buffer->GetBackingStore()->has_guard_regions());
+  CHECK_IMPLIES(use_trap_handler,
+                buffer.GetBackingStore()->has_guard_regions());
 
-  // TODO(13918): Support multiple memories.
-  instance->SetRawMemory(0, reinterpret_cast<uint8_t*>(buffer->backing_store()),
-                         buffer->byte_length());
+  instance.SetRawMemory(memory_index,
+                        reinterpret_cast<uint8_t*>(buffer.backing_store()),
+                        buffer.byte_length());
 #if DEBUG
   if (!v8_flags.mock_arraybuffer_allocator) {
     // To flush out bugs earlier, in DEBUG mode, check that all pages of the
     // memory are accessible by reading and writing one byte on each page.
     // Don't do this if the mock ArrayBuffer allocator is enabled.
-    uint8_t* mem_start = instance->memory0_start();
-    size_t mem_size = instance->memory0_size();
+    uint8_t* mem_start = instance.memory0_start();
+    size_t mem_size = instance.memory0_size();
     for (size_t offset = 0; offset < mem_size; offset += wasm::kWasmPageSize) {
       uint8_t val = mem_start[offset];
       USE(val);
@@ -737,6 +739,7 @@ void SetInstanceMemory(Handle<WasmInstanceObject> instance,
   }
 #endif
 }
+
 }  // namespace
 
 Handle<WasmMemoryObject> WasmMemoryObject::New(Isolate* isolate,
@@ -819,41 +822,45 @@ MaybeHandle<WasmMemoryObject> WasmMemoryObject::New(
           ? isolate->factory()->NewJSSharedArrayBuffer(std::move(backing_store))
           : isolate->factory()->NewJSArrayBuffer(std::move(backing_store));
 
-  return New(isolate, buffer, maximum);
+  return New(isolate, buffer, maximum, memory_type);
 }
 
-void WasmMemoryObject::AddInstance(Isolate* isolate,
-                                   Handle<WasmMemoryObject> memory,
-                                   Handle<WasmInstanceObject> instance) {
+void WasmMemoryObject::UseInInstance(Isolate* isolate,
+                                     Handle<WasmMemoryObject> memory,
+                                     Handle<WasmInstanceObject> instance,
+                                     int memory_index_in_instance) {
+  SetInstanceMemory(*instance, memory->array_buffer(),
+                    memory_index_in_instance);
   Handle<WeakArrayList> old_instances =
       memory->has_instances()
           ? Handle<WeakArrayList>(memory->instances(), isolate)
-          : handle(ReadOnlyRoots(isolate->heap()).empty_weak_array_list(),
-                   isolate);
+          : isolate->factory()->empty_weak_array_list();
   Handle<WeakArrayList> new_instances = WeakArrayList::Append(
       isolate, old_instances, MaybeObjectHandle::Weak(instance));
   memory->set_instances(*new_instances);
-  Handle<JSArrayBuffer> buffer(memory->array_buffer(), isolate);
-  SetInstanceMemory(instance, buffer);
 }
 
-void WasmMemoryObject::update_instances(Isolate* isolate,
-                                        Handle<JSArrayBuffer> buffer) {
+void WasmMemoryObject::SetNewBuffer(JSArrayBuffer new_buffer) {
+  DisallowGarbageCollection no_gc;
+  set_array_buffer(new_buffer);
   if (has_instances()) {
-    Handle<WeakArrayList> instances(this->instances(), isolate);
-    for (int i = 0; i < instances->length(); i++) {
-      MaybeObject elem = instances->Get(i);
-      HeapObject heap_object;
-      if (elem->GetHeapObjectIfWeak(&heap_object)) {
-        Handle<WasmInstanceObject> instance(
-            WasmInstanceObject::cast(heap_object), isolate);
-        SetInstanceMemory(instance, buffer);
-      } else {
-        DCHECK(elem->IsCleared());
+    WeakArrayList instances = this->instances();
+    for (int i = 0, len = instances.length(); i < len; ++i) {
+      MaybeObject elem = instances.Get(i);
+      if (elem->IsCleared()) continue;
+      WasmInstanceObject instance =
+          WasmInstanceObject::cast(elem->GetHeapObjectAssumeWeak());
+      // TODO(13918): Avoid the iteration if we ever see larger numbers of
+      // memories.
+      FixedArray memory_objects = instance.memory_objects();
+      int num_memories = memory_objects.length();
+      for (int mem_idx = 0; mem_idx < num_memories; ++mem_idx) {
+        if (memory_objects.get(mem_idx) == *this) {
+          SetInstanceMemory(instance, new_buffer, mem_idx);
+        }
       }
     }
   }
-  set_array_buffer(*buffer);
 }
 
 // static
@@ -921,7 +928,7 @@ int32_t WasmMemoryObject::Grow(Isolate* isolate,
     JSArrayBuffer::Detach(old_buffer, true).Check();
     Handle<JSArrayBuffer> new_buffer =
         isolate->factory()->NewJSArrayBuffer(std::move(backing_store));
-    memory_object->update_instances(isolate, new_buffer);
+    memory_object->SetNewBuffer(*new_buffer);
     // For debugging purposes we memorize a link from the JSArrayBuffer
     // to it's owning WasmMemoryObject instance.
     Handle<Symbol> symbol =
@@ -961,7 +968,7 @@ int32_t WasmMemoryObject::Grow(Isolate* isolate,
   JSArrayBuffer::Detach(old_buffer, true).Check();
   Handle<JSArrayBuffer> new_buffer =
       isolate->factory()->NewJSArrayBuffer(std::move(new_backing_store));
-  memory_object->update_instances(isolate, new_buffer);
+  memory_object->SetNewBuffer(*new_buffer);
   // For debugging purposes we memorize a link from the JSArrayBuffer
   // to it's owning WasmMemoryObject instance.
   Handle<Symbol> symbol = isolate->factory()->array_buffer_wasm_memory_symbol();
@@ -1102,12 +1109,21 @@ bool WasmInstanceObject::EnsureIndirectFunctionTableWithMinimumSize(
 
 void WasmInstanceObject::SetRawMemory(int memory_index, uint8_t* mem_start,
                                       size_t mem_size) {
-  // TODO(13918): Support multiple memories.
-  CHECK_EQ(0, memory_index);
-  CHECK_LE(mem_size, module()->is_memory64 ? wasm::max_mem64_bytes()
-                                           : wasm::max_mem32_bytes());
-  set_memory0_start(mem_start);
-  set_memory0_size(mem_size);
+  CHECK_LE(memory_index, module()->memories.size());
+
+  CHECK_LE(mem_size, module()->memories[memory_index].is_memory64
+                         ? wasm::max_mem64_bytes()
+                         : wasm::max_mem32_bytes());
+  // All memory bases and sizes are stored in a FixedAddressArray.
+  FixedAddressArray bases_and_sizes = memory_bases_and_sizes();
+  bases_and_sizes.set_sandboxed_pointer(memory_index * 2,
+                                        reinterpret_cast<Address>(mem_start));
+  bases_and_sizes.set(memory_index * 2 + 1, mem_size);
+  // Memory 0 has fast-access fields.
+  if (memory_index == 0) {
+    set_memory0_start(mem_start);
+    set_memory0_size(mem_size);
+  }
 }
 
 const WasmModule* WasmInstanceObject::module() {
@@ -1116,21 +1132,21 @@ const WasmModule* WasmInstanceObject::module() {
 
 Handle<WasmInstanceObject> WasmInstanceObject::New(
     Isolate* isolate, Handle<WasmModuleObject> module_object) {
-  Handle<JSFunction> instance_cons(
-      isolate->native_context()->wasm_instance_constructor(), isolate);
-  Handle<JSObject> instance_object =
-      isolate->factory()->NewJSObject(instance_cons, AllocationType::kOld);
+  // Do first allocate all objects that will be stored in instance fields,
+  // because otherwise we would have to allocate when the instance is not fully
+  // initialized yet, which can lead to heap verification errors.
+  const WasmModule* module = module_object->module();
 
-  Handle<WasmInstanceObject> instance(
-      WasmInstanceObject::cast(*instance_object), isolate);
-  instance->clear_padding();
-
-  auto module = module_object->module();
-
-  auto num_imported_functions = module->num_imported_functions;
+  int num_imported_functions = module->num_imported_functions;
   Handle<FixedAddressArray> imported_function_targets =
       FixedAddressArray::New(isolate, num_imported_functions);
-  instance->set_imported_function_targets(*imported_function_targets);
+  Handle<FixedArray> imported_function_refs =
+      isolate->factory()->NewFixedArray(num_imported_functions);
+  Handle<FixedArray> well_known_imports =
+      isolate->factory()->NewFixedArray(num_imported_functions);
+
+  Handle<FixedArray> functions = isolate->factory()->NewFixedArrayWithZeroes(
+      static_cast<int>(module->functions.size()));
 
   int num_imported_mutable_globals = module->num_imported_mutable_globals;
   // The imported_mutable_globals is essentially a FixedAddressArray (storing
@@ -1139,63 +1155,90 @@ Handle<WasmInstanceObject> WasmInstanceObject::New(
   // raw ByteArray.
   Handle<FixedAddressArray> imported_mutable_globals =
       FixedAddressArray::New(isolate, num_imported_mutable_globals);
-  instance->set_imported_mutable_globals(*imported_mutable_globals);
 
   int num_data_segments = module->num_declared_data_segments;
   Handle<FixedAddressArray> data_segment_starts =
       FixedAddressArray::New(isolate, num_data_segments);
-  instance->set_data_segment_starts(*data_segment_starts);
-
   Handle<FixedUInt32Array> data_segment_sizes =
       FixedUInt32Array::New(isolate, num_data_segments);
-  instance->set_data_segment_sizes(*data_segment_sizes);
 
-  instance->set_element_segments(*isolate->factory()->empty_fixed_array());
+  static_assert(wasm::kV8MaxWasmMemories < kMaxInt / 2);
+  int num_memories = static_cast<int>(module->memories.size());
+  Handle<FixedArray> memory_objects =
+      isolate->factory()->NewFixedArray(num_memories);
+  Handle<FixedAddressArray> memory_bases_and_sizes =
+      FixedAddressArray::New(isolate, 2 * num_memories);
 
-  Handle<FixedArray> imported_function_refs =
-      isolate->factory()->NewFixedArray(num_imported_functions);
-  instance->set_imported_function_refs(*imported_function_refs);
+  // Now allocate the instance itself.
+  Handle<JSFunction> instance_cons(
+      isolate->native_context()->wasm_instance_constructor(), isolate);
+  Handle<JSObject> instance_object =
+      isolate->factory()->NewJSObject(instance_cons, AllocationType::kOld);
 
-  instance->set_stack_limit_address(
-      isolate->stack_guard()->address_of_jslimit());
-  instance->set_real_stack_limit_address(
-      isolate->stack_guard()->address_of_real_jslimit());
-  instance->set_new_allocation_limit_address(
-      isolate->heap()->NewSpaceAllocationLimitAddress());
-  instance->set_new_allocation_top_address(
-      isolate->heap()->NewSpaceAllocationTopAddress());
-  instance->set_old_allocation_limit_address(
-      isolate->heap()->OldSpaceAllocationLimitAddress());
-  instance->set_old_allocation_top_address(
-      isolate->heap()->OldSpaceAllocationTopAddress());
-  instance->set_globals_start(
-      reinterpret_cast<uint8_t*>(EmptyBackingStoreBuffer()));
-  instance->set_indirect_function_table_size(0);
-  instance->set_indirect_function_table_refs(
-      ReadOnlyRoots(isolate).empty_fixed_array());
-  instance->set_indirect_function_table_sig_ids(
-      FixedUInt32Array::cast(ReadOnlyRoots(isolate).empty_byte_array()));
-  instance->set_indirect_function_table_targets(
-      FixedAddressArray::cast(ReadOnlyRoots(isolate).empty_byte_array()));
-  instance->set_native_context(*isolate->native_context());
-  instance->set_module_object(*module_object);
-  instance->set_jump_table_start(
-      module_object->native_module()->jump_table_start());
-  instance->set_hook_on_function_call_address(
-      isolate->debug()->hook_on_function_call_address());
-  instance->set_managed_object_maps(*isolate->factory()->empty_fixed_array());
-  Handle<FixedArray> well_known_imports =
-      isolate->factory()->NewFixedArray(num_imported_functions);
-  instance->set_well_known_imports(*well_known_imports);
-  Handle<FixedArray> functions = isolate->factory()->NewFixedArrayWithZeroes(
-      static_cast<int>(module->functions.size()));
-  instance->set_wasm_internal_functions(*functions);
-  instance->set_feedback_vectors(*isolate->factory()->empty_fixed_array());
-  instance->set_tiering_budget_array(
-      module_object->native_module()->tiering_budget_array());
-  instance->set_break_on_entry(module_object->script().break_on_entry());
-  instance->SetRawMemory(
-      0, reinterpret_cast<uint8_t*>(EmptyBackingStoreBuffer()), 0);
+  // Initialize the instance. During this step, no more allocations should
+  // happen because the instance is incomplete yet, so we should not trigger
+  // heap verification at this point.
+  {
+    DisallowHeapAllocation no_gc;
+
+    // Some constants:
+    uint8_t* empty_backing_store_buffer =
+        reinterpret_cast<uint8_t*>(EmptyBackingStoreBuffer());
+    FixedArray empty_fixed_array = ReadOnlyRoots(isolate).empty_fixed_array();
+    ByteArray empty_byte_array = ReadOnlyRoots(isolate).empty_byte_array();
+
+    WasmInstanceObject instance = WasmInstanceObject::cast(*instance_object);
+    instance.clear_padding();
+    instance.set_imported_function_targets(*imported_function_targets);
+    instance.set_imported_mutable_globals(*imported_mutable_globals);
+    instance.set_data_segment_starts(*data_segment_starts);
+    instance.set_data_segment_sizes(*data_segment_sizes);
+    instance.set_element_segments(empty_fixed_array);
+    instance.set_imported_function_refs(*imported_function_refs);
+    instance.set_stack_limit_address(
+        isolate->stack_guard()->address_of_jslimit());
+    instance.set_real_stack_limit_address(
+        isolate->stack_guard()->address_of_real_jslimit());
+    instance.set_new_allocation_limit_address(
+        isolate->heap()->NewSpaceAllocationLimitAddress());
+    instance.set_new_allocation_top_address(
+        isolate->heap()->NewSpaceAllocationTopAddress());
+    instance.set_old_allocation_limit_address(
+        isolate->heap()->OldSpaceAllocationLimitAddress());
+    instance.set_old_allocation_top_address(
+        isolate->heap()->OldSpaceAllocationTopAddress());
+    instance.set_globals_start(empty_backing_store_buffer);
+    instance.set_indirect_function_table_size(0);
+    instance.set_indirect_function_table_refs(empty_fixed_array);
+    instance.set_indirect_function_table_sig_ids(
+        FixedUInt32Array::cast(empty_byte_array));
+    instance.set_indirect_function_table_targets(
+        FixedAddressArray::cast(empty_byte_array));
+    instance.set_native_context(*isolate->native_context());
+    instance.set_module_object(*module_object);
+    instance.set_jump_table_start(
+        module_object->native_module()->jump_table_start());
+    instance.set_hook_on_function_call_address(
+        isolate->debug()->hook_on_function_call_address());
+    instance.set_managed_object_maps(*isolate->factory()->empty_fixed_array());
+    instance.set_well_known_imports(*well_known_imports);
+    instance.set_wasm_internal_functions(*functions);
+    instance.set_feedback_vectors(*isolate->factory()->empty_fixed_array());
+    instance.set_tiering_budget_array(
+        module_object->native_module()->tiering_budget_array());
+    instance.set_break_on_entry(module_object->script().break_on_entry());
+    instance.InitDataSegmentArrays(*module_object);
+    instance.set_memory0_start(empty_backing_store_buffer);
+    instance.set_memory0_size(0);
+    instance.set_memory_objects(*memory_objects);
+    instance.set_memory_bases_and_sizes(*memory_bases_and_sizes);
+
+    for (int i = 0; i < num_memories; ++i) {
+      memory_bases_and_sizes->set_sandboxed_pointer(
+          2 * i, reinterpret_cast<Address>(empty_backing_store_buffer));
+      memory_bases_and_sizes->set(2 * i + 1, 0);
+    }
+  }
 
   // Insert the new instance into the scripts weak list of instances. This list
   // is used for breakpoints affecting all instances belonging to the script.
@@ -1203,21 +1246,16 @@ Handle<WasmInstanceObject> WasmInstanceObject::New(
     Handle<WeakArrayList> weak_instance_list(
         module_object->script().wasm_weak_instance_list(), isolate);
     weak_instance_list = WeakArrayList::Append(
-        isolate, weak_instance_list, MaybeObjectHandle::Weak(instance));
+        isolate, weak_instance_list, MaybeObjectHandle::Weak(instance_object));
     module_object->script().set_wasm_weak_instance_list(*weak_instance_list);
   }
 
-  InitDataSegmentArrays(instance, module_object);
-
-  return instance;
+  return Handle<WasmInstanceObject>::cast(instance_object);
 }
 
-// static
-void WasmInstanceObject::InitDataSegmentArrays(
-    Handle<WasmInstanceObject> instance,
-    Handle<WasmModuleObject> module_object) {
-  auto module = module_object->module();
-  auto wire_bytes = module_object->native_module()->wire_bytes();
+void WasmInstanceObject::InitDataSegmentArrays(WasmModuleObject module_object) {
+  auto module = module_object.module();
+  auto wire_bytes = module_object.native_module()->wire_bytes();
   auto num_data_segments = module->num_declared_data_segments;
   // The number of declared data segments will be zero if there is no DataCount
   // section. These arrays will not be allocated nor initialized in that case,
@@ -1231,13 +1269,13 @@ void WasmInstanceObject::InitDataSegmentArrays(
     // Initialize the pointer and size of passive segments.
     auto source_bytes = wire_bytes.SubVector(segment.source.offset(),
                                              segment.source.end_offset());
-    instance->data_segment_starts().set(
-        i, reinterpret_cast<Address>(source_bytes.begin()));
+    data_segment_starts().set(i,
+                              reinterpret_cast<Address>(source_bytes.begin()));
     // Set the active segments to being already dropped, since memory.init on
     // a dropped passive segment and an active segment have the same
     // behavior.
-    instance->data_segment_sizes().set(
-        static_cast<int>(i), segment.active ? 0 : source_bytes.length());
+    data_segment_sizes().set(static_cast<int>(i),
+                             segment.active ? 0 : source_bytes.length());
   }
 }
 
@@ -1373,7 +1411,7 @@ WasmInstanceObject::GetOrCreateWasmInternalFunction(
       instance->module_object().native_module()->enabled_features().has_gc();
   if (has_gc) {
     int sig_index = instance->module()->functions[function_index].sig_index;
-    // TODO(7748): Create funcref RTTs lazily?
+    // TODO(14034): Create funcref RTTs lazily?
     rtt = handle(Map::cast(instance->managed_object_maps().get(sig_index)),
                  isolate);
   } else {
@@ -1699,10 +1737,10 @@ bool WasmCapiFunction::MatchesSignature(
   Zone zone(&allocator, ZONE_NAME);
   const wasm::FunctionSig* sig = GetSignature(&zone);
 #if DEBUG
-  // TODO(7748): Change this if indexed types are allowed.
+  // TODO(14034): Change this if indexed types are allowed.
   for (wasm::ValueType type : sig->all()) CHECK(!type.has_index());
 #endif
-  // TODO(7748): Check for subtyping instead if C API functions can define
+  // TODO(14034): Check for subtyping instead if C API functions can define
   // signature supertype.
   return wasm::GetWasmEngine()->type_canonicalizer()->AddRecursiveGroup(sig) ==
          other_canonical_sig_index;
@@ -1831,8 +1869,10 @@ Handle<WasmContinuationObject> WasmContinuationObject::New(
 Handle<WasmSuspenderObject> WasmSuspenderObject::New(Isolate* isolate) {
   Handle<JSFunction> suspender_cons(
       isolate->native_context()->wasm_suspender_constructor(), isolate);
+  Handle<JSPromise> promise = isolate->factory()->NewJSPromise();
   auto suspender = Handle<WasmSuspenderObject>::cast(
       isolate->factory()->NewJSObject(suspender_cons));
+  suspender->set_promise(*promise);
   suspender->set_state(kInactive);
   // Instantiate the callable object which resumes this Suspender. This will be
   // used implicitly as the onFulfilled callback of the returned JS promise.
@@ -1918,6 +1958,7 @@ bool WasmExportedFunction::IsWasmExportedFunction(Object object) {
   Code code = js_function.code();
   if (CodeKind::JS_TO_WASM_FUNCTION != code.kind() &&
       code.builtin_id() != Builtin::kGenericJSToWasmWrapper &&
+      code.builtin_id() != Builtin::kJSToWasmWrapper &&
       code.builtin_id() != Builtin::kWasmReturnPromiseOnSuspend) {
     return false;
   }
@@ -1979,6 +2020,7 @@ Handle<WasmExportedFunction> WasmExportedFunction::New(
       CodeKind::JS_TO_WASM_FUNCTION == export_wrapper->kind() ||
       (export_wrapper->is_builtin() &&
        (export_wrapper->builtin_id() == Builtin::kGenericJSToWasmWrapper ||
+        export_wrapper->builtin_id() == Builtin::kJSToWasmWrapper ||
         export_wrapper->builtin_id() == Builtin::kWasmReturnPromiseOnSuspend)));
   Factory* factory = isolate->factory();
   const wasm::FunctionSig* sig = instance->module()->functions[func_index].sig;
@@ -2180,10 +2222,10 @@ bool WasmJSFunction::MatchesSignature(
   Zone zone(&allocator, ZONE_NAME);
   const wasm::FunctionSig* sig = GetSignature(&zone);
 #if DEBUG
-  // TODO(7748): Change this if indexed types are allowed.
+  // TODO(14034): Change this if indexed types are allowed.
   for (wasm::ValueType type : sig->all()) CHECK(!type.has_index());
 #endif
-  // TODO(7748): Check for subtyping instead if WebAssembly.Function can define
+  // TODO(14034): Check for subtyping instead if WebAssembly.Function can define
   // signature supertype.
   return wasm::GetWasmEngine()->type_canonicalizer()->AddRecursiveGroup(sig) ==
          other_canonical_sig_index;
@@ -2294,7 +2336,6 @@ MaybeHandle<Object> JSToWasmObject(Isolate* isolate, Handle<Object> value,
     }
   }
 
-  // TODO(7748): Streamline interaction of undefined and (ref any).
   switch (expected_canonical.heap_representation()) {
     case HeapType::kFunc: {
       if (!(WasmExternalFunction::IsWasmExternalFunction(*value) ||
@@ -2456,46 +2497,14 @@ MaybeHandle<Object> JSToWasmObject(Isolate* isolate, const WasmModule* module,
   return JSToWasmObject(isolate, value, expected_canonical, error_message);
 }
 
-MaybeHandle<Object> WasmToJSObject(Isolate* isolate, Handle<Object> value,
-                                   HeapType type, const char** error_message) {
-  switch (type.representation()) {
-    case i::wasm::HeapType::kExtern:
-    case i::wasm::HeapType::kString:
-    case i::wasm::HeapType::kI31:
-    case i::wasm::HeapType::kStruct:
-    case i::wasm::HeapType::kArray:
-    case i::wasm::HeapType::kEq:
-    case i::wasm::HeapType::kAny:
-      return value->IsWasmNull() ? isolate->factory()->null_value() : value;
-    case i::wasm::HeapType::kFunc: {
-      if (value->IsWasmNull()) {
-        return isolate->factory()->null_value();
-      } else {
-        DCHECK(value->IsWasmInternalFunction());
-        return i::WasmInternalFunction::GetOrCreateExternal(
-            i::Handle<i::WasmInternalFunction>::cast(value));
-      }
-    }
-    case i::wasm::HeapType::kStringViewWtf8:
-      *error_message = "stringview_wtf8 has no JS representation";
-      return {};
-    case i::wasm::HeapType::kStringViewWtf16:
-      *error_message = "stringview_wtf16 has no JS representation";
-      return {};
-    case i::wasm::HeapType::kStringViewIter:
-      *error_message = "stringview_iter has no JS representation";
-      return {};
-    case i::wasm::HeapType::kBottom:
-      UNREACHABLE();
-    default:
-      if (value->IsWasmNull()) {
-        return isolate->factory()->null_value();
-      } else if (value->IsWasmInternalFunction()) {
-        return i::WasmInternalFunction::GetOrCreateExternal(
-            i::Handle<i::WasmInternalFunction>::cast(value));
-      } else {
-        return value;
-      }
+Handle<Object> WasmToJSObject(Isolate* isolate, Handle<Object> value) {
+  if (value->IsWasmNull()) {
+    return isolate->factory()->null_value();
+  } else if (value->IsWasmInternalFunction()) {
+    return i::WasmInternalFunction::GetOrCreateExternal(
+        i::Handle<i::WasmInternalFunction>::cast(value));
+  } else {
+    return value;
   }
 }
 

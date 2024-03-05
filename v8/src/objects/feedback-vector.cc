@@ -350,8 +350,10 @@ void FeedbackVector::SetOptimizedCode(Code code) {
   DCHECK(CodeKindIsOptimizedJSFunction(code.kind()));
   int32_t state = flags();
   // Skip setting optimized code if it would cause us to tier down.
-  if (has_optimized_code() && (!CodeKindCanTierUp(optimized_code().kind()) ||
-                               optimized_code().kind() > code.kind())) {
+  if (!has_optimized_code()) {
+    state = MaybeHasTurbofanCodeBit::update(state, false);
+  } else if (!CodeKindCanTierUp(optimized_code().kind()) ||
+             optimized_code().kind() > code.kind()) {
     if (!v8_flags.stress_concurrent_inlining_attach_code &&
         !optimized_code().marked_for_deoptimization()) {
       return;
@@ -389,9 +391,14 @@ void FeedbackVector::ClearOptimizedCode() {
   set_maybe_has_turbofan_code(false);
 }
 
-void FeedbackVector::SetOptimizedOsrCode(FeedbackSlot slot, Code code) {
+void FeedbackVector::SetOptimizedOsrCode(Isolate* isolate, FeedbackSlot slot,
+                                         Code code) {
   DCHECK(CodeKindIsOptimizedJSFunction(code.kind()));
   DCHECK(!slot.IsInvalid());
+  auto current = GetOptimizedOsrCode(isolate, slot);
+  if (V8_UNLIKELY(current && current->kind() > code.kind())) {
+    return;
+  }
   Set(slot, HeapObjectReference::Weak(code));
   set_maybe_has_optimized_osr_code(true);
 }
@@ -899,11 +906,11 @@ void FeedbackNexus::ConfigureCloneObject(Handle<Map> source_map,
         Handle<WeakFixedArray> array =
             CreateArrayOfSize(2 * kCloneObjectPolymorphicEntrySize);
         DisallowGarbageCollection no_gc;
-        auto raw_array = *array;
-        raw_array.Set(0, HeapObjectReference::Weak(*feedback));
-        raw_array.Set(1, GetFeedbackExtra());
-        raw_array.Set(2, HeapObjectReference::Weak(*source_map));
-        raw_array.Set(3, MaybeObject::FromObject(*result_map));
+        Tagged<WeakFixedArray> raw_array = *array;
+        raw_array->Set(0, HeapObjectReference::Weak(*feedback));
+        raw_array->Set(1, GetFeedbackExtra());
+        raw_array->Set(2, HeapObjectReference::Weak(*source_map));
+        raw_array->Set(3, MaybeObject::FromObject(*result_map));
         SetFeedback(raw_array, UPDATE_WRITE_BARRIER,
                     HeapObjectReference::ClearedValue(isolate));
       }
@@ -996,7 +1003,7 @@ CallFeedbackContent FeedbackNexus::GetCallFeedbackContent() {
 float FeedbackNexus::ComputeCallFrequency() {
   DCHECK(IsCallICKind(kind()));
 
-  double const invocation_count = vector().invocation_count(kRelaxedLoad);
+  double const invocation_count = vector()->invocation_count(kRelaxedLoad);
   double const call_count = GetCallCount();
   if (invocation_count == 0.0) {  // Prevent division by 0.
     return 0.0f;

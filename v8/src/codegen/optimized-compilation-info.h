@@ -17,6 +17,7 @@
 #include "src/handles/handles.h"
 #include "src/handles/persistent-handles.h"
 #include "src/objects/objects.h"
+#include "src/objects/tagged.h"
 #include "src/utils/identity-map.h"
 #include "src/utils/utils.h"
 
@@ -70,7 +71,8 @@ class V8_EXPORT_PRIVATE OptimizedCompilationInfo final {
   V(TraceHeapBroker, trace_heap_broker, 15)                          \
   V(WasmRuntimeExceptionSupport, wasm_runtime_exception_support, 16) \
   V(DiscardResultForTesting, discard_result_for_testing, 17)         \
-  V(InlineJSWasmCalls, inline_js_wasm_calls, 18)
+  V(InlineJSWasmCalls, inline_js_wasm_calls, 18)                     \
+  V(TurboshaftTraceReduction, turboshaft_trace_reduction, 19)
 
   enum Flag {
 #define DEF_ENUM(Camel, Lower, Bit) k##Camel = 1 << Bit,
@@ -172,6 +174,12 @@ class V8_EXPORT_PRIVATE OptimizedCompilationInfo final {
 
   template <typename T>
   Handle<T> CanonicalHandle(T object, Isolate* isolate) {
+    static_assert(kTaggedCanConvertToRawObjects);
+    return CanonicalHandle(Tagged<T>(object), isolate);
+  }
+
+  template <typename T>
+  Handle<T> CanonicalHandle(Tagged<T> object, Isolate* isolate) {
     DCHECK_NOT_NULL(canonical_handles_);
     DCHECK(PersistentHandlesScope::IsActive(isolate));
     auto find_result = canonical_handles_->FindOrInsert(object);

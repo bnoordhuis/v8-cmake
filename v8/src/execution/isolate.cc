@@ -29,6 +29,7 @@
 #include "src/baseline/baseline-batch-compiler.h"
 #include "src/bigint/bigint.h"
 #include "src/builtins/builtins-promise.h"
+#include "src/builtins/builtins.h"
 #include "src/builtins/constants-table-builder.h"
 #include "src/codegen/assembler-inl.h"
 #include "src/codegen/compilation-cache.h"
@@ -60,7 +61,7 @@
 #include "src/handles/persistent-handles.h"
 #include "src/heap/heap-inl.h"
 #include "src/heap/heap-verifier.h"
-#include "src/heap/local-heap.h"
+#include "src/heap/local-heap-inl.h"
 #include "src/heap/parked-scope.h"
 #include "src/heap/read-only-heap.h"
 #include "src/heap/safepoint.h"
@@ -1154,6 +1155,7 @@ void VisitStack(Isolate* isolate, Visitor* visitor,
   for (StackFrameIterator it(isolate); !it.done(); it.Advance()) {
     StackFrame* frame = it.frame();
     switch (frame->type()) {
+      case StackFrame::API_CALLBACK_EXIT:
       case StackFrame::BUILTIN_EXIT:
       case StackFrame::JAVA_SCRIPT_BUILTIN_CONTINUATION:
       case StackFrame::JAVA_SCRIPT_BUILTIN_CONTINUATION_WITH_CATCH:
@@ -1523,7 +1525,7 @@ void Isolate::ReportFailedAccessCheck(Handle<JSObject> receiver) {
       v8::Utils::ToLocal(receiver), v8::ACCESS_HAS, v8::Utils::ToLocal(data));
 }
 
-bool Isolate::MayAccess(Handle<Context> accessing_context,
+bool Isolate::MayAccess(Handle<NativeContext> accessing_context,
                         Handle<JSObject> receiver) {
   DCHECK(receiver->IsJSGlobalProxy() || receiver->IsAccessCheckNeeded());
 
@@ -1539,13 +1541,10 @@ bool Isolate::MayAccess(Handle<Context> accessing_context,
       Object receiver_context = JSGlobalProxy::cast(*receiver).native_context();
       if (!receiver_context.IsContext()) return false;
 
-      // Get the native context of current top context.
-      // avoid using Isolate::native_context() because it uses Handle.
-      Context native_context = accessing_context->native_context();
-      if (receiver_context == native_context) return true;
+      if (receiver_context == *accessing_context) return true;
 
       if (Context::cast(receiver_context).security_token() ==
-          native_context.security_token())
+          accessing_context->security_token())
         return true;
     }
   }
@@ -1618,7 +1617,8 @@ Object Isolate::StackOverflow() {
   return ReadOnlyRoots(heap()).exception();
 }
 
-Object Isolate::ThrowAt(Handle<JSObject> exception, MessageLocation* location) {
+Tagged<Object> Isolate::ThrowAt(Handle<JSObject> exception,
+                                MessageLocation* location) {
   Handle<Name> key_start_pos = factory()->error_start_pos_symbol();
   Object::SetProperty(this, exception, key_start_pos,
                       handle(Smi::FromInt(location->start_pos()), this),
@@ -1971,43 +1971,16 @@ Object Isolate::UnwindAndFindHandler() {
   // over the stack and dispatching according to the frame type.
   for (StackFrameIterator iter(this);; iter.Advance(), visited_frames++) {
 #if V8_ENABLE_WEBASSEMBLY
-    if (v8_flags.experimental_wasm_stack_switching && iter.done()) {
-      // We reached the end of the current stack segment. Follow the linked-list
-      // of stacks to find the next frame, and perform the implicit stack
-      // switch.
-      auto stack = Managed<wasm::StackMemory>::cast(current_stack.stack());
-      // Mark this stack as empty.
-      DCHECK_EQ(stack.get()->jmpbuf()->state, wasm::JumpBuffer::Active);
-      stack.get()->jmpbuf()->state = wasm::JumpBuffer::Retired;
-      HeapObject parent = current_stack.parent();
-      DCHECK(!parent.IsUndefined());
-      current_stack = WasmContinuationObject::cast(parent);
-      wasm::StackMemory* parent_stack =
-          Managed<wasm::StackMemory>::cast(current_stack.stack()).get().get();
-      DCHECK_EQ(parent_stack->jmpbuf()->state, wasm::JumpBuffer::Inactive);
-      parent_stack->jmpbuf()->state = wasm::JumpBuffer::Active;
-      iter.Reset(thread_local_top(), parent_stack);
-
-      // Update the continuation and suspender state.
-      roots_table().slot(RootIndex::kActiveContinuation).store(current_stack);
-      WasmSuspenderObject suspender =
-          WasmSuspenderObject::cast(root(RootIndex::kActiveSuspender));
-      if (!suspender.parent().IsUndefined()) {
-        suspender.set_state(WasmSuspenderObject::State::kInactive);
-        auto parent_suspender = WasmSuspenderObject::cast(suspender.parent());
-        parent_suspender.set_state(WasmSuspenderObject::State::kActive);
-        // For now, assume that a suspender contains a single continuation.
-        // TODO(thibaudm): When core stack-switching is added, only update the
-        // suspender when we exit its outermost stack.
-        DCHECK_EQ(current_stack, parent_suspender.continuation());
-      }
-      roots_table().slot(RootIndex::kActiveSuspender).store(suspender.parent());
-      if (v8_flags.trace_wasm_stack_switching) {
-        PrintF("Switch to stack #%d (unwind)\n", parent_stack->id());
-      }
-      uintptr_t limit =
-          reinterpret_cast<uintptr_t>(parent_stack->jmpbuf()->stack_limit);
-      stack_guard()->SetStackLimit(limit);
+    if (v8_flags.experimental_wasm_stack_switching &&
+        iter.frame()->type() == StackFrame::STACK_SWITCH) {
+      Code code = builtins()->code(Builtin::kWasmReturnPromiseOnSuspend);
+      HandlerTable table(code);
+      Address instruction_start =
+          code.InstructionStart(this, iter.frame()->pc());
+      int handler_offset = table.LookupReturn(0);
+      return FoundHandler(Context(), instruction_start, handler_offset,
+                          kNullAddress, iter.frame()->sp(), iter.frame()->fp(),
+                          visited_frames);
     }
 #endif
     // Handler must exist.
@@ -2186,8 +2159,7 @@ Object Isolate::UnwindAndFindHandler() {
         // The code might be a dynamically generated stub or a turbofanned
         // embedded builtin.
         Code code = stub_frame->LookupCode();
-        if (code.kind() != CodeKind::BUILTIN || !code.is_turbofanned() ||
-            !code.has_handler_table()) {
+        if (!code.is_turbofanned() || !code.has_handler_table()) {
           break;
         }
 
@@ -2436,7 +2408,7 @@ Isolate::CatchType Isolate::PredictExceptionCatcher() {
   return NOT_CAUGHT;
 }
 
-Object Isolate::ThrowIllegalOperation() {
+Tagged<Object> Isolate::ThrowIllegalOperation() {
   if (v8_flags.stack_trace_on_illegal) PrintStack(stdout);
   return Throw(ReadOnlyRoots(heap()).illegal_access_string());
 }
@@ -2970,7 +2942,7 @@ void Isolate::SetAbortOnUncaughtExceptionCallback(
   abort_on_uncaught_exception_callback_ = callback;
 }
 
-void Isolate::InstallConditionalFeatures(Handle<Context> context) {
+void Isolate::InstallConditionalFeatures(Handle<NativeContext> context) {
   Handle<JSGlobalObject> global = handle(context->global_object(), this);
   // If some fuzzer decided to make the global object non-extensible, then
   // we can't install any features (and would CHECK-fail if we tried).
@@ -2985,7 +2957,8 @@ void Isolate::InstallConditionalFeatures(Handle<Context> context) {
   }
 }
 
-bool Isolate::IsSharedArrayBufferConstructorEnabled(Handle<Context> context) {
+bool Isolate::IsSharedArrayBufferConstructorEnabled(
+    Handle<NativeContext> context) {
   if (!v8_flags.enable_sharedarraybuffer_per_context) return true;
 
   if (sharedarraybuffer_constructor_enabled_callback()) {
@@ -2995,7 +2968,7 @@ bool Isolate::IsSharedArrayBufferConstructorEnabled(Handle<Context> context) {
   return false;
 }
 
-bool Isolate::IsWasmGCEnabled(Handle<Context> context) {
+bool Isolate::IsWasmGCEnabled(Handle<NativeContext> context) {
 #ifdef V8_ENABLE_WEBASSEMBLY
   v8::WasmGCEnabledCallback callback = wasm_gc_enabled_callback();
   if (callback) {
@@ -3008,7 +2981,7 @@ bool Isolate::IsWasmGCEnabled(Handle<Context> context) {
 #endif
 }
 
-bool Isolate::IsWasmStringRefEnabled(Handle<Context> context) {
+bool Isolate::IsWasmStringRefEnabled(Handle<NativeContext> context) {
   // If Wasm GC is explicitly enabled via a callback, also enable stringref.
 #ifdef V8_ENABLE_WEBASSEMBLY
   v8::WasmGCEnabledCallback callback = wasm_gc_enabled_callback();
@@ -3022,7 +2995,7 @@ bool Isolate::IsWasmStringRefEnabled(Handle<Context> context) {
 #endif
 }
 
-bool Isolate::IsWasmInliningEnabled(Handle<Context> context) {
+bool Isolate::IsWasmInliningEnabled(Handle<NativeContext> context) {
   // If Wasm GC is explicitly enabled via a callback, also enable inlining.
 #ifdef V8_ENABLE_WEBASSEMBLY
   v8::WasmGCEnabledCallback callback = wasm_gc_enabled_callback();
@@ -3036,7 +3009,7 @@ bool Isolate::IsWasmInliningEnabled(Handle<Context> context) {
 #endif
 }
 
-Handle<Context> Isolate::GetIncumbentContext() {
+Handle<NativeContext> Isolate::GetIncumbentContext() {
   JavaScriptStackFrameIterator it(this);
 
   // 1st candidate: most-recently-entered author function's context
@@ -3050,7 +3023,7 @@ Handle<Context> Isolate::GetIncumbentContext() {
   if (!it.done() &&
       (!top_backup_incumbent || it.frame()->sp() < top_backup_incumbent)) {
     Context context = Context::cast(it.frame()->context());
-    return Handle<Context>(context.native_context(), this);
+    return Handle<NativeContext>(context.native_context(), this);
   }
 
   // 2nd candidate: the last Context::Scope's incumbent context if any.
@@ -3428,9 +3401,7 @@ Isolate::Isolate(std::unique_ptr<i::IsolateAllocator> isolate_allocator)
       detailed_source_positions_for_profiling_(v8_flags.detailed_line_info),
       persistent_handles_list_(new PersistentHandlesList()),
       jitless_(v8_flags.jitless),
-#if V8_SFI_HAS_UNIQUE_ID
       next_unique_sfi_id_(0),
-#endif
       next_module_async_evaluating_ordinal_(
           SourceTextModule::kFirstAsyncEvaluatingOrdinal),
       cancelable_task_manager_(new CancelableTaskManager()) {
@@ -3556,8 +3527,9 @@ void Isolate::Deinit() {
 
   if (has_shared_space() && !is_shared_space_isolate()) {
     IgnoreLocalGCRequests ignore_gc_requests(heap());
-    ParkedScope parked_scope(main_thread_local_heap());
-    shared_space_isolate()->global_safepoint()->clients_mutex_.Lock();
+    main_thread_local_heap()->BlockMainThreadWhileParked([this]() {
+      shared_space_isolate()->global_safepoint()->clients_mutex_.Lock();
+    });
   }
 
   DisallowGarbageCollection no_gc;
@@ -3572,7 +3544,7 @@ void Isolate::Deinit() {
 
   FutexEmulation::IsolateDeinit(this);
 
-  debug()->Unload();
+  debug()->TearDown();
 
 #if V8_ENABLE_WEBASSEMBLY
   wasm::GetWasmEngine()->DeleteCompileJobsOnIsolate(this);
@@ -3904,14 +3876,16 @@ void FinalizeBuiltinCodeObjects(Isolate* isolate) {
   DCHECK_NOT_NULL(isolate->embedded_blob_data());
   DCHECK_NE(0, isolate->embedded_blob_data_size());
 
+  EmbeddedData d = EmbeddedData::FromBlob(isolate);
   HandleScope scope(isolate);
   static_assert(Builtins::kAllBuiltinsAreIsolateIndependent);
   for (Builtin builtin = Builtins::kFirst; builtin <= Builtins::kLast;
        ++builtin) {
     Handle<Code> old_code = isolate->builtins()->code_handle(builtin);
-    // Note we use `instruction_start` as given by the old code object (instead
-    // of asking EmbeddedData) due to MaybeRemapEmbeddedBuiltinsIntoCodeRange.
-    Address instruction_start = old_code->instruction_start();
+    // Note that `old_code.instruction_start` might point to `old_code`'s
+    // InstructionStream which might be GCed once we replace the old code
+    // with the new code.
+    Address instruction_start = d.InstructionStartOf(builtin);
     Handle<Code> new_code = isolate->factory()->NewCodeObjectForEmbeddedBuiltin(
         old_code, instruction_start);
 
@@ -4231,7 +4205,7 @@ void Isolate::VerifyStaticRoots() {
         V8HeapCompressionScheme::CompressObject(map.ptr()) <
             InstanceTypeChecker::kNonJsReceiverMapLimit);
     CHECK_IMPLIES(InstanceTypeChecker::IsJSReceiver(map.instance_type()),
-                  V8HeapCompressionScheme::CompressObject(map.ptr()) >
+                  V8HeapCompressionScheme::CompressObject(map.ptr()) >=
                       InstanceTypeChecker::kNonJsReceiverMapLimit);
     CHECK(InstanceTypeChecker::kNonJsReceiverMapLimit <
           read_only_heap()->read_only_space()->Size());
@@ -4271,8 +4245,6 @@ bool Isolate::Init(SnapshotData* startup_snapshot_data,
   DCHECK_EQ(create_heap_objects, startup_snapshot_data == nullptr);
   DCHECK_EQ(create_heap_objects, read_only_snapshot_data == nullptr);
 
-  // Code space setup requires the permissions to be set to default state.
-  RwxMemoryWriteScope::SetDefaultPermissionsForNewThread();
   base::ElapsedTimer timer;
   if (create_heap_objects && v8_flags.profile_deserialization) timer.Start();
 
@@ -4452,10 +4424,10 @@ bool Isolate::Init(SnapshotData* startup_snapshot_data,
   isolate_data_.external_reference_table()->Init(this);
 
 #ifdef V8_COMPRESS_POINTERS
-  external_pointer_table().Init(this);
+  external_pointer_table().Init();
   if (owns_shareable_data()) {
     isolate_data_.shared_external_pointer_table_ = new ExternalPointerTable();
-    shared_external_pointer_table().Init(this);
+    shared_external_pointer_table().Init();
   } else {
     DCHECK(has_shared_space());
     isolate_data_.shared_external_pointer_table_ =
@@ -4530,31 +4502,21 @@ bool Isolate::Init(SnapshotData* startup_snapshot_data,
   // clearing/updating ICs (and thus affecting tiering decisions).
   tiering_manager_ = new TieringManager(this);
 
-  // If we are deserializing, read the state into the now-empty heap.
-  {
-    if (create_heap_objects) {
-      read_only_heap_->OnCreateHeapObjectsComplete(this);
-    } else {
-      SharedHeapDeserializer shared_heap_deserializer(
-          this, shared_heap_snapshot_data, can_rehash);
-      shared_heap_deserializer.DeserializeIntoIsolate();
+  if (!create_heap_objects) {
+    // If we are deserializing, read the state into the now-empty heap.
+    SharedHeapDeserializer shared_heap_deserializer(
+        this, shared_heap_snapshot_data, can_rehash);
+    shared_heap_deserializer.DeserializeIntoIsolate();
 
-      StartupDeserializer startup_deserializer(this, startup_snapshot_data,
-                                               can_rehash);
-      startup_deserializer.DeserializeIntoIsolate();
-    }
-    if (DEBUG_BOOL) VerifyStaticRoots();
-    load_stub_cache_->Initialize();
-    store_stub_cache_->Initialize();
-    interpreter_->Initialize();
-    heap_.NotifyDeserializationComplete();
+    StartupDeserializer startup_deserializer(this, startup_snapshot_data,
+                                             can_rehash);
+    startup_deserializer.DeserializeIntoIsolate();
   }
-
-#ifdef VERIFY_HEAP
-  if (v8_flags.verify_heap) {
-    HeapVerifier::VerifyReadOnlyHeap(&heap_);
-  }
-#endif
+  if (DEBUG_BOOL) VerifyStaticRoots();
+  load_stub_cache_->Initialize();
+  store_stub_cache_->Initialize();
+  interpreter_->Initialize();
+  heap_.NotifyDeserializationComplete();
 
   delete setup_delegate_;
   setup_delegate_ = nullptr;
@@ -4649,6 +4611,12 @@ bool Isolate::Init(SnapshotData* startup_snapshot_data,
   DCHECK_IMPLIES(heap()->new_lo_space(), heap()->new_lo_space()->Size() == 0);
   DCHECK_EQ(heap()->gc_count(), 0);
 
+#if defined(V8_OS_WIN) && defined(V8_ENABLE_ETW_STACK_WALKING)
+  if (v8_flags.enable_etw_stack_walking) {
+    ETWJITInterface::MaybeSetHandlerNow(this);
+  }
+#endif  // defined(V8_OS_WIN) && defined(V8_ENABLE_ETW_STACK_WALKING)
+
   initialized_ = true;
 
   return true;
@@ -4676,7 +4644,6 @@ void Isolate::Enter() {
     }
   }
 
-  RwxMemoryWriteScope::SetDefaultPermissionsForNewThread();
   PerIsolateThreadData* data = FindOrAllocatePerThreadDataForThisThread();
   DCHECK_NOT_NULL(data);
   DCHECK(data->isolate_ == this);
@@ -4800,6 +4767,12 @@ void Isolate::AbortConcurrentOptimization(BlockingBehavior behavior) {
     DisallowGarbageCollection no_recursive_gc;
     optimizing_compile_dispatcher()->Flush(behavior);
   }
+#ifdef V8_ENABLE_MAGLEV
+  if (maglev_concurrent_dispatcher()->is_enabled()) {
+    DisallowGarbageCollection no_recursive_gc;
+    maglev_concurrent_dispatcher()->Flush(behavior);
+  }
+#endif
 }
 
 std::shared_ptr<CompilationStatistics> Isolate::GetTurboStatistics() {
@@ -4836,6 +4809,10 @@ bool Isolate::IsLoggingCodeCreation() const {
          logger()->is_listening_to_code_events();
 }
 
+bool Isolate::AllowsCodeCompaction() const {
+  return v8_flags.compact_code_space && logger()->allows_code_compaction();
+}
+
 bool Isolate::NeedsSourcePositions() const {
   return
       // Static conditions.
@@ -4843,13 +4820,6 @@ bool Isolate::NeedsSourcePositions() const {
       v8_flags.trace_turbo_graph || v8_flags.turbo_profiling ||
       v8_flags.print_maglev_code || v8_flags.perf_prof || v8_flags.log_maps ||
       v8_flags.log_ic || v8_flags.log_function_events ||
-#if V8_ENABLE_WEBASSEMBLY
-      // TODO(mliedtke): We need the source positions of wasm trap nodes.
-      // All other positions are not needed. For wasm we do not have the source
-      // position in the FrameState as we only have one FrameState per inlined
-      // function which itself could have many trap instructions.
-      v8_flags.experimental_wasm_js_inlining ||
-#endif  // V8_ENABLE_WEBASSEMBLY
       // Dynamic conditions; changing any of these conditions triggers source
       // position collection for the entire heap
       // (CollectSourcePositionsForAllBytecodeArrays).
@@ -5148,8 +5118,7 @@ MaybeHandle<JSPromise> Isolate::RunHostImportModuleDynamicallyCallback(
     MaybeHandle<Object> maybe_import_assertions_argument) {
   DCHECK(!is_execution_terminating());
   DCHECK(!is_execution_termination_pending());
-  v8::Local<v8::Context> api_context =
-      v8::Utils::ToLocal(Handle<Context>::cast(native_context()));
+  v8::Local<v8::Context> api_context = v8::Utils::ToLocal(native_context());
   if (host_import_module_dynamically_with_import_assertions_callback_ ==
           nullptr &&
       host_import_module_dynamically_callback_ == nullptr) {
@@ -5280,8 +5249,8 @@ MaybeHandle<FixedArray> Isolate::GetImportAssertionsFromArgument(
   for (int i = 0; i < assertion_keys->length(); i++) {
     Handle<String> assertion_key(String::cast(assertion_keys->get(i)), this);
     Handle<Object> assertion_value;
-    if (!JSReceiver::GetProperty(this, import_assertions_object_receiver,
-                                 assertion_key)
+    if (!Object::GetPropertyOrElement(this, import_assertions_object_receiver,
+                                      assertion_key)
              .ToHandle(&assertion_value)) {
       // This can happen if the property has a getter function that throws
       // an error.
@@ -5322,8 +5291,7 @@ MaybeHandle<JSObject> Isolate::RunHostInitializeImportMetaObjectCallback(
   CHECK(module->import_meta(kAcquireLoad).IsTheHole(this));
   Handle<JSObject> import_meta = factory()->NewJSObjectWithNullProto();
   if (host_initialize_import_meta_object_callback_ != nullptr) {
-    v8::Local<v8::Context> api_context =
-        v8::Utils::ToLocal(Handle<Context>(native_context()));
+    v8::Local<v8::Context> api_context = v8::Utils::ToLocal(native_context());
     host_initialize_import_meta_object_callback_(
         api_context, Utils::ToLocal(Handle<Module>::cast(module)),
         v8::Local<v8::Object>::Cast(v8::Utils::ToLocal(import_meta)));
@@ -5353,8 +5321,7 @@ MaybeHandle<NativeContext> Isolate::RunHostCreateShadowRealmContextCallback() {
     return kNullMaybeHandle;
   }
 
-  v8::Local<v8::Context> api_context =
-      v8::Utils::ToLocal(Handle<Context>(native_context()));
+  v8::Local<v8::Context> api_context = v8::Utils::ToLocal(native_context());
   v8::Local<v8::Context> shadow_realm_context;
   ASSIGN_RETURN_ON_SCHEDULED_EXCEPTION_VALUE(
       this, shadow_realm_context,
@@ -5369,7 +5336,8 @@ MaybeHandle<NativeContext> Isolate::RunHostCreateShadowRealmContextCallback() {
 }
 
 MaybeHandle<Object> Isolate::RunPrepareStackTraceCallback(
-    Handle<Context> context, Handle<JSObject> error, Handle<JSArray> sites) {
+    Handle<NativeContext> context, Handle<JSObject> error,
+    Handle<JSArray> sites) {
   v8::Local<v8::Context> api_context = Utils::ToLocal(context);
 
   v8::Local<v8::Value> stack;
@@ -5924,7 +5892,7 @@ SaveContext::SaveContext(Isolate* isolate) : isolate_(isolate) {
 }
 
 SaveContext::~SaveContext() {
-  isolate_->set_context(context_.is_null() ? Context() : *context_);
+  isolate_->set_context(context_.is_null() ? Tagged<Context>() : *context_);
 }
 
 SaveAndSwitchContext::SaveAndSwitchContext(Isolate* isolate,
@@ -6142,7 +6110,7 @@ ExternalPointerHandle Isolate::GetOrCreateWaiterQueueNodeExternalPointer() {
     handle = waiter_queue_node_external_pointer_handle_;
   } else {
     handle = shared_external_pointer_table().AllocateAndInitializeEntry(
-        this, kNullAddress, kWaiterQueueNodeTag);
+        kNullAddress, kWaiterQueueNodeTag);
     waiter_queue_node_external_pointer_handle_ = handle;
   }
   DCHECK_NE(0, handle);

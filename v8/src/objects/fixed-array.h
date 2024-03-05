@@ -6,6 +6,7 @@
 #define V8_OBJECTS_FIXED_ARRAY_H_
 
 #include "src/handles/maybe-handles.h"
+#include "src/objects/heap-object.h"
 #include "src/objects/instance-type.h"
 #include "src/objects/objects.h"
 #include "src/objects/smi.h"
@@ -470,7 +471,7 @@ class ArrayList : public TorqueGeneratedArrayList<ArrayList, FixedArray> {
                                                  Handle<ArrayList> array,
                                                  Handle<Object> obj1, Smi obj2,
                                                  Smi obj3, Smi obj4);
-  static Handle<ArrayList> New(Isolate* isolate, int size);
+  V8_EXPORT_PRIVATE static Handle<ArrayList> New(Isolate* isolate, int size);
 
   // Returns the number of elements in the list, not the allocated size, which
   // is length(). Lower and upper case length() return different results!
@@ -495,7 +496,8 @@ class ArrayList : public TorqueGeneratedArrayList<ArrayList, FixedArray> {
 
   // Return a copy of the list of size Length() without the first entry. The
   // number returned by Length() is stored in the first entry.
-  static Handle<FixedArray> Elements(Isolate* isolate, Handle<ArrayList> array);
+  V8_EXPORT_PRIVATE static Handle<FixedArray> Elements(Isolate* isolate,
+                                                       Handle<ArrayList> array);
 
   static const int kHeaderFields = 1;
 
@@ -644,6 +646,8 @@ class PodArray : public ByteArray {
   static Handle<PodArray<T>> New(
       Isolate* isolate, int length,
       AllocationType allocation = AllocationType::kYoung);
+  static Handle<PodArray<T>> New(LocalIsolate* isolate, int length);
+
   void copy_out(int index, T* result, int length) {
     ByteArray::copy_out(index * sizeof(T), reinterpret_cast<uint8_t*>(result),
                         length * sizeof(T));

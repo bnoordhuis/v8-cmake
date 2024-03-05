@@ -470,7 +470,7 @@ bool MarkCompactCollector::StartCompaction(StartCompactionMode mode) {
     CollectEvacuationCandidates(heap()->shared_space());
   }
 
-  if (v8_flags.compact_code_space &&
+  if (isolate()->AllowsCodeCompaction() &&
       (!heap()->IsGCWithStack() || v8_flags.compact_code_space_with_stack)) {
     CollectEvacuationCandidates(heap()->code_space());
   } else if (v8_flags.trace_fragmentation) {
@@ -1599,6 +1599,7 @@ class EvacuateVisitorBase : public HeapObjectVisitor {
       {
         CodePageMemoryModificationScope memory_modification_scope(
             BasicMemoryChunk::FromAddress(dst_addr));
+        ThreadIsolation::RegisterInstructionStreamAllocation(dst_addr, size);
         base->heap_->CopyBlock(dst_addr, src_addr, size);
         InstructionStream istream = InstructionStream::cast(dst);
         istream.Relocate(dst_addr - src_addr);
@@ -4278,7 +4279,6 @@ class PageEvacuationJob : public v8::JobTask {
         tracer_(isolate->heap()->tracer()) {}
 
   void Run(JobDelegate* delegate) override {
-    RwxMemoryWriteScope::SetDefaultPermissionsForNewThread();
     Evacuator* evacuator = (*evacuators_)[delegate->GetTaskId()].get();
     if (delegate->IsJoiningThread()) {
       TRACE_GC(tracer_, GCTracer::Scope::MC_EVACUATE_COPY_PARALLEL);
@@ -4412,6 +4412,13 @@ bool ShouldMovePageForYoungGC(Page* p, intptr_t live_bytes,
         p, should_move_page, live_bytes, wasted_bytes,
         NewSpacePageEvacuationThreshold(GarbageCollector::MINOR_MARK_COMPACTOR),
         p->AllocatedLabSize());
+  }
+  if (!should_move_page &&
+      (p->AgeInNewSpace() == v8_flags.minor_mc_max_page_age)) {
+    // Don't allocate on old pages so that recently allocated objects on the
+    // page get a chance to die young. The page will be force promoted on the
+    // next GC because `AllocatedLabSize` will be 0.
+    p->SetFlag(Page::NEVER_ALLOCATE_ON_PAGE);
   }
   return should_move_page;
 }
@@ -4633,7 +4640,6 @@ class PointersUpdatingJob : public v8::JobTask {
         tracer_(isolate->heap()->tracer()) {}
 
   void Run(JobDelegate* delegate) override {
-    RwxMemoryWriteScope::SetDefaultPermissionsForNewThread();
     if (delegate->IsJoiningThread()) {
       TRACE_GC(tracer_, GCTracer::Scope::MC_EVACUATE_UPDATE_POINTERS_PARALLEL);
       UpdatePointers(delegate);
@@ -5392,10 +5398,22 @@ YoungGenerationMainMarkingVisitor::YoungGenerationMainMarkingVisitor(
     EphemeronRememberedSet::TableList::Local* ephemeron_table_list_local)
     : YoungGenerationMarkingVisitorBase<YoungGenerationMainMarkingVisitor,
                                         MarkingState>(
-          isolate, worklists_local, ephemeron_table_list_local),
+          isolate, worklists_local, ephemeron_table_list_local,
+          &local_pretenuring_feedback_),
       marking_state_(PtrComprCageBase(isolate)),
+      local_pretenuring_feedback_(PretenuringHandler::kInitialFeedbackCapacity),
       shortcut_strings_(isolate->heap()->CanShortcutStringsDuringGC(
           GarbageCollector::MINOR_MARK_COMPACTOR)) {}
+
+YoungGenerationMainMarkingVisitor::~YoungGenerationMainMarkingVisitor() {
+  DCHECK(local_pretenuring_feedback_.empty());
+}
+
+void YoungGenerationMainMarkingVisitor::Finalize() {
+  pretenuring_handler()->MergeAllocationSitePretenuringFeedback(
+      local_pretenuring_feedback_);
+  local_pretenuring_feedback_.clear();
+}
 
 MinorMarkCompactCollector::~MinorMarkCompactCollector() = default;
 
@@ -5448,7 +5466,7 @@ void MinorMarkCompactCollector::PerformWrapperTracing() {
 class MinorMarkCompactCollector::RootMarkingVisitor final : public RootVisitor {
  public:
   explicit RootMarkingVisitor(
-      YoungGenerationMainMarkingVisitor* main_marking_visitor)
+      YoungGenerationMainMarkingVisitor& main_marking_visitor)
       : main_marking_visitor_(main_marking_visitor) {}
 
   void VisitRootPointer(Root root, const char* description,
@@ -5470,7 +5488,7 @@ class MinorMarkCompactCollector::RootMarkingVisitor final : public RootVisitor {
   void VisitPointersImpl(Root root, TSlot start, TSlot end) {
     if (root == Root::kStackRoots) {
       for (TSlot slot = start; slot < end; ++slot) {
-        main_marking_visitor_->VisitObjectViaSlot<
+        main_marking_visitor_.VisitObjectViaSlot<
             YoungGenerationMainMarkingVisitor::ObjectVisitationMode::
                 kPushToWorklist,
             YoungGenerationMainMarkingVisitor::SlotTreatmentMode::kReadOnly>(
@@ -5478,7 +5496,7 @@ class MinorMarkCompactCollector::RootMarkingVisitor final : public RootVisitor {
       }
     } else {
       for (TSlot slot = start; slot < end; ++slot) {
-        main_marking_visitor_->VisitObjectViaSlot<
+        main_marking_visitor_.VisitObjectViaSlot<
             YoungGenerationMainMarkingVisitor::ObjectVisitationMode::
                 kPushToWorklist,
             YoungGenerationMainMarkingVisitor::SlotTreatmentMode::kReadWrite>(
@@ -5487,7 +5505,7 @@ class MinorMarkCompactCollector::RootMarkingVisitor final : public RootVisitor {
     }
   }
 
-  YoungGenerationMainMarkingVisitor* const main_marking_visitor_;
+  YoungGenerationMainMarkingVisitor& main_marking_visitor_;
 };
 
 void MinorMarkCompactCollector::StartMarking() {
@@ -5515,9 +5533,6 @@ void MinorMarkCompactCollector::StartMarking() {
       marking_worklists(),
       cpp_heap ? cpp_heap->CreateCppMarkingStateForMutatorThread()
                : MarkingWorklists::Local::kNoCppMarkingState);
-  main_marking_visitor_ = std::make_unique<YoungGenerationMainMarkingVisitor>(
-      heap()->isolate(), local_marking_worklists(),
-      local_ephemeron_table_list_.get());
   if (cpp_heap && cpp_heap->generational_gc_supported()) {
     TRACE_GC(heap()->tracer(),
              GCTracer::Scope::MINOR_MC_MARK_EMBEDDER_PROLOGUE);
@@ -5740,8 +5755,10 @@ void YoungGenerationMarkingTask::DrainMarkingWorklist() {
     // atomics.
     Map map = Map::cast(*heap_object.map_slot());
     // kDataOnly objects are filtered on push.
-    DCHECK_EQ(Map::ObjectFieldsFrom(map.visitor_id()),
-              ObjectFields::kMaybePointers);
+    // TODO(v8:13012): Re-enable this DCHECK once the this optimization is
+    // implemented for MinorMC concurrent marking.
+    // DCHECK_EQ(Map::ObjectFieldsFrom(map.visitor_id()),
+    //           ObjectFields::kMaybePointers);
     const auto visited_size = visitor_.Visit(map, heap_object);
     if (visited_size) {
       visitor_.marking_state()->IncrementLiveBytes(
@@ -6050,9 +6067,12 @@ void MinorMarkCompactCollector::MarkLiveObjects() {
   }
 
   DCHECK_NOT_NULL(local_marking_worklists_);
-  DCHECK_NOT_NULL(main_marking_visitor_);
 
-  RootMarkingVisitor root_visitor(main_marking_visitor_.get());
+  YoungGenerationMainMarkingVisitor main_marking_visitor(
+      heap()->isolate(), local_marking_worklists(),
+      local_ephemeron_table_list_.get());
+
+  RootMarkingVisitor root_visitor(main_marking_visitor);
 
   MarkLiveObjectsInParallel(&root_visitor, was_marked_incrementally);
 
@@ -6062,23 +6082,23 @@ void MinorMarkCompactCollector::MarkLiveObjects() {
     if (auto* cpp_heap = CppHeap::From(heap_->cpp_heap())) {
       cpp_heap->FinishConcurrentMarkingIfNeeded();
     }
-    DrainMarkingWorklist();
+    DrainMarkingWorklist(main_marking_visitor);
   }
 
   if (was_marked_incrementally) {
     MarkingBarrier::DeactivateAll(heap());
   }
 
-  main_marking_visitor_->Finalize();
+  main_marking_visitor.Finalize();
   local_marking_worklists_.reset();
-  main_marking_visitor_.reset();
 
   if (v8_flags.minor_mc_trace_fragmentation) {
     TraceFragmentation();
   }
 }
 
-void MinorMarkCompactCollector::DrainMarkingWorklist() {
+void MinorMarkCompactCollector::DrainMarkingWorklist(
+    YoungGenerationMainMarkingVisitor& visitor) {
   PtrComprCageBase cage_base(isolate());
   do {
     PerformWrapperTracing();
@@ -6092,7 +6112,11 @@ void MinorMarkCompactCollector::DrainMarkingWorklist() {
       // Maps won't change in the atomic pause, so the map can be read without
       // atomics.
       Map map = Map::cast(*heap_object.map_slot());
-      const auto visited_size = main_marking_visitor_->Visit(map, heap_object);
+      // TODO(v8:13012): Re-enable this DCHECK once the this optimization is
+      // implemented for MinorMC concurrent marking.
+      // DCHECK_EQ(Map::ObjectFieldsFrom(map.visitor_id()),
+      //           ObjectFields::kMaybePointers);
+      const auto visited_size = visitor.Visit(map, heap_object);
       if (visited_size) {
         marking_state_->IncrementLiveBytes(
             MemoryChunk::cast(BasicMemoryChunk::FromHeapObject(heap_object)),

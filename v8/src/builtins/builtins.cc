@@ -401,7 +401,7 @@ Handle<Code> Builtins::CreateInterpreterEntryTrampolineForProfiling(
       Builtin::kInterpreterEntryTrampolineForProfiling);
 
   CodeDesc desc;
-  desc.buffer = reinterpret_cast<byte*>(code.instruction_start());
+  desc.buffer = reinterpret_cast<uint8_t*>(code.instruction_start());
 
   int instruction_size = code.instruction_size();
   desc.buffer_size = instruction_size;
@@ -464,7 +464,8 @@ bool Builtins::AllowDynamicFunction(Isolate* isolate, Handle<JSFunction> target,
                                     Handle<JSObject> target_global_proxy) {
   if (v8_flags.allow_unsafe_function_constructor) return true;
   HandleScopeImplementer* impl = isolate->handle_scope_implementer();
-  Handle<Context> responsible_context = impl->LastEnteredOrMicrotaskContext();
+  Handle<NativeContext> responsible_context =
+      impl->LastEnteredOrMicrotaskContext();
   // TODO(verwaest): Remove this.
   if (responsible_context.is_null()) {
     return true;

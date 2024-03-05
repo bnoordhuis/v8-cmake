@@ -6,7 +6,7 @@
 #include "src/base/platform/platform.h"
 #include "src/heap/heap.h"
 #include "src/heap/local-heap.h"
-#include "src/heap/parked-scope.h"
+#include "src/heap/parked-scope-inl.h"
 #include "src/heap/safepoint.h"
 #include "test/unittests/test-utils.h"
 #include "testing/gtest/include/gtest/gtest.h"
@@ -102,10 +102,7 @@ TEST_F(GlobalSafepointTest, Interrupt) {
     sema_execute_complete.ParkedWait(local_isolate);
   }
 
-  ParkedScope parked(local_isolate);
-  for (auto& thread : threads) {
-    thread->ParkedJoin(parked);
-  }
+  ParkingThread::ParkedJoinAll(local_isolate, threads);
 }
 
 }  // namespace internal

@@ -643,16 +643,7 @@ void CodeGenerator::AssembleCodeStartRegisterCheck() {
 //       the flags in the referenced {Code} object;
 //    2. test kMarkedForDeoptimizationBit in those flags; and
 //    3. if it is not zero then it jumps to the builtin.
-void CodeGenerator::BailoutIfDeoptimized() {
-  UseScratchRegisterScope temps(masm());
-  Register scratch = temps.Acquire();
-  int offset = InstructionStream::kCodeOffset - InstructionStream::kHeaderSize;
-  __ ldr(scratch, MemOperand(kJavaScriptCallCodeStartRegister, offset));
-  __ ldr(scratch, FieldMemOperand(scratch, Code::kFlagsOffset));
-  __ tst(scratch, Operand(1 << Code::kMarkedForDeoptimizationBit));
-  __ Jump(BUILTIN_CODE(isolate(), CompileLazyDeoptimizedCode),
-          RelocInfo::CODE_TARGET, ne);
-}
+void CodeGenerator::BailoutIfDeoptimized() { __ BailoutIfDeoptimized(); }
 
 // Assembles an instruction after register allocation, producing machine code.
 CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
@@ -3620,13 +3611,14 @@ void CodeGenerator::AssembleArchTrap(Instruction* instr,
         : OutOfLineCode(gen), instr_(instr), gen_(gen) {}
 
     void Generate() final {
-      auto [trap_id, frame_state_offset] =
-          gen_->DecodeTrapIdAndFrameStateOffset<ArmOperandConverter>(instr_);
-      GenerateCallToTrap(trap_id, frame_state_offset);
+      ArmOperandConverter i(gen_, instr_);
+      TrapId trap_id =
+          static_cast<TrapId>(i.InputInt32(instr_->InputCount() - 1));
+      GenerateCallToTrap(trap_id);
     }
 
    private:
-    void GenerateCallToTrap(TrapId trap_id, size_t frame_state_offset) {
+    void GenerateCallToTrap(TrapId trap_id) {
       if (trap_id == TrapId::kInvalid) {
         // We cannot test calls to the runtime in cctest/test-run-wasm.
         // Therefore we emit a call to C here instead of a call to the runtime.
@@ -3649,12 +3641,6 @@ void CodeGenerator::AssembleArchTrap(Instruction* instr,
         ReferenceMap* reference_map =
             gen_->zone()->New<ReferenceMap>(gen_->zone());
         gen_->RecordSafepoint(reference_map);
-        // If we have a frame state, the offset is not 0.
-        if (frame_state_offset != 0) {
-          gen_->BuildTranslation(instr_, masm()->pc_offset(),
-                                 frame_state_offset, 0,
-                                 OutputFrameStateCombine::Ignore());
-        }
         if (v8_flags.debug_code) {
           __ stop();
         }

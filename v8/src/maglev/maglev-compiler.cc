@@ -374,7 +374,9 @@ class UseMarkingProcessor {
 bool MaglevCompiler::Compile(LocalIsolate* local_isolate,
                              MaglevCompilationInfo* compilation_info) {
   compiler::CurrentHeapBrokerScope current_broker(compilation_info->broker());
-  Graph* graph = Graph::New(compilation_info->zone());
+  Graph* graph =
+      Graph::New(compilation_info->zone(),
+                 compilation_info->toplevel_compilation_unit()->is_osr());
 
   // Build graph.
   if (v8_flags.print_maglev_code || v8_flags.code_comments ||
@@ -385,7 +387,7 @@ bool MaglevCompiler::Compile(LocalIsolate* local_isolate,
   }
 
   {
-    UnparkedScope unparked_scope(local_isolate->heap());
+    UnparkedScopeIfOnBackground unparked_scope(local_isolate->heap());
 
     if (v8_flags.print_maglev_code || v8_flags.print_maglev_graph ||
         v8_flags.print_maglev_graphs || v8_flags.trace_maglev_graph_building ||
@@ -442,7 +444,7 @@ bool MaglevCompiler::Compile(LocalIsolate* local_isolate,
   }
 
   if (v8_flags.print_maglev_graphs) {
-    UnparkedScope unparked_scope(local_isolate->heap());
+    UnparkedScopeIfOnBackground unparked_scope(local_isolate->heap());
     std::cout << "After register allocation pre-processing" << std::endl;
     PrintGraph(std::cout, compilation_info, graph);
   }
@@ -450,17 +452,23 @@ bool MaglevCompiler::Compile(LocalIsolate* local_isolate,
   StraightForwardRegisterAllocator allocator(compilation_info, graph);
 
   if (v8_flags.print_maglev_graph || v8_flags.print_maglev_graphs) {
-    UnparkedScope unparked_scope(local_isolate->heap());
+    UnparkedScopeIfOnBackground unparked_scope(local_isolate->heap());
     std::cout << "After register allocation" << std::endl;
     PrintGraph(std::cout, compilation_info, graph);
   }
 
   {
-    UnparkedScope unparked_scope(local_isolate->heap());
+    UnparkedScopeIfOnBackground unparked_scope(local_isolate->heap());
     std::unique_ptr<MaglevCodeGenerator> code_generator =
         std::make_unique<MaglevCodeGenerator>(local_isolate, compilation_info,
                                               graph);
     code_generator->Assemble();
+
+#ifdef V8_TARGET_ARCH_ARM
+    if (code_generator->AssembleHasFailed()) {
+      return false;
+    }
+#endif
 
     // Stash the compiled code_generator on the compilation info.
     compilation_info->set_code_generator(std::move(code_generator));

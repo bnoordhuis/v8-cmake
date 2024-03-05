@@ -33,9 +33,14 @@ namespace compiler {
 class BasicBlock;
 struct CallBuffer;  // TODO(bmeurer): Remove this.
 class Linkage;
-class OperandGenerator;
+template <typename Adapter>
+class OperandGeneratorT;
 class SwitchInfo;
 class StateObjectDeduplicator;
+
+struct TurbofanAdapter {};
+
+struct TurboshaftAdapter {};
 
 // The flags continuation is a way to combine a branch or a materialization
 // of a boolean value with an instruction that sets the flags register.
@@ -78,9 +83,8 @@ class FlagsContinuation final {
   }
 
   // Creates a new flags continuation for a wasm trap.
-  static FlagsContinuation ForTrap(FlagsCondition condition, TrapId trap_id,
-                                   NodeId node_id, Node* frame_state) {
-    return FlagsContinuation(condition, trap_id, node_id, frame_state);
+  static FlagsContinuation ForTrap(FlagsCondition condition, TrapId trap_id) {
+    return FlagsContinuation(condition, trap_id);
   }
 
   static FlagsContinuation ForSelect(FlagsCondition condition, Node* result,
@@ -103,7 +107,7 @@ class FlagsContinuation final {
     return reason_;
   }
   NodeId node_id() const {
-    DCHECK(IsDeoptimize() || IsTrap());
+    DCHECK(IsDeoptimize());
     return node_id_;
   }
   FeedbackSource const& feedback() const {
@@ -111,7 +115,7 @@ class FlagsContinuation final {
     return feedback_;
   }
   Node* frame_state() const {
-    DCHECK(IsDeoptimize() || IsTrap());
+    DCHECK(IsDeoptimize());
     return frame_state_or_result_;
   }
   Node* result() const {
@@ -218,13 +222,8 @@ class FlagsContinuation final {
     DCHECK_NOT_NULL(result);
   }
 
-  FlagsContinuation(FlagsCondition condition, TrapId trap_id, NodeId node_id,
-                    Node* frame_state)
-      : mode_(kFlags_trap),
-        condition_(condition),
-        node_id_(node_id),
-        frame_state_or_result_(frame_state),
-        trap_id_(trap_id) {}
+  FlagsContinuation(FlagsCondition condition, TrapId trap_id)
+      : mode_(kFlags_trap), condition_(condition), trap_id_(trap_id) {}
 
   FlagsContinuation(FlagsCondition condition, Node* result, Node* true_value,
                     Node* false_value)
@@ -266,8 +265,10 @@ struct PushParameter {
 enum class FrameStateInputKind { kAny, kStackSlot };
 
 // Instruction selection generates an InstructionSequence for a given Schedule.
-class V8_EXPORT_PRIVATE InstructionSelector final {
+template <typename Adapter>
+class EXPORT_TEMPLATE_DECLARE(V8_EXPORT_PRIVATE) InstructionSelectorT final {
  public:
+  using OperandGenerator = OperandGeneratorT<Adapter>;
   // Forward declarations.
   class Features;
 
@@ -283,7 +284,7 @@ class V8_EXPORT_PRIVATE InstructionSelector final {
   };
   enum EnableTraceTurboJson { kDisableTraceTurboJson, kEnableTraceTurboJson };
 
-  InstructionSelector(
+  InstructionSelectorT(
       Zone* zone, size_t node_count, Linkage* linkage,
       InstructionSequence* sequence, Schedule* schedule,
       SourcePositionTable* source_positions, Frame* frame,
@@ -474,7 +475,7 @@ class V8_EXPORT_PRIVATE InstructionSelector final {
   }
 
  private:
-  friend class OperandGenerator;
+  friend class OperandGeneratorT<Adapter>;
 
   bool UseInstructionScheduling() const {
     return (enable_scheduling_ == kEnableScheduling) &&
@@ -760,8 +761,9 @@ class V8_EXPORT_PRIVATE InstructionSelector final {
   EnableScheduling enable_scheduling_;
   EnableRootsRelativeAddressing enable_roots_relative_addressing_;
   EnableSwitchJumpTable enable_switch_jump_table_;
-  ZoneUnorderedMap<FrameStateInput, CachedStateValues*, FrameStateInput::Hash,
-                   FrameStateInput::Equal>
+  ZoneUnorderedMap<FrameStateInput, CachedStateValues*,
+                   typename FrameStateInput::Hash,
+                   typename FrameStateInput::Equal>
       state_values_cache_;
 
   Frame* frame_;
@@ -785,6 +787,13 @@ class V8_EXPORT_PRIVATE InstructionSelector final {
   ZoneVector<Upper32BitsState> phi_states_;
 #endif
 };
+
+using InstructionSelector = InstructionSelectorT<TurbofanAdapter>;
+
+extern template class EXPORT_TEMPLATE_DECLARE(V8_EXPORT_PRIVATE)
+    InstructionSelectorT<TurbofanAdapter>;
+extern template class EXPORT_TEMPLATE_DECLARE(V8_EXPORT_PRIVATE)
+    InstructionSelectorT<TurboshaftAdapter>;
 
 }  // namespace compiler
 }  // namespace internal

@@ -168,7 +168,11 @@ class StatsCounter;
   V(invalidate_prototype_chains_function,                                      \
     "JSObject::InvalidatePrototypeChains()")                                   \
   V(invoke_accessor_getter_callback, "InvokeAccessorGetterCallback")           \
-  V(invoke_function_callback, "InvokeFunctionCallback")                        \
+  V(invoke_function_callback_generic, "InvokeFunctionCallbackGeneric")         \
+  V(invoke_function_callback_no_side_effects,                                  \
+    "InvokeFunctionCallbackNoSideEffects")                                     \
+  V(invoke_function_callback_with_side_effects,                                \
+    "InvokeFunctionCallbackWithSideEffects")                                   \
   V(jsarray_array_join_concat_to_sequential_string,                            \
     "jsarray_array_join_concat_to_sequential_string")                          \
   V(jsreceiver_create_identity_hash, "jsreceiver_create_identity_hash")        \
@@ -384,10 +388,11 @@ class StatsCounter;
 #endif  // V8_INTL_SUPPORT
 
 #ifdef V8_ENABLE_SANDBOX
-#define EXTERNAL_REFERENCE_LIST_SANDBOX(V)   \
-  V(sandbox_base_address, "Sandbox::base()") \
-  V(sandbox_end_address, "Sandbox::end()")   \
-  V(empty_backing_store_buffer, "EmptyBackingStoreBuffer()")
+#define EXTERNAL_REFERENCE_LIST_SANDBOX(V)                   \
+  V(sandbox_base_address, "Sandbox::base()")                 \
+  V(sandbox_end_address, "Sandbox::end()")                   \
+  V(empty_backing_store_buffer, "EmptyBackingStoreBuffer()") \
+  V(code_pointer_table_address, "GetProcessWideCodePointerTable()")
 #else
 #define EXTERNAL_REFERENCE_LIST_SANDBOX(V)
 #endif  // V8_ENABLE_SANDBOX
@@ -498,6 +503,8 @@ class ExternalReference {
   address_of_load_from_stack_count(const char* function_name);
   static V8_EXPORT_PRIVATE ExternalReference
   address_of_store_to_stack_count(const char* function_name);
+
+  static ExternalReference invoke_function_callback(CallApiCallbackMode mode);
 
   Address address() const { return address_; }
 

@@ -47,12 +47,6 @@ namespace internal {
      100 * KB, GB, 51)                                                         \
   HR(wasm_asm_module_size_bytes, V8.WasmModuleSizeBytes.asm, 1, GB, 51)        \
   HR(wasm_wasm_module_size_bytes, V8.WasmModuleSizeBytes.wasm, 1, GB, 51)      \
-  HR(wasm_asm_min_mem_pages_count, V8.WasmMinMemPagesCount.asm, 1, 2 << 16,    \
-     51)                                                                       \
-  HR(wasm_wasm_min_mem_pages_count, V8.WasmMinMemPagesCount.wasm, 1, 2 << 16,  \
-     51)                                                                       \
-  HR(wasm_wasm_max_mem_pages_count, V8.WasmMaxMemPagesCount.wasm, 1, 2 << 16,  \
-     51)                                                                       \
   HR(wasm_compile_function_peak_memory_bytes,                                  \
      V8.WasmCompileFunctionPeakMemoryBytes, 1, GB, 51)                         \
   HR(wasm_compile_huge_function_peak_memory_bytes,                             \
@@ -101,6 +95,8 @@ namespace internal {
   /* Counted after sweeping the table at the end of mark-compact GC. */        \
   HR(external_pointers_count, V8.SandboxedExternalPointersCount, 0,            \
      kMaxExternalPointers, 101)                                                \
+  HR(code_pointers_count, V8.SandboxedCodePointersCount, 0, kMaxCodePointers,  \
+     101)                                                                      \
   HR(wasm_num_lazy_compilations_5sec, V8.WasmNumLazyCompilations5Sec, 0,       \
      200000, 50)                                                               \
   HR(wasm_num_lazy_compilations_20sec, V8.WasmNumLazyCompilations20Sec, 0,     \

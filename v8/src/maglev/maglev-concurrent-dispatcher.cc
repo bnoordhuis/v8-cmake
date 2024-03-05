@@ -86,7 +86,7 @@ MaglevCompilationJob::MaglevCompilationJob(
     std::unique_ptr<MaglevCompilationInfo>&& info)
     : OptimizedCompilationJob(kMaglevCompilerName, State::kReadyToPrepare),
       info_(std::move(info)) {
-  DCHECK(v8_flags.maglev);
+  DCHECK(maglev::IsMaglevEnabled());
 }
 
 MaglevCompilationJob::~MaglevCompilationJob() = default;
@@ -116,8 +116,12 @@ CompilationJob::Status MaglevCompilationJob::FinalizeJobImpl(Isolate* isolate) {
   if (!maglev::MaglevCompiler::GenerateCode(isolate, info()).ToHandle(&code)) {
     return CompilationJob::FAILED;
   }
-  info()->toplevel_function()->set_code(*code);
+  info()->set_code(code);
   return CompilationJob::SUCCEEDED;
+}
+
+MaybeHandle<Code> MaglevCompilationJob::code() const {
+  return info_->get_code();
 }
 
 Handle<JSFunction> MaglevCompilationJob::function() const {
@@ -125,8 +129,10 @@ Handle<JSFunction> MaglevCompilationJob::function() const {
 }
 
 BytecodeOffset MaglevCompilationJob::osr_offset() const {
-  return info_->osr_offset();
+  return info_->toplevel_osr_offset();
 }
+
+bool MaglevCompilationJob::is_osr() const { return info_->toplevel_is_osr(); }
 
 bool MaglevCompilationJob::specialize_to_function_context() const {
   return info_->specialize_to_function_context();
@@ -146,6 +152,20 @@ void MaglevCompilationJob::RecordCompilationStats(Isolate* isolate) const {
         static_cast<int>(time_taken_to_finalize_.InMicroseconds()));
     counters->maglev_optimize_total_time()->AddSample(
         static_cast<int>(ElapsedTime().InMicroseconds()));
+  }
+  if (v8_flags.trace_opt_stats) {
+    static double compilation_time = 0.0;
+    static int compiled_functions = 0;
+    static int code_size = 0;
+
+    compilation_time += (time_taken_to_prepare_.InMillisecondsF() +
+                         time_taken_to_execute_.InMillisecondsF() +
+                         time_taken_to_finalize_.InMillisecondsF());
+    compiled_functions++;
+    code_size += function()->shared().SourceSize();
+    PrintF(
+        "[maglev] Compiled: %d functions with %d byte source size in %fms.\n",
+        compiled_functions, code_size, compilation_time);
   }
 }
 
@@ -193,7 +213,7 @@ class MaglevConcurrentDispatcher::JobTask final : public v8::JobTask {
 
 MaglevConcurrentDispatcher::MaglevConcurrentDispatcher(Isolate* isolate)
     : isolate_(isolate) {
-  if (v8_flags.concurrent_recompilation && v8_flags.maglev) {
+  if (v8_flags.concurrent_recompilation && maglev::IsMaglevEnabled()) {
     job_handle_ = V8::GetCurrentPlatform()->PostJob(
         TaskPriority::kUserVisible, std::make_unique<JobTask>(this));
     DCHECK(is_enabled());
@@ -238,6 +258,22 @@ void MaglevConcurrentDispatcher::AwaitCompileJobs() {
   job_handle_ = V8::GetCurrentPlatform()->PostJob(
       TaskPriority::kUserVisible, std::make_unique<JobTask>(this));
   DCHECK(incoming_queue_.IsEmpty());
+}
+
+void MaglevConcurrentDispatcher::Flush(BlockingBehavior behavior) {
+  while (!incoming_queue_.IsEmpty()) {
+    std::unique_ptr<MaglevCompilationJob> job;
+    incoming_queue_.Dequeue(&job);
+  }
+  if (behavior == BlockingBehavior::kBlock) {
+    job_handle_->Cancel();
+    job_handle_ = V8::GetCurrentPlatform()->PostJob(
+        TaskPriority::kUserVisible, std::make_unique<JobTask>(this));
+  }
+  while (!outgoing_queue_.IsEmpty()) {
+    std::unique_ptr<MaglevCompilationJob> job;
+    outgoing_queue_.Dequeue(&job);
+  }
 }
 
 }  // namespace maglev

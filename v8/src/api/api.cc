@@ -653,7 +653,7 @@ size_t SnapshotCreator::AddData(i::Address object) {
 size_t SnapshotCreator::AddData(Local<Context> context, i::Address object) {
   DCHECK_NE(object, i::kNullAddress);
   DCHECK(!SnapshotCreatorData::cast(data_)->created_);
-  i::Handle<i::Context> ctx = Utils::OpenHandle(*context);
+  i::Handle<i::NativeContext> ctx = Utils::OpenHandle(*context);
   i::Isolate* i_isolate = ctx->GetIsolate();
   i::HandleScope scope(i_isolate);
   i::Handle<i::Object> obj(i::Object(object), i_isolate);
@@ -672,7 +672,7 @@ size_t SnapshotCreator::AddData(Local<Context> context, i::Address object) {
 
 namespace {
 void ConvertSerializedObjectsToFixedArray(Local<Context> context) {
-  i::Handle<i::Context> ctx = Utils::OpenHandle(*context);
+  i::Handle<i::NativeContext> ctx = Utils::OpenHandle(*context);
   i::Isolate* i_isolate = ctx->GetIsolate();
   if (!ctx->serialized_objects().IsArrayList()) {
     ctx->set_serialized_objects(
@@ -1194,7 +1194,7 @@ bool Data::IsContext() const { return Utils::OpenHandle(this)->IsContext(); }
 
 void Context::Enter() {
   i::DisallowGarbageCollection no_gc;
-  i::Context env = *Utils::OpenHandle(this);
+  i::NativeContext env = *Utils::OpenHandle(this);
   i::Isolate* i_isolate = env.GetIsolate();
   ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);
   i::HandleScopeImplementer* impl = i_isolate->handle_scope_implementer();
@@ -1204,7 +1204,7 @@ void Context::Enter() {
 }
 
 void Context::Exit() {
-  i::Handle<i::Context> env = Utils::OpenHandle(this);
+  i::Handle<i::NativeContext> env = Utils::OpenHandle(this);
   i::Isolate* i_isolate = env->GetIsolate();
   ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);
   i::HandleScopeImplementer* impl = i_isolate->handle_scope_implementer();
@@ -1221,7 +1221,8 @@ Context::BackupIncumbentScope::BackupIncumbentScope(
     : backup_incumbent_context_(backup_incumbent_context) {
   DCHECK(!backup_incumbent_context_.IsEmpty());
 
-  i::Handle<i::Context> env = Utils::OpenHandle(*backup_incumbent_context_);
+  i::Handle<i::NativeContext> env =
+      Utils::OpenHandle(*backup_incumbent_context_);
   i::Isolate* i_isolate = env->GetIsolate();
 
   js_stack_comparable_address_ =
@@ -1232,7 +1233,8 @@ Context::BackupIncumbentScope::BackupIncumbentScope(
 }
 
 Context::BackupIncumbentScope::~BackupIncumbentScope() {
-  i::Handle<i::Context> env = Utils::OpenHandle(*backup_incumbent_context_);
+  i::Handle<i::NativeContext> env =
+      Utils::OpenHandle(*backup_incumbent_context_);
   i::Isolate* i_isolate = env->GetIsolate();
 
   i::SimulatorStack::UnregisterJSStackComparableAddress(i_isolate);
@@ -1247,7 +1249,7 @@ static_assert(i::Internals::kEmbedderDataSlotExternalPointerOffset ==
 static i::Handle<i::EmbedderDataArray> EmbedderDataFor(Context* context,
                                                        int index, bool can_grow,
                                                        const char* location) {
-  i::Handle<i::Context> env = Utils::OpenHandle(context);
+  i::Handle<i::NativeContext> env = Utils::OpenHandle(context);
   i::Isolate* i_isolate = env->GetIsolate();
   DCHECK_NO_SCRIPT_NO_EXCEPTION(i_isolate);
   bool ok = Utils::ApiCheck(env->IsNativeContext(), location,
@@ -1268,7 +1270,7 @@ static i::Handle<i::EmbedderDataArray> EmbedderDataFor(Context* context,
 }
 
 uint32_t Context::GetNumberOfEmbedderDataFields() {
-  i::Handle<i::Context> context = Utils::OpenHandle(this);
+  i::Handle<i::NativeContext> context = Utils::OpenHandle(this);
   DCHECK_NO_SCRIPT_NO_EXCEPTION(context->GetIsolate());
   Utils::ApiCheck(context->IsNativeContext(),
                   "Context::GetNumberOfEmbedderDataFields",
@@ -1398,7 +1400,7 @@ void Template::SetAccessorProperty(v8::Local<v8::Name> name,
 static void InitializeFunctionTemplate(i::FunctionTemplateInfo info,
                                        bool do_not_cache) {
   InitializeTemplate(info, Consts::FUNCTION_TEMPLATE, do_not_cache);
-  info.set_flag(0);
+  info.set_flag(0, kRelaxedStore);
 }
 
 namespace {
@@ -1615,6 +1617,7 @@ void FunctionTemplate::SetCallHandler(
   i::HandleScope scope(i_isolate);
   i::Handle<i::CallHandlerInfo> obj = i_isolate->factory()->NewCallHandlerInfo(
       side_effect_type == SideEffectType::kHasNoSideEffect);
+  obj->set_owner_template(*info);
   obj->set_callback(i_isolate, reinterpret_cast<i::Address>(callback));
   if (data.IsEmpty()) {
     data = v8::Undefined(reinterpret_cast<v8::Isolate*>(i_isolate));
@@ -2066,6 +2069,7 @@ void ObjectTemplate::SetCallAsFunctionHandler(FunctionCallback callback,
   EnsureNotPublished(cons, "v8::ObjectTemplate::SetCallAsFunctionHandler");
   i::Handle<i::CallHandlerInfo> obj =
       i_isolate->factory()->NewCallHandlerInfo();
+  obj->set_owner_template(*Utils::OpenHandle(this));
   obj->set_callback(i_isolate, reinterpret_cast<i::Address>(callback));
   if (data.IsEmpty()) {
     data = v8::Undefined(reinterpret_cast<v8::Isolate*>(i_isolate));
@@ -2928,17 +2932,19 @@ void ScriptCompiler::ScriptStreamingTask::Run() { data_->task->Run(); }
 
 ScriptCompiler::ScriptStreamingTask* ScriptCompiler::StartStreaming(
     Isolate* v8_isolate, StreamedSource* source, v8::ScriptType type,
-    CompileOptions options) {
-  Utils::ApiCheck(options == kNoCompileOptions || options == kEagerCompile ||
-                      options == kProduceCompileHints,
-                  "v8::ScriptCompiler::StartStreaming",
-                  "Invalid CompileOptions");
+    CompileOptions options, CompileHintCallback compile_hint_callback,
+    void* compile_hint_callback_data) {
+  Utils::ApiCheck(
+      options == kNoCompileOptions || options == kEagerCompile ||
+          options == kProduceCompileHints || options == kConsumeCompileHints,
+      "v8::ScriptCompiler::StartStreaming", "Invalid CompileOptions");
   if (!i::v8_flags.script_streaming) return nullptr;
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(v8_isolate);
   i::ScriptStreamingData* data = source->impl();
   std::unique_ptr<i::BackgroundCompileTask> task =
-      std::make_unique<i::BackgroundCompileTask>(data, i_isolate, type,
-                                                 options);
+      std::make_unique<i::BackgroundCompileTask>(data, i_isolate, type, options,
+                                                 compile_hint_callback,
+                                                 compile_hint_callback_data);
   data->task = std::move(task);
   return new ScriptCompiler::ScriptStreamingTask(data);
 }
@@ -4919,8 +4925,8 @@ Local<Object> v8::Object::FindInstanceInPrototypeChain(
   auto self = Utils::OpenHandle(this);
   auto i_isolate = self->GetIsolate();
   i::PrototypeIterator iter(i_isolate, *self, i::kStartAtReceiver);
-  auto tmpl_info = *Utils::OpenHandle(*tmpl);
-  while (!tmpl_info.IsTemplateFor(iter.GetCurrent<i::JSObject>())) {
+  i::Tagged<i::FunctionTemplateInfo> tmpl_info = *Utils::OpenHandle(*tmpl);
+  while (!tmpl_info->IsTemplateFor(iter.GetCurrent<i::JSObject>())) {
     iter.Advance();
     if (iter.IsAtEnd()) return Local<Object>();
     if (!iter.GetCurrent().IsJSObject()) return Local<Object>();
@@ -5269,13 +5275,13 @@ Maybe<bool> v8::Object::HasRealNamedCallbackProperty(Local<Context> context,
 
 bool v8::Object::HasNamedLookupInterceptor() const {
   auto self = *Utils::OpenHandle(this);
-  if (self.IsJSObject()) return false;
+  if (!self.IsJSObject()) return false;
   return i::JSObject::cast(self).HasNamedInterceptor();
 }
 
 bool v8::Object::HasIndexedLookupInterceptor() const {
   auto self = *Utils::OpenHandle(this);
-  if (self.IsJSObject()) return false;
+  if (!self.IsJSObject()) return false;
   return i::JSObject::cast(self).HasIndexedInterceptor();
 }
 
@@ -5372,7 +5378,7 @@ Local<v8::Object> v8::Object::Clone() {
 
 MaybeLocal<v8::Context> v8::Object::GetCreationContext() {
   auto self = Utils::OpenHandle(this);
-  i::Handle<i::Context> context;
+  i::Handle<i::NativeContext> context;
   if (self->GetCreationContext().ToHandle(&context)) {
     return Utils::ToLocal(context);
   }
@@ -6624,8 +6630,8 @@ template <typename ObjectType>
 struct InvokeBootstrapper;
 
 template <>
-struct InvokeBootstrapper<i::Context> {
-  i::Handle<i::Context> Invoke(
+struct InvokeBootstrapper<i::NativeContext> {
+  i::Handle<i::NativeContext> Invoke(
       i::Isolate* i_isolate,
       i::MaybeHandle<i::JSGlobalProxy> maybe_global_proxy,
       v8::Local<v8::ObjectTemplate> global_proxy_template,
@@ -6777,7 +6783,7 @@ Local<Context> NewContext(
   i::HandleScope scope(i_isolate);
   ExtensionConfiguration no_extensions;
   if (extensions == nullptr) extensions = &no_extensions;
-  i::Handle<i::Context> env = CreateEnvironment<i::Context>(
+  i::Handle<i::NativeContext> env = CreateEnvironment<i::NativeContext>(
       i_isolate, extensions, global_template, global_object,
       context_snapshot_index, embedder_fields_deserializer, microtask_queue);
   if (env.is_null()) {
@@ -6844,18 +6850,18 @@ MaybeLocal<Object> v8::Context::NewRemoteContext(
 }
 
 void v8::Context::SetSecurityToken(Local<Value> token) {
-  i::Handle<i::Context> env = Utils::OpenHandle(this);
+  i::Handle<i::NativeContext> env = Utils::OpenHandle(this);
   i::Handle<i::Object> token_handle = Utils::OpenHandle(*token);
   env->set_security_token(*token_handle);
 }
 
 void v8::Context::UseDefaultSecurityToken() {
-  i::Handle<i::Context> env = Utils::OpenHandle(this);
+  i::Handle<i::NativeContext> env = Utils::OpenHandle(this);
   env->set_security_token(env->global_object());
 }
 
 Local<Value> v8::Context::GetSecurityToken() {
-  i::Handle<i::Context> env = Utils::OpenHandle(this);
+  i::Handle<i::NativeContext> env = Utils::OpenHandle(this);
   i::Isolate* i_isolate = env->GetIsolate();
   i::Object security_token = env->security_token();
   i::Handle<i::Object> token_handle(security_token, i_isolate);
@@ -7146,7 +7152,7 @@ class ObjectVisitorDeepFreezer : i::ObjectVisitor {
 }  // namespace
 
 Maybe<void> Context::DeepFreeze(DeepFreezeDelegate* delegate) {
-  i::Handle<i::Context> env = Utils::OpenHandle(this);
+  i::Handle<i::NativeContext> env = Utils::OpenHandle(this);
   i::Isolate* i_isolate = env->GetIsolate();
 
   // TODO(behamilton): Incorporate compatibility improvements similar to NodeJS:
@@ -7164,19 +7170,19 @@ Maybe<void> Context::DeepFreeze(DeepFreezeDelegate* delegate) {
 }
 
 v8::Isolate* Context::GetIsolate() {
-  i::Handle<i::Context> env = Utils::OpenHandle(this);
+  i::Handle<i::NativeContext> env = Utils::OpenHandle(this);
   return reinterpret_cast<Isolate*>(env->GetIsolate());
 }
 
 v8::MicrotaskQueue* Context::GetMicrotaskQueue() {
-  i::Handle<i::Context> env = Utils::OpenHandle(this);
+  i::Handle<i::NativeContext> env = Utils::OpenHandle(this);
   Utils::ApiCheck(env->IsNativeContext(), "v8::Context::GetMicrotaskQueue",
                   "Must be called on a native context");
   return i::Handle<i::NativeContext>::cast(env)->microtask_queue();
 }
 
 void Context::SetMicrotaskQueue(v8::MicrotaskQueue* queue) {
-  i::Handle<i::Context> context = Utils::OpenHandle(this);
+  i::Handle<i::NativeContext> context = Utils::OpenHandle(this);
   i::Isolate* i_isolate = context->GetIsolate();
   Utils::ApiCheck(context->IsNativeContext(), "v8::Context::SetMicrotaskQueue",
                   "Must be called on a native context");
@@ -7197,7 +7203,7 @@ void Context::SetMicrotaskQueue(v8::MicrotaskQueue* queue) {
 }
 
 v8::Local<v8::Object> Context::Global() {
-  i::Handle<i::Context> context = Utils::OpenHandle(this);
+  i::Handle<i::NativeContext> context = Utils::OpenHandle(this);
   i::Isolate* i_isolate = context->GetIsolate();
   i::Handle<i::Object> global(context->global_proxy(), i_isolate);
   // TODO(chromium:324812): This should always return the global proxy
@@ -7210,21 +7216,21 @@ v8::Local<v8::Object> Context::Global() {
 }
 
 void Context::DetachGlobal() {
-  i::Handle<i::Context> context = Utils::OpenHandle(this);
+  i::Handle<i::NativeContext> context = Utils::OpenHandle(this);
   i::Isolate* i_isolate = context->GetIsolate();
   ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);
   i_isolate->DetachGlobal(context);
 }
 
 Local<v8::Object> Context::GetExtrasBindingObject() {
-  i::Handle<i::Context> context = Utils::OpenHandle(this);
+  i::Handle<i::NativeContext> context = Utils::OpenHandle(this);
   i::Isolate* i_isolate = context->GetIsolate();
   i::Handle<i::JSObject> binding(context->extras_binding_object(), i_isolate);
   return Utils::ToLocal(binding);
 }
 
 void Context::AllowCodeGenerationFromStrings(bool allow) {
-  i::Handle<i::Context> context = Utils::OpenHandle(this);
+  i::Handle<i::NativeContext> context = Utils::OpenHandle(this);
   i::Isolate* i_isolate = context->GetIsolate();
   ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);
   context->set_allow_code_gen_from_strings(
@@ -7233,25 +7239,25 @@ void Context::AllowCodeGenerationFromStrings(bool allow) {
 }
 
 bool Context::IsCodeGenerationFromStringsAllowed() const {
-  i::Context context = *Utils::OpenHandle(this);
+  i::NativeContext context = *Utils::OpenHandle(this);
   return !context.allow_code_gen_from_strings().IsFalse(context.GetIsolate());
 }
 
 void Context::SetErrorMessageForCodeGenerationFromStrings(Local<String> error) {
-  i::Handle<i::Context> context = Utils::OpenHandle(this);
+  i::Handle<i::NativeContext> context = Utils::OpenHandle(this);
   i::Handle<i::String> error_handle = Utils::OpenHandle(*error);
   context->set_error_message_for_code_gen_from_strings(*error_handle);
 }
 
 void Context::SetErrorMessageForWasmCodeGeneration(Local<String> error) {
-  i::Handle<i::Context> context = Utils::OpenHandle(this);
+  i::Handle<i::NativeContext> context = Utils::OpenHandle(this);
   i::Handle<i::String> error_handle = Utils::OpenHandle(*error);
   context->set_error_message_for_wasm_code_gen(*error_handle);
 }
 
 void Context::SetAbortScriptExecution(
     Context::AbortScriptExecutionCallback callback) {
-  i::Handle<i::Context> context = Utils::OpenHandle(this);
+  i::Handle<i::NativeContext> context = Utils::OpenHandle(this);
   i::Isolate* i_isolate = context->GetIsolate();
   if (callback == nullptr) {
     context->set_script_execution_callback(
@@ -7263,7 +7269,7 @@ void Context::SetAbortScriptExecution(
 }
 
 Local<Value> Context::GetContinuationPreservedEmbedderData() const {
-  i::Handle<i::Context> context = Utils::OpenHandle(this);
+  i::Handle<i::NativeContext> context = Utils::OpenHandle(this);
   i::Isolate* i_isolate = context->GetIsolate();
   i::Handle<i::Object> data(
       context->native_context().continuation_preserved_embedder_data(),
@@ -7272,7 +7278,7 @@ Local<Value> Context::GetContinuationPreservedEmbedderData() const {
 }
 
 void Context::SetContinuationPreservedEmbedderData(Local<Value> data) {
-  i::Handle<i::Context> context = Utils::OpenHandle(this);
+  i::Handle<i::NativeContext> context = Utils::OpenHandle(this);
   i::Isolate* i_isolate = context->GetIsolate();
   if (data.IsEmpty())
     data = v8::Undefined(reinterpret_cast<v8::Isolate*>(i_isolate));
@@ -7285,7 +7291,7 @@ void v8::Context::SetPromiseHooks(Local<Function> init_hook,
                                   Local<Function> after_hook,
                                   Local<Function> resolve_hook) {
 #ifdef V8_ENABLE_JAVASCRIPT_PROMISE_HOOKS
-  i::Handle<i::Context> context = Utils::OpenHandle(this);
+  i::Handle<i::NativeContext> context = Utils::OpenHandle(this);
   i::Isolate* i_isolate = context->GetIsolate();
 
   i::Handle<i::Object> init = i_isolate->factory()->undefined_value();
@@ -7340,7 +7346,7 @@ MaybeLocal<Context> metrics::Recorder::GetContext(
 
 metrics::Recorder::ContextId metrics::Recorder::GetContextId(
     Local<Context> context) {
-  i::Handle<i::Context> i_context = Utils::OpenHandle(*context);
+  i::Handle<i::NativeContext> i_context = Utils::OpenHandle(*context);
   i::Isolate* i_isolate = i_context->GetIsolate();
   return i_isolate->GetOrRegisterRecorderContextId(
       handle(i_context->native_context(), i_isolate));
@@ -7730,16 +7736,7 @@ bool v8::String::MakeExternal(
 bool v8::String::CanMakeExternal(Encoding encoding) const {
   i::String obj = *Utils::OpenHandle(this);
 
-  if (obj.IsThinString()) {
-    obj = i::ThinString::cast(obj).actual();
-  }
-
-  if (!obj.SupportsExternalization(encoding)) {
-    return false;
-  }
-
-  // Only old space strings should be externalized.
-  return !i::Heap::InYoungGeneration(obj);
+  return obj.SupportsExternalization(encoding);
 }
 
 bool v8::String::StringEquals(Local<String> that) const {
@@ -9227,23 +9224,21 @@ v8::Local<v8::Context> Isolate::GetCurrentContext() {
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(this);
   i::Context context = i_isolate->context();
   if (context.is_null()) return Local<Context>();
-  i::Context native_context = context.native_context();
-  if (native_context.is_null()) return Local<Context>();
-  return Utils::ToLocal(i::Handle<i::Context>(native_context, i_isolate));
+  i::NativeContext native_context = context.native_context();
+  return Utils::ToLocal(handle(native_context, i_isolate));
 }
 
 v8::Local<v8::Context> Isolate::GetEnteredOrMicrotaskContext() {
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(this);
-  i::Handle<i::Object> last =
+  i::Handle<i::NativeContext> last =
       i_isolate->handle_scope_implementer()->LastEnteredOrMicrotaskContext();
   if (last.is_null()) return Local<Context>();
-  DCHECK(last->IsNativeContext());
-  return Utils::ToLocal(i::Handle<i::Context>::cast(last));
+  return Utils::ToLocal(last);
 }
 
 v8::Local<v8::Context> Isolate::GetIncumbentContext() {
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(this);
-  i::Handle<i::Context> context = i_isolate->GetIncumbentContext();
+  i::Handle<i::NativeContext> context = i_isolate->GetIncumbentContext();
   return Utils::ToLocal(context);
 }
 
@@ -11291,14 +11286,17 @@ void HandleScopeImplementer::IterateThis(RootVisitor* v) {
                          FullObjectSlot(handle_scope_data_.next));
   }
 
-  DetachableVector<Context>* context_lists[2] = {&saved_contexts_,
-                                                 &entered_contexts_};
-  for (unsigned i = 0; i < arraysize(context_lists); i++) {
-    context_lists[i]->shrink_to_fit();
-    if (context_lists[i]->empty()) continue;
-    FullObjectSlot start(&context_lists[i]->front());
+  saved_contexts_.shrink_to_fit();
+  if (!saved_contexts_.empty()) {
+    FullObjectSlot start(&saved_contexts_.front());
     v->VisitRootPointers(Root::kHandleScope, nullptr, start,
-                         start + static_cast<int>(context_lists[i]->size()));
+                         start + static_cast<int>(saved_contexts_.size()));
+  }
+  entered_contexts_.shrink_to_fit();
+  if (!entered_contexts_.empty()) {
+    FullObjectSlot start(&entered_contexts_.front());
+    v->VisitRootPointers(Root::kHandleScope, nullptr, start,
+                         start + static_cast<int>(entered_contexts_.size()));
   }
   // The shape of |entered_contexts_| and |is_microtask_context_| stacks must
   // be in sync.
@@ -11388,12 +11386,46 @@ void InvokeAccessorGetterCallback(
   getter(property, info);
 }
 
-void InvokeFunctionCallback(const v8::FunctionCallbackInfo<v8::Value>& info) {
+namespace {
+
+inline void InvokeFunctionCallback(
+    const v8::FunctionCallbackInfo<v8::Value>& info, CallApiCallbackMode mode) {
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(info.GetIsolate());
   RCS_SCOPE(i_isolate, RuntimeCallCounterId::kFunctionCallback);
 
-  // TODO(v8:13825): perform side effect checks if necessary once
-  // CallHandlerInfo is passed here.
+  switch (mode) {
+    case CallApiCallbackMode::kGeneric: {
+      if (V8_UNLIKELY(i_isolate->should_check_side_effects())) {
+        // Load FunctionTemplateInfo from API_CALLBACK_EXIT frame.
+        // If this ever becomes a performance bottleneck, one can pass function
+        // template info here explicitly.
+        StackFrameIterator it(i_isolate);
+        CHECK(it.frame()->is_api_callback_exit());
+        ApiCallbackExitFrame* frame = ApiCallbackExitFrame::cast(it.frame());
+        FunctionTemplateInfo fti = FunctionTemplateInfo::cast(frame->target());
+        CallHandlerInfo call_handler_info =
+            CallHandlerInfo::cast(fti.call_code(kAcquireLoad));
+        if (!i_isolate->debug()->PerformSideEffectCheckForCallback(
+                handle(call_handler_info, i_isolate))) {
+          // Failed side effect check.
+          return;
+        }
+      }
+      break;
+    }
+    case CallApiCallbackMode::kWithSideEffects: {
+      Handle<CallHandlerInfo> has_side_effects;
+      if (V8_UNLIKELY(i_isolate->should_check_side_effects()) &&
+          !i_isolate->debug()->PerformSideEffectCheckForCallback(
+              has_side_effects)) {
+        // Failed side effect check.
+        return;
+      }
+      break;
+    }
+    case CallApiCallbackMode::kNoSideEffects:
+      break;
+  }
 
   Address arg = i_isolate->isolate_data()->api_callback_thunk_argument();
   if (USE_SIMULATOR_BOOL) {
@@ -11403,9 +11435,25 @@ void InvokeFunctionCallback(const v8::FunctionCallbackInfo<v8::Value>& info) {
   ExternalCallbackScope call_scope(i_isolate, FUNCTION_ADDR(callback));
   callback(info);
 }
+}  // namespace
+
+void InvokeFunctionCallbackGeneric(
+    const v8::FunctionCallbackInfo<v8::Value>& info) {
+  InvokeFunctionCallback(info, CallApiCallbackMode::kGeneric);
+}
+
+void InvokeFunctionCallbackNoSideEffects(
+    const v8::FunctionCallbackInfo<v8::Value>& info) {
+  InvokeFunctionCallback(info, CallApiCallbackMode::kNoSideEffects);
+}
+
+void InvokeFunctionCallbackWithSideEffects(
+    const v8::FunctionCallbackInfo<v8::Value>& info) {
+  InvokeFunctionCallback(info, CallApiCallbackMode::kWithSideEffects);
+}
 
 void InvokeFinalizationRegistryCleanupFromTask(
-    Handle<Context> context,
+    Handle<NativeContext> native_context,
     Handle<JSFinalizationRegistry> finalization_registry,
     Handle<Object> callback) {
   i::Isolate* i_isolate = finalization_registry->native_context().GetIsolate();
@@ -11416,7 +11464,7 @@ void InvokeFinalizationRegistryCleanupFromTask(
   // API call. This method is implemented here to avoid duplication of the
   // exception handling and microtask running logic in CallDepthScope.
   if (i_isolate->is_execution_terminating()) return;
-  Local<v8::Context> api_context = Utils::ToLocal(context);
+  Local<v8::Context> api_context = Utils::ToLocal(native_context);
   CallDepthScope<true> call_depth_scope(i_isolate, api_context);
   VMState<OTHER> state(i_isolate);
   Handle<Object> argv[] = {callback};

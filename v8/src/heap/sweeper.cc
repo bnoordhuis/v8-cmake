@@ -125,7 +125,6 @@ class Sweeper::MajorSweeperJob final : public JobTask {
   MajorSweeperJob& operator=(const MajorSweeperJob&) = delete;
 
   void Run(JobDelegate* delegate) final {
-    RwxMemoryWriteScope::SetDefaultPermissionsForNewThread();
     RunImpl(delegate, delegate->IsJoiningThread());
   }
 
@@ -181,7 +180,6 @@ class Sweeper::MinorSweeperJob final : public JobTask {
   MinorSweeperJob& operator=(const MinorSweeperJob&) = delete;
 
   void Run(JobDelegate* delegate) final {
-    RwxMemoryWriteScope::SetDefaultPermissionsForNewThread();
     RunImpl(delegate, delegate->IsJoiningThread());
   }
 
@@ -771,7 +769,13 @@ int Sweeper::RawSweep(Page* p, FreeSpaceTreatmentMode free_space_treatment_mode,
                                          *active_system_pages_after_sweeping);
   }
 
+  DCHECK_IMPLIES(!code_object_registry,
+                 !p->IsFlagSet(MemoryChunk::Flag::IS_EXECUTABLE));
   if (code_object_registry) {
+    if (p->IsFlagSet(MemoryChunk::Flag::IS_EXECUTABLE)) {
+      ThreadIsolation::UnregisterInstructionStreamsInPageExcept(p,
+                                                                code_objects);
+    }
     code_object_registry->ReinitializeFrom(std::move(code_objects));
   }
 
@@ -1078,10 +1082,12 @@ void Sweeper::AddPage(AllocationSpace space, Page* page) {
 
 void Sweeper::AddNewSpacePage(Page* page) {
   DCHECK_EQ(NEW_SPACE, page->owner_identity());
+  DCHECK_LE(page->AgeInNewSpace(), v8_flags.minor_mc_max_page_age);
   size_t live_bytes = marking_state_->live_bytes(page);
   heap_->IncrementNewSpaceSurvivingObjectSize(live_bytes);
   heap_->IncrementYoungSurvivorsCounter(live_bytes);
   AddPageImpl(NEW_SPACE, page);
+  page->IncrementAgeInNewSpace();
 }
 
 void Sweeper::AddPromotedPageForIteration(MemoryChunk* chunk) {
@@ -1249,6 +1255,8 @@ void Sweeper::SweepEmptyNewSpacePage(Page* page) {
   }
 
   page->ResetAllocationStatistics();
+  page->ResetAgeInNewSpace();
+  page->ClearFlag(Page::NEVER_ALLOCATE_ON_PAGE);
   heap_->CreateFillerObjectAtSweeper(start, static_cast<int>(size));
   paged_space->UnaccountedFree(start, size);
   paged_space->IncreaseAllocatedBytes(0, page);

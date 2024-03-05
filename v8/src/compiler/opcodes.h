@@ -556,7 +556,9 @@
   V(Null)                          \
   V(RttCanon)                      \
   V(WasmTypeCast)                  \
+  V(WasmTypeCastAbstract)          \
   V(WasmTypeCheck)                 \
+  V(WasmTypeCheckAbstract)         \
   V(WasmExternInternalize)         \
   V(WasmExternExternalize)         \
   V(WasmStructGet)                 \
@@ -1195,6 +1197,10 @@
   V(I32x8ExtMulI16x8U)             \
   V(I16x16ExtMulI8x16S)            \
   V(I16x16ExtMulI8x16U)            \
+  V(I32x8ExtAddPairwiseI16x16S)    \
+  V(I32x8ExtAddPairwiseI16x16U)    \
+  V(I16x16ExtAddPairwiseI8x32S)    \
+  V(I16x16ExtAddPairwiseI8x32U)    \
   V(ExtractF128)                   \
   V(S256Zero)                      \
   V(S256Not)                       \

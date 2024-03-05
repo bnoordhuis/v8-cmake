@@ -248,6 +248,11 @@ ExternalReference::shared_external_pointer_table_address_address(
   return ExternalReference(
       isolate->shared_external_pointer_table_address_address());
 }
+
+ExternalReference ExternalReference::code_pointer_table_address() {
+  return ExternalReference(GetProcessWideCodePointerTable()->buffer_address());
+}
+
 #endif  // V8_ENABLE_SANDBOX
 
 ExternalReference ExternalReference::interpreter_dispatch_table_address(
@@ -359,7 +364,7 @@ ExternalPointerHandle AllocateAndInitializeExternalPointerTableEntry(
     Isolate* isolate, Address pointer) {
 #ifdef V8_ENABLE_SANDBOX
   return isolate->external_pointer_table().AllocateAndInitializeEntry(
-      isolate, pointer, kExternalObjectValueTag);
+      pointer, kExternalObjectValueTag);
 #else
   return 0;
 #endif  // V8_ENABLE_SANDBOX
@@ -774,11 +779,40 @@ ExternalReference ExternalReference::thread_in_wasm_flag_address_address(
   return ExternalReference(isolate->thread_in_wasm_flag_address_address());
 }
 
-ExternalReference ExternalReference::invoke_function_callback() {
-  Address thunk_address = FUNCTION_ADDR(&InvokeFunctionCallback);
+ExternalReference ExternalReference::invoke_function_callback_generic() {
+  Address thunk_address = FUNCTION_ADDR(&InvokeFunctionCallbackGeneric);
   ExternalReference::Type thunk_type = ExternalReference::DIRECT_API_CALL;
   ApiFunction thunk_fun(thunk_address);
   return ExternalReference::Create(&thunk_fun, thunk_type);
+}
+
+ExternalReference
+ExternalReference::invoke_function_callback_with_side_effects() {
+  Address thunk_address = FUNCTION_ADDR(&InvokeFunctionCallbackWithSideEffects);
+  ExternalReference::Type thunk_type = ExternalReference::DIRECT_API_CALL;
+  ApiFunction thunk_fun(thunk_address);
+  return ExternalReference::Create(&thunk_fun, thunk_type);
+}
+
+ExternalReference
+ExternalReference::invoke_function_callback_no_side_effects() {
+  Address thunk_address = FUNCTION_ADDR(&InvokeFunctionCallbackNoSideEffects);
+  ExternalReference::Type thunk_type = ExternalReference::DIRECT_API_CALL;
+  ApiFunction thunk_fun(thunk_address);
+  return ExternalReference::Create(&thunk_fun, thunk_type);
+}
+
+// static
+ExternalReference ExternalReference::invoke_function_callback(
+    CallApiCallbackMode mode) {
+  switch (mode) {
+    case CallApiCallbackMode::kGeneric:
+      return invoke_function_callback_generic();
+    case CallApiCallbackMode::kWithSideEffects:
+      return invoke_function_callback_with_side_effects();
+    case CallApiCallbackMode::kNoSideEffects:
+      return invoke_function_callback_no_side_effects();
+  }
 }
 
 ExternalReference ExternalReference::invoke_accessor_getter_callback() {
@@ -1605,7 +1639,7 @@ IF_TSAN(FUNCTION_REFERENCE, tsan_relaxed_load_function_64_bits,
 
 static int EnterMicrotaskContextWrapper(HandleScopeImplementer* hsi,
                                         Address raw_context) {
-  Context context = Context::cast(Object(raw_context));
+  NativeContext context = NativeContext::cast(Object(raw_context));
   hsi->EnterMicrotaskContext(context);
   return 0;
 }

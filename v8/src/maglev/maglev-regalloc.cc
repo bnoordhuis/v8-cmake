@@ -27,7 +27,9 @@
 #include "src/maglev/maglev-regalloc-data.h"
 #include "src/zone/zone-containers.h"
 
-#ifdef V8_TARGET_ARCH_ARM64
+#ifdef V8_TARGET_ARCH_ARM
+#include "src/codegen/arm/register-arm.h"
+#elif V8_TARGET_ARCH_ARM64
 #include "src/codegen/arm64/register-arm64.h"
 #elif V8_TARGET_ARCH_X64
 #include "src/codegen/x64/register-x64.h"
@@ -192,6 +194,26 @@ StraightForwardRegisterAllocator::StraightForwardRegisterAllocator(
   AllocateRegisters();
   uint32_t tagged_stack_slots = tagged_.top;
   uint32_t untagged_stack_slots = untagged_.top;
+  if (graph_->is_osr()) {
+    // Fix our stack frame to be compatible with the source stack frame of this
+    // OSR transition:
+    // 1) Ensure the section with tagged slots is big enough to receive all
+    //    live OSR-in values.
+    for (auto val : graph_->osr_values()) {
+      if (val->result().operand().IsAllocated() &&
+          val->stack_slot() >= tagged_stack_slots) {
+        tagged_stack_slots = val->stack_slot() + 1;
+      }
+    }
+    // 2) Ensure we never have to shrink stack frames when OSR'ing into Maglev.
+    //    We don't grow tagged slots or they might end up being uninitialized.
+    uint32_t source_frame_size =
+        graph_->min_maglev_stackslots_for_unoptimized_frame_size();
+    uint32_t target_frame_size = tagged_stack_slots + untagged_stack_slots;
+    if (source_frame_size > target_frame_size) {
+      untagged_stack_slots += source_frame_size - target_frame_size;
+    }
+  }
 #ifdef V8_TARGET_ARCH_ARM64
   // Due to alignment constraints, we add one untagged slot if
   // stack_slots + fixed_slot_count is odd.
@@ -768,13 +790,25 @@ void StraightForwardRegisterAllocator::AllocateNodeResult(ValueNode* node) {
 
   if (operand.basic_policy() == compiler::UnallocatedOperand::FIXED_SLOT) {
     DCHECK(node->Is<InitialValue>());
-    DCHECK_LT(operand.fixed_slot_index(), 0);
+    DCHECK_IMPLIES(!graph_->is_osr(), operand.fixed_slot_index() < 0);
     // Set the stack slot to exactly where the value is.
     compiler::AllocatedOperand location(compiler::AllocatedOperand::STACK_SLOT,
                                         node->GetMachineRepresentation(),
                                         operand.fixed_slot_index());
     node->result().SetAllocated(location);
     node->Spill(location);
+
+    int idx = operand.fixed_slot_index();
+    if (idx > 0) {
+      // Reserve this slot by increasing the top and also marking slots below as
+      // free. Assumes slots are processed in increasing order.
+      CHECK(node->is_tagged());
+      CHECK_GE(idx, tagged_.top);
+      for (int i = tagged_.top; i < idx; ++i) {
+        tagged_.free_slots.emplace_back(i, node->live_range().start);
+      }
+      tagged_.top = idx + 1;
+    }
     return;
   }
 
@@ -928,7 +962,7 @@ void StraightForwardRegisterAllocator::AllocateControlNode(ControlNode* node,
   // Control nodes can't lazy deopt at the moment.
   DCHECK(!node->properties().can_lazy_deopt());
 
-  if (node->Is<JumpToInlined>() || node->Is<Abort>()) {
+  if (node->Is<Abort>()) {
     // Do nothing.
     DCHECK(node->general_temporaries().is_empty());
     DCHECK(node->double_temporaries().is_empty());
@@ -1536,12 +1570,19 @@ void StraightForwardRegisterAllocator::AllocateSpillSlot(ValueNode* node) {
   uint32_t free_slot;
   bool is_tagged = (node->properties().value_representation() ==
                     ValueRepresentation::kTagged);
-  // TODO(v8:7700): We will need a new class of SpillSlots for doubles in 32-bit
-  // architectures.
+  uint32_t slot_size = 1;
+  if constexpr (kDoubleSize != kSystemPointerSize) {
+    if (IsDoubleRepresentation(node->properties().value_representation())) {
+      slot_size = kDoubleSize / kSystemPointerSize;
+    }
+  }
   SpillSlots& slots = is_tagged ? tagged_ : untagged_;
   MachineRepresentation representation = node->GetMachineRepresentation();
-  if (!v8_flags.maglev_reuse_stack_slots || slots.free_slots.empty()) {
-    free_slot = slots.top++;
+  // TODO(victorgomes): We don't currently reuse double slots on arm.
+  if (!v8_flags.maglev_reuse_stack_slots || slot_size > 1 ||
+      slots.free_slots.empty()) {
+    free_slot = slots.top;
+    slots.top += slot_size;
   } else {
     NodeIdT start = node->live_range().start;
     auto it =
@@ -1840,6 +1881,10 @@ RegListBase<RegisterT> GetReservedRegisters(NodeBase* node_base) {
   compiler::UnallocatedOperand operand =
       compiler::UnallocatedOperand::cast(node->result().operand());
   RegListBase<RegisterT> reserved = {node->GetRegisterHint<RegisterT>()};
+  if (operand.basic_policy() == compiler::UnallocatedOperand::FIXED_SLOT) {
+    DCHECK(node->Is<InitialValue>());
+    return reserved;
+  }
   if constexpr (std::is_same_v<RegisterT, Register>) {
     if (operand.extended_policy() ==
         compiler::UnallocatedOperand::FIXED_REGISTER) {
@@ -1934,8 +1979,10 @@ void StraightForwardRegisterAllocator::ClearRegisterValues() {
   ClearRegisterState(double_registers_);
 
   // All registers should be free by now.
-  DCHECK_EQ(general_registers_.unblocked_free(), kAllocatableGeneralRegisters);
-  DCHECK_EQ(double_registers_.unblocked_free(), kAllocatableDoubleRegisters);
+  DCHECK_EQ(general_registers_.unblocked_free(),
+            MaglevAssembler::GetAllocatableRegisters());
+  DCHECK_EQ(double_registers_.unblocked_free(),
+            MaglevAssembler::GetAllocatableDoubleRegisters());
 }
 
 void StraightForwardRegisterAllocator::InitializeRegisterValues(

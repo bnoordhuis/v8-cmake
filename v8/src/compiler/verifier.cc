@@ -1706,7 +1706,9 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
       CheckValueInputIs(node, 0, Type::Any());  // callee
       break;
     case IrOpcode::kWasmTypeCheck:
+    case IrOpcode::kWasmTypeCheckAbstract:
     case IrOpcode::kWasmTypeCast:
+    case IrOpcode::kWasmTypeCastAbstract:
     case IrOpcode::kRttCanon:
     case IrOpcode::kNull:
     case IrOpcode::kIsNull:
@@ -1722,7 +1724,7 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
     case IrOpcode::kWasmArrayInitializeLength:
     case IrOpcode::kStringAsWtf16:
     case IrOpcode::kStringPrepareForGetCodeunit:
-      // TODO(manoskouk): What are the constraints here?
+      // TODO(7748): What are the constraints here?
       break;
 #endif  // V8_ENABLE_WEBASSEMBLY
 

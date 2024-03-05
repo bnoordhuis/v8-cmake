@@ -333,11 +333,6 @@ class EffectControlLinearizer {
   Node* JSAnyIsNotPrimitiveHeapObject(Node* value, Node* map = nullptr);
   Node* LoadFromSeqString(Node* receiver, Node* position, Node* is_one_byte);
   Node* TruncateWordToInt32(Node* value);
-  Node* MakeWeakForComparison(Node* heap_object);
-  Node* BuildIsWeakReferenceTo(Node* maybe_object, Node* value);
-  Node* BuildIsClearedWeakReference(Node* maybe_object);
-  Node* BuildIsStrongReference(Node* value);
-  Node* BuildStrongReferenceFromWeakReference(Node* value);
   Node* SmiMaxValueConstant();
   Node* SmiShiftBitsConstant();
 
@@ -2720,7 +2715,10 @@ Node* EffectControlLinearizer::SizeForString(Node* length, Node* is_two_byte) {
 // {length}.
 Node* EffectControlLinearizer::AllocateSeqString(Node* length, bool one_byte) {
   Node* size = SizeForString(length, __ Int32Constant(!one_byte));
-  Node* seq_string = __ Allocate(AllocationType::kYoung, size);
+
+  Node* seq_string =
+      __ Allocate(AllocationType::kYoung, size, AllowLargeObjects::kTrue);
+
   __ StoreField(AccessBuilder::ForMap(), seq_string,
                 __ HeapConstant(one_byte ? factory()->one_byte_string_map()
                                          : factory()->string_map()));
@@ -2745,7 +2743,10 @@ Node* EffectControlLinearizer::AllocateSeqString(Node* length,
                                                  Node* is_one_byte) {
   Node* is_two_byte = __ Word32Xor(is_one_byte, __ Int32Constant(1));
   Node* size = SizeForString(length, is_two_byte);
-  Node* seq_string = __ Allocate(AllocationType::kYoung, size);
+
+  Node* seq_string =
+      __ Allocate(AllocationType::kYoung, size, AllowLargeObjects::kTrue);
+
   __ StoreField(AccessBuilder::ForNameRawHashField(), seq_string,
                 __ Int32Constant(Name::kEmptyHashField));
   __ StoreField(AccessBuilder::ForStringLength(), seq_string, length);
@@ -3022,7 +3023,7 @@ void EffectControlLinearizer::EndStringBuilderConcatForLoopPhi(
     // If we reach this point:
     //   - {user_block} cannot be before {block}, otherwise it couldn't use
     //     {node} which is defined in {block} (that was true at the beginning of
-    //     the loop already).
+    //     the loop already). (unless used as the backedge of a loop phi)
     //   - {user_block} cannot be inside the loop (we've checked that).
     // So {user_block} has to be after the loop. Then, since {user_block} is
     // after {block} and uses {node}:
@@ -3032,9 +3033,11 @@ void EffectControlLinearizer::EndStringBuilderConcatForLoopPhi(
     //     right above, so we're not in this case.
     //   - it is dominated by {block}. This is the only case that remains; we
     //     DCHECK it just to be safe.
-    DCHECK_EQ(BasicBlock::GetCommonDominator(block, user_block), block);
-    // {user_block} is dominated by {block}, which mean that we can safely
-    // update the edge.
+    DCHECK((BasicBlock::GetCommonDominator(block, user_block) == block) ||
+           (user_block->IsLoopHeader() &&
+            edge.from()->opcode() == IrOpcode::kPhi));
+    // {user_block} is dominated by {block}, or it's a loop header using {node}
+    // as the backedge, which mean that we can safely update the edge.
     DCHECK(!NodeProperties::IsControlEdge(edge) &&
            !NodeProperties::IsEffectEdge(edge));
     edge.UpdateTo(backing_store);
@@ -3243,7 +3246,7 @@ Node* EffectControlLinearizer::LowerStringConcat(Node* node) {
             ? __ Int32Constant(0)
             : ConstStringIsOneByte(node->InputAt(2));
     auto has_correct_representation =
-        __ MakeLabel(MachineType::PointerRepresentation());
+        __ MakeLabel(MachineRepresentation::kTaggedPointer);
     if (one_or_two_byte != OneOrTwoByteAnalysis::State::kOneByte &&
         one_or_two_byte != OneOrTwoByteAnalysis::State::kTwoByte) {
       Node* need_to_move_backing_store_to_2_bytes =
@@ -3259,10 +3262,10 @@ Node* EffectControlLinearizer::LowerStringConcat(Node* node) {
       {
         Node* new_backing_store = ConvertOneByteStringToTwoByte(
             init_backing_store, max_length, current_length);
-        __ StoreField(AccessBuilder::ForSlicedStringParent(), sliced_string,
-                      new_backing_store);
         __ StoreField(AccessBuilder::ForMap(), sliced_string,
                       __ HeapConstant(factory()->sliced_string_map()));
+        __ StoreField(AccessBuilder::ForSlicedStringParent(), sliced_string,
+                      new_backing_store);
         __ Goto(&has_correct_representation, new_backing_store);
       }
     } else {
@@ -3288,7 +3291,7 @@ Node* EffectControlLinearizer::LowerStringConcat(Node* node) {
         __ Int32Add(current_length, __ Int32Constant(literal_length));
     auto needs_realloc = __ MakeLabel();
     auto add_to_backing_store =
-        __ MakeLabel(MachineType::PointerRepresentation());
+        __ MakeLabel(MachineRepresentation::kTaggedPointer);
     Node* realloc_cond = __ Int32LessThan(max_length, new_length);
 
     __ GotoIf(realloc_cond, &needs_realloc);
@@ -6491,8 +6494,8 @@ Node* EffectControlLinearizer::LowerEnsureWritableFastElements(Node* node) {
   auto call_descriptor = Linkage::GetStubCallDescriptor(
       graph()->zone(), callable.descriptor(),
       callable.descriptor().GetStackParameterCount(), flags, properties);
-  Node* result = __ Call(call_descriptor, __ HeapConstant(callable.code()),
-                         object, __ NoContextConstant());
+  Node* result =
+      __ Call(call_descriptor, __ HeapConstant(callable.code()), object);
   __ Goto(&done, result);
 
   __ Bind(&done);
@@ -6531,7 +6534,7 @@ Node* EffectControlLinearizer::LowerMaybeGrowFastElements(Node* node,
       callable.descriptor().GetStackParameterCount(), call_flags, properties);
   Node* new_elements =
       __ Call(call_descriptor, __ HeapConstant(callable.code()), object,
-              ChangeInt32ToSmi(index), __ NoContextConstant());
+              ChangeInt32ToSmi(index));
 
   // Ensure that we were able to grow the {elements}.
   __ DeoptimizeIf(DeoptimizeReason::kCouldNotGrowElements, params.feedback(),
@@ -6797,20 +6800,20 @@ Node* EffectControlLinearizer::AdaptFastCallArgument(
         switch (arg_type.GetType()) {
           case CTypeInfo::Type::kInt32:
             truncation = __ TryTruncateFloat64ToInt32(node);
-            __ GotoIfNot(__ Projection(1, truncation), if_error);
-            return __ Projection(0, truncation);
+            __ GotoIfNot(__ Projection(1, truncation, __ start()), if_error);
+            return __ Projection(0, truncation, __ start());
           case CTypeInfo::Type::kUint32:
             truncation = __ TryTruncateFloat64ToUint32(node);
-            __ GotoIfNot(__ Projection(1, truncation), if_error);
-            return __ Projection(0, truncation);
+            __ GotoIfNot(__ Projection(1, truncation, __ start()), if_error);
+            return __ Projection(0, truncation, __ start());
           case CTypeInfo::Type::kInt64:
             truncation = __ TryTruncateFloat64ToInt64(node);
-            __ GotoIfNot(__ Projection(1, truncation), if_error);
-            return __ Projection(0, truncation);
+            __ GotoIfNot(__ Projection(1, truncation, __ start()), if_error);
+            return __ Projection(0, truncation, __ start());
           case CTypeInfo::Type::kUint64:
             truncation = __ TryTruncateFloat64ToUint64(node);
-            __ GotoIfNot(__ Projection(1, truncation), if_error);
-            return __ Projection(0, truncation);
+            __ GotoIfNot(__ Projection(1, truncation, __ start()), if_error);
+            return __ Projection(0, truncation, __ start());
           default: {
             __ Goto(if_error);
             return node;
@@ -8479,49 +8482,6 @@ Node* EffectControlLinearizer::TruncateWordToInt32(Node* value) {
     return __ TruncateInt64ToInt32(value);
   }
   return value;
-}
-
-Node* EffectControlLinearizer::BuildIsStrongReference(Node* value) {
-  return __ Word32Equal(
-      __ Word32And(
-          TruncateWordToInt32(__ BitcastTaggedToWordForTagAndSmiBits(value)),
-          __ Int32Constant(kHeapObjectTagMask)),
-      __ Int32Constant(kHeapObjectTag));
-}
-
-Node* EffectControlLinearizer::MakeWeakForComparison(Node* heap_object) {
-  // TODO(gsathya): Specialize this for pointer compression.
-  return __ BitcastWordToTagged(
-      __ WordOr(__ BitcastTaggedToWord(heap_object),
-                __ IntPtrConstant(kWeakHeapObjectTag)));
-}
-
-Node* EffectControlLinearizer::BuildStrongReferenceFromWeakReference(
-    Node* maybe_object) {
-  return __ BitcastWordToTagged(
-      __ WordAnd(__ BitcastMaybeObjectToWord(maybe_object),
-                 __ IntPtrConstant(~kWeakHeapObjectMask)));
-}
-
-Node* EffectControlLinearizer::BuildIsWeakReferenceTo(Node* maybe_object,
-                                                      Node* value) {
-  if (COMPRESS_POINTERS_BOOL) {
-    return __ Word32Equal(
-        __ Word32And(
-            TruncateWordToInt32(__ BitcastMaybeObjectToWord(maybe_object)),
-            __ Uint32Constant(~static_cast<uint32_t>(kWeakHeapObjectMask))),
-        TruncateWordToInt32(__ BitcastTaggedToWord(value)));
-  } else {
-    return __ WordEqual(__ WordAnd(__ BitcastMaybeObjectToWord(maybe_object),
-                                   __ IntPtrConstant(~kWeakHeapObjectMask)),
-                        __ BitcastTaggedToWord(value));
-  }
-}
-
-Node* EffectControlLinearizer::BuildIsClearedWeakReference(Node* maybe_object) {
-  return __ Word32Equal(
-      TruncateWordToInt32(__ BitcastMaybeObjectToWord(maybe_object)),
-      __ Int32Constant(kClearedWeakHeapObjectLower32));
 }
 
 // Pass {bitfield} = {digit} = nullptr to construct the canoncial 0n BigInt.

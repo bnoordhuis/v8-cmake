@@ -131,7 +131,7 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
 
   Handle<Oddball> NewOddball(Handle<Map> map, const char* to_string,
                              Handle<Object> to_number, const char* type_of,
-                             byte kind);
+                             uint8_t kind);
 
   // Marks self references within code generation.
   Handle<Oddball> NewSelfReferenceMarker();
@@ -774,8 +774,6 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
 
   // Create an External object for V8's external API.
   Handle<JSObject> NewExternal(void* value);
-
-  Handle<DeoptimizationLiteralArray> NewDeoptimizationLiteralArray(int length);
 
   // Allocates a new code object and initializes it to point to the given
   // off-heap entry point.

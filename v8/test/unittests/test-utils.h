@@ -207,27 +207,16 @@ class WithIsolateScopeMixin : public TMixin {
         .ToLocalChecked();
   }
 
-  void CollectGarbage(i::AllocationSpace space, i::Isolate* isolate = nullptr) {
+  void InvokeMajorGC(i::Isolate* isolate = nullptr) {
     i::Isolate* iso = isolate ? isolate : i_isolate();
-    iso->heap()->CollectGarbage(space, i::GarbageCollectionReason::kTesting);
+    iso->heap()->CollectGarbage(i::OLD_SPACE,
+                                i::GarbageCollectionReason::kTesting);
   }
 
-  void CollectAllGarbage(i::Isolate* isolate = nullptr) {
+  void InvokeMinorGC(i::Isolate* isolate = nullptr) {
     i::Isolate* iso = isolate ? isolate : i_isolate();
-    iso->heap()->CollectAllGarbage(i::GCFlag::kNoFlags,
-                                   i::GarbageCollectionReason::kTesting);
-  }
-
-  void CollectAllAvailableGarbage(i::Isolate* isolate = nullptr) {
-    i::Isolate* iso = isolate ? isolate : i_isolate();
-    iso->heap()->CollectAllAvailableGarbage(
-        i::GarbageCollectionReason::kTesting);
-  }
-
-  void PreciseCollectAllGarbage(i::Isolate* isolate = nullptr) {
-    i::Isolate* iso = isolate ? isolate : i_isolate();
-    iso->heap()->PreciseCollectAllGarbage(i::GCFlag::kNoFlags,
-                                          i::GarbageCollectionReason::kTesting);
+    iso->heap()->CollectGarbage(i::NEW_SPACE,
+                                i::GarbageCollectionReason::kTesting);
   }
 
   v8::Local<v8::String> NewString(const char* string) {
@@ -528,16 +517,6 @@ inline void PrintTo(Smi o, ::std::ostream* os) {
   *os << reinterpret_cast<void*>(o.ptr());
 }
 
-// ManualGCScope allows for disabling GC heuristics. This is useful for tests
-// that want to check specific corner cases around GC.
-//
-// The scope will finalize any ongoing GC on the provided Isolate.
-class V8_NODISCARD ManualGCScope final : private SaveFlags {
- public:
-  explicit ManualGCScope(i::Isolate* isolate);
-  ~ManualGCScope() = default;
-};
-
 static inline uint16_t* AsciiToTwoByteString(const char* source) {
   size_t array_length = strlen(source) + 1;
   uint16_t* converted = NewArray<uint16_t>(array_length);
@@ -597,26 +576,6 @@ template <typename Spec>
 Handle<FeedbackVector> NewFeedbackVector(Isolate* isolate, Spec* spec) {
   return FeedbackVector::NewForTesting(isolate, spec);
 }
-
-class ParkingThread : public v8::base::Thread {
- public:
-  explicit ParkingThread(const Options& options) : v8::base::Thread(options) {}
-
-  void ParkedJoin(LocalIsolate* local_isolate) {
-    ParkedJoin(local_isolate->heap());
-  }
-  void ParkedJoin(LocalHeap* local_heap) {
-    ParkedScope scope(local_heap);
-    ParkedJoin(scope);
-  }
-  void ParkedJoin(const ParkedScope& scope) {
-    USE(scope);
-    Join();
-  }
-
- private:
-  using v8::base::Thread::Join;
-};
 
 #ifdef V8_CC_GNU
 

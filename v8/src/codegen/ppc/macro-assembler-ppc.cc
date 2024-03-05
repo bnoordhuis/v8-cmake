@@ -299,7 +299,7 @@ void MacroAssembler::CallBuiltin(Builtin builtin, Condition cond) {
              cond);
       } else {
         Label skip;
-        LoadU64(ip, EntryFromBuiltinAsOperand(builtin));
+        LoadU64(ip, EntryFromBuiltinAsOperand(builtin), r0);
         if (cond != al) b(NegateCondition(cond), &skip);
         Call(ip);
         bind(&skip);
@@ -1341,7 +1341,8 @@ int MacroAssembler::LeaveFrame(StackFrame::Type type, int stack_adjustment) {
 void MacroAssembler::EnterExitFrame(int stack_space,
                                     StackFrame::Type frame_type) {
   DCHECK(frame_type == StackFrame::EXIT ||
-         frame_type == StackFrame::BUILTIN_EXIT);
+         frame_type == StackFrame::BUILTIN_EXIT ||
+         frame_type == StackFrame::API_CALLBACK_EXIT);
   // Set up the frame structure on the stack.
   DCHECK_EQ(2 * kSystemPointerSize, ExitFrameConstants::kCallerSPDisplacement);
   DCHECK_EQ(1 * kSystemPointerSize, ExitFrameConstants::kCallerPCOffset);

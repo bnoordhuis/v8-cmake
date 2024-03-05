@@ -291,19 +291,6 @@ const size_t kShortBuiltinCallsOldSpaceSizeThreshold = size_t{2} * GB;
 #define TAGGED_SIZE_8_BYTES false
 #endif
 
-// Some types of tracing require the SFI to store a unique ID.
-#if defined(V8_TRACE_MAPS) || defined(V8_TRACE_UNOPTIMIZED)
-#define V8_SFI_HAS_UNIQUE_ID true
-#else
-#define V8_SFI_HAS_UNIQUE_ID false
-#endif
-
-#if V8_SFI_HAS_UNIQUE_ID && TAGGED_SIZE_8_BYTES
-#define V8_SFI_NEEDS_PADDING true
-#else
-#define V8_SFI_NEEDS_PADDING false
-#endif
-
 #if defined(V8_OS_WIN) && defined(V8_TARGET_ARCH_X64)
 #define V8_OS_WIN_X64 true
 #endif
@@ -334,8 +321,6 @@ class AllStatic {
 #endif
 };
 
-using byte = uint8_t;
-
 // -----------------------------------------------------------------------------
 // Constants
 
@@ -357,7 +342,7 @@ constexpr int kMinUInt32 = 0;
 
 constexpr int kInt8Size = sizeof(int8_t);
 constexpr int kUInt8Size = sizeof(uint8_t);
-constexpr int kByteSize = sizeof(byte);
+constexpr int kByteSize = 1;
 constexpr int kCharSize = sizeof(char);
 constexpr int kShortSize = sizeof(short);  // NOLINT
 constexpr int kInt16Size = sizeof(int16_t);
@@ -425,7 +410,7 @@ constexpr bool kPlatformRequiresCodeRange = true;
     (V8_TARGET_ARCH_PPC || V8_TARGET_ARCH_PPC64) && V8_OS_LINUX
 constexpr size_t kMaximalCodeRangeSize = 512 * MB;
 constexpr size_t kMinExpectedOSPageSize = 64 * KB;  // OS page on PPC Linux
-#elif V8_TARGET_ARCH_ARM64
+#elif V8_TARGET_ARCH_ARM64 || V8_TARGET_ARCH_LOONG64
 constexpr size_t kMaximalCodeRangeSize =
     (COMPRESS_POINTERS_BOOL && !V8_EXTERNAL_CODE_SPACE_BOOL) ? 128 * MB
                                                              : 256 * MB;
@@ -531,13 +516,21 @@ static_assert(kPointerSize == (1 << kPointerSizeLog2));
 #define V8_COMPRESS_POINTERS_8GB_BOOL false
 #endif
 
-// This type defines raw storage type for external (or off-V8 heap) pointers
+// This type defines the raw storage type for external (or off-V8 heap) pointers
 // stored on V8 heap.
 constexpr int kExternalPointerSlotSize = sizeof(ExternalPointer_t);
 #ifdef V8_ENABLE_SANDBOX
 static_assert(kExternalPointerSlotSize == kTaggedSize);
 #else
 static_assert(kExternalPointerSlotSize == kSystemPointerSize);
+#endif
+
+// This type defines the raw storage type for code pointers stored on V8 heap.
+constexpr int kCodePointerSlotSize = sizeof(CodePointer_t);
+#ifdef V8_CODE_POINTER_SANDBOXING
+static_assert(kCodePointerSlotSize == kTaggedSize);
+#else
+static_assert(kCodePointerSlotSize == kSystemPointerSize);
 #endif
 
 constexpr int kEmbedderDataSlotSize = kSystemPointerSize;
@@ -596,7 +589,7 @@ constexpr unsigned kMaxModuleAsyncEvaluatingOrdinal = (1 << 30) - 1;
 // FUNCTION_CAST<F>(addr) casts an address into a function
 // of type F. Used to invoke generated code from within C.
 template <typename F>
-F FUNCTION_CAST(byte* addr) {
+F FUNCTION_CAST(uint8_t* addr) {
   return reinterpret_cast<F>(reinterpret_cast<Address>(addr));
 }
 
@@ -690,6 +683,22 @@ enum class SaveFPRegsMode { kIgnore, kSave };
 // Whether arguments are passed on a known stack location or through a
 // register.
 enum class ArgvMode { kStack, kRegister };
+
+enum class CallApiCallbackMode {
+  // This version of CallApiCallback used by IC system, it gets additional
+  // target function argument which is used both for stack trace reconstruction
+  // in case exception is thrown inside the callback and for callback
+  // side-effects checking by debugger.
+  kGeneric,
+
+  // The following two are used for generating calls from optimized code when
+  // the target CallHandlerInfo object is known and thus the expected
+  // side-effects of the callback. These versions don't get the target
+  // function because the target function can be reconstructed from the deopt
+  // info in case exception is thrown.
+  kNoSideEffects,
+  kWithSideEffects,
+};
 
 // This constant is used as an undefined value when passing source positions.
 constexpr int kNoSourcePosition = -1;
@@ -886,6 +895,10 @@ class InstructionStream;
 class Code;
 class CodeSpace;
 class Context;
+#ifdef V8_ENABLE_CONSERVATIVE_STACK_SCANNING
+template <typename T>
+class DirectHandle;
+#endif
 class DeclarationScope;
 class Debug;
 class DebugInfo;
@@ -959,6 +972,8 @@ class String;
 class StringStream;
 class Struct;
 class Symbol;
+template <typename T>
+class Tagged;
 class Variable;
 
 // Slots are either full-pointer slots or compressed slots depending on whether
@@ -2112,6 +2127,8 @@ enum class StubCallMode {
 #endif  // V8_ENABLE_WEBASSEMBLY
   kCallBuiltinPointer,
 };
+
+enum class NeedsContext { kYes, kNo };
 
 constexpr int kFunctionLiteralIdInvalid = -1;
 constexpr int kFunctionLiteralIdTopLevel = 0;

@@ -1,9 +1,9 @@
 [
   {
     "url": "https://chromium.googlesource.com/v8/v8.git",
-    "commit": "07c05c4b8c5e8916e604c09692d7b6e1813c606e",
+    "commit": "3236505a90c64a5fbb1e1f2584b9e551d84a08dc",
     "/* comment */": "Dependency v8 must be first.",
-    "branch": "branch-heads/11.5",
+    "branch": "branch-heads/11.6",
     "path": ""
   },
   {
@@ -26,7 +26,7 @@
   },
   {
     "url": "https://chromium.googlesource.com/chromium/src/third_party/zlib.git",
-    "commit": "14dd4c4455602c9b71a1a89b5cafd1f4030d2e3f",
+    "commit": "e6795474e4885ae55b6c6c0a612d0889e2ebd8d9",
     "branch": "master",
     "path": "third_party/zlib"
   },

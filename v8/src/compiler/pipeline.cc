@@ -128,6 +128,7 @@
 #include "src/compiler/wasm-gc-lowering.h"
 #include "src/compiler/wasm-gc-operator-reducer.h"
 #include "src/compiler/wasm-inlining.h"
+#include "src/compiler/wasm-js-lowering.h"
 #include "src/compiler/wasm-load-elimination.h"
 #include "src/compiler/wasm-loop-peeling.h"
 #include "src/compiler/wasm-typer.h"
@@ -159,14 +160,14 @@ static constexpr char kRegisterAllocatorVerifierZoneName[] =
 namespace {
 
 Maybe<OuterContext> GetModuleContext(OptimizedCompilationInfo* info) {
-  Context current = info->closure()->context();
+  Tagged<Context> current = info->closure()->context();
   size_t distance = 0;
-  while (!current.IsNativeContext()) {
-    if (current.IsModuleContext()) {
+  while (!current->IsNativeContext()) {
+    if (current->IsModuleContext()) {
       return Just(OuterContext(
-          info->CanonicalHandle(current, current.GetIsolate()), distance));
+          info->CanonicalHandle(current, current->GetIsolate()), distance));
     }
-    current = current.previous();
+    current = current->previous();
     distance++;
   }
   return Nothing<OuterContext>();
@@ -1473,6 +1474,17 @@ struct InliningPhase {
       DCHECK(call_reducer.wasm_module_for_inlining() != nullptr);
       data->set_wasm_module_for_inlining(
           call_reducer.wasm_module_for_inlining());
+      // Enable source positions if not enabled yet. While JS only uses the
+      // source position table for tracing, profiling, ..., wasm needs it at
+      // compile time for keeping track of source locations for wasm traps.
+      // Note: By not setting data->info()->set_source_positions(), even with
+      // wasm inlining, source positions shouldn't be kept alive after
+      // compilation is finished (if not for tracing, ...)
+      if (v8_flags.experimental_wasm_js_inlining &&
+          !data->source_positions()->IsEnabled()) {
+        data->source_positions()->Enable();
+        data->source_positions()->AddDecorator();
+      }
     }
 #endif
   }
@@ -2158,10 +2170,11 @@ struct WasmGCOptimizationPhase {
                                          temp_zone);
     WasmGCOperatorReducer wasm_gc(&graph_reducer, temp_zone, mcgraph, module,
                                   data->source_positions());
-    // Note: if we want to add DeadCodeElimination here, we'll have to update
-    // the existing reducers to handle kDead and kDeadValue nodes everywhere.
+    DeadCodeElimination dead_code_elimination(&graph_reducer, data->graph(),
+                                              data->common(), temp_zone);
     AddReducer(data, &graph_reducer, &load_elimination);
     AddReducer(data, &graph_reducer, &wasm_gc);
+    AddReducer(data, &graph_reducer, &dead_code_elimination);
     graph_reducer.ReduceGraph();
   }
 };
@@ -2254,6 +2267,20 @@ struct WasmOptimizationPhase {
       AddReducer(data, &graph_reducer, &branch_condition_elimination);
       graph_reducer.ReduceGraph();
     }
+  }
+};
+
+struct WasmJSLoweringPhase {
+  DECL_PIPELINE_PHASE_CONSTANTS(WasmJSLowering)
+
+  void Run(PipelineData* data, Zone* temp_zone) {
+    GraphReducer graph_reducer(
+        temp_zone, data->graph(), &data->info()->tick_counter(), data->broker(),
+        data->jsgraph()->Dead(), data->observe_node_manager());
+    WasmJSLowering lowering(&graph_reducer, data->jsgraph(),
+                            data->source_positions());
+    AddReducer(data, &graph_reducer, &lowering);
+    graph_reducer.ReduceGraph();
   }
 };
 #endif  // V8_ENABLE_WEBASSEMBLY
@@ -2407,40 +2434,45 @@ struct InstructionSelectionPhase {
 
   base::Optional<BailoutReason> Run(PipelineData* data, Zone* temp_zone,
                                     Linkage* linkage) {
-    InstructionSelector selector(
-        temp_zone, data->graph()->NodeCount(), linkage, data->sequence(),
-        data->schedule(), data->source_positions(), data->frame(),
-        data->info()->switch_jump_table()
-            ? InstructionSelector::kEnableSwitchJumpTable
-            : InstructionSelector::kDisableSwitchJumpTable,
-        &data->info()->tick_counter(), data->broker(),
-        data->address_of_max_unoptimized_frame_height(),
-        data->address_of_max_pushed_argument_count(),
-        data->info()->source_positions()
-            ? InstructionSelector::kAllSourcePositions
-            : InstructionSelector::kCallSourcePositions,
-        InstructionSelector::SupportedFeatures(),
-        v8_flags.turbo_instruction_scheduling
-            ? InstructionSelector::kEnableScheduling
-            : InstructionSelector::kDisableScheduling,
-        data->assembler_options().enable_root_relative_access
-            ? InstructionSelector::kEnableRootsRelativeAddressing
-            : InstructionSelector::kDisableRootsRelativeAddressing,
-        data->info()->trace_turbo_json()
-            ? InstructionSelector::kEnableTraceTurboJson
-            : InstructionSelector::kDisableTraceTurboJson);
-    if (base::Optional<BailoutReason> bailout = selector.SelectInstructions()) {
-      return bailout;
+    if (v8_flags.turboshaft && v8_flags.turboshaft_instruction_selection) {
+      UNIMPLEMENTED();
+    } else {
+      InstructionSelector selector(
+          temp_zone, data->graph()->NodeCount(), linkage, data->sequence(),
+          data->schedule(), data->source_positions(), data->frame(),
+          data->info()->switch_jump_table()
+              ? InstructionSelector::kEnableSwitchJumpTable
+              : InstructionSelector::kDisableSwitchJumpTable,
+          &data->info()->tick_counter(), data->broker(),
+          data->address_of_max_unoptimized_frame_height(),
+          data->address_of_max_pushed_argument_count(),
+          data->info()->source_positions()
+              ? InstructionSelector::kAllSourcePositions
+              : InstructionSelector::kCallSourcePositions,
+          InstructionSelector::SupportedFeatures(),
+          v8_flags.turbo_instruction_scheduling
+              ? InstructionSelector::kEnableScheduling
+              : InstructionSelector::kDisableScheduling,
+          data->assembler_options().enable_root_relative_access
+              ? InstructionSelector::kEnableRootsRelativeAddressing
+              : InstructionSelector::kDisableRootsRelativeAddressing,
+          data->info()->trace_turbo_json()
+              ? InstructionSelector::kEnableTraceTurboJson
+              : InstructionSelector::kDisableTraceTurboJson);
+      if (base::Optional<BailoutReason> bailout =
+              selector.SelectInstructions()) {
+        return bailout;
+      }
+      if (data->info()->trace_turbo_json()) {
+        TurboJsonFile json_of(data->info(), std::ios_base::app);
+        json_of << "{\"name\":\"" << phase_name()
+                << "\",\"type\":\"instructions\""
+                << InstructionRangesAsJSON{data->sequence(),
+                                           &selector.instr_origins()}
+                << "},\n";
+      }
+      return base::nullopt;
     }
-    if (data->info()->trace_turbo_json()) {
-      TurboJsonFile json_of(data->info(), std::ios_base::app);
-      json_of << "{\"name\":\"" << phase_name()
-              << "\",\"type\":\"instructions\""
-              << InstructionRangesAsJSON{data->sequence(),
-                                         &selector.instr_origins()}
-              << "},\n";
-    }
-    return base::nullopt;
   }
 };
 
@@ -3036,11 +3068,17 @@ bool PipelineImpl::OptimizeGraph(Linkage* linkage) {
 
     Run<DecompressionOptimizationPhase>();
     RunPrintAndVerify(DecompressionOptimizationPhase::phase_name(), true);
+
+#if V8_ENABLE_WEBASSEMBLY
+    if (data->has_js_wasm_calls() && v8_flags.experimental_wasm_js_inlining) {
+      Run<WasmJSLoweringPhase>();
+      RunPrintAndVerify(WasmJSLoweringPhase::phase_name(), true);
+    }
+#endif  // V8_ENABLE_WEBASSEMBLY
   }
 
   Run<BranchConditionDuplicationPhase>();
   RunPrintAndVerify(BranchConditionDuplicationPhase::phase_name(), true);
-
   data->source_positions()->RemoveDecorator();
   if (data->info()->trace_turbo_json()) {
     data->node_origins()->RemoveDecorator();
@@ -3174,9 +3212,9 @@ MaybeHandle<Code> Pipeline::GenerateCodeForCodeStub(
   ZoneStats zone_stats(isolate->allocator());
   NodeOriginTable node_origins(graph);
   JumpOptimizationInfo jump_opt;
-  bool should_optimize_jumps = isolate->serializer_enabled() &&
-                               v8_flags.turbo_rewrite_far_jumps &&
-                               !v8_flags.turbo_profiling;
+  bool should_optimize_jumps =
+      isolate->serializer_enabled() && v8_flags.turbo_rewrite_far_jumps &&
+      !v8_flags.turbo_profiling && !v8_flags.dump_builtins_hashes_to_file;
   PipelineData data(&zone_stats, &info, isolate, isolate->allocator(), graph,
                     jsgraph, nullptr, source_positions, &node_origins,
                     should_optimize_jumps ? &jump_opt : nullptr, options,
@@ -3210,8 +3248,15 @@ MaybeHandle<Code> Pipeline::GenerateCodeForCodeStub(
   }
 
   int initial_graph_hash = 0;
-  if (v8_flags.turbo_profiling || profile_data != nullptr) {
+  if (v8_flags.turbo_profiling || v8_flags.dump_builtins_hashes_to_file ||
+      profile_data != nullptr) {
     initial_graph_hash = HashGraphForPGO(data.graph());
+    if (v8_flags.dump_builtins_hashes_to_file) {
+      std::ofstream out(v8_flags.dump_builtins_hashes_to_file,
+                        std::ios_base::app);
+      out << "Builtin: " << Builtins::name(builtin) << ", hash: 0x" << std::hex
+          << initial_graph_hash << std::endl;
+    }
   }
 
   if (profile_data != nullptr && profile_data->hash() != initial_graph_hash) {

@@ -1292,11 +1292,11 @@ struct type_sew_t<128> {
   if (v8_flags.trace_sim) {                                                    \
     __int128_t value = Vregister_[rvv_vd_reg()];                               \
     SNPrintF(trace_buf_,                                                       \
-             "%016" REGIx_FORMAT "%016" REGIx_FORMAT                           \
-             " <-- 0x%016" REGIx_FORMAT,                                       \
+             "%016" PRIx64 "%016" PRIx64 "    (%" PRId64 ")    vlen:%" PRId64  \
+             " <-- [addr: %" REGIx_FORMAT "]",                                 \
              *(reinterpret_cast<int64_t*>(&value) + 1),                        \
-             *reinterpret_cast<int64_t*>(&value),                              \
-             (uint64_t)(get_register(rs1_reg())));                             \
+             *reinterpret_cast<int64_t*>(&value), icount_, rvv_vlen(),         \
+             (sreg_t)(get_register(rs1_reg())));                               \
   }
 
 #define RVV_VI_ST(stride, offset, elt_width, is_mask_ldst)                     \
@@ -1318,11 +1318,11 @@ struct type_sew_t<128> {
   if (v8_flags.trace_sim) {                                                    \
     __int128_t value = Vregister_[rvv_vd_reg()];                               \
     SNPrintF(trace_buf_,                                                       \
-             "%016" REGIx_FORMAT "%016" REGIx_FORMAT                           \
-             " --> 0x%016" REGIx_FORMAT,                                       \
+             "%016" PRIx64 "%016" PRIx64 "    (%" PRId64 ")    vlen:%" PRId64  \
+             " --> [addr: %" REGIx_FORMAT "]",                                 \
              *(reinterpret_cast<int64_t*>(&value) + 1),                        \
-             *reinterpret_cast<int64_t*>(&value),                              \
-             (uint64_t)(get_register(rs1_reg())));                             \
+             *reinterpret_cast<int64_t*>(&value), icount_, rvv_vlen(),         \
+             (sreg_t)(get_register(rs1_reg())));                               \
   }
 
 #define VI_VFP_LOOP_SCALE_BASE                      \
@@ -1392,14 +1392,14 @@ static inline uint8_t get_round(int vxrm, uint64_t v, uint8_t shift) {
 
 template <typename Src, typename Dst>
 inline Dst signed_saturation(Src v, uint n) {
-  Dst smax = (Dst)(INTPTR_MAX >> (64 - n));
-  Dst smin = (Dst)(INTPTR_MIN >> (64 - n));
+  Dst smax = (Dst)(INTPTR_MAX >> (sizeof(intptr_t) * 8 - n));
+  Dst smin = (Dst)(INTPTR_MIN >> (sizeof(intptr_t) * 8 - n));
   return (v > smax) ? smax : ((v < smin) ? smin : (Dst)v);
 }
 
 template <typename Src, typename Dst>
 inline Dst unsigned_saturation(Src v, uint n) {
-  Dst umax = (Dst)(UINTPTR_MAX >> (64 - n));
+  Dst umax = (Dst)(UINTPTR_MAX >> (sizeof(uintptr_t) * 8 - n));
   return (v > umax) ? umax : ((v < 0) ? 0 : (Dst)v);
 }
 
@@ -1853,7 +1853,7 @@ void RiscvDebugger::Debug() {
 #ifdef CAN_USE_RVV_INSTRUCTIONS
             } else if (vregnum != kInvalidVRegister) {
               __int128_t v = GetVRegisterValue(vregnum);
-              PrintF("\t%s:0x%016" REGIx_FORMAT "%016" REGIx_FORMAT "\n",
+              PrintF("\t%s:0x%016" PRIx64 "%016" PRIx64 "\n",
                      VRegisters::Name(vregnum), (uint64_t)(v >> 64),
                      (uint64_t)v);
 #endif
@@ -6328,6 +6328,7 @@ void Simulator::DecodeRvvMVV() {
     }
     case RO_V_VWXUNARY0: {
       if (rvv_vs1_reg() == 0) {
+        // vmv.x.s
         switch (rvv_vsew()) {
           case E8:
             set_rd(Rvvelt<type_sew_t<8>::type>(rvv_vs2_reg(), 0));
@@ -6347,7 +6348,8 @@ void Simulator::DecodeRvvMVV() {
         set_rvv_vstart(0);
         rvv_trace_vd();
       } else if (rvv_vs1_reg() == 0b10000) {
-        uint64_t cnt = 0;
+        // vpopc
+        reg_t cnt = 0;
         RVV_VI_GENERAL_LOOP_BASE
         RVV_VI_LOOP_MASK_SKIP()
         const uint8_t idx = i / 64;
@@ -6358,7 +6360,8 @@ void Simulator::DecodeRvvMVV() {
         set_register(rd_reg(), cnt);
         rvv_trace_vd();
       } else if (rvv_vs1_reg() == 0b10001) {
-        int64_t index = -1;
+        // vfirst
+        sreg_t index = -1;
         RVV_VI_GENERAL_LOOP_BASE
         RVV_VI_LOOP_MASK_SKIP()
         const uint8_t idx = i / 64;
@@ -7116,8 +7119,8 @@ void Simulator::DecodeRvvFVV() {
           },
           false)
       break;
-    case RO_V_VFWREDUSUM_VV:
-    case RO_V_VFWREDOSUM_VV:
+    case RO_V_VFWREDUSUM_VS:
+    case RO_V_VFWREDOSUM_VS:
       RVV_VI_CHECK_DSS(true);
       switch (rvv_vsew()) {
         case E16:
@@ -7150,7 +7153,7 @@ void Simulator::DecodeRvvFVV() {
           require(false);
           break;
       }
-
+      rvv_trace_vd();
       break;
     case RO_V_VFMADD_VV:
       RVV_VI_VFP_FMA_VV_LOOP({RVV_VI_VFP_FMA(float, vd, vs1, vs2)},
@@ -7206,20 +7209,19 @@ void Simulator::DecodeRvvFVV() {
           UNIMPLEMENTED();
         }
         case E32: {
-          float fs2 = Rvvelt<float>(rvv_vs2_reg(), 0);
-          set_fpu_register_float(rd_reg(), fs2);
+          uint32_t fs2 = Rvvelt<uint32_t>(rvv_vs2_reg(), 0);
+          set_frd(Float32::FromBits(fs2));
           break;
         }
         case E64: {
-          double fs2 = Rvvelt<double>(rvv_vs2_reg(), 0);
-          set_fpu_register_double(rd_reg(), fs2);
+          uint64_t fs2 = Rvvelt<uint64_t>(rvv_vs2_reg(), 0);
+          set_drd(Float64::FromBits(fs2));
           break;
         }
         default:
           require(0);
           break;
       }
-      rvv_trace_vd();
       break;
     default:
       UNSUPPORTED_RISCV();
@@ -7683,17 +7685,18 @@ void Simulator::InstructionDecode(Instruction* instr) {
            " ",
            reinterpret_cast<intptr_t>(watch_address_), *watch_address_,
            *watch_address_);
-    Object obj(*watch_address_);
-    Heap* current_heap = isolate_->heap();
-    if (obj.IsSmi() || IsValidHeapObject(current_heap, HeapObject::cast(obj))) {
-      PrintF(" (");
-      if (obj.IsSmi()) {
-        PrintF("smi %d", Smi::ToInt(obj));
-      } else {
-        obj.ShortPrint();
-      }
-      PrintF(")");
-    }
+    // Object obj(*watch_address_);
+    // Heap* current_heap = isolate_->heap();
+    // if (obj.IsSmi() || IsValidHeapObject(current_heap,
+    // HeapObject::cast(obj))) {
+    //   PrintF(" (");
+    //   if (obj.IsSmi()) {
+    //     PrintF("smi %d", Smi::ToInt(obj));
+    //   } else {
+    //     obj.ShortPrint();
+    //   }
+    //   PrintF(")");
+    // }
     PrintF("\n");
     if (watch_value_ != *watch_address_) {
       RiscvDebugger dbg(this);

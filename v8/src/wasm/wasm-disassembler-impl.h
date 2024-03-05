@@ -135,9 +135,7 @@ class ModuleDisassembler {
   V8_EXPORT_PRIVATE ModuleDisassembler(
       MultiLineStringBuilder& out, const WasmModule* module,
       NamesProvider* names, const ModuleWireBytes wire_bytes,
-      AccountingAllocator* allocator,
-      // When non-nullptr, doubles as a sentinel that bytecode offsets should be
-      // stored for each line of disassembly.
+      AccountingAllocator* allocator, bool collect_offsets,
       std::vector<int>* function_body_offsets = nullptr);
   V8_EXPORT_PRIVATE ~ModuleDisassembler();
 
@@ -151,7 +149,7 @@ class ModuleDisassembler {
   void PrintExportName(ImportExportKindCode kind, uint32_t index);
   void PrintMutableType(bool mutability, ValueType type);
   void PrintTable(const WasmTable& table);
-  void PrintMemory();
+  void PrintMemory(const WasmMemory& memory);
   void PrintGlobal(const WasmGlobal& global);
   void PrintInitExpression(const ConstantExpression& init,
                            ValueType expected_type);

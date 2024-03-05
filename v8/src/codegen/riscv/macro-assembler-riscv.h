@@ -170,8 +170,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   void Branch(int32_t target, Condition cond, Register r1, const Operand& r2,
               Label::Distance distance = Label::kFar);
   void Branch(Label* L, Condition cond, Register rj, RootIndex index,
-              Label::Distance distance = Label::kFar,
-              bool need_sign_extend = true);
+              Label::Distance distance = Label::kFar);
 #undef DECLARE_BRANCH_PROTOTYPES
 #undef COND_TYPED_ARGS
 #undef COND_ARGS
@@ -204,6 +203,8 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   void BranchTrueF(Register rs, Label* target);
   void BranchFalseF(Register rs, Label* target);
 
+  void CompareTaggedAndBranch(Label* label, Condition cond, Register r1,
+                              const Operand& r2, bool need_link = false);
   static int InstrCountForLi64Bit(int64_t value);
   inline void LiLower32BitHelper(Register rd, Operand j);
   void li_optimized(Register rd, Operand j, LiFlags mode = OPTIMIZE_SIZE);
@@ -1112,6 +1113,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   // Compresses and stores tagged value to given on-heap location.
   void StoreTaggedField(const Register& value,
                         const MemOperand& dst_field_operand);
+  void AtomicStoreTaggedField(Register dst, const MemOperand& src);
 
   void DecompressTaggedSigned(const Register& destination,
                               const MemOperand& field_operand);
@@ -1119,6 +1121,10 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
                         const MemOperand& field_operand);
   void DecompressTagged(const Register& destination, const Register& source);
   void DecompressTagged(Register dst, Tagged_t immediate);
+
+  void AtomicDecompressTaggedSigned(Register dst, const MemOperand& src);
+  void AtomicDecompressTagged(Register dst, const MemOperand& src);
+
   void CmpTagged(const Register& rd, const Register& rs1, const Register& rs2) {
     if (COMPRESS_POINTERS_BOOL) {
       Sub32(rd, rs1, rs2);
@@ -1172,7 +1178,6 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
 
   void WasmRvvEq(VRegister dst, VRegister lhs, VRegister rhs, VSew sew,
                  Vlmul lmul);
-
   void WasmRvvNe(VRegister dst, VRegister lhs, VRegister rhs, VSew sew,
                  Vlmul lmul);
   void WasmRvvGeS(VRegister dst, VRegister lhs, VRegister rhs, VSew sew,
@@ -1183,6 +1188,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
                   Vlmul lmul);
   void WasmRvvGtU(VRegister dst, VRegister lhs, VRegister rhs, VSew sew,
                   Vlmul lmul);
+
   void WasmRvvS128const(VRegister dst, const uint8_t imms[16]);
 
   void LoadLane(int sz, VRegister dst, uint8_t laneidx, MemOperand src);
@@ -1231,6 +1237,18 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
                        unsigned higher_limit, Label* on_in_range);
   void JumpIfObjectType(Label* target, Condition cc, Register object,
                         InstanceType instance_type, Register scratch = no_reg);
+  // Fast check if the object is a js receiver type. Assumes only primitive
+  // objects or js receivers are passed.
+  void JumpIfJSAnyIsNotPrimitive(
+      Register heap_object, Register scratch, Label* target,
+      Label::Distance distance = Label::kFar,
+      Condition condition = Condition::kUnsignedGreaterThanEqual);
+  void JumpIfJSAnyIsPrimitive(Register heap_object, Register scratch,
+                              Label* target,
+                              Label::Distance distance = Label::kFar) {
+    return JumpIfJSAnyIsNotPrimitive(heap_object, scratch, target, distance,
+                                     Condition::kUnsignedLessThan);
+  }
   // ---------------------------------------------------------------------------
   // GC Support
 
@@ -1463,6 +1481,24 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
     DecodeField<Field>(reg, reg);
   }
 
+  // ---------------------------------------------------------------------------
+  // V8 Sandbox support
+
+  // Transform a SandboxedPointer from/to its encoded form, which is used when
+  // the pointer is stored on the heap and ensures that the pointer will always
+  // point into the sandbox.
+  void DecodeSandboxedPointer(Register value);
+  void LoadSandboxedPointerField(Register destination,
+                                 const MemOperand& field_operand);
+  void StoreSandboxedPointerField(Register value,
+                                  const MemOperand& dst_field_operand);
+
+  // Loads a field containing off-heap pointer and does necessary decoding
+  // if sandboxed external pointers are enabled.
+  void LoadExternalPointerField(Register destination, MemOperand field_operand,
+                                ExternalPointerTag tag,
+                                Register isolate_root = no_reg);
+
  protected:
   inline Register GetRtAsRegisterHelper(const Operand& rt, Register scratch);
   inline int32_t GetOffset(int32_t offset, Label* L, OffsetSize bits);
@@ -1470,7 +1506,6 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
  private:
   bool has_double_zero_reg_set_ = false;
   bool has_single_zero_reg_set_ = false;
-
   // Performs a truncating conversion of a floating point number as used by
   // the JS bitwise operations. See ECMA-262 9.5: ToInt32. Goes to 'done' if it
   // succeeds, otherwise falls through if result is saturated. On return

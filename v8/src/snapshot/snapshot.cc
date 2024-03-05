@@ -7,7 +7,8 @@
 #include "src/snapshot/snapshot.h"
 
 #include "src/common/assert-scope.h"
-#include "src/heap/parked-scope.h"
+#include "src/execution/local-isolate-inl.h"
+#include "src/heap/local-heap-inl.h"
 #include "src/heap/safepoint.h"
 #include "src/init/bootstrapper.h"
 #include "src/logging/runtime-call-stats-scope.h"
@@ -336,33 +337,35 @@ void Snapshot::SerializeDeserializeAndVerifyForTesting(
   // The shared heap is verified on Heap teardown, which performs a global
   // safepoint. Both isolate and new_isolate are running in the same thread, so
   // park isolate before running new_isolate to avoid deadlock.
-  ParkedScope parked(isolate->main_thread_local_isolate());
+  isolate->main_thread_local_isolate()->BlockMainThreadWhileParked(
+      [&serialized_data]() {
+        // Test deserialization.
+        Isolate* new_isolate = Isolate::New();
+        std::unique_ptr<v8::ArrayBuffer::Allocator> array_buffer_allocator(
+            v8::ArrayBuffer::Allocator::NewDefaultAllocator());
+        {
+          // Set serializer_enabled() to not install extensions and experimental
+          // natives on the new isolate.
+          // TODO(v8:10416): This should be a separate setting on the isolate.
+          new_isolate->enable_serializer();
+          new_isolate->Enter();
+          new_isolate->set_snapshot_blob(&serialized_data);
+          new_isolate->set_array_buffer_allocator(array_buffer_allocator.get());
+          CHECK(Snapshot::Initialize(new_isolate));
 
-  // Test deserialization.
-  Isolate* new_isolate = Isolate::New();
-  std::unique_ptr<v8::ArrayBuffer::Allocator> array_buffer_allocator(
-      v8::ArrayBuffer::Allocator::NewDefaultAllocator());
-  {
-    // Set serializer_enabled() to not install extensions and experimental
-    // natives on the new isolate.
-    // TODO(v8:10416): This should be a separate setting on the isolate.
-    new_isolate->enable_serializer();
-    new_isolate->Enter();
-    new_isolate->set_snapshot_blob(&serialized_data);
-    new_isolate->set_array_buffer_allocator(array_buffer_allocator.get());
-    CHECK(Snapshot::Initialize(new_isolate));
-
-    HandleScope scope(new_isolate);
-    Handle<Context> new_native_context =
-        new_isolate->bootstrapper()->CreateEnvironmentForTesting();
-    CHECK(new_native_context->IsNativeContext());
+          HandleScope scope(new_isolate);
+          Handle<Context> new_native_context =
+              new_isolate->bootstrapper()->CreateEnvironmentForTesting();
+          CHECK(new_native_context->IsNativeContext());
 
 #ifdef VERIFY_HEAP
-    if (v8_flags.verify_heap) HeapVerifier::VerifyHeap(new_isolate->heap());
+          if (v8_flags.verify_heap)
+            HeapVerifier::VerifyHeap(new_isolate->heap());
 #endif  // VERIFY_HEAP
-  }
-  new_isolate->Exit();
-  Isolate::Delete(new_isolate);
+        }
+        new_isolate->Exit();
+        Isolate::Delete(new_isolate);
+      });
 }
 
 // static
@@ -380,27 +383,29 @@ v8::StartupData Snapshot::Create(
   DCHECK_GT(contexts->size(), 0);
   HandleScope scope(isolate);
 
-  // The HeapSafepointScope ensures we are in a safepoint scope so that the
-  // string table is safe to iterate. Unlike mksnapshot, embedders may have
-  // background threads running.
+  if (!isolate->initialized_from_snapshot()) {
+    // When creating the snapshot from scratch, we are responsible for sealing
+    // the RO heap here. Note we cannot delegate the responsibility e.g. to
+    // Isolate::Init since it should still be possible to allocate into RO
+    // space after the Isolate has been initialized, for example as part of
+    // Context creation.
+    isolate->read_only_heap()->OnCreateHeapObjectsComplete(isolate);
+  }
 
   ReadOnlySerializer read_only_serializer(isolate, flags);
-  read_only_serializer.SerializeReadOnlyRoots();
+  read_only_serializer.Serialize();
 
-  SharedHeapSerializer shared_heap_serializer(isolate, flags,
-                                              &read_only_serializer);
+  // TODO(v8:6593): generalize rehashing, and remove this flag.
+  bool can_be_rehashed = read_only_serializer.can_be_rehashed();
 
-  StartupSerializer startup_serializer(isolate, flags, &read_only_serializer,
-                                       &shared_heap_serializer);
+  SharedHeapSerializer shared_heap_serializer(isolate, flags);
+  StartupSerializer startup_serializer(isolate, flags, &shared_heap_serializer);
   startup_serializer.SerializeStrongReferences(no_gc);
 
   // Serialize each context with a new serializer.
   const int num_contexts = static_cast<int>(contexts->size());
   std::vector<SnapshotData*> context_snapshots;
   context_snapshots.reserve(num_contexts);
-
-  // TODO(v8:6593): generalize rehashing, and remove this flag.
-  bool can_be_rehashed = true;
 
   std::vector<int> context_allocation_sizes;
   for (int i = 0; i < num_contexts; i++) {
@@ -422,9 +427,6 @@ v8::StartupData Snapshot::Create(
 
   shared_heap_serializer.FinalizeSerialization();
   can_be_rehashed = can_be_rehashed && shared_heap_serializer.can_be_rehashed();
-
-  read_only_serializer.FinalizeSerialization();
-  can_be_rehashed = can_be_rehashed && read_only_serializer.can_be_rehashed();
 
   if (v8_flags.serialization_statistics) {
     DCHECK_NE(read_only_serializer.TotalAllocationSize(), 0);

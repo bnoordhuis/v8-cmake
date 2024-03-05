@@ -456,14 +456,31 @@ void MacroAssembler::LoadExternalPointerField(
          Operand(scratch, IsolateData::external_pointer_table_offset() +
                               Internals::kExternalPointerTableBufferOffset));
   }
-    movl(destination, field_operand);
-    shrq(destination, Immediate(kExternalPointerIndexShift));
-    movq(destination, Operand(scratch, destination, times_8, 0));
-    movq(scratch, Immediate64(~tag));
-    andq(destination, scratch);
+  movl(destination, field_operand);
+  shrq(destination, Immediate(kExternalPointerIndexShift));
+  static_assert(kExternalPointerTableEntrySize == 8);
+  movq(destination, Operand(scratch, destination, times_8, 0));
+  movq(scratch, Immediate64(~tag));
+  andq(destination, scratch);
 #else
   movq(destination, field_operand);
 #endif  // V8_ENABLE_SANDBOX
+}
+
+void MacroAssembler::LoadCodePointerField(Register destination,
+                                          Operand field_operand,
+                                          Register scratch) {
+  DCHECK(!AreAliased(destination, scratch));
+#ifdef V8_CODE_POINTER_SANDBOXING
+  DCHECK(!field_operand.AddressUsesRegister(scratch));
+  LoadAddress(scratch, ExternalReference::code_pointer_table_address());
+  movl(destination, field_operand);
+  shrl(destination, Immediate(kCodePointerIndexShift));
+  static_assert(kCodePointerTableEntrySize == 8);
+  movq(destination, Operand(scratch, destination, times_8, 0));
+#else
+  movq(destination, field_operand);
+#endif  // V8_CODE_POINTER_SANDBOXING
 }
 
 void MacroAssembler::CallEphemeronKeyBarrier(Register object,
@@ -1532,7 +1549,7 @@ void MacroAssembler::F64x4Min(YMMRegister dst, YMMRegister lhs, YMMRegister rhs,
   vorpd(scratch, scratch, dst);
   vcmpunordpd(dst, dst, scratch);
   vorpd(scratch, scratch, dst);
-  vpsrlq(dst, dst, byte{13});
+  vpsrlq(dst, dst, uint8_t{13});
   vandnpd(dst, dst, scratch);
 }
 
@@ -1547,7 +1564,7 @@ void MacroAssembler::F64x4Max(YMMRegister dst, YMMRegister lhs, YMMRegister rhs,
   vorpd(scratch, scratch, dst);
   vsubpd(scratch, scratch, dst);
   vcmpunordpd(dst, dst, scratch);
-  vpsrlq(dst, dst, byte{13});
+  vpsrlq(dst, dst, uint8_t{13});
   vandnpd(dst, dst, scratch);
 }
 
@@ -1561,7 +1578,7 @@ void MacroAssembler::F32x8Min(YMMRegister dst, YMMRegister lhs, YMMRegister rhs,
   vorps(scratch, scratch, dst);
   vcmpunordps(dst, dst, scratch);
   vorps(scratch, scratch, dst);
-  vpsrld(dst, dst, byte{10});
+  vpsrld(dst, dst, uint8_t{10});
   vandnps(dst, dst, scratch);
 }
 
@@ -1576,7 +1593,7 @@ void MacroAssembler::F32x8Max(YMMRegister dst, YMMRegister lhs, YMMRegister rhs,
   vorps(scratch, scratch, dst);
   vsubps(scratch, scratch, dst);
   vcmpunordps(dst, dst, scratch);
-  vpsrld(dst, dst, byte{10});
+  vpsrld(dst, dst, uint8_t{10});
   vandnps(dst, dst, scratch);
 }
 
@@ -1622,6 +1639,61 @@ void MacroAssembler::I16x16ExtMul(YMMRegister dst, XMMRegister src1,
   is_signed ? vpmovsxbw(scratch, src1) : vpmovzxbw(scratch, src1);
   is_signed ? vpmovsxbw(dst, src2) : vpmovzxbw(dst, src2);
   vpmullw(dst, dst, scratch);
+}
+
+void MacroAssembler::I32x8ExtAddPairwiseI16x16S(YMMRegister dst,
+                                                YMMRegister src,
+                                                YMMRegister scratch) {
+  ASM_CODE_COMMENT(this);
+  DCHECK(CpuFeatures::IsSupported(AVX2));
+  CpuFeatureScope avx2_scope(this, AVX2);
+  Move(scratch, uint32_t{1});
+  vpbroadcastw(scratch, scratch);
+  // vpmaddwd multiplies signed words in src and op, producing
+  // signed doublewords, then adds pairwise.
+  // src = |l0|l1|...|l14|l15|
+  // dst = |l0*1+l1*1|l2*1+l3*1|...|l14*1+l15*1|
+  vpmaddwd(dst, src, scratch);
+}
+
+void MacroAssembler::I32x8ExtAddPairwiseI16x16U(YMMRegister dst,
+                                                YMMRegister src,
+                                                YMMRegister scratch) {
+  ASM_CODE_COMMENT(this);
+  DCHECK(CpuFeatures::IsSupported(AVX2));
+  CpuFeatureScope avx2_scope(this, AVX2);
+  // src = |l0|l1|...l14|l15|
+  // scratch = |0|l0|0|l2|...|0|l14|
+  vpsrld(scratch, src, 16);
+  // dst = |0|l1|0|l3|...|0|l15|
+  vpblendw(dst, src, scratch, 0xAA);
+  vpaddd(dst, dst, scratch);
+}
+
+void MacroAssembler::I16x16ExtAddPairwiseI8x32S(YMMRegister dst,
+                                                YMMRegister src,
+                                                YMMRegister scratch) {
+  ASM_CODE_COMMENT(this);
+  DCHECK(CpuFeatures::IsSupported(AVX2));
+  CpuFeatureScope avx2_scope(this, AVX2);
+  Move(scratch, uint32_t{1});
+  vpbroadcastb(scratch, scratch);
+  // pmaddubsw treats the first operand as unsigned, so scratch here should
+  // be first operand
+  // src = |l0|l1|...|l34|l35|
+  // dst = |l0*1+l1*1|l2*1+l3*1|...|l34*1+l35*1|
+  vpmaddubsw(dst, scratch, src);
+}
+
+void MacroAssembler::I16x16ExtAddPairwiseI8x32U(YMMRegister dst,
+                                                YMMRegister src,
+                                                YMMRegister scratch) {
+  ASM_CODE_COMMENT(this);
+  DCHECK(CpuFeatures::IsSupported(AVX2));
+  CpuFeatureScope avx2_scope(this, AVX2);
+  Move(scratch, uint32_t{1});
+  vpbroadcastb(scratch, scratch);
+  vpmaddubsw(dst, src, scratch);
 }
 
 void MacroAssembler::SmiTag(Register reg) {
@@ -1726,8 +1798,9 @@ void MacroAssembler::SmiToInt32(Register reg) {
 }
 
 void MacroAssembler::SmiToInt32(Register dst, Register src) {
-  DCHECK(dst != src);
-  mov_tagged(dst, src);
+  if (dst != src) {
+    mov_tagged(dst, src);
+  }
   SmiToInt32(dst);
 }
 
@@ -2437,7 +2510,9 @@ void MacroAssembler::TailCallBuiltin(Builtin builtin, Condition cc) {
 void MacroAssembler::LoadCodeInstructionStart(Register destination,
                                               Register code_object) {
   ASM_CODE_COMMENT(this);
-  movq(destination, FieldOperand(code_object, Code::kInstructionStartOffset));
+  LoadCodePointerField(destination,
+                       FieldOperand(code_object, Code::kInstructionStartOffset),
+                       kScratchRegister);
 }
 
 void MacroAssembler::CallCodeObject(Register code_object) {
@@ -2775,6 +2850,11 @@ void MacroAssembler::TestCodeIsMarkedForDeoptimization(Register code) {
   static_assert(FIELD_SIZE(Code::kFlagsOffset) * kBitsPerByte == 32);
   testl(FieldOperand(code, Code::kFlagsOffset),
         Immediate(1 << Code::kMarkedForDeoptimizationBit));
+}
+
+void MacroAssembler::TestCodeIsTurbofanned(Register code) {
+  testl(FieldOperand(code, Code::kFlagsOffset),
+        Immediate(1 << Code::kIsTurbofannedBit));
 }
 
 Immediate MacroAssembler::ClearedValue() const {
@@ -3320,7 +3400,8 @@ void MacroAssembler::EnterExitFrame(int extra_slots,
                                     Register c_function) {
   ASM_CODE_COMMENT(this);
   DCHECK(frame_type == StackFrame::EXIT ||
-         frame_type == StackFrame::BUILTIN_EXIT);
+         frame_type == StackFrame::BUILTIN_EXIT ||
+         frame_type == StackFrame::API_CALLBACK_EXIT);
 
   // Set up the frame structure on the stack.
   // All constants are relative to the frame pointer of the exit frame.
@@ -3397,11 +3478,13 @@ void MacroAssembler::LoadNativeContextSlot(Register dst, int index) {
 }
 
 void MacroAssembler::TryLoadOptimizedOsrCode(Register scratch_and_result,
+                                             CodeKind min_opt_level,
                                              Register feedback_vector,
                                              FeedbackSlot slot,
                                              Label* on_result,
                                              Label::Distance distance) {
-  Label fallthrough;
+  ASM_CODE_COMMENT(this);
+  Label fallthrough, on_mark_deopt;
   LoadTaggedField(
       scratch_and_result,
       FieldOperand(feedback_vector,
@@ -3411,7 +3494,19 @@ void MacroAssembler::TryLoadOptimizedOsrCode(Register scratch_and_result,
   // Is it marked_for_deoptimization? If yes, clear the slot.
   {
     TestCodeIsMarkedForDeoptimization(scratch_and_result);
-    j(equal, on_result, distance);
+
+    if (min_opt_level == CodeKind::TURBOFAN) {
+      j(not_zero, &on_mark_deopt, Label::Distance::kNear);
+
+      TestCodeIsTurbofanned(scratch_and_result);
+      j(not_zero, on_result, distance);
+      jmp(&fallthrough);
+    } else {
+      DCHECK_EQ(min_opt_level, CodeKind::MAGLEV);
+      j(equal, on_result, distance);
+    }
+
+    bind(&on_mark_deopt);
     StoreTaggedField(
         FieldOperand(feedback_vector,
                      FeedbackVector::OffsetOfElementAt(slot.ToInt())),
