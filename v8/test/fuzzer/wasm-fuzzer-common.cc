@@ -137,6 +137,16 @@ void ExecuteAgainstReference(Isolate* isolate,
   // module, and in particular it may not terminate.
   if (nondeterminism != 0) return;
 
+  if (exception_ref) {
+    if (strcmp(exception_ref.get(),
+               "RangeError: Maximum call stack size exceeded") == 0) {
+      // There was a stack overflow, which may happen nondeterministically. We
+      // cannot guarantee the behavior of the test module, and in particular it
+      // may not terminate.
+      return;
+    }
+  }
+
   // Instantiate a fresh instance for the actual (non-ref) execution.
   Handle<WasmInstanceObject> instance;
   {
@@ -396,8 +406,16 @@ class InitExprInterface {
 
   void UnOp(FullDecoder* decoder, WasmOpcode opcode, const Value& value,
             Value* result) {
-    // TODO(12089): Implement.
-    UNIMPLEMENTED();
+    switch (opcode) {
+      case kExprExternInternalize:
+        os_ << "kGCPrefix, kExprExternInternalize, ";
+        break;
+      case kExprExternExternalize:
+        os_ << "kGCPrefix, kExprExternExternalize, ";
+        break;
+      default:
+        UNREACHABLE();
+    }
   }
 
   void RefNull(FullDecoder* decoder, ValueType type, Value* result) {
@@ -416,29 +434,29 @@ class InitExprInterface {
 
   // The following operations assume non-rtt versions of the instructions.
   void StructNew(FullDecoder* decoder, const StructIndexImmediate& imm,
-                 const Value& rtt, const Value args[], Value* result) {
+                 const Value args[], Value* result) {
     os_ << "kGCPrefix, kExprStructNew, " << index(imm.index);
   }
 
   void StructNewDefault(FullDecoder* decoder, const StructIndexImmediate& imm,
-                        const Value& rtt, Value* result) {
+                        Value* result) {
     os_ << "kGCPrefix, kExprStructNewDefault, " << index(imm.index);
   }
 
   void ArrayNew(FullDecoder* decoder, const ArrayIndexImmediate& imm,
                 const Value& length, const Value& initial_value,
-                const Value& rtt, Value* result) {
+                Value* result) {
     os_ << "kGCPrefix, kExprArrayNew, " << index(imm.index);
   }
 
   void ArrayNewDefault(FullDecoder* decoder, const ArrayIndexImmediate& imm,
-                       const Value& length, const Value& rtt, Value* result) {
+                       const Value& length, Value* result) {
     os_ << "kGCPrefix, kExprArrayNewDefault, " << index(imm.index);
   }
 
   void ArrayNewFixed(FullDecoder* decoder, const ArrayIndexImmediate& array_imm,
                      const IndexImmediate& length_imm, const Value elements[],
-                     const Value& rtt, Value* result) {
+                     Value* result) {
     os_ << "kGCPrefix, kExprArrayNewFixed, " << index(array_imm.index)
         << index(length_imm.index);
   }
@@ -447,8 +465,8 @@ class InitExprInterface {
                        const ArrayIndexImmediate& array_imm,
                        const IndexImmediate& data_segment_imm,
                        const Value& offset_value, const Value& length_value,
-                       const Value& rtt, Value* result) {
-    // TODO(7748): Implement.
+                       Value* result) {
+    // TODO(14034): Implement when/if array.new_data/element becomes const.
     UNIMPLEMENTED();
   }
 
@@ -507,9 +525,9 @@ void GenerateTestCase(Isolate* isolate, ModuleWireBytes wire_bytes,
                       bool compiles) {
   constexpr bool kVerifyFunctions = false;
   auto enabled_features = WasmFeatures::FromIsolate(isolate);
-  ModuleResult module_res =
-      DecodeWasmModule(enabled_features, wire_bytes.module_bytes(),
-                       kVerifyFunctions, ModuleOrigin::kWasmOrigin);
+  ModuleResult module_res = DecodeWasmModule(
+      enabled_features, wire_bytes.module_bytes(), kVerifyFunctions,
+      ModuleOrigin::kWasmOrigin, kPopulateExplicitRecGroups);
   CHECK_WITH_MSG(module_res.ok(), module_res.error().message().c_str());
   WasmModule* module = module_res.value().get();
   CHECK_NOT_NULL(module);
@@ -542,7 +560,13 @@ void GenerateTestCase(Isolate* isolate, ModuleWireBytes wire_bytes,
         "\n"
         "const builder = new WasmModuleBuilder();\n";
 
+  int recursive_group_end = -1;
   for (int i = 0; i < static_cast<int>(module->types.size()); i++) {
+    auto rec_group = module->explicit_recursive_type_groups.find(i);
+    if (rec_group != module->explicit_recursive_type_groups.end()) {
+      os << "builder.startRecGroup();\n";
+      recursive_group_end = rec_group->first + rec_group->second - 1;
+    }
     if (module->has_struct(i)) {
       const StructType* struct_type = module->types[i].struct_type;
       os << "builder.addStruct([";
@@ -573,6 +597,10 @@ void GenerateTestCase(Isolate* isolate, ModuleWireBytes wire_bytes,
       os << "builder.addType(makeSig(" << PrintParameters(sig) << ", "
          << PrintReturns(sig) << "));\n";
     }
+
+    if (i == recursive_group_end) {
+      os << "builder.endRecGroup();\n";
+    }
   }
 
   for (WasmImport imported : module->import_table) {
@@ -585,15 +613,15 @@ void GenerateTestCase(Isolate* isolate, ModuleWireBytes wire_bytes,
        << sig_index << " /* sig */);\n";
   }
 
-  if (module->has_memory) {
-    os << "builder.addMemory(" << module->initial_pages;
-    if (module->has_maximum_pages) {
-      os << ", " << module->maximum_pages;
+  for (const WasmMemory& memory : module->memories) {
+    os << "builder.addMemory(" << memory.initial_pages;
+    if (memory.has_maximum_pages) {
+      os << ", " << memory.maximum_pages;
     } else {
       os << ", undefined";
     }
-    os << ", " << (module->mem_export ? "true" : "false");
-    if (module->has_shared_memory) {
+    os << ", " << (memory.exported ? "true" : "false");
+    if (memory.is_shared) {
       os << ", true";
     }
     os << ");\n";
@@ -627,13 +655,19 @@ void GenerateTestCase(Isolate* isolate, ModuleWireBytes wire_bytes,
 
   Zone tmp_zone(isolate->allocator(), ZONE_NAME);
 
-  // TODO(9495): Add support for tables with explicit initializers.
   for (const WasmTable& table : module->tables) {
     os << "builder.addTable(" << ValueTypeToConstantName(table.type) << ", "
        << table.initial_size << ", "
        << (table.has_maximum_size ? std::to_string(table.maximum_size)
                                   : "undefined")
-       << ", undefined)\n";
+       << ", ";
+    if (table.initial_value.is_set()) {
+      DecodeAndAppendInitExpr(os, &zone, module, wire_bytes,
+                              table.initial_value, table.type);
+    } else {
+      os << "undefined";
+    }
+    os << ")\n";
   }
   for (const WasmElemSegment& elem_segment : module->elem_segments) {
     const char* status_str =

@@ -121,12 +121,6 @@ void CodeSerializer::SerializeObjectImpl(Handle<HeapObject> obj,
 
     instance_type = raw.map().instance_type();
     CHECK(!InstanceTypeChecker::IsInstructionStream(instance_type));
-
-    if (ElideObject(raw)) {
-      AllowGarbageCollection allow_gc;
-      return SerializeObject(roots.undefined_value_handle(),
-                             SlotType::kAnySlot);
-    }
   }
 
   if (InstanceTypeChecker::IsScript(instance_type)) {
@@ -358,7 +352,7 @@ void FinalizeDeserialization(Isolate* isolate,
   }
 
   Handle<String> name(script->name().IsString()
-                          ? String::cast(script->name())
+                          ? Tagged<String>::cast(script->name())
                           : ReadOnlyRoots(isolate).empty_string(),
                       isolate);
 

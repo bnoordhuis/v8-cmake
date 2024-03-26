@@ -93,7 +93,7 @@ def update_all():
   # Now for some arbitrary code execution...
   what = '{}:DEPS'.format(v8['commit'])
   source = git('show', what, check_output=True, cwd=repodir(v8))
-  code = compile('def Var(k): return vars[k]\n' + source, 'DEPS', 'exec')
+  code = compile('def Var(k): return vars[k]\ndef Str(k): return str(k)\n' + source, 'DEPS', 'exec')
   globls = {}
   eval(code, globls)
   v8_deps = globls['deps']

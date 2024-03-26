@@ -699,7 +699,7 @@ void WasmEngine::AsyncCompile(
       base::OwnedVector<const uint8_t>::Of(bytes.module_bytes());
 
   AsyncCompileJob* job = CreateAsyncCompileJob(
-      isolate, enabled, std::move(copy), handle(isolate->context(), isolate),
+      isolate, enabled, std::move(copy), isolate->native_context(),
       api_method_name_for_errors, std::move(resolver), compilation_id);
   job->Start();
 }
@@ -877,18 +877,18 @@ Handle<Script> CreateWasmScript(Isolate* isolate,
       isolate->factory()->NewScript(isolate->factory()->undefined_value());
   {
     DisallowGarbageCollection no_gc;
-    auto raw_script = *script;
-    raw_script.set_compilation_state(Script::CompilationState::kCompiled);
-    raw_script.set_context_data(isolate->native_context()->debug_context_id());
-    raw_script.set_name(*url_str);
-    raw_script.set_type(Script::Type::kWasm);
-    raw_script.set_source_mapping_url(*source_map_url);
-    raw_script.set_line_ends(ReadOnlyRoots(isolate).empty_fixed_array(),
-                             SKIP_WRITE_BARRIER);
-    raw_script.set_wasm_managed_native_module(*managed_native_module);
-    raw_script.set_wasm_breakpoint_infos(
+    Tagged<Script> raw_script = *script;
+    raw_script->set_compilation_state(Script::CompilationState::kCompiled);
+    raw_script->set_context_data(isolate->native_context()->debug_context_id());
+    raw_script->set_name(*url_str);
+    raw_script->set_type(Script::Type::kWasm);
+    raw_script->set_source_mapping_url(*source_map_url);
+    raw_script->set_line_ends(ReadOnlyRoots(isolate).empty_fixed_array(),
+                              SKIP_WRITE_BARRIER);
+    raw_script->set_wasm_managed_native_module(*managed_native_module);
+    raw_script->set_wasm_breakpoint_infos(
         ReadOnlyRoots(isolate).empty_fixed_array(), SKIP_WRITE_BARRIER);
-    raw_script.set_wasm_weak_instance_list(
+    raw_script->set_wasm_weak_instance_list(
         ReadOnlyRoots(isolate).empty_weak_array_list(), SKIP_WRITE_BARRIER);
   }
 
@@ -964,7 +964,7 @@ AsyncCompileJob* WasmEngine::CreateAsyncCompileJob(
     base::OwnedVector<const uint8_t> bytes, Handle<Context> context,
     const char* api_method_name,
     std::shared_ptr<CompilationResultResolver> resolver, int compilation_id) {
-  Handle<Context> incumbent_context = isolate->GetIncumbentContext();
+  Handle<NativeContext> incumbent_context = isolate->GetIncumbentContext();
   AsyncCompileJob* job = new AsyncCompileJob(
       isolate, enabled, std::move(bytes), context, incumbent_context,
       api_method_name, std::move(resolver), compilation_id);

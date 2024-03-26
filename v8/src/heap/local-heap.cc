@@ -35,7 +35,7 @@ thread_local LocalHeap* current_local_heap = nullptr;
 LocalHeap* LocalHeap::Current() { return current_local_heap; }
 
 #ifdef DEBUG
-void LocalHeap::VerifyCurrent() {
+void LocalHeap::VerifyCurrent() const {
   LocalHeap* current = LocalHeap::Current();
 
   if (is_main_thread())
@@ -49,6 +49,7 @@ LocalHeap::LocalHeap(Heap* heap, ThreadKind kind,
                      std::unique_ptr<PersistentHandles> persistent_handles)
     : heap_(heap),
       is_main_thread_(kind == ThreadKind::kMain),
+      is_in_trampoline_(false),
       state_(ThreadState::Parked()),
       allocation_failed_(false),
       main_thread_parked_(false),
@@ -199,14 +200,14 @@ bool LocalHeap::IsHandleDereferenceAllowed() {
 }
 #endif
 
-bool LocalHeap::IsParked() {
+bool LocalHeap::IsParked() const {
 #ifdef DEBUG
   VerifyCurrent();
 #endif
   return state_.load_relaxed().IsParked();
 }
 
-bool LocalHeap::IsRunning() {
+bool LocalHeap::IsRunning() const {
 #ifdef DEBUG
   VerifyCurrent();
 #endif
@@ -362,20 +363,24 @@ void LocalHeap::SleepInSafepoint() {
 
   TRACE_GC1(heap_->tracer(), scope_id, thread_kind);
 
-  if (is_main_thread()) heap()->stack().SetMarkerToCurrentStackPosition();
+  ExecuteWithStackMarkerIfNeeded([this]() {
+    // Parking the running thread here is an optimization. We do not need to
+    // wake this thread up to reach the next safepoint.
+    ThreadState old_state = state_.SetParked();
+    CHECK(old_state.IsRunning());
+    CHECK(old_state.IsSafepointRequested());
+    CHECK_IMPLIES(old_state.IsCollectionRequested(), is_main_thread());
 
-  // Parking the running thread here is an optimization. We do not need to
-  // wake this thread up to reach the next safepoint.
-  ThreadState old_state = state_.SetParked();
-  CHECK(old_state.IsRunning());
-  CHECK(old_state.IsSafepointRequested());
-  CHECK_IMPLIES(old_state.IsCollectionRequested(), is_main_thread());
+    heap_->safepoint()->WaitInSafepoint();
 
-  heap_->safepoint()->WaitInSafepoint();
+    base::Optional<IgnoreLocalGCRequests> ignore_gc_requests;
+    if (is_main_thread()) ignore_gc_requests.emplace(heap());
+    Unpark();
+  });
+}
 
-  base::Optional<IgnoreLocalGCRequests> ignore_gc_requests;
-  if (is_main_thread()) ignore_gc_requests.emplace(heap());
-  Unpark();
+bool LocalHeap::IsMainThreadOfClientIsolate() const {
+  return is_main_thread() && heap()->isolate()->has_shared_space();
 }
 
 void LocalHeap::FreeLinearAllocationArea() {

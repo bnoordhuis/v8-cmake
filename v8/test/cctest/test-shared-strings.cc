@@ -14,7 +14,7 @@
 #include "src/heap/heap.h"
 #include "src/heap/memory-chunk-layout.h"
 #include "src/heap/memory-chunk.h"
-#include "src/heap/parked-scope.h"
+#include "src/heap/parked-scope-inl.h"
 #include "src/heap/remembered-set.h"
 #include "src/heap/safepoint.h"
 #include "src/objects/fixed-array.h"
@@ -45,11 +45,9 @@ struct V8_NODISCARD IsolateParkOnDisposeWrapper {
       : isolate(isolate), isolate_to_park(isolate_to_park) {}
 
   ~IsolateParkOnDisposeWrapper() {
-    {
-      i::ParkedScope parked(reinterpret_cast<Isolate*>(isolate_to_park)
-                                ->main_thread_local_isolate());
-      isolate->Dispose();
-    }
+    auto main_isolate = reinterpret_cast<Isolate*>(isolate_to_park)
+                            ->main_thread_local_isolate();
+    main_isolate->BlockMainThreadWhileParked([this]() { isolate->Dispose(); });
   }
 
   v8::Isolate* const isolate;
@@ -229,8 +227,7 @@ UNINITIALIZED_TEST(YoungInternalization) {
   Handle<String> young_two_byte_seq1;
   Handle<String> one_byte_intern1;
   Handle<String> two_byte_intern1;
-  {
-    ParkedScope parked_scope(i_isolate2->main_thread_local_isolate());
+  i_isolate2->main_thread_local_isolate()->BlockMainThreadWhileParked([&]() {
     young_one_byte_seq1 = factory1->NewStringFromAsciiChecked(
         raw_one_byte, AllocationType::kYoung);
     young_two_byte_seq1 =
@@ -246,7 +243,7 @@ UNINITIALIZED_TEST(YoungInternalization) {
     CHECK(!young_two_byte_seq1.equals(two_byte_intern1));
     CHECK_NE(*young_one_byte_seq1, *one_byte_intern1);
     CHECK_NE(*young_two_byte_seq1, *two_byte_intern1);
-  }
+  });
 
   // Allocate two young strings with the same contents in isolate2 then intern
   // them. They should be the same as the interned strings from isolate1.
@@ -272,14 +269,14 @@ UNINITIALIZED_TEST(YoungInternalization) {
   }
 }
 
-class ConcurrentStringThreadBase : public v8::base::Thread {
+class ConcurrentStringThreadBase : public ParkingThread {
  public:
   ConcurrentStringThreadBase(const char* name, MultiClientIsolateTest* test,
                              Handle<FixedArray> shared_strings,
                              ParkingSemaphore* sema_ready,
                              ParkingSemaphore* sema_execute_start,
                              ParkingSemaphore* sema_execute_complete)
-      : v8::base::Thread(base::Thread::Options(name)),
+      : ParkingThread(base::Thread::Options(name)),
         test_(test),
         shared_strings_(shared_strings),
         sema_ready_(sema_ready),
@@ -314,14 +311,7 @@ class ConcurrentStringThreadBase : public v8::base::Thread {
     i_isolate = nullptr;
   }
 
-  void ParkedJoin(const ParkedScope& scope) {
-    USE(scope);
-    Join();
-  }
-
  protected:
-  using base::Thread::Join;
-
   Isolate* i_isolate;
   MultiClientIsolateTest* test_;
   Handle<FixedArray> shared_strings_;
@@ -458,10 +448,7 @@ void TestConcurrentInternalization(TestHitOrMiss hit_or_miss) {
     sema_execute_complete.ParkedWait(local_isolate);
   }
 
-  ParkedScope parked(local_isolate);
-  for (auto& thread : threads) {
-    thread->ParkedJoin(parked);
-  }
+  ParkingThread::ParkedJoinAll(local_isolate, threads);
 }
 }  // namespace
 
@@ -549,10 +536,7 @@ UNINITIALIZED_TEST(ConcurrentStringTableLookup) {
     sema_execute_complete.ParkedWait(local_isolate);
   }
 
-  ParkedScope parked(local_isolate);
-  for (auto& thread : threads) {
-    thread->ParkedJoin(parked);
-  }
+  ParkingThread::ParkedJoinAll(local_isolate, threads);
 }
 
 namespace {
@@ -833,11 +817,11 @@ UNINITIALIZED_TEST(PromotionMarkCompact) {
 
     // 1st GC moves `one_byte_seq` to old space and 2nd GC evacuates it within
     // old space.
-    heap::CollectAllGarbage(heap);
+    heap::InvokeMajorGC(heap);
     heap::ForceEvacuationCandidate(i::Page::FromHeapObject(*one_byte_seq));
     // We need to invoke GC without stack, otherwise no compaction is performed.
     DisableConservativeStackScanningScopeForTesting no_stack_scanning(heap);
-    heap::CollectAllGarbage(heap);
+    heap::InvokeMajorGC(heap);
 
     // In-place-internalizable strings are promoted into the shared heap when
     // sharing.
@@ -874,7 +858,7 @@ UNINITIALIZED_TEST(PromotionScavenge) {
     CHECK(heap->InSpace(*one_byte_seq, NEW_SPACE));
 
     for (int i = 0; i < 2; i++) {
-      heap::CollectGarbage(heap, NEW_SPACE);
+      heap::InvokeMinorGC(heap);
     }
 
     // In-place-internalizable strings are promoted into the shared heap when
@@ -922,7 +906,7 @@ UNINITIALIZED_TEST(PromotionScavengeOldToShared) {
         RememberedSet<OLD_TO_NEW>::Contains(old_object_chunk, slot.address()));
 
     for (int i = 0; i < 2; i++) {
-      heap::CollectGarbage(heap, NEW_SPACE);
+      heap::InvokeMinorGC(heap);
     }
 
     // In-place-internalizable strings are promoted into the shared heap when
@@ -974,7 +958,7 @@ UNINITIALIZED_TEST(PromotionMarkCompactNewToShared) {
 
     // We need to invoke GC without stack, otherwise no compaction is performed.
     DisableConservativeStackScanningScopeForTesting no_stack_scanning(heap);
-    heap::CollectGarbage(heap, OLD_SPACE);
+    heap::InvokeMajorGC(heap);
 
     // In-place-internalizable strings are promoted into the shared heap when
     // sharing.
@@ -1025,7 +1009,7 @@ UNINITIALIZED_TEST(PromotionMarkCompactOldToShared) {
     // Fill the page and do a full GC. Page promotion should kick in and promote
     // the page as is to old space.
     heap::FillCurrentPage(heap->new_space(), &handles);
-    heap->CollectGarbage(OLD_SPACE, GarbageCollectionReason::kTesting);
+    heap::InvokeMajorGC(heap);
     // Make sure 'one_byte_seq' is in old space.
     CHECK(!MemoryChunk::FromHeapObject(*one_byte_seq)->InYoungGeneration());
     CHECK(heap->Contains(*one_byte_seq));
@@ -1038,7 +1022,7 @@ UNINITIALIZED_TEST(PromotionMarkCompactOldToShared) {
     heap::ForceEvacuationCandidate(Page::FromHeapObject(*one_byte_seq));
     // We need to invoke GC without stack, otherwise no compaction is performed.
     DisableConservativeStackScanningScopeForTesting no_stack_scanning(heap);
-    heap->CollectGarbage(OLD_SPACE, GarbageCollectionReason::kTesting);
+    heap::InvokeMajorGC(heap);
 
     // In-place-internalizable strings are promoted into the shared heap when
     // sharing.
@@ -1747,10 +1731,7 @@ void TestConcurrentExternalization(bool share_resources) {
                            threads);
   }
 
-  ParkedScope parked(local_isolate);
-  for (auto& thread : threads) {
-    thread->ParkedJoin(parked);
-  }
+  ParkingThread::ParkedJoinAll(local_isolate, threads);
 }
 
 UNINITIALIZED_TEST(ConcurrentExternalizationWithUniqueResources) {
@@ -1865,10 +1846,7 @@ void TestConcurrentExternalizationWithDeadStrings(bool share_resources,
     }
   }
 
-  ParkedScope parked(local_isolate);
-  for (auto& thread : threads) {
-    thread->ParkedJoin(parked);
-  }
+  ParkingThread::ParkedJoinAll(local_isolate, threads);
 }
 
 UNINITIALIZED_TEST(
@@ -1979,10 +1957,7 @@ void TestConcurrentExternalizationAndInternalization(
     CHECK(string.HasHashCode());
   }
 
-  ParkedScope parked(local_isolate);
-  for (auto& thread : threads) {
-    thread->ParkedJoin(parked);
-  }
+  ParkingThread::ParkedJoinAll(local_isolate, threads);
 }
 
 UNINITIALIZED_TEST(ConcurrentExternalizationAndInternalizationMiss) {
@@ -2012,7 +1987,7 @@ UNINITIALIZED_TEST(SharedStringInGlobalHandle) {
                                           lh_shared_string);
   gh_shared_string.SetWeak();
 
-  heap::CollectGarbage(i_isolate->heap(), OLD_SPACE);
+  heap::InvokeMajorGC(i_isolate->heap());
 
   CHECK(!gh_shared_string.IsEmpty());
 }
@@ -2274,7 +2249,6 @@ class ClientIsolateThreadForRetainingByRememberedSet : public v8::base::Thread {
     Isolate* i_client = reinterpret_cast<Isolate*>(client_isolate_);
     Factory* factory = i_client->factory();
     Heap* heap = i_client->heap();
-    ManualGCScope manual_gc_scope(i_client);
 
     // Cache the thread's task runner.
     task_runner_ =
@@ -2468,8 +2442,7 @@ class Regress1424955ClientIsolateThread : public v8::base::Thread {
       USE(array);
 
       // Start sweeping.
-      i_client_heap->CollectGarbage(OLD_SPACE,
-                                    GarbageCollectionReason::kTesting);
+      heap::InvokeMajorGC(i_client_heap);
       CHECK(i_client_heap->sweeping_in_progress());
 
       // Inform the initiator thread it's time to request a global safepoint.
@@ -2488,8 +2461,7 @@ class Regress1424955ClientIsolateThread : public v8::base::Thread {
       // Start a minor GC. This will cause this client isolate to join the
       // global safepoint. At which point, the initiator isolate will try to
       // finalize sweeping on behalf of this client isolate.
-      i_client_heap->CollectGarbage(NEW_SPACE,
-                                    GarbageCollectionReason::kTesting);
+      heap::InvokeMinorGC(i_client_heap);
     }
 
     // Wait for the initiator isolate to finish the shared GC.

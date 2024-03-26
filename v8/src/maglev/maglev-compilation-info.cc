@@ -61,8 +61,9 @@ MaglevCompilationInfo::MaglevCompilationInfo(Isolate* isolate,
           v8_flags.maglev_function_context_specialization &&
           function->raw_feedback_cell().map() ==
               ReadOnlyRoots(isolate).one_closure_cell_map()) {
-  DCHECK(v8_flags.maglev);
-  DCHECK_IMPLIES(osr_offset != BytecodeOffset::None(), v8_flags.maglev_osr);
+  DCHECK(maglev::IsMaglevEnabled());
+  DCHECK_IMPLIES(osr_offset != BytecodeOffset::None(),
+                 maglev::IsMaglevOsrEnabled());
   canonical_handles_ = std::make_unique<CanonicalHandlesMap>(
       isolate->heap(), ZoneAllocationPolicy(&zone_));
   compiler::CurrentHeapBrokerScope current_broker(broker_.get());
@@ -108,8 +109,8 @@ void MaglevCompilationInfo::set_code_generator(
 
 namespace {
 template <typename T>
-Handle<T> CanonicalHandle(CanonicalHandlesMap* canonical_handles, T object,
-                          Isolate* isolate) {
+Handle<T> CanonicalHandle(CanonicalHandlesMap* canonical_handles,
+                          Tagged<T> object, Isolate* isolate) {
   DCHECK_NOT_NULL(canonical_handles);
   DCHECK(PersistentHandlesScope::IsActive(isolate));
   auto find_result = canonical_handles->FindOrInsert(object);

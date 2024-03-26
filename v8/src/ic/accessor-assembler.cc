@@ -281,10 +281,6 @@ void AccessorAssembler::HandleLoadAccessor(
   CSA_CHECK(this, IsNotCleared(maybe_context));
   TNode<HeapObject> context = GetHeapObjectAssumeWeak(maybe_context);
 
-  TNode<RawPtrT> callback = LoadCallHandlerInfoJsCallbackPtr(call_handler_info);
-  TNode<Object> data =
-      LoadObjectField(call_handler_info, CallHandlerInfo::kDataOffset);
-
   TVARIABLE(HeapObject, api_holder, CAST(p->lookup_start_object()));
   Label load(this);
   GotoIf(Word32Equal(handler_kind, LOAD_KIND(kApiGetter)), &load);
@@ -297,8 +293,9 @@ void AccessorAssembler::HandleLoadAccessor(
 
   BIND(&load);
   TNode<Int32T> argc = Int32Constant(0);
-  exit_point->Return(CallApiCallback(context, callback, argc, data,
-                                     api_holder.value(), p->receiver()));
+  exit_point->Return(CallBuiltin(Builtin::kCallApiCallbackGeneric, context,
+                                 argc, call_handler_info, api_holder.value(),
+                                 p->receiver()));
 }
 
 void AccessorAssembler::HandleLoadField(TNode<JSObject> holder,
@@ -741,10 +738,7 @@ void AccessorAssembler::HandleLoadICSmiHandlerLoadNamedCase(
   }
 
   BIND(&native_data_property);
-  {
-    GotoIf(IsSideEffectFreeDebuggingActive(), &slow);
-    HandleLoadCallbackProperty(p, CAST(holder), handler_word, exit_point);
-  }
+  HandleLoadCallbackProperty(p, CAST(holder), handler_word, exit_point);
 
   BIND(&api_getter);
   {
@@ -753,7 +747,6 @@ void AccessorAssembler::HandleLoadICSmiHandlerLoadNamedCase(
       // the correct receiver checks.
       Goto(&slow);
     } else {
-      GotoIf(IsSideEffectFreeDebuggingActive(), &slow);
       HandleLoadAccessor(p, CAST(holder), handler_word, CAST(handler),
                          handler_kind, exit_point);
     }
@@ -1490,8 +1483,9 @@ void AccessorAssembler::UpdateMayHaveInterestingSymbol(
     GotoIfNot(IsSetWord32<Symbol::IsInterestingSymbolBit>(symbol_flags), &done);
     TNode<Smi> flags = GetNameDictionaryFlags(dict);
     flags = SmiOr(
-        flags, SmiConstant(
-                   NameDictionary::MayHaveInterestingSymbolsBit::encode(true)));
+        flags,
+        SmiConstant(
+            NameDictionary::MayHaveInterestingPropertiesBit::encode(true)));
     SetNameDictionaryFlags(dict, flags);
     Goto(&done);
   }
@@ -1908,7 +1902,7 @@ void AccessorAssembler::HandleStoreICProtoHandler(
       TNode<PropertyDictionary> properties =
           CAST(LoadSlowProperties(CAST(p->receiver())));
       TNode<Name> name = CAST(p->name());
-      Add<PropertyDictionary>(properties, name, p->value(), &slow);
+      AddToDictionary<PropertyDictionary>(properties, name, p->value(), &slow);
       UpdateMayHaveInterestingSymbol(properties, name);
       Return(p->value());
 
@@ -1942,11 +1936,6 @@ void AccessorAssembler::HandleStoreICProtoHandler(
           IsCleared(maybe_context), [=] { return SmiConstant(0); },
           [=] { return GetHeapObjectAssumeWeak(maybe_context); });
 
-      TNode<RawPtrT> callback =
-          LoadCallHandlerInfoJsCallbackPtr(call_handler_info);
-      TNode<Object> data =
-          LoadObjectField(call_handler_info, CallHandlerInfo::kDataOffset);
-
       TVARIABLE(Object, api_holder, p->receiver());
       Label store(this);
       GotoIf(Word32Equal(handler_kind, STORE_KIND(kApiSetter)), &store);
@@ -1959,10 +1948,10 @@ void AccessorAssembler::HandleStoreICProtoHandler(
 
       BIND(&store);
       {
-        GotoIf(IsSideEffectFreeDebuggingActive(), &if_slow);
         TNode<Int32T> argc = Int32Constant(1);
-        Return(CallApiCallback(context, callback, argc, data,
-                               api_holder.value(), p->receiver(), p->value()));
+        Return(CallBuiltin(Builtin::kCallApiCallbackGeneric, context, argc,
+                           call_handler_info, api_holder.value(), p->receiver(),
+                           p->value()));
       }
     }
 

@@ -57,7 +57,6 @@ load(":bazel/v8-non-pointer-compression.bzl", "v8_binary_non_pointer_compression
 # v8_use_mips_abi_hardfloat
 # v8_enable_gdbjit
 # v8_check_header_includes
-# v8_enable_shared_ro_heap
 # v8_enable_lazy_source_positions
 # v8_enable_third_party_heap
 # v8_third_party_heap_files
@@ -225,6 +224,13 @@ selects.config_setting_group(
 # Pointer cage, true by default if v8_enable_pointer_compression.
 v8_flag(
     name = "v8_enable_pointer_compression_shared_cage",
+    default = True,
+)
+
+# Shared RO heap. Flag has to be set to false when
+# v8_enable_pointer_compression_shared_cage is set to false.
+v8_flag(
+    name = "v8_enable_shared_ro_heap",
     default = True,
 )
 
@@ -413,6 +419,10 @@ v8_config(
             "V8_COMPRESS_POINTERS_IN_ISOLATE_CAGE",
         ],
         "//conditions:default": [],
+    }) + select({
+        ":is_v8_enable_shared_ro_heap": [
+            "V8_SHARED_RO_HEAP",
+        ],
     }) + select({
         ":is_v8_enable_short_builtin_calls": [
             "V8_SHORT_BUILTIN_CALLS",
@@ -843,10 +853,12 @@ filegroup(
         "src/builtins/iterator.tq",
         "src/builtins/iterator-from.tq",
         "src/builtins/iterator-helpers.tq",
+        "src/builtins/map-groupby.tq",
         "src/builtins/math.tq",
         "src/builtins/number.tq",
         "src/builtins/object.tq",
         "src/builtins/object-fromentries.tq",
+        "src/builtins/object-groupby.tq",
         "src/builtins/promise-abstract-operations.tq",
         "src/builtins/promise-all.tq",
         "src/builtins/promise-all-element-closure.tq",
@@ -881,6 +893,8 @@ filegroup(
         "src/builtins/regexp-source.tq",
         "src/builtins/regexp-split.tq",
         "src/builtins/regexp-test.tq",
+        "src/builtins/set-intersection.tq",
+        "src/builtins/set-union.tq",
         "src/builtins/string-at.tq",
         "src/builtins/string-endswith.tq",
         "src/builtins/string-html.tq",
@@ -999,6 +1013,7 @@ filegroup(
         "third_party/v8/builtins/array-sort.tq",
     ] + select({
         ":is_v8_enable_webassembly": [
+            "src/builtins/js-to-wasm.tq",
             "src/builtins/wasm.tq",
             "src/debug/debug-wasm-objects.tq",
             "src/wasm/wasm-objects.tq",
@@ -1550,6 +1565,8 @@ filegroup(
         "src/heap/marking-worklist-inl.h",
         "src/heap/memory-allocator.cc",
         "src/heap/memory-allocator.h",
+        "src/heap/memory-balancer.cc",
+        "src/heap/memory-balancer.h",
         "src/heap/memory-chunk.cc",
         "src/heap/memory-chunk.h",
         "src/heap/memory-chunk-inl.h",
@@ -1575,6 +1592,7 @@ filegroup(
         "src/heap/paged-spaces.h",
         "src/heap/paged-spaces-inl.h",
         "src/heap/parallel-work-item.h",
+        "src/heap/parked-scope-inl.h",
         "src/heap/parked-scope.h",
         "src/heap/pretenuring-handler.cc",
         "src/heap/pretenuring-handler.h",
@@ -1954,6 +1972,7 @@ filegroup(
         "src/objects/synthetic-module.cc",
         "src/objects/synthetic-module.h",
         "src/objects/synthetic-module-inl.h",
+        "src/objects/tagged.h",
         "src/objects/tagged-field.h",
         "src/objects/tagged-field-inl.h",
         "src/objects/tagged-impl.cc",
@@ -2134,6 +2153,11 @@ filegroup(
         "src/sandbox/external-pointer-table.cc",
         "src/sandbox/external-pointer-table.h",
         "src/sandbox/external-pointer-table-inl.h",
+        "src/sandbox/code-pointer-table.cc",
+        "src/sandbox/code-pointer-table.h",
+        "src/sandbox/code-pointer-table-inl.h",
+        "src/sandbox/code-pointer.h",
+        "src/sandbox/code-pointer-inl.h",
         "src/sandbox/external-entity-table.h",
         "src/sandbox/external-entity-table-inl.h",
         "src/sandbox/sandbox.cc",
@@ -2162,6 +2186,7 @@ filegroup(
         "src/snapshot/read-only-deserializer.h",
         "src/snapshot/read-only-serializer.cc",
         "src/snapshot/read-only-serializer.h",
+        "src/snapshot/read-only-serializer-deserializer.h",
         "src/snapshot/references.h",
         "src/snapshot/roots-serializer.cc",
         "src/snapshot/roots-serializer.h",
@@ -2799,6 +2824,7 @@ filegroup(
         "src/compiler/js-graph.h",
         "src/compiler/js-heap-broker.cc",
         "src/compiler/js-heap-broker.h",
+        "src/compiler/js-heap-broker-inl.h",
         "src/compiler/js-inlining.cc",
         "src/compiler/js-inlining.h",
         "src/compiler/js-inlining-heuristic.cc",
@@ -2969,7 +2995,6 @@ filegroup(
         "src/compiler/turboshaft/store-store-elimination-phase.h",
         "src/compiler/turboshaft/store-store-elimination-reducer.h",
         "src/compiler/turboshaft/structural-optimization-reducer.h",
-        "src/compiler/turboshaft/tag-untag-lowering-reducer.h",
         "src/compiler/turboshaft/tracing.h",
         "src/compiler/turboshaft/type-assertions-phase.cc",
         "src/compiler/turboshaft/type-assertions-phase.h",
@@ -2990,6 +3015,7 @@ filegroup(
         "src/compiler/turboshaft/utils.h",
         "src/compiler/turboshaft/value-numbering-reducer.h",
         "src/compiler/turboshaft/variable-reducer.h",
+        "src/compiler/turboshaft/wasm-js-lowering-reducer.h",
         "src/compiler/type-cache.cc",
         "src/compiler/type-cache.h",
         "src/compiler/type-narrowing-reducer.cc",
@@ -3088,6 +3114,8 @@ filegroup(
             "src/compiler/wasm-load-elimination.h",
             "src/compiler/wasm-loop-peeling.cc",
             "src/compiler/wasm-loop-peeling.h",
+            "src/compiler/wasm-js-lowering.cc",
+            "src/compiler/wasm-js-lowering.h",
             "src/compiler/wasm-typer.cc",
             "src/compiler/wasm-typer.h",
         ],
@@ -3600,6 +3628,7 @@ py_binary(
         "third_party/inspector_protocol/templates/TypeBuilder_cpp.template",
         "third_party/inspector_protocol/templates/TypeBuilder_h.template",
     ],
+    imports = ["third_party/inspector_protocol/"],
     python_version = "PY3",
     deps = [
         requirement("jinja2"),

@@ -31,8 +31,8 @@ void SealCurrentObjects(Heap* heap) {
   // v8_flags.stress_concurrent_allocation = false;
   // Background thread allocating concurrently interferes with this function.
   CHECK(!v8_flags.stress_concurrent_allocation);
-  heap::CollectAllGarbage(heap);
-  heap::CollectAllGarbage(heap);
+  heap::InvokeMajorGC(heap);
+  heap::InvokeMajorGC(heap);
   heap->EnsureSweepingCompleted(Heap::SweepingForcedFinalizationMode::kV8Only);
   heap->old_space()->FreeLinearAllocationArea();
   for (Page* page : *heap->old_space()) {
@@ -326,21 +326,37 @@ void AbandonCurrentlyFreeMemory(PagedSpace* space) {
   }
 }
 
-void CollectGarbage(Heap* heap, AllocationSpace space) {
-  heap->CollectGarbage(space, GarbageCollectionReason::kTesting);
+void InvokeMajorGC(Heap* heap) {
+  heap->CollectGarbage(OLD_SPACE, GarbageCollectionReason::kTesting);
 }
 
-void CollectAllGarbage(Heap* heap) {
-  heap->CollectAllGarbage(GCFlag::kNoFlags, GarbageCollectionReason::kTesting);
+void InvokeMajorGC(Heap* heap, GCFlag gc_flag) {
+  heap->CollectAllGarbage(gc_flag, GarbageCollectionReason::kTesting);
 }
 
-void CollectAllAvailableGarbage(Heap* heap) {
-  heap->CollectAllAvailableGarbage(GarbageCollectionReason::kTesting);
+void InvokeMinorGC(Heap* heap) {
+  heap->CollectGarbage(NEW_SPACE, GarbageCollectionReason::kTesting);
 }
 
-void PreciseCollectAllGarbage(Heap* heap) {
+void InvokeAtomicMajorGC(Heap* heap) {
   heap->PreciseCollectAllGarbage(GCFlag::kNoFlags,
                                  GarbageCollectionReason::kTesting);
+  if (heap->sweeping_in_progress()) {
+    heap->EnsureSweepingCompleted(
+        Heap::SweepingForcedFinalizationMode::kUnifiedHeap);
+  }
+}
+
+void InvokeAtomicMinorGC(Heap* heap) {
+  InvokeMinorGC(heap);
+  if (heap->sweeping_in_progress()) {
+    heap->EnsureSweepingCompleted(
+        Heap::SweepingForcedFinalizationMode::kUnifiedHeap);
+  }
+}
+
+void InvokeMemoryReducingMajorGCs(Heap* heap) {
+  heap->CollectAllAvailableGarbage(GarbageCollectionReason::kTesting);
 }
 
 void CollectSharedGarbage(Heap* heap) {
@@ -348,16 +364,7 @@ void CollectSharedGarbage(Heap* heap) {
                              GarbageCollectionReason::kTesting);
 }
 
-void GcAndSweep(Heap* heap, AllocationSpace space) {
-  CollectGarbage(heap, space);
-  if (heap->sweeping_in_progress()) {
-    IsolateSafepointScope scope(heap);
-    heap->EnsureSweepingCompleted(
-        Heap::SweepingForcedFinalizationMode::kV8Only);
-  }
-}
-
-void EmptyNewSpaceUsingGC(Heap* heap) { CollectGarbage(heap, OLD_SPACE); }
+void EmptyNewSpaceUsingGC(Heap* heap) { InvokeMajorGC(heap); }
 
 void ForceEvacuationCandidate(Page* page) {
   CHECK(v8_flags.manual_evacuation_candidates_selection);
@@ -399,5 +406,61 @@ void GrowNewSpaceToMaximumCapacity(Heap* heap) {
 }
 
 }  // namespace heap
+
+ManualGCScope::ManualGCScope(Isolate* isolate)
+    : isolate_(isolate),
+      flag_concurrent_marking_(v8_flags.concurrent_marking),
+      flag_concurrent_sweeping_(v8_flags.concurrent_sweeping),
+      flag_concurrent_minor_mc_marking_(v8_flags.concurrent_minor_mc_marking),
+      flag_stress_concurrent_allocation_(v8_flags.stress_concurrent_allocation),
+      flag_stress_incremental_marking_(v8_flags.stress_incremental_marking),
+      flag_parallel_marking_(v8_flags.parallel_marking),
+      flag_detect_ineffective_gcs_near_heap_limit_(
+          v8_flags.detect_ineffective_gcs_near_heap_limit),
+      flag_cppheap_concurrent_marking_(v8_flags.cppheap_concurrent_marking) {
+  // Some tests run threaded (back-to-back) and thus the GC may already be
+  // running by the time a ManualGCScope is created. Finalizing existing marking
+  // prevents any undefined/unexpected behavior.
+  if (isolate) {
+    auto* heap = isolate->heap();
+    if (heap->incremental_marking()->IsMarking()) {
+      heap::InvokeAtomicMajorGC(heap);
+    }
+  }
+
+  v8_flags.concurrent_marking = false;
+  v8_flags.concurrent_sweeping = false;
+  v8_flags.concurrent_minor_mc_marking = false;
+  v8_flags.stress_incremental_marking = false;
+  v8_flags.stress_concurrent_allocation = false;
+  // Parallel marking has a dependency on concurrent marking.
+  v8_flags.parallel_marking = false;
+  v8_flags.detect_ineffective_gcs_near_heap_limit = false;
+  // CppHeap concurrent marking has a dependency on concurrent marking.
+  v8_flags.cppheap_concurrent_marking = false;
+
+  if (isolate_ && isolate_->heap()->cpp_heap()) {
+    CppHeap::From(isolate_->heap()->cpp_heap())
+        ->UpdateGCCapabilitiesFromFlagsForTesting();
+  }
+}
+
+ManualGCScope::~ManualGCScope() {
+  v8_flags.concurrent_marking = flag_concurrent_marking_;
+  v8_flags.concurrent_sweeping = flag_concurrent_sweeping_;
+  v8_flags.concurrent_minor_mc_marking = flag_concurrent_minor_mc_marking_;
+  v8_flags.stress_concurrent_allocation = flag_stress_concurrent_allocation_;
+  v8_flags.stress_incremental_marking = flag_stress_incremental_marking_;
+  v8_flags.parallel_marking = flag_parallel_marking_;
+  v8_flags.detect_ineffective_gcs_near_heap_limit =
+      flag_detect_ineffective_gcs_near_heap_limit_;
+  v8_flags.cppheap_concurrent_marking = flag_cppheap_concurrent_marking_;
+
+  if (isolate_ && isolate_->heap()->cpp_heap()) {
+    CppHeap::From(isolate_->heap()->cpp_heap())
+        ->UpdateGCCapabilitiesFromFlagsForTesting();
+  }
+}
+
 }  // namespace internal
 }  // namespace v8

@@ -55,11 +55,6 @@ namespace internal {
   V(cr8)  V(cr9)  V(cr10) V(cr11) V(cr12) V(cr15)
 // clang-format on
 
-// The ARM ABI does not specify the usage of register r9, which may be reserved
-// as the static base or thread register on some platforms, in which case we
-// leave it alone. Adjust the value of kR9Available accordingly:
-const int kR9Available = 1;  // 1 if available to us, 0 if reserved
-
 enum RegisterCode {
 #define REGISTER_CODE(R) kRegCode_##R,
   GENERAL_REGISTERS(REGISTER_CODE)
@@ -333,6 +328,8 @@ constexpr Register r11 = fp;
 constexpr Register kRootRegister = r10;  // Roots array pointer.
 
 constexpr DoubleRegister kFPReturnRegister0 = d0;
+
+constexpr Register kMaglevExtraScratchRegister = r9;
 
 }  // namespace internal
 }  // namespace v8

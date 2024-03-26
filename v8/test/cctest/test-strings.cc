@@ -674,9 +674,12 @@ void TestStringCharacterStream(BuildString build, int test_cases) {
     cons_string_stats.VerifyEqual(flat_string_stats);
     cons_string_stats.VerifyEqual(data.stats_);
     VerifyConsString(cons_string, &data);
-    String flat_string_ptr = flat_string->IsConsString()
-                                 ? ConsString::cast(*flat_string).first()
-                                 : *flat_string;
+    // TODO(leszeks): Remove Tagged cast when .first() returns a Tagged.
+    static_assert(kTaggedCanConvertToRawObjects);
+    String flat_string_ptr =
+        flat_string->IsConsString()
+            ? Tagged(Tagged<ConsString>::cast(*flat_string)->first())
+            : *flat_string;
     VerifyCharacterStream(flat_string_ptr, *cons_string);
   }
 }
@@ -1308,10 +1311,12 @@ TEST(SliceFromCons) {
   // After slicing, the original string becomes a flat cons.
   CHECK(parent->IsFlat());
   CHECK(slice->IsSlicedString());
-  CHECK_EQ(
-      SlicedString::cast(*slice).parent(),
-      // Parent could have been short-circuited.
-      parent->IsConsString() ? ConsString::cast(*parent).first() : *parent);
+  // TODO(leszeks): Remove Tagged cast when .first() returns a Tagged.
+  static_assert(kTaggedCanConvertToRawObjects);
+  CHECK_EQ(SlicedString::cast(*slice).parent(),
+           // Parent could have been short-circuited.
+           parent->IsConsString() ? Tagged(ConsString::cast(*parent).first())
+                                  : *parent);
   CHECK(SlicedString::cast(*slice).parent().IsSeqString());
   CHECK(slice->IsFlat());
 }
@@ -1353,8 +1358,8 @@ TEST(InternalizeExternal) {
     CHECK(string->IsInternalizedString());
     CHECK(!i::Heap::InYoungGeneration(*string));
   }
-  i::heap::CollectGarbage(CcTest::heap(), i::OLD_SPACE);
-  i::heap::CollectGarbage(CcTest::heap(), i::OLD_SPACE);
+  i::heap::InvokeMajorGC(CcTest::heap());
+  i::heap::InvokeMajorGC(CcTest::heap());
 }
 
 TEST(Regress1402187) {
@@ -1397,8 +1402,8 @@ TEST(Regress1402187) {
     CHECK(string->IsExternalString());
     CHECK(string->IsInternalizedString());
   }
-  i::heap::CollectGarbage(CcTest::heap(), i::OLD_SPACE);
-  i::heap::CollectGarbage(CcTest::heap(), i::OLD_SPACE);
+  i::heap::InvokeMajorGC(CcTest::heap());
+  i::heap::InvokeMajorGC(CcTest::heap());
 }
 
 TEST(SliceFromExternal) {

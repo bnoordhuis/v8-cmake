@@ -121,6 +121,56 @@ Object ThrowWasmError(Isolate* isolate, MessageTemplate message,
 }
 }  // namespace
 
+RUNTIME_FUNCTION(Runtime_WasmGenericWasmToJSObject) {
+  HandleScope scope(isolate);
+  DCHECK_EQ(1, args.length());
+  Handle<Object> value(args[0], isolate);
+  if (value->IsWasmInternalFunction()) {
+    Handle<WasmInternalFunction> internal =
+        Handle<WasmInternalFunction>::cast(value);
+    return *WasmInternalFunction::GetOrCreateExternal(internal);
+  }
+  if (value->IsWasmNull()) return ReadOnlyRoots(isolate).null_value();
+  return *value;
+}
+
+// Takes a JS object and a wasm type as Smi. Type checks the object against the
+// type; if the check succeeds, returns the object in its wasm representation;
+// otherwise throws a type error.
+RUNTIME_FUNCTION(Runtime_WasmGenericJSToWasmObject) {
+  HandleScope scope(isolate);
+  DCHECK_EQ(3, args.length());
+  Handle<WasmInstanceObject> instance(WasmInstanceObject::cast(args[0]),
+                                      isolate);
+  Handle<Object> value(args[1], isolate);
+  // Make sure ValueType fits properly in a Smi.
+  static_assert(wasm::ValueType::kLastUsedBit + 1 <= kSmiValueSize);
+  int raw_type = args.smi_value_at(2);
+
+  const wasm::WasmModule* module = instance->module();
+  wasm::ValueType type = wasm::ValueType::FromRawBitField(raw_type);
+  if (type.has_index()) {
+    DCHECK_NOT_NULL(module);
+    uint32_t canonical_index =
+        module->isorecursive_canonical_type_ids[type.ref_index()];
+    type = wasm::ValueType::RefMaybeNull(canonical_index, type.nullability());
+  }
+  const char* error_message;
+  {
+    // TODO(ahaas): Make the wrapper GC-safe, and enable it for 32-bit Smis. For
+    // 32-bit Smis, allocations happen at the moment due to smi
+    // canonicalization.
+    DisallowHeapAllocation no_gc;
+    Handle<Object> result;
+    if (JSToWasmObject(isolate, value, type, &error_message)
+            .ToHandle(&result)) {
+      return *result;
+    }
+  }
+  return isolate->Throw(
+      *isolate->factory()->NewTypeError(MessageTemplate::kWasmTrapJSTypeError));
+}
+
 // Takes a JS object and a wasm type as Smi. Type checks the object against the
 // type; if the check succeeds, returns the object in its wasm representation;
 // otherwise throws a type error.
@@ -140,11 +190,10 @@ RUNTIME_FUNCTION(Runtime_WasmJSToWasmObject) {
   wasm::ValueType expected_canonical =
       wasm::ValueType::FromRawBitField(raw_type);
   const char* error_message;
-
   Handle<Object> result;
-  bool success = internal::wasm::JSToWasmObject(
-                     isolate, value, expected_canonical, &error_message)
-                     .ToHandle(&result);
+  bool success =
+      JSToWasmObject(isolate, value, expected_canonical, &error_message)
+          .ToHandle(&result);
   Object ret = success ? *result
                        : isolate->Throw(*isolate->factory()->NewTypeError(
                              MessageTemplate::kWasmTrapJSTypeError));
@@ -162,9 +211,12 @@ RUNTIME_FUNCTION(Runtime_WasmMemoryGrow) {
   // {delta_pages} is checked to be a positive smi in the WasmMemoryGrow builtin
   // which calls this runtime function.
   uint32_t delta_pages = args.positive_smi_value_at(1);
+  // TODO(13918): Support multiple memories.
+  uint32_t memory_index = 0;
 
-  int ret = WasmMemoryObject::Grow(
-      isolate, handle(instance.memory_object(), isolate), delta_pages);
+  Handle<WasmMemoryObject> memory_object{instance.memory_object(memory_index),
+                                         isolate};
+  int ret = WasmMemoryObject::Grow(isolate, memory_object, delta_pages);
   // The WasmMemoryGrow builtin which calls this runtime function expects us to
   // always return a Smi.
   DCHECK(!isolate->has_pending_exception());
@@ -320,11 +372,10 @@ void ReplaceWrapper(Isolate* isolate, Handle<WasmInstanceObject> instance,
 
 RUNTIME_FUNCTION(Runtime_WasmCompileWrapper) {
   HandleScope scope(isolate);
-  DCHECK_EQ(2, args.length());
-  Handle<WasmInstanceObject> instance(WasmInstanceObject::cast(args[0]),
-                                      isolate);
+  DCHECK_EQ(1, args.length());
   Handle<WasmExportedFunctionData> function_data(
-      WasmExportedFunctionData::cast(args[1]), isolate);
+      WasmExportedFunctionData::cast(args[0]), isolate);
+  Handle<WasmInstanceObject> instance(function_data->instance(), isolate);
   DCHECK(isolate->context().is_null());
   isolate->set_context(instance->native_context());
 
@@ -413,8 +464,11 @@ RUNTIME_FUNCTION(Runtime_WasmAtomicNotify) {
   double offset_double = args.number_value_at(1);
   uintptr_t offset = static_cast<uintptr_t>(offset_double);
   uint32_t count = NumberToUint32(args[2]);
-  Handle<JSArrayBuffer> array_buffer{instance.memory_object().array_buffer(),
-                                     isolate};
+  // TODO(13918): Support multiple memories.
+  uint32_t memory_index = 0;
+
+  Handle<JSArrayBuffer> array_buffer{
+      instance.memory_object(memory_index).array_buffer(), isolate};
   // Should have trapped if address was OOB.
   DCHECK_LT(offset, array_buffer->byte_length());
   if (!array_buffer->is_shared()) return Smi::FromInt(0);
@@ -430,9 +484,11 @@ RUNTIME_FUNCTION(Runtime_WasmI32AtomicWait) {
   uintptr_t offset = static_cast<uintptr_t>(offset_double);
   int32_t expected_value = NumberToInt32(args[2]);
   BigInt timeout_ns = BigInt::cast(args[3]);
+  // TODO(13918): Support multiple memories.
+  uint32_t memory_index = 0;
 
-  Handle<JSArrayBuffer> array_buffer{instance.memory_object().array_buffer(),
-                                     isolate};
+  Handle<JSArrayBuffer> array_buffer{
+      instance.memory_object(memory_index).array_buffer(), isolate};
   // Should have trapped if address was OOB.
   DCHECK_LT(offset, array_buffer->byte_length());
 
@@ -455,9 +511,11 @@ RUNTIME_FUNCTION(Runtime_WasmI64AtomicWait) {
   uintptr_t offset = static_cast<uintptr_t>(offset_double);
   BigInt expected_value = BigInt::cast(args[2]);
   BigInt timeout_ns = BigInt::cast(args[3]);
+  // TODO(13918): Support multiple memories.
+  uint32_t memory_index = 0;
 
-  Handle<JSArrayBuffer> array_buffer{instance.memory_object().array_buffer(),
-                                     isolate};
+  Handle<JSArrayBuffer> array_buffer{
+      instance.memory_object(memory_index).array_buffer(), isolate};
   // Should have trapped if address was OOB.
   DCHECK_LT(offset, array_buffer->byte_length());
 
@@ -994,26 +1052,6 @@ RUNTIME_FUNCTION(Runtime_WasmSyncStackLimit) {
   CHECK(v8_flags.experimental_wasm_stack_switching);
   SyncStackLimit(isolate);
   return ReadOnlyRoots(isolate).undefined_value();
-}
-
-// Takes a promise and a suspender, and returns
-// promise.then(suspender.resume(), suspender.reject());
-RUNTIME_FUNCTION(Runtime_WasmCreateResumePromise) {
-  CHECK(v8_flags.experimental_wasm_stack_switching);
-  HandleScope scope(isolate);
-  Handle<Object> promise(args[0], isolate);
-  WasmSuspenderObject suspender = WasmSuspenderObject::cast(args[1]);
-
-  i::Handle<i::Object> argv[] = {handle(suspender.resume(), isolate),
-                                 handle(suspender.reject(), isolate)};
-  i::Handle<i::Object> result;
-  bool has_pending_exception =
-      !i::Execution::CallBuiltin(isolate, isolate->promise_then(), promise,
-                                 arraysize(argv), argv)
-           .ToHandle(&result);
-  // TODO(thibaudm): Propagate exception.
-  CHECK(!has_pending_exception);
-  return *result;
 }
 
 #define RETURN_RESULT_OR_TRAP(call)                                            \

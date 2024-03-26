@@ -39,9 +39,7 @@
 #include "test/common/value-helper.h"
 #include "test/common/wasm/flag-utils.h"
 
-namespace v8 {
-namespace internal {
-namespace wasm {
+namespace v8::internal::wasm {
 
 enum class TestExecutionTier : int8_t {
   kLiftoff = static_cast<int8_t>(ExecutionTier::kLiftoff),
@@ -104,16 +102,18 @@ class TestingModuleBuilder {
  public:
   TestingModuleBuilder(Zone*, ModuleOrigin origin, ManuallyImportedJSFunction*,
                        TestExecutionTier, RuntimeExceptionSupport,
-                       TestingModuleMemoryType, Isolate* isolate);
+                       Isolate* isolate);
   ~TestingModuleBuilder();
 
-  uint8_t* AddMemory(uint32_t size, SharedFlag shared = SharedFlag::kNotShared);
+  uint8_t* AddMemory(uint32_t size, SharedFlag shared = SharedFlag::kNotShared,
+                     TestingModuleMemoryType = kMemory32);
 
   size_t CodeTableLength() const { return native_module_->num_functions(); }
 
   template <typename T>
-  T* AddMemoryElems(uint32_t count) {
-    AddMemory(count * sizeof(T));
+  T* AddMemoryElems(uint32_t count,
+                    TestingModuleMemoryType mem_type = kMemory32) {
+    AddMemory(count * sizeof(T), SharedFlag::kNotShared, mem_type);
     return raw_mem_start<T>();
   }
 
@@ -123,7 +123,7 @@ class TestingModuleBuilder {
     return reinterpret_cast<T*>(globals_data_ + global->offset);
   }
 
-  // TODO(7748): Allow selecting type finality.
+  // TODO(14034): Allow selecting type finality.
   uint8_t AddSignature(const FunctionSig* sig) {
     test_module_->add_signature(sig, kNoSuperType, v8_flags.wasm_final_types);
     GetTypeCanonicalizer()->AddRecursiveGroup(test_module_.get(), 1);
@@ -134,29 +134,30 @@ class TestingModuleBuilder {
     return static_cast<uint8_t>(size - 1);
   }
 
-  uint32_t mem_size() { return mem_size_; }
+  // TODO(13918): Fix the following APIs for multi-memory.
+  uint32_t mem_size() { return mem0_size_; }
 
   template <typename T>
   T* raw_mem_start() {
-    DCHECK(mem_start_);
-    return reinterpret_cast<T*>(mem_start_);
+    DCHECK_NOT_NULL(mem0_start_);
+    return reinterpret_cast<T*>(mem0_start_);
   }
 
   template <typename T>
   T* raw_mem_end() {
-    DCHECK(mem_start_);
-    return reinterpret_cast<T*>(mem_start_ + mem_size_);
+    DCHECK_NOT_NULL(mem0_start_);
+    return reinterpret_cast<T*>(mem0_start_ + mem0_size_);
   }
 
   template <typename T>
   T raw_mem_at(int i) {
-    DCHECK(mem_start_);
-    return ReadMemory(&(reinterpret_cast<T*>(mem_start_)[i]));
+    DCHECK_NOT_NULL(mem0_start_);
+    return ReadMemory(&(reinterpret_cast<T*>(mem0_start_)[i]));
   }
 
   template <typename T>
   T raw_val_at(int i) {
-    return ReadMemory(reinterpret_cast<T*>(mem_start_ + i));
+    return ReadMemory(reinterpret_cast<T*>(mem0_start_ + i));
   }
 
   template <typename T>
@@ -172,7 +173,7 @@ class TestingModuleBuilder {
   // Zero-initialize the memory.
   void BlankMemory() {
     uint8_t* raw = raw_mem_start<uint8_t>();
-    memset(raw, 0, mem_size_);
+    memset(raw, 0, mem0_size_);
   }
 
   // Pseudo-randomly initialize the memory.
@@ -185,13 +186,19 @@ class TestingModuleBuilder {
   }
 
   void SetMaxMemPages(uint32_t maximum_pages) {
-    test_module_->maximum_pages = maximum_pages;
-    if (instance_object()->has_memory_object()) {
-      instance_object()->memory_object().set_maximum_pages(maximum_pages);
-    }
+    // TODO(13918): Adapt this for multi-memory.
+    DCHECK_EQ(1, test_module_->memories.size());
+    test_module_->memories[0].maximum_pages = maximum_pages;
+    DCHECK_EQ(instance_object_->memory_objects().length(),
+              test_module_->memories.size());
+    instance_object_->memory_object(0).set_maximum_pages(maximum_pages);
   }
 
-  void SetHasSharedMemory() { test_module_->has_shared_memory = true; }
+  void SetMemoryShared() {
+    // TODO(13918): Adapt this for multi-memory.
+    DCHECK_EQ(1, test_module_->memories.size());
+    test_module_->memories[0].is_shared = true;
+  }
 
   enum FunctionType { kImport, kWasm };
   uint32_t AddFunction(const FunctionSig* sig, const char* name,
@@ -273,8 +280,9 @@ class TestingModuleBuilder {
   Isolate* isolate_;
   WasmFeatures enabled_features_;
   uint32_t global_offset = 0;
-  uint8_t* mem_start_ = nullptr;
-  uint32_t mem_size_ = 0;
+  // TODO(13918): Adapt for multi-memory.
+  uint8_t* mem0_start_ = nullptr;
+  uint32_t mem0_size_ = 0;
   uint8_t* globals_data_ = nullptr;
   TestExecutionTier execution_tier_;
   Handle<WasmInstanceObject> instance_object_;
@@ -398,12 +406,11 @@ class WasmRunnerBase : public InitializedHandleScope {
                  TestExecutionTier execution_tier, int num_params,
                  RuntimeExceptionSupport runtime_exception_support =
                      kNoRuntimeExceptionSupport,
-                 TestingModuleMemoryType mem_type = kMemory32,
                  Isolate* isolate = nullptr)
       : InitializedHandleScope(isolate),
         zone_(&allocator_, ZONE_NAME, kCompressGraphZone),
         builder_(&zone_, origin, maybe_import, execution_tier,
-                 runtime_exception_support, mem_type, isolate),
+                 runtime_exception_support, isolate),
         wrapper_(&zone_, num_params) {}
 
   static void SetUpTrapCallback() {
@@ -563,11 +570,10 @@ class WasmRunner : public WasmRunnerBase {
                       const char* main_fn_name = "main",
                       RuntimeExceptionSupport runtime_exception_support =
                           kNoRuntimeExceptionSupport,
-                      TestingModuleMemoryType mem_type = kMemory32,
                       Isolate* isolate = nullptr)
       : WasmRunnerBase(maybe_import, origin, execution_tier,
                        sizeof...(ParamTypes), runtime_exception_support,
-                       mem_type, isolate) {
+                       isolate) {
     WasmFunctionCompiler& main_fn =
         NewFunction<ReturnType, ParamTypes...>(main_fn_name);
     // Non-zero if there is an import.
@@ -648,8 +654,6 @@ class WasmRunner : public WasmRunnerBase {
   TEST(RunWasmLiftoff_##name) { RunWasm_##name(TestExecutionTier::kLiftoff); } \
   void RunWasm_##name(TestExecutionTier execution_tier)
 
-}  // namespace wasm
-}  // namespace internal
-}  // namespace v8
+}  // namespace v8::internal::wasm
 
 #endif

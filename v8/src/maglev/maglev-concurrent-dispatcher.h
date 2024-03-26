@@ -56,7 +56,9 @@ class MaglevCompilationJob final : public OptimizedCompilationJob {
   Status FinalizeJobImpl(Isolate* isolate) override;
 
   Handle<JSFunction> function() const;
+  MaybeHandle<Code> code() const;
   BytecodeOffset osr_offset() const;
+  bool is_osr() const;
 
   bool specialize_to_function_context() const;
 
@@ -94,6 +96,8 @@ class V8_EXPORT_PRIVATE MaglevConcurrentDispatcher final {
   void FinalizeFinishedJobs();
 
   void AwaitCompileJobs();
+
+  void Flush(BlockingBehavior blocking_behavior);
 
   bool is_enabled() const { return static_cast<bool>(job_handle_); }
 

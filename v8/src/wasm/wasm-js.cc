@@ -151,15 +151,16 @@ std::shared_ptr<WasmStreaming> WasmStreaming::Unpack(Isolate* isolate,
 
 namespace {
 
-#define ASSIGN(type, var, expr)                      \
-  Local<type> var;                                   \
-  do {                                               \
-    if (!expr.ToLocal(&var)) {                       \
-      DCHECK(i_isolate->has_scheduled_exception());  \
-      return;                                        \
-    } else {                                         \
-      DCHECK(!i_isolate->has_scheduled_exception()); \
-    }                                                \
+#define ASSIGN(type, var, expr)                          \
+  Local<type> var;                                       \
+  do {                                                   \
+    if (!expr.ToLocal(&var)) {                           \
+      DCHECK(i_isolate->has_scheduled_exception());      \
+      return;                                            \
+    } else {                                             \
+      if (i_isolate->is_execution_terminating()) return; \
+      DCHECK(!i_isolate->has_scheduled_exception());     \
+    }                                                    \
   } while (false)
 
 i::Handle<i::String> v8_str(i::Isolate* isolate, const char* str) {
@@ -516,7 +517,7 @@ void WebAssemblyCompile(const v8::FunctionCallbackInfo<v8::Value>& info) {
   HandleScope scope(isolate);
   ScheduledErrorThrower thrower(i_isolate, kAPIMethodName);
 
-  i::Handle<i::Context> native_context = i_isolate->native_context();
+  i::Handle<i::NativeContext> native_context = i_isolate->native_context();
   if (!i::wasm::IsWasmCodegenAllowed(i_isolate, native_context)) {
     i::Handle<i::String> error =
         i::wasm::ErrorStringForCodegen(i_isolate, native_context);
@@ -600,7 +601,7 @@ void WebAssemblyCompileStreaming(
   auto resolver = std::make_shared<AsyncCompilationResolver>(isolate, context,
                                                              promise_resolver);
 
-  i::Handle<i::Context> native_context = i_isolate->native_context();
+  i::Handle<i::NativeContext> native_context = i_isolate->native_context();
   if (!i::wasm::IsWasmCodegenAllowed(i_isolate, native_context)) {
     i::Handle<i::String> error =
         i::wasm::ErrorStringForCodegen(i_isolate, native_context);
@@ -715,7 +716,7 @@ void WebAssemblyModule(const v8::FunctionCallbackInfo<v8::Value>& info) {
     thrower.TypeError("WebAssembly.Module must be invoked with 'new'");
     return;
   }
-  i::Handle<i::Context> native_context = i_isolate->native_context();
+  i::Handle<i::NativeContext> native_context = i_isolate->native_context();
   if (!i::wasm::IsWasmCodegenAllowed(i_isolate, native_context)) {
     i::Handle<i::String> error =
         i::wasm::ErrorStringForCodegen(i_isolate, native_context);
@@ -909,7 +910,7 @@ void WebAssemblyInstantiateStreaming(
   std::unique_ptr<i::wasm::InstantiationResultResolver> resolver(
       new InstantiateModuleResultResolver(isolate, context, result_resolver));
 
-  i::Handle<i::Context> native_context = i_isolate->native_context();
+  i::Handle<i::NativeContext> native_context = i_isolate->native_context();
   if (!i::wasm::IsWasmCodegenAllowed(i_isolate, native_context)) {
     i::Handle<i::String> error =
         i::wasm::ErrorStringForCodegen(i_isolate, native_context);
@@ -1038,7 +1039,7 @@ void WebAssemblyInstantiate(const v8::FunctionCallbackInfo<v8::Value>& info) {
 
   // The first parameter is a buffer source, we have to check if we are allowed
   // to compile it.
-  i::Handle<i::Context> native_context = i_isolate->native_context();
+  i::Handle<i::NativeContext> native_context = i_isolate->native_context();
   if (!i::wasm::IsWasmCodegenAllowed(i_isolate, native_context)) {
     i::Handle<i::String> error =
         i::wasm::ErrorStringForCodegen(i_isolate, native_context);
@@ -1154,7 +1155,8 @@ i::Handle<i::Object> DefaultReferenceValue(i::Isolate* isolate,
   DCHECK(type.is_object_reference());
   // Use undefined for JS type (externref) but null for wasm types as wasm does
   // not know undefined.
-  if (type.heap_representation() == i::wasm::HeapType::kExtern) {
+  if (type.heap_representation() == i::wasm::HeapType::kExtern ||
+      type.heap_representation() == i::wasm::HeapType::kNoExtern) {
     return isolate->factory()->undefined_value();
   }
   return isolate->factory()->wasm_null();
@@ -1313,7 +1315,7 @@ void WebAssemblyMemory(const v8::FunctionCallbackInfo<v8::Value>& info) {
   Local<Context> context = isolate->GetCurrentContext();
   Local<v8::Object> descriptor = Local<Object>::Cast(info[0]);
 
-  // TODO(clemensb): The JS API spec is not updated for memory64 yet; fix this
+  // TODO(14076): The JS API spec is not updated for memory64 yet; fix this
   // code once it is.
   int64_t initial = 0;
   if (!GetInitialOrMinimumProperty(isolate, &thrower, context, descriptor,
@@ -1349,8 +1351,10 @@ void WebAssemblyMemory(const v8::FunctionCallbackInfo<v8::Value>& info) {
   }
 
   i::Handle<i::JSObject> memory_obj;
+  // TODO(14076): Pass {kWasmMemory64} for 64-bit memories.
   if (!i::WasmMemoryObject::New(i_isolate, static_cast<int>(initial),
-                                static_cast<int>(maximum), shared)
+                                static_cast<int>(maximum), shared,
+                                i::WasmMemoryFlag::kWasmMemory32)
            .ToHandle(&memory_obj)) {
     thrower.RangeError("could not allocate memory");
     return;
@@ -1586,18 +1590,22 @@ void WebAssemblyGlobal(const v8::FunctionCallbackInfo<v8::Value>& info) {
       V8_FALLTHROUGH;
     case i::wasm::kRefNull: {
       // We need the wasm default value {null} over {undefined}.
-      i::Handle<i::Object> value_handle =
-          (info.Length() < 2) ? i_isolate->factory()->null_value()
-                              : Utils::OpenHandle(*value);
-      const char* error_message;
-      // The JS API does not allow for indexed types.
-      // TODO(7748): Fix this if that changes.
-      DCHECK(!type.has_index());
-      if (!i::wasm::JSToWasmObject(i_isolate, value_handle, type,
-                                   &error_message)
-               .ToHandle(&value_handle)) {
-        thrower.TypeError("%s", error_message);
-        break;
+      i::Handle<i::Object> value_handle;
+      if (info.Length() < 2) {
+        value_handle = DefaultReferenceValue(i_isolate, type);
+      } else {
+        value_handle = Utils::OpenHandle(*value);
+        const char* error_message;
+        // While the JS API generally allows indexed types, it currently has
+        // no way to specify such types in `new WebAssembly.Global(...)`.
+        // TODO(14034): Fix this if that changes.
+        DCHECK(!type.has_index());
+        if (!i::wasm::JSToWasmObject(i_isolate, value_handle, type,
+                                     &error_message)
+                 .ToHandle(&value_handle)) {
+          thrower.TypeError("%s", error_message);
+          break;
+        }
       }
       global_obj->SetRef(value_handle);
       break;
@@ -1748,7 +1756,18 @@ void EncodeExceptionValues(v8::Isolate* isolate,
     thrower->TypeError("Exception values must be an iterable object");
     return;
   }
+  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
   auto values = arg.As<Object>();
+  uint32_t length = GetIterableLength(i_isolate, context, values);
+  if (length == i::kMaxUInt32) {
+    thrower->TypeError("Exception values argument has no length");
+    return;
+  }
+  if (length != static_cast<uint32_t>(signature->length())) {
+    thrower->TypeError(
+        "Number of exception values does not match signature length");
+    return;
+  }
   for (int i = 0; i < signature->length(); ++i) {
     MaybeLocal<Value> maybe_value = values->Get(context, i);
     i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
@@ -1783,28 +1802,18 @@ void EncodeExceptionValues(v8::Isolate* isolate,
         break;
       }
       case i::wasm::kRef:
-      case i::wasm::kRefNull:
-        switch (type.heap_representation()) {
-          case i::wasm::HeapType::kFunc:
-          case i::wasm::HeapType::kExtern:
-          case i::wasm::HeapType::kAny:
-          case i::wasm::HeapType::kEq:
-          case i::wasm::HeapType::kI31:
-          case i::wasm::HeapType::kStruct:
-          case i::wasm::HeapType::kArray:
-          case i::wasm::HeapType::kString:
-          case i::wasm::HeapType::kStringViewWtf8:
-          case i::wasm::HeapType::kStringViewWtf16:
-          case i::wasm::HeapType::kStringViewIter:
-            values_out->set(index++, *Utils::OpenHandle(*value));
-            break;
-          case internal::wasm::HeapType::kBottom:
-            UNREACHABLE();
-          default:
-            // TODO(7748): Add support for custom struct/array types.
-            UNIMPLEMENTED();
+      case i::wasm::kRefNull: {
+        const char* error_message;
+        i::Handle<i::Object> value_handle = Utils::OpenHandle(*value);
+        if (!internal::wasm::JSToWasmObject(i_isolate, value_handle, type,
+                                            &error_message)
+                 .ToHandle(&value_handle)) {
+          thrower->TypeError("%s", error_message);
+          return;
         }
+        values_out->set(index++, *value_handle);
         break;
+      }
       case i::wasm::kRtt:
       case i::wasm::kI8:
       case i::wasm::kI16:
@@ -2131,7 +2140,7 @@ void WebAssemblyFunction(const v8::FunctionCallbackInfo<v8::Value>& info) {
         instance->module_object().native_module()->enabled_features().has_gc();
     if (has_gc) {
       int sig_index = instance->module()->functions[func_index].sig_index;
-      // TODO(7748): Create funcref RTTs lazily?
+      // TODO(14034): Create funcref RTTs lazily?
       rtt = handle(i::Map::cast(instance->managed_object_maps().get(sig_index)),
                    i_isolate);
     } else {
@@ -2281,7 +2290,7 @@ void WebAssemblyTableGrow(const v8::FunctionCallbackInfo<v8::Value>& info) {
 
   i::Handle<i::Object> init_value;
 
-  if (info.Length() >= 2 && !info[1]->IsUndefined()) {
+  if (info.Length() >= 2) {
     init_value = Utils::OpenHandle(*info[1]);
     const char* error_message;
     if (!i::WasmTableObject::JSToWasmElement(i_isolate, receiver, init_value,
@@ -2313,13 +2322,20 @@ void WasmObjectToJSReturnValue(v8::ReturnValue<v8::Value>& return_value,
                                i::Handle<i::Object> value,
                                i::wasm::HeapType type, i::Isolate* isolate,
                                ScheduledErrorThrower* thrower) {
-  const char* error_message = nullptr;
-  i::MaybeHandle<i::Object> maybe_result =
-      i::wasm::WasmToJSObject(isolate, value, type, &error_message);
-  if (maybe_result.is_null()) {
-    thrower->TypeError("%s", error_message);
-  } else {
-    return_value.Set(Utils::ToLocal(maybe_result.ToHandleChecked()));
+  switch (type.representation()) {
+    case internal::wasm::HeapType::kStringViewWtf8:
+      thrower->TypeError("%s", "stringview_wtf8 has no JS representation");
+      break;
+    case internal::wasm::HeapType::kStringViewWtf16:
+      thrower->TypeError("%s", "stringview_wtf16 has no JS representation");
+      break;
+    case internal::wasm::HeapType::kStringViewIter:
+      thrower->TypeError("%s", "stringview_iter has no JS representation");
+      break;
+    default: {
+      return_value.Set(Utils::ToLocal(i::wasm::WasmToJSObject(isolate, value)));
+      break;
+    }
   }
 }
 }  // namespace
@@ -2342,19 +2358,6 @@ void WebAssemblyTableGet(const v8::FunctionCallbackInfo<v8::Value>& info) {
     thrower.RangeError("invalid index %u into %s table of size %d", index,
                        receiver->type().name().c_str(),
                        receiver->current_length());
-    return;
-  }
-
-  if (receiver->type() == i::wasm::kWasmStringViewWtf8) {
-    thrower.TypeError("stringview_wtf8 has no JS representation");
-    return;
-  }
-  if (receiver->type() == i::wasm::kWasmStringViewWtf16) {
-    thrower.TypeError("stringview_wtf16 has no JS representation");
-    return;
-  }
-  if (receiver->type() == i::wasm::kWasmStringViewIter) {
-    thrower.TypeError("stringview_iter has no JS representation");
     return;
   }
 
@@ -2591,26 +2594,7 @@ void WebAssemblyExceptionGetArg(
         break;
       case i::wasm::kRef:
       case i::wasm::kRefNull:
-        switch (signature.get(i).heap_representation()) {
-          case i::wasm::HeapType::kFunc:
-          case i::wasm::HeapType::kExtern:
-          case i::wasm::HeapType::kAny:
-          case i::wasm::HeapType::kEq:
-          case i::wasm::HeapType::kI31:
-          case i::wasm::HeapType::kStruct:
-          case i::wasm::HeapType::kArray:
-          case i::wasm::HeapType::kString:
-          case i::wasm::HeapType::kStringViewWtf8:
-          case i::wasm::HeapType::kStringViewWtf16:
-          case i::wasm::HeapType::kStringViewIter:
-            decode_index++;
-            break;
-          case i::wasm::HeapType::kBottom:
-            UNREACHABLE();
-          default:
-            // TODO(7748): Add support for custom struct/array types.
-            UNIMPLEMENTED();
-        }
+        decode_index++;
         break;
       case i::wasm::kRtt:
       case i::wasm::kI8:
@@ -2653,30 +2637,13 @@ void WebAssemblyExceptionGetArg(
       break;
     }
     case i::wasm::kRef:
-    case i::wasm::kRefNull:
-      switch (signature.get(index).heap_representation()) {
-        case i::wasm::HeapType::kFunc:
-        case i::wasm::HeapType::kExtern:
-        case i::wasm::HeapType::kAny:
-        case i::wasm::HeapType::kEq:
-        case i::wasm::HeapType::kI31:
-        case i::wasm::HeapType::kArray:
-        case i::wasm::HeapType::kStruct:
-        case i::wasm::HeapType::kString:
-        case i::wasm::HeapType::kStringViewWtf8:
-        case i::wasm::HeapType::kStringViewWtf16:
-        case i::wasm::HeapType::kStringViewIter: {
-          auto obj = values->get(decode_index);
-          result = Utils::ToLocal(i::Handle<i::Object>(obj, i_isolate));
-          break;
-        }
-        case i::wasm::HeapType::kBottom:
-          UNREACHABLE();
-        default:
-          // TODO(7748): Add support for custom struct/array types.
-          UNIMPLEMENTED();
-      }
-      break;
+    case i::wasm::kRefNull: {
+      i::Handle<i::Object> obj = handle(values->get(decode_index), i_isolate);
+      ReturnValue<Value> return_value = info.GetReturnValue();
+      return WasmObjectToJSReturnValue(return_value, obj,
+                                       signature.get(index).heap_type(),
+                                       i_isolate, &thrower);
+    }
     case i::wasm::kRtt:
     case i::wasm::kI8:
     case i::wasm::kI16:

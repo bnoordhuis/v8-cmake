@@ -400,9 +400,10 @@ class WasmOutOfLineTrap : public OutOfLineCode {
   WasmOutOfLineTrap(CodeGenerator* gen, Instruction* instr)
       : OutOfLineCode(gen), gen_(gen), instr_(instr) {}
   void Generate() override {
-    auto [trap_id, frame_state_offset] =
-        gen_->DecodeTrapIdAndFrameStateOffset<Arm64OperandConverter>(instr_);
-    GenerateCallToTrap(trap_id, frame_state_offset);
+    Arm64OperandConverter i(gen_, instr_);
+    TrapId trap_id =
+        static_cast<TrapId>(i.InputInt32(instr_->InputCount() - 1));
+    GenerateCallToTrap(trap_id);
   }
 
  protected:
@@ -411,7 +412,7 @@ class WasmOutOfLineTrap : public OutOfLineCode {
   void GenerateWithTrapId(TrapId trap_id) { GenerateCallToTrap(trap_id); }
 
  private:
-  void GenerateCallToTrap(TrapId trap_id, size_t frame_state_offset = 0) {
+  void GenerateCallToTrap(TrapId trap_id) {
     if (!gen_->wasm_runtime_exception_support()) {
       // We cannot test calls to the runtime in cctest/test-run-wasm.
       // Therefore we emit a call to C here instead of a call to the runtime.
@@ -425,26 +426,10 @@ class WasmOutOfLineTrap : public OutOfLineCode {
       __ Ret();
     } else {
       gen_->AssembleSourcePosition(instr_);
-      // A direct call to a wasm runtime stub defined in this module.
-      // Just encode the stub index. This will be patched when the code
-      // is added to the native module and copied into wasm code space.
-      if (gen_->IsWasm() || gen_->isolate()->is_short_builtin_calls_enabled()) {
-        __ Call(static_cast<Address>(trap_id), RelocInfo::WASM_STUB_CALL);
-      } else {
-        // For wasm traps inlined into JavaScript force indirect call if pointer
-        // compression is disabled as it can't be guaranteed that the built-in's
-        // address is close enough for a near call.
-        __ IndirectCall(static_cast<Address>(trap_id),
-                        RelocInfo::WASM_STUB_CALL);
-      }
+      __ Call(static_cast<Address>(trap_id), RelocInfo::WASM_STUB_CALL);
       ReferenceMap* reference_map =
           gen_->zone()->New<ReferenceMap>(gen_->zone());
       gen_->RecordSafepoint(reference_map);
-      // If we have a frame state, the offset is not 0.
-      if (frame_state_offset != 0) {
-        gen_->BuildTranslation(instr_, masm()->pc_offset(), frame_state_offset,
-                               0, OutputFrameStateCombine::Ignore());
-      }
       __ AssertUnreachable(AbortReason::kUnexpectedReturnFromWasmTrap);
     }
   }
@@ -2809,11 +2794,6 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ Movi(i.OutputSimd128Register().V16B(), imm2, imm1);
       break;
     }
-    case kArm64S128Zero: {
-      VRegister dst = i.OutputSimd128Register().V16B();
-      __ Eor(dst, dst, dst);
-      break;
-    }
       SIMD_BINOP_CASE(kArm64S128And, And, 16B);
       SIMD_BINOP_CASE(kArm64S128Or, Orr, 16B);
       SIMD_BINOP_CASE(kArm64S128Xor, Eor, 16B);
@@ -3166,17 +3146,11 @@ void CodeGenerator::AssembleArchSelect(Instruction* instr,
     __ Fcsel(i.OutputFloat32Register(),
              i.InputFloat32Register(true_value_index),
              i.InputFloat32Register(false_value_index), cc);
-  } else if (rep == MachineRepresentation::kFloat64) {
+  } else {
+    DCHECK_EQ(rep, MachineRepresentation::kFloat64);
     __ Fcsel(i.OutputFloat64Register(),
              i.InputFloat64Register(true_value_index),
              i.InputFloat64Register(false_value_index), cc);
-  } else if (rep == MachineRepresentation::kWord32) {
-    __ Csel(i.OutputRegister32(), i.InputRegister32(true_value_index),
-            i.InputRegister32(false_value_index), cc);
-  } else {
-    DCHECK_EQ(rep, MachineRepresentation::kWord64);
-    __ Csel(i.OutputRegister64(), i.InputRegister64(true_value_index),
-            i.InputRegister64(false_value_index), cc);
   }
 }
 

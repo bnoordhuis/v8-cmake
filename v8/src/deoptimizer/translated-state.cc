@@ -656,13 +656,6 @@ Handle<Object> TranslatedValue::GetValue() {
     //    pass the verifier.
     container_->EnsureObjectAllocatedAt(this);
 
-    // Finish any sweeping so that it becomes safe to overwrite the ByteArray
-    // headers.
-    // TODO(hpayer): Find a cleaner way to support a group of
-    // non-fully-initialized objects.
-    isolate()->heap()->EnsureSweepingCompleted(
-        Heap::SweepingForcedFinalizationMode::kV8Only);
-
     // 2. Initialize the objects. If we have allocated only byte arrays
     //    for some objects, we now overwrite the byte arrays with the
     //    correct object fields. Note that this phase does not allocate
@@ -1948,7 +1941,7 @@ void TranslatedState::EnsureCapturedObjectAllocatedAt(
       CHECK_EQ(instance_size, slot->GetChildrenCount() * kTaggedSize);
 
       // Canonicalize empty fixed array.
-      if (*map == ReadOnlyRoots(isolate()).empty_fixed_array().map() &&
+      if (*map == ReadOnlyRoots(isolate()).empty_fixed_array()->map() &&
           array_length == 0) {
         slot->set_storage(isolate()->factory()->empty_fixed_array());
       } else {
@@ -2080,8 +2073,8 @@ void TranslatedState::EnsurePropertiesAllocatedAndMarked(
   properties_slot->set_storage(object_storage);
 
   DisallowGarbageCollection no_gc;
-  auto raw_map = *map;
-  auto raw_object_storage = *object_storage;
+  Tagged<Map> raw_map = *map;
+  Tagged<ByteArray> raw_object_storage = *object_storage;
 
   // Set markers for out-of-object properties.
   DescriptorArray descriptors = map->instance_descriptors(isolate());
@@ -2092,7 +2085,7 @@ void TranslatedState::EnsurePropertiesAllocatedAndMarked(
         (representation.IsDouble() || representation.IsHeapObject())) {
       int outobject_index = index.outobject_array_index();
       int array_index = outobject_index * kTaggedSize;
-      raw_object_storage.set(array_index, kStoreHeapObject);
+      raw_object_storage->set(array_index, kStoreHeapObject);
     }
   }
 }
@@ -2105,9 +2098,9 @@ Handle<ByteArray> TranslatedState::AllocateStorageFor(TranslatedValue* slot) {
   Handle<ByteArray> object_storage =
       isolate()->factory()->NewByteArray(allocate_size, AllocationType::kOld);
   DisallowGarbageCollection no_gc;
-  auto raw_object_storage = *object_storage;
+  Tagged<ByteArray> raw_object_storage = *object_storage;
   for (int i = 0; i < object_storage->length(); i++) {
-    raw_object_storage.set(i, kStoreTagged);
+    raw_object_storage->set(i, kStoreTagged);
   }
   return object_storage;
 }
@@ -2121,19 +2114,19 @@ void TranslatedState::EnsureJSObjectAllocated(TranslatedValue* slot,
 
   // Now we handle the interesting (JSObject) case.
   DisallowGarbageCollection no_gc;
-  auto raw_map = *map;
-  auto raw_object_storage = *object_storage;
+  Tagged<Map> raw_map = *map;
+  Tagged<ByteArray> raw_object_storage = *object_storage;
   DescriptorArray descriptors = map->instance_descriptors(isolate());
 
   // Set markers for in-object properties.
-  for (InternalIndex i : raw_map.IterateOwnDescriptors()) {
+  for (InternalIndex i : raw_map->IterateOwnDescriptors()) {
     FieldIndex index = FieldIndex::ForDescriptor(raw_map, i);
     Representation representation = descriptors.GetDetails(i).representation();
     if (index.is_inobject() &&
         (representation.IsDouble() || representation.IsHeapObject())) {
       CHECK_GE(index.index(), FixedArray::kHeaderSize / kTaggedSize);
       int array_index = index.index() * kTaggedSize - FixedArray::kHeaderSize;
-      raw_object_storage.set(array_index, kStoreHeapObject);
+      raw_object_storage->set(array_index, kStoreHeapObject);
     }
   }
   slot->set_storage(object_storage);
@@ -2185,6 +2178,10 @@ void TranslatedState::InitializeJSObjectAt(
   // Notify the concurrent marker about the layout change.
   isolate()->heap()->NotifyObjectLayoutChange(*object_storage, no_gc,
                                               InvalidateRecordedSlots::kNo);
+
+  // Finish any sweeping so that it becomes safe to overwrite the ByteArray
+  // headers. See chromium:1228036.
+  isolate()->heap()->EnsureSweepingCompletedForObject(*object_storage);
 
   // Fill the property array field.
   {
@@ -2247,6 +2244,10 @@ void TranslatedState::InitializeObjectWithTaggedFieldsAt(
   // Notify the concurrent marker about the layout change.
   isolate()->heap()->NotifyObjectLayoutChange(*object_storage, no_gc,
                                               InvalidateRecordedSlots::kNo);
+
+  // Finish any sweeping so that it becomes safe to overwrite the ByteArray
+  // headers. See chromium:1228036.
+  isolate()->heap()->EnsureSweepingCompletedForObject(*object_storage);
 
   // Write the fields to the object.
   for (int i = 1; i < children_count; i++) {

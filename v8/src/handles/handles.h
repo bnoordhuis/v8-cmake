@@ -94,22 +94,6 @@ class HandleBase {
 template <typename T>
 class Handle final : public HandleBase {
  public:
-  // {ObjectRef} is returned by {Handle::operator->}. It should never be stored
-  // anywhere or used in any other code; no one should ever have to spell out
-  // {ObjectRef} in code. Its only purpose is to be dereferenced immediately by
-  // "operator-> chaining". Returning the address of the field is valid because
-  // this objects lifetime only ends at the end of the full statement.
-  class ObjectRef {
-   public:
-    T* operator->() { return &object_; }
-
-   private:
-    friend class Handle<T>;
-    explicit ObjectRef(T object) : object_(object) {}
-
-    T object_;
-  };
-
   V8_INLINE Handle() : HandleBase(nullptr) {
     // Skip static type check in order to allow Handle<XXX>::null() as default
     // parameter values in non-inl header files without requiring full
@@ -123,12 +107,12 @@ class Handle final : public HandleBase {
     // TODO(jkummerow): Runtime type check here as a SLOW_DCHECK?
   }
 
-  V8_INLINE Handle(T object, Isolate* isolate);
-  V8_INLINE Handle(T object, LocalIsolate* isolate);
-  V8_INLINE Handle(T object, LocalHeap* local_heap);
+  V8_INLINE Handle(Tagged<T> object, Isolate* isolate);
+  V8_INLINE Handle(Tagged<T> object, LocalIsolate* isolate);
+  V8_INLINE Handle(Tagged<T> object, LocalHeap* local_heap);
 
   // Allocate a new handle for the object.
-  V8_INLINE static Handle<T> New(T object, Isolate* isolate);
+  V8_INLINE static Handle<T> New(Tagged<T> object, Isolate* isolate);
 
   // Constructor for handling automatic up casting.
   // Ex. Handle<JSFunction> can be passed when Handle<Object> is expected.
@@ -136,13 +120,14 @@ class Handle final : public HandleBase {
                             std::is_convertible<S*, T*>::value>::type>
   V8_INLINE Handle(Handle<S> handle) : HandleBase(handle) {}
 
-  V8_INLINE ObjectRef operator->() const { return ObjectRef{**this}; }
+  V8_INLINE Tagged<T> operator->() const { return **this; }
 
-  V8_INLINE T operator*() const {
-    // unchecked_cast because we rather trust Handle<T> to contain a T than
-    // include all the respective -inl.h headers for SLOW_DCHECKs.
+  V8_INLINE Tagged<T> operator*() const {
+    // Direct construction of Tagged from address, without a type check, because
+    // we rather trust Handle<T> to contain a T than include all the respective
+    // -inl.h headers for SLOW_DCHECKs.
     SLOW_DCHECK(IsDereferenceAllowed());
-    return T::unchecked_cast(Object(*location()));
+    return Tagged<T>(*location());
   }
 
   template <typename S>
@@ -348,6 +333,21 @@ class DirectHandle final {
                   "static type violation");
   }
 
+  V8_INLINE explicit DirectHandle(Tagged<T> object);
+  V8_INLINE DirectHandle(Tagged<T> object, Isolate* isolate)
+      : DirectHandle(object) {}
+  V8_INLINE DirectHandle(Tagged<T> object, LocalIsolate* isolate)
+      : DirectHandle(object) {}
+  V8_INLINE DirectHandle(Tagged<T> object, LocalHeap* local_heap)
+      : DirectHandle(object) {}
+
+  V8_INLINE explicit DirectHandle(Address* address)
+      : obj_(address == nullptr ? kTaggedNullAddress : *address) {}
+
+  V8_INLINE static DirectHandle<T> New(Tagged<T> object, Isolate* isolate) {
+    return DirectHandle<T>(object);
+  }
+
   // Constructor for handling automatic up casting.
   // Ex. DirectHandle<JSFunction> can be passed when DirectHandle<Object> is
   // expected.
@@ -355,27 +355,33 @@ class DirectHandle final {
                             std::is_convertible<S*, T*>::value>::type>
   V8_INLINE DirectHandle(DirectHandle<S> handle) : obj_(handle.obj_) {}
 
-  V8_INLINE T operator->() const { return obj_; }
+  template <typename S, typename = typename std::enable_if<
+                            std::is_convertible<S*, T*>::value>::type>
+  V8_INLINE DirectHandle(Handle<S> handle)
+      : obj_(handle.location() != nullptr ? *handle.location()
+                                          : kTaggedNullAddress) {}
 
-  V8_INLINE T operator*() const {
+  V8_INLINE Tagged<T> operator->() const { return **this; }
+
+  V8_INLINE Tagged<T> operator*() const {
+    // Direct construction of Tagged from address, without a type check, because
+    // we rather trust Handle<T> to contain a T than include all the respective
+    // -inl.h headers for SLOW_DCHECKs.
     SLOW_DCHECK(IsDereferenceAllowed());
-    return T::unchecked_cast(Object(obj_));
+    return Tagged<T>(address());
   }
 
   template <typename S>
-  inline static const DirectHandle<T> cast(DirectHandle<S> that);
+  V8_INLINE static const DirectHandle<T> cast(DirectHandle<S> that);
+
+  template <typename S>
+  V8_INLINE static const DirectHandle<T> cast(Handle<S> that);
 
   // Consider declaring values that contain empty handles as
   // MaybeHandle to force validation before being used as handles.
-  static const DirectHandle<T> null() { return DirectHandle<T>(); }
+  V8_INLINE static const DirectHandle<T> null() { return DirectHandle<T>(); }
 
- protected:
-#ifdef DEBUG
-  bool V8_EXPORT_PRIVATE IsDereferenceAllowed() const;
-#else
-  V8_INLINE
-  bool V8_EXPORT_PRIVATE IsDereferenceAllowed() const { return true; }
-#endif  // DEBUG
+  V8_INLINE Address address() const { return obj_; }
 
  private:
   // DirectHandles of different classes are allowed to access each other's
@@ -386,15 +392,27 @@ class DirectHandle final {
   template <typename>
   friend class MaybeDirectHandle;
 
+#ifdef DEBUG
+  bool V8_EXPORT_PRIVATE IsDereferenceAllowed() const;
+#else
+  V8_INLINE
+  bool V8_EXPORT_PRIVATE IsDereferenceAllowed() const { return true; }
+#endif  // DEBUG
+
   // This is a direct pointer to either a tagged object or SMI. Design overview:
   // https://docs.google.com/document/d/1uRGYQM76vk1fc_aDqDH3pm2qhaJtnK2oyzeVng4cS6I/
-  T obj_;
+  Address obj_;
 };
 
 template <typename T>
 std::ostream& operator<<(std::ostream& os, DirectHandle<T> handle);
 
-#endif
+#else  // !V8_ENABLE_CONSERVATIVE_STACK_SCANNING
+
+template <typename T>
+using DirectHandle = Handle<T>;
+
+#endif  // V8_ENABLE_CONSERVATIVE_STACK_SCANNING
 
 }  // namespace internal
 }  // namespace v8

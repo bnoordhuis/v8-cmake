@@ -47,14 +47,13 @@ bool IsSameNan(double expected, double actual) {
 TestingModuleBuilder::TestingModuleBuilder(
     Zone* zone, ModuleOrigin origin, ManuallyImportedJSFunction* maybe_import,
     TestExecutionTier tier, RuntimeExceptionSupport exception_support,
-    TestingModuleMemoryType mem_type, Isolate* isolate)
+    Isolate* isolate)
     : test_module_(std::make_shared<WasmModule>(origin)),
       isolate_(isolate ? isolate : CcTest::InitIsolateOnce()),
       enabled_features_(WasmFeatures::FromIsolate(isolate_)),
       execution_tier_(tier),
       runtime_exception_support_(exception_support) {
   WasmJs::Install(isolate_, true);
-  test_module_->is_memory64 = mem_type == kMemory64;
   test_module_->untagged_globals_buffer_size = kMaxGlobalsSize;
   // The GlobalsData must be located inside the sandbox, so allocate it from the
   // ArrayBuffer allocator.
@@ -108,37 +107,54 @@ TestingModuleBuilder::~TestingModuleBuilder() {
   CcTest::array_buffer_allocator()->Free(globals_data_, kMaxGlobalsSize);
 }
 
-uint8_t* TestingModuleBuilder::AddMemory(uint32_t size, SharedFlag shared) {
-  CHECK(!test_module_->has_memory);
-  CHECK_NULL(mem_start_);
-  CHECK_EQ(0, mem_size_);
-  // TODO(13918): Support multiple memories.
-  DCHECK(!instance_object_->has_memory_object());
+uint8_t* TestingModuleBuilder::AddMemory(uint32_t size, SharedFlag shared,
+                                         TestingModuleMemoryType mem_type) {
+  // TODO(13918): Add support for multi-memory.
+  CHECK_EQ(0, test_module_->memories.size());
+  CHECK_NULL(mem0_start_);
+  CHECK_EQ(0, mem0_size_);
+  CHECK_EQ(0, instance_object_->memory_objects().length());
+
   uint32_t initial_pages = RoundUp(size, kWasmPageSize) / kWasmPageSize;
-  uint32_t maximum_pages = (test_module_->maximum_pages != 0)
-                               ? test_module_->maximum_pages
-                               : initial_pages;
-  test_module_->has_memory = true;
-  test_module_->min_memory_size = initial_pages * kWasmPageSize;
-  test_module_->max_memory_size = maximum_pages * kWasmPageSize;
+  uint32_t maximum_pages = initial_pages;
+  test_module_->memories.resize(1);
+  WasmMemory* memory = &test_module_->memories[0];
+  memory->initial_pages = initial_pages;
+  memory->maximum_pages = maximum_pages;
+  memory->is_memory64 = mem_type == kMemory64;
+  UpdateComputedInformation(memory, test_module_->origin);
 
   // Create the WasmMemoryObject.
   Handle<WasmMemoryObject> memory_object =
-      WasmMemoryObject::New(isolate_, initial_pages, maximum_pages, shared)
+      WasmMemoryObject::New(isolate_, initial_pages, maximum_pages, shared,
+                            mem_type == kMemory64
+                                ? WasmMemoryFlag::kWasmMemory64
+                                : WasmMemoryFlag::kWasmMemory32)
           .ToHandleChecked();
-  instance_object_->set_memory_object(*memory_object);
+  Handle<FixedArray> memory_objects = isolate_->factory()->NewFixedArray(1);
+  memory_objects->set(0, *memory_object);
+  instance_object_->set_memory_objects(*memory_objects);
 
-  mem_start_ =
+  // Create the memory_bases_and_sizes array.
+  Handle<FixedAddressArray> memory_bases_and_sizes =
+      FixedAddressArray::New(isolate_, 2);
+  uint8_t* mem_start =
       reinterpret_cast<uint8_t*>(memory_object->array_buffer().backing_store());
-  mem_size_ = size;
-  CHECK(size == 0 || mem_start_);
+  memory_bases_and_sizes->set_sandboxed_pointer(
+      0, reinterpret_cast<Address>(mem_start));
+  memory_bases_and_sizes->set(1, size);
+  instance_object_->set_memory_bases_and_sizes(*memory_bases_and_sizes);
 
-  WasmMemoryObject::AddInstance(isolate_, memory_object, instance_object_);
-  // TODO(wasm): Delete the following two lines when test-run-wasm will use a
+  mem0_start_ = mem_start;
+  mem0_size_ = size;
+  CHECK(size == 0 || mem0_start_);
+
+  WasmMemoryObject::UseInInstance(isolate_, memory_object, instance_object_, 0);
+  // TODO(wasm): Delete the following line when test-run-wasm will use a
   // multiple of kPageSize as memory size. At the moment, the effect of these
   // two lines is used to shrink the memory for testing purposes.
-  instance_object_->SetRawMemory(0, mem_start_, mem_size_);
-  return mem_start_;
+  instance_object_->SetRawMemory(0, mem0_start_, mem0_size_);
+  return mem0_start_;
 }
 
 uint32_t TestingModuleBuilder::AddFunction(const FunctionSig* sig,
@@ -305,7 +321,7 @@ uint32_t TestingModuleBuilder::AddPassiveDataSegment(
   // Add a passive data segment. This isn't used by function compilation, but
   // but it keeps the index in sync. The data segment's source will not be
   // correct, since we don't store data in the module wire bytes.
-  test_module_->data_segments.emplace_back();
+  test_module_->data_segments.push_back(WasmDataSegment::PassiveForTesting());
 
   // The num_declared_data_segments (from the DataCount section) is used
   // to validate the segment index, during function compilation.
@@ -346,8 +362,8 @@ uint32_t TestingModuleBuilder::AddPassiveDataSegment(
 }
 
 CompilationEnv TestingModuleBuilder::CreateCompilationEnv() {
-  return {test_module_.get(), native_module_->bounds_checks(),
-          runtime_exception_support_, enabled_features_, kNoDynamicTiering};
+  return {test_module_.get(), runtime_exception_support_, enabled_features_,
+          kNoDynamicTiering};
 }
 
 const WasmGlobal* TestingModuleBuilder::AddGlobal(ValueType type) {

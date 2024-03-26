@@ -767,6 +767,8 @@ void WasmCodeAllocator::FreeCode(base::Vector<WasmCode* const> codes) {
     code_size += code->instructions().size();
     freed_regions.Merge(base::AddressRegion{code->instruction_start(),
                                             code->instructions().size()});
+    ThreadIsolation::UnregisterWasmAllocation(code->instruction_start(),
+                                              code->instructions().size());
   }
   freed_code_size_.fetch_add(code_size);
 
@@ -803,17 +805,6 @@ size_t WasmCodeAllocator::GetNumCodeSpaces() const {
   return owned_code_space_.size();
 }
 
-namespace {
-BoundsCheckStrategy GetBoundsChecks(const WasmModule* module) {
-  if (!v8_flags.wasm_bounds_checks) return kNoBoundsChecks;
-  if (v8_flags.wasm_enforce_bounds_checks) return kExplicitBoundsChecks;
-  // We do not have trap handler support for memory64 yet.
-  if (module->is_memory64) return kExplicitBoundsChecks;
-  if (trap_handler::IsTrapHandlerEnabled()) return kTrapHandler;
-  return kExplicitBoundsChecks;
-}
-}  // namespace
-
 NativeModule::NativeModule(const WasmFeatures& enabled,
                            DynamicTiering dynamic_tiering,
                            VirtualMemory code_space,
@@ -826,8 +817,7 @@ NativeModule::NativeModule(const WasmFeatures& enabled,
       enabled_features_(enabled),
       module_(std::move(module)),
       import_wrapper_cache_(std::unique_ptr<WasmImportWrapperCache>(
-          new WasmImportWrapperCache())),
-      bounds_checks_(GetBoundsChecks(module_.get())) {
+          new WasmImportWrapperCache())) {
   DCHECK(engine_scope_);
   // We receive a pointer to an empty {std::shared_ptr}, and install ourselve
   // there.
@@ -901,7 +891,7 @@ void NativeModule::LogWasmCodes(Isolate* isolate, Script script) {
 }
 
 CompilationEnv NativeModule::CreateCompilationEnv() const {
-  return {module(), bounds_checks_, kRuntimeExceptionSupport, enabled_features_,
+  return {module(), kRuntimeExceptionSupport, enabled_features_,
           compilation_state()->dynamic_tiering()};
 }
 
@@ -945,6 +935,8 @@ WasmCode* NativeModule::AddCodeForTesting(Handle<Code> code) {
       code_allocator_.AllocateForCode(this, instructions.size());
   {
     CodeSpaceWriteScope write_scope;
+    ThreadIsolation::RegisterWasmAllocation(
+        reinterpret_cast<Address>(dst_code_bytes.begin()), instructions.size());
     memcpy(dst_code_bytes.begin(), instructions.begin(), instructions.size());
 
     // Apply the relocation delta by iterating over the RelocInfo.
@@ -1099,6 +1091,8 @@ std::unique_ptr<WasmCode> NativeModule::AddCodeWithCodeSpace(
 
   {
     CodeSpaceWriteScope write_scope;
+    ThreadIsolation::RegisterWasmAllocation(
+        reinterpret_cast<Address>(dst_code_bytes.begin()), desc.instr_size);
     memcpy(dst_code_bytes.begin(), desc.buffer,
            static_cast<size_t>(desc.instr_size));
 
@@ -1428,6 +1422,8 @@ WasmCode* NativeModule::CreateEmptyJumpTableInRegionLocked(
                    WasmCode::kJumpTable,  // kind
                    ExecutionTier::kNone,  // tier
                    kNotForDebugging}};    // for_debugging
+  ThreadIsolation::RegisterWasmAllocation(
+      reinterpret_cast<Address>(code_space.begin()), code_space.size());
   return PublishCodeLocked(std::move(code));
 }
 
@@ -1849,9 +1845,12 @@ void WasmCodeManager::Commit(base::AddressRegion region) {
         "Setting rwx permissions and memory protection key for 0x%" PRIxPTR
         ":0x%" PRIxPTR "\n",
         region.begin(), region.end());
-    success = base::MemoryProtectionKey::SetPermissionsAndKey(
-        GetPlatformPageAllocator(), region, permission,
-        RwxMemoryWriteScope::memory_protection_key());
+    if (ThreadIsolation::Enabled()) {
+      success = ThreadIsolation::MakeExecutable(region.begin(), region.size());
+    } else {
+      success = base::MemoryProtectionKey::SetPermissionsAndKey(
+          region, permission, RwxMemoryWriteScope::memory_protection_key());
+    }
 #else
     UNREACHABLE();
 #endif  // V8_HAS_PKU_JIT_WRITE_PROTECT
@@ -1914,6 +1913,8 @@ VirtualMemory WasmCodeManager::TryAllocate(size_t size, void* hint) {
   if (!mem.IsReserved()) return {};
   TRACE_HEAP("VMem alloc: 0x%" PRIxPTR ":0x%" PRIxPTR " (%zu)\n", mem.address(),
              mem.end(), mem.size());
+
+  ThreadIsolation::RegisterJitPage(mem.address(), mem.size());
 
   // TODO(v8:8462): Remove eager commit once perf supports remapping.
   if (v8_flags.perf_prof) {
@@ -2071,8 +2072,7 @@ bool WasmCodeManager::HasMemoryProtectionKeySupport() {
 
 // static
 bool WasmCodeManager::MemoryProtectionKeysEnabled() {
-  return HasMemoryProtectionKeySupport() &&
-         v8_flags.wasm_memory_protection_keys;
+  return HasMemoryProtectionKeySupport();
 }
 
 // static
@@ -2362,6 +2362,7 @@ void WasmCodeManager::FreeNativeModule(
 #endif  // V8_OS_WIN64
 
     lookup_map_.erase(code_space.address());
+    ThreadIsolation::UnregisterJitPage(code_space.address(), code_space.size());
     code_space.Free();
     DCHECK(!code_space.IsReserved());
   }
@@ -2428,6 +2429,13 @@ Builtin RuntimeStubIdToBuiltinName(WasmCode::RuntimeStubId stub_id) {
 #undef RUNTIME_STUB_NAME
 #undef RUNTIME_STUB_NAME_TRAP
   static_assert(arraysize(builtin_names) == WasmCode::kRuntimeStubCount);
+
+#define RUNTIME_STUB_NAME(Name) \
+  static_assert(Builtin::k##Name == builtin_names[wasm::WasmCode::k##Name]);
+#define RUNTIME_STUB_NAME_TRAP(Name) RUNTIME_STUB_NAME(ThrowWasm##Name)
+  WASM_RUNTIME_STUB_LIST(RUNTIME_STUB_NAME, RUNTIME_STUB_NAME_TRAP);
+#undef RUNTIME_STUB_NAME
+#undef RUNTIME_STUB_NAME_TRAP
 
   DCHECK_GT(arraysize(builtin_names), stub_id);
   return builtin_names[stub_id];

@@ -107,6 +107,7 @@ extern class WasmContinuationObject extends HeapObject {
 extern class WasmSuspenderObject extends JSObject {
   continuation: WasmContinuationObject|Undefined;
   parent: WasmSuspenderObject|Undefined;
+  promise: JSPromise;
   resume: JSObject|Undefined;
   reject: JSObject|Undefined;
   state: Smi;  // 0: Inactive, 1: Active, 2: Suspended.
@@ -164,7 +165,7 @@ extern class WasmGlobalObject extends JSObject {
   tagged_buffer: FixedArray|Undefined;
   offset: Smi;
   raw_type: Smi;
-  // TODO(7748): If we encode mutability in raw_type, turn this into a boolean
+  // TODO(14034): If we encode mutability in raw_type, turn this into a boolean
   // accessor.
   is_mutable: Smi;
 }

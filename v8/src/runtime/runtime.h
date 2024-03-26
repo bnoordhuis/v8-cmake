@@ -99,11 +99,13 @@ namespace internal {
 #define FOR_EACH_INTRINSIC_COLLECTIONS(F, I) \
   F(MapGrow, 1, 1)                           \
   F(MapShrink, 1, 1)                         \
+  F(OrderedHashSetEnsureGrowable, 2, 1)      \
   F(SetGrow, 1, 1)                           \
   F(SetShrink, 1, 1)                         \
   F(TheHole, 0, 1)                           \
   F(WeakCollectionDelete, 3, 1)              \
-  F(WeakCollectionSet, 4, 1)
+  F(WeakCollectionSet, 4, 1)                 \
+  F(OrderedHashMapEnsureGrowable, 2, 1)
 
 #define FOR_EACH_INTRINSIC_COMPILER(F, I)       \
   F(CompileOptimizedOSR, 0, 1)                  \
@@ -224,6 +226,7 @@ namespace internal {
   F(DoubleToStringWithRadix, 2, 1)                         \
   F(FatalProcessOutOfMemoryInAllocateRaw, 0, 1)            \
   F(FatalProcessOutOfMemoryInvalidArrayLength, 0, 1)       \
+  F(FatalInvalidSize, 0, 1)                                \
   F(GetAndResetRuntimeCallStats, -1 /* <= 2 */, 1)         \
   F(GetAndResetTurboProfilingData, 0, 1)                   \
   F(GetTemplateObject, 3, 1)                               \
@@ -636,9 +639,11 @@ namespace internal {
   F(WasmTableGrow, 3, 1)                      \
   F(WasmTableFill, 5, 1)                      \
   F(WasmJSToWasmObject, 2, 1)                 \
+  F(WasmGenericJSToWasmObject, 3, 1)          \
+  F(WasmGenericWasmToJSObject, 1, 1)          \
   F(WasmCompileLazy, 2, 1)                    \
   F(WasmAllocateFeedbackVector, 3, 1)         \
-  F(WasmCompileWrapper, 2, 1)                 \
+  F(WasmCompileWrapper, 1, 1)                 \
   F(WasmTriggerTierUp, 1, 1)                  \
   F(WasmDebugBreak, 0, 1)                     \
   F(WasmArrayCopy, 5, 1)                      \
@@ -646,7 +651,6 @@ namespace internal {
   F(WasmArrayInitSegment, 6, 1)               \
   F(WasmAllocateSuspender, 0, 1)              \
   F(WasmSyncStackLimit, 0, 1)                 \
-  F(WasmCreateResumePromise, 2, 1)            \
   F(WasmStringNewWtf8, 5, 1)                  \
   F(WasmStringNewWtf8Array, 4, 1)             \
   F(WasmStringNewWtf16, 4, 1)                 \

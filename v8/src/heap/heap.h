@@ -99,6 +99,7 @@ class JSPromise;
 class LinearAllocationArea;
 class LocalHeap;
 class MemoryAllocator;
+class MemoryBalancer;
 class MemoryChunk;
 class MemoryMeasurement;
 class MemoryReducer;
@@ -321,15 +322,6 @@ class Heap final {
   // The minimum size of a HeapObject on the heap.
   static const int kMinObjectSizeInTaggedWords = 2;
 
-  static const int kMinPromotedPercentForFastPromotionMode = 90;
-
-  // The minimum new space capacity from which allocation sites can be
-  // pretenured. A too small capacity means frequent GCs. Objects thus don't get
-  // a chance to die before being promoted, which may lead to wrong pretenuring
-  // decisions.
-  static constexpr size_t kDefaultMinSemiSpaceSizeForPretenuring =
-      8192 * KB * kPointerMultiplier;
-
   static_assert(static_cast<int>(RootIndex::kUndefinedValue) ==
                 Internals::kUndefinedValueRootIndex);
   static_assert(static_cast<int>(RootIndex::kTheHoleValue) ==
@@ -357,21 +349,28 @@ class Heap final {
 
   static size_t DefaultMaxSemiSpaceSize() {
 #if ENABLE_HUGEPAGE
-    static constexpr size_t kMaxSemiSpaceSize =
-        kHugePageSize * 16 * kPointerMultiplier;
+    static constexpr size_t kMaxSemiSpaceCapacityBaseUnit =
+        kHugePageSize * 2 * kPointerMultiplier;
 #else
-    static constexpr size_t kMaxSemiSpaceSize = 8192 * KB * kPointerMultiplier;
+    static constexpr size_t kMaxSemiSpaceCapacityBaseUnit =
+        MB * kPointerMultiplier;
 #endif
-    static_assert(kMaxSemiSpaceSize % (1 << kPageSizeBits) == 0);
+    static_assert(kMaxSemiSpaceCapacityBaseUnit % (1 << kPageSizeBits) == 0);
 
-    return (v8_flags.minor_mc ? 2 : 1) * kMaxSemiSpaceSize;
+    size_t max_semi_space_size =
+        (v8_flags.minor_mc ? v8_flags.minor_mc_max_new_space_capacity_mb
+                           : v8_flags.scavenger_max_new_space_capacity_mb) *
+        kMaxSemiSpaceCapacityBaseUnit;
+    DCHECK_EQ(0, max_semi_space_size % (1 << kPageSizeBits));
+    return max_semi_space_size;
   }
 
   // Young generation size is the same for compressed heaps and 32-bit heaps.
   static size_t OldGenerationToSemiSpaceRatio() {
+    DCHECK(!v8_flags.minor_mc);
     static constexpr size_t kOldGenerationToSemiSpaceRatio =
         128 * kHeapLimitMultiplier / kPointerMultiplier;
-    return kOldGenerationToSemiSpaceRatio / (v8_flags.minor_mc ? 2 : 1);
+    return kOldGenerationToSemiSpaceRatio;
   }
   static size_t OldGenerationToSemiSpaceRatioLowMemory() {
     static constexpr size_t kOldGenerationToSemiSpaceRatioLowMemory =
@@ -992,7 +991,8 @@ class Heap final {
       GCFlags gc_flags, GarbageCollectionReason gc_reason,
       const GCCallbackFlags gc_callback_flags = kNoGCCallbackFlags);
 
-  // Last hope GC, should try to squeeze as much as possible.
+  // Last hope garbage collection. Will try to free as much memory as possible
+  // with multiple rounds of garbage collection.
   V8_EXPORT_PRIVATE void CollectAllAvailableGarbage(
       GarbageCollectionReason gc_reason);
 
@@ -1201,12 +1201,18 @@ class Heap final {
   static inline bool InYoungGeneration(Object object);
   static inline bool InYoungGeneration(MaybeObject object);
   static inline bool InYoungGeneration(HeapObject heap_object);
+  template <typename T>
+  static inline bool InYoungGeneration(Tagged<T> object);
   static inline bool InFromPage(Object object);
   static inline bool InFromPage(MaybeObject object);
   static inline bool InFromPage(HeapObject heap_object);
+  template <typename T>
+  static inline bool InFromPage(Tagged<T> object);
   static inline bool InToPage(Object object);
   static inline bool InToPage(MaybeObject object);
   static inline bool InToPage(HeapObject heap_object);
+  template <typename T>
+  static inline bool InToPage(Tagged<T> object);
 
   // Returns whether the object resides in old space.
   inline bool InOldSpace(Object object);
@@ -1515,6 +1521,10 @@ class Heap final {
   // This predicate may be invoked from a background thread.
   inline bool IsPendingAllocation(HeapObject object);
   inline bool IsPendingAllocation(Object object);
+  template <typename T>
+  inline bool IsPendingAllocation(Tagged<T> object) {
+    return IsPendingAllocation(*object);
+  }
 
   // Notifies that all previously allocated objects are properly initialized
   // and ensures that IsPendingAllocation returns false for them. This function
@@ -1661,6 +1671,9 @@ class Heap final {
 
   bool IsInlineAllocationEnabled() const { return inline_allocation_enabled_; }
 
+  // Returns the amount of external memory registered since last global gc.
+  V8_EXPORT_PRIVATE uint64_t AllocatedExternalMemorySinceMarkCompact() const;
+
  private:
   class AllocationTrackerForDebugging;
 
@@ -1772,9 +1785,14 @@ class Heap final {
                                 GarbageCollectionReason gc_reason,
                                 const char* collector_reason);
 
+  // For static-roots builds, pads the object to the required size.
+  void StaticRootsEnsureAllocatedSize(Handle<HeapObject> obj, int required);
+  // TODO(jgruber): Remove this once the created SFIs are allocated in RO space.
+  void CreateImportantSharedFunctionInfos();
   bool CreateEarlyReadOnlyMaps();
   bool CreateImportantReadOnlyObjects();
-  bool CreateLateReadOnlyMaps();
+  bool CreateLateReadOnlyNonJSReceiverMaps();
+  bool CreateLateReadOnlyJSReceiverMaps();
   bool CreateReadOnlyObjects();
 
   void CreateInternalAccessorInfoObjects();
@@ -1914,10 +1932,6 @@ class Heap final {
 
   void UpdateTotalGCTime(double duration);
 
-  bool MinorGCAbovePretenuringThreshold() const {
-    return minor_gc_above_pretenuring_threshold_ > 0;
-  }
-
   bool IsIneffectiveMarkCompact(size_t old_generation_size,
                                 double mutator_utilization);
   void CheckIneffectiveMarkCompact(size_t old_generation_size,
@@ -1941,7 +1955,7 @@ class Heap final {
   // v8 browsing benchmarks.
   static const int kMaxLoadTimeMs = 7000;
 
-  bool ShouldOptimizeForLoadTime();
+  V8_EXPORT_PRIVATE bool ShouldOptimizeForLoadTime();
 
   size_t old_generation_allocation_limit() const {
     return old_generation_allocation_limit_.load(std::memory_order_relaxed);
@@ -2083,8 +2097,6 @@ class Heap final {
   void SetIsMarkingFlag(bool value);
   void SetIsMinorMarkingFlag(bool value);
 
-  bool IsNewSpaceCapacityAbovePretenuringThreshold() const;
-
   ExternalMemoryAccounting external_memory_;
 
   // This can be calculated directly from a pointer to the heap; however, it is
@@ -2098,7 +2110,6 @@ class Heap final {
   size_t code_range_size_ = 0;
   size_t max_semi_space_size_ = 0;
   size_t initial_semispace_size_ = 0;
-  size_t min_semi_space_size_for_pretenuring_ = 0;
   // Full garbage collections can be skipped if the old generation size
   // is below this threshold.
   size_t min_old_generation_size_ = 0;
@@ -2170,9 +2181,6 @@ class Heap final {
 
   std::atomic<HeapState> gc_state_{NOT_IN_GC};
 
-  // Returns the amount of external memory registered since last global gc.
-  V8_EXPORT_PRIVATE uint64_t AllocatedExternalMemorySinceMarkCompact() const;
-
   // Starts marking when stress_marking_percentage_% of the marking start limit
   // is reached.
   int stress_marking_percentage_ = 0;
@@ -2234,12 +2242,6 @@ class Heap final {
   int nodes_died_in_new_space_ = 0;
   int nodes_copied_in_new_space_ = 0;
   int nodes_promoted_ = 0;
-
-  // This is the pretenuring trigger for allocation sites that are in maybe
-  // tenure state. When we switched to a large enough new space size we
-  // deoptimize the code that belongs to the allocation site and derive the
-  // lifetime of the allocation site.
-  unsigned int minor_gc_above_pretenuring_threshold_ = 0;
 
   // Total time spent in GC.
   double total_gc_time_ms_ = 0.0;
@@ -2384,6 +2386,8 @@ class Heap final {
   // This field is used only when not running with MinorMC.
   ResizeNewSpaceMode resize_new_space_mode_ = ResizeNewSpaceMode::kNone;
 
+  std::unique_ptr<MemoryBalancer> mb_;
+
   // Classes in "heap" can be friends.
   friend class AlwaysAllocateScope;
   friend class ArrayBufferCollector;
@@ -2446,6 +2450,8 @@ class Heap final {
 
   // Used in cctest.
   friend class heap::HeapTester;
+
+  friend class MemoryBalancer;
 };
 
 class HeapStats {
@@ -2563,6 +2569,26 @@ class V8_NODISCARD CodePageMemoryModificationScope {
   // Disallow any GCs inside this scope, as a relocation of the underlying
   // object would change the {MemoryChunk} that this scope targets.
   DISALLOW_GARBAGE_COLLECTION(no_heap_allocation_)
+};
+
+class CodePageMemoryModificationScopeForDebugging {
+ public:
+  // When we zap newly allocated MemoryChunks, the chunk is not initialized yet
+  // and we can't use the regular CodePageMemoryModificationScope since it will
+  // access the page header. Hence, use the VirtualMemory for tracking instead.
+  explicit CodePageMemoryModificationScopeForDebugging(
+      Heap* heap, VirtualMemory* reservation, base::AddressRegion region);
+  explicit CodePageMemoryModificationScopeForDebugging(BasicMemoryChunk* chunk);
+  ~CodePageMemoryModificationScopeForDebugging();
+
+ private:
+#if V8_HEAP_USE_PTHREAD_JIT_WRITE_PROTECT || V8_HEAP_USE_PKU_JIT_WRITE_PROTECT
+  RwxMemoryWriteScope rwx_write_scope_;
+#else
+  VirtualMemory* reservation_ = nullptr;
+  base::Optional<base::AddressRegion> region_;
+  base::Optional<CodePageMemoryModificationScope> memory_modification_scope_;
+#endif
 };
 
 class V8_NODISCARD IgnoreLocalGCRequests {

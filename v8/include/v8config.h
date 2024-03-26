@@ -529,9 +529,6 @@ path. Add it with -I<path> to the command line
 // A macro used to change the calling conventions to preserve all registers (no
 // caller-saved registers). Use this for cold functions called from hot
 // functions.
-// Note: The attribute is considered experimental, so apply with care. Also,
-// "preserve_most" is currently not handling the return value correctly, so only
-// use it for functions returning void (see https://reviews.llvm.org/D141020).
 // Use like:
 //   V8_NOINLINE V8_PRESERVE_MOST void UnlikelyMethod();
 #if V8_HAS_ATTRIBUTE_PRESERVE_MOST
@@ -761,7 +758,7 @@ V8 shared library set USING_V8_SHARED.
 #elif defined(__mips64)
 #define V8_HOST_ARCH_MIPS64 1
 #define V8_HOST_ARCH_64_BIT 1
-#elif defined(__loongarch64)
+#elif defined(__loongarch_lp64)
 #define V8_HOST_ARCH_LOONG64 1
 #define V8_HOST_ARCH_64_BIT 1
 #elif defined(__PPC64__) || defined(_ARCH_PPC64)
@@ -811,7 +808,7 @@ V8 shared library set USING_V8_SHARED.
 #define V8_TARGET_ARCH_ARM 1
 #elif defined(__mips64)
 #define V8_TARGET_ARCH_MIPS64 1
-#elif defined(__loongarch64)
+#elif defined(__loongarch_lp64)
 #define V8_TARGET_ARCH_LOONG64 1
 #elif defined(_ARCH_PPC64)
 #define V8_TARGET_ARCH_PPC64 1

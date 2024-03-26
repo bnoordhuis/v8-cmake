@@ -11,6 +11,7 @@
 #include "src/heap/factory.h"
 #include "src/heap/spaces.h"
 #include "src/libsampler/sampler.h"
+#include "test/unittests/heap/heap-utils.h"
 #include "test/unittests/test-utils.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
@@ -256,7 +257,7 @@ TEST_F(CodePagesTest, OptimizedCodeWithCodePages) {
     }
   }
 
-  CollectGarbage(CODE_SPACE);
+  InvokeMajorGC();
 
   std::vector<MemoryRange>* pages = i_isolate()->GetCodePages();
   auto it = std::find_if(
@@ -313,7 +314,7 @@ TEST_F(CodePagesTest, LargeCodeObject) {
   }
 
   // Delete the large code object.
-  CollectGarbage(CODE_LO_SPACE);
+  InvokeMajorGC();
   EXPECT_TRUE(
       !i_isolate()->heap()->InSpaceSlow(stale_code_address, CODE_LO_SPACE));
 
@@ -450,7 +451,7 @@ TEST_F(CodePagesTest, LargeCodeObjectWithSignalHandler) {
   sampling_thread.StartSynchronously();
 
   // Delete the large code object.
-  CollectGarbage(CODE_LO_SPACE);
+  InvokeMajorGC();
   EXPECT_TRUE(
       !i_isolate()->heap()->InSpaceSlow(stale_code_address, CODE_LO_SPACE));
 
@@ -553,7 +554,7 @@ TEST_F(CodePagesTest, Sorted) {
     EXPECT_TRUE(
         i_isolate()->heap()->InSpaceSlow(code3->address(), CODE_LO_SPACE));
     // Delete code2.
-    CollectGarbage(CODE_LO_SPACE);
+    InvokeMajorGC();
     EXPECT_TRUE(
         i_isolate()->heap()->InSpaceSlow(code1->address(), CODE_LO_SPACE));
     EXPECT_TRUE(

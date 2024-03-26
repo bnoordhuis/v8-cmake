@@ -25,9 +25,6 @@
   # "unreached-invalid" is supposed to fail for "type mismatch"; missing rebase
   # on https://github.com/WebAssembly/spec/commit/7fa2f20a.
   'proposals/memory64/unreached-invalid': [FAIL],
-  # TODO(13780): Fix validation of memory args to check that the offset is
-  # within the memory limit.
-  'proposals/memory64/address': [FAIL],
 
   # TODO(wasm): Roll newest tests into "js-types" repository.
   'proposals/js-types/globals': [FAIL],
@@ -159,9 +156,6 @@
    # These tests need larger stack size on simulator.
    'skip-stack-guard-page': '--sim-stack-size=8192',
    'proposals/tail-call/skip-stack-guard-page': '--sim-stack-size=8192',
-
-   # SIMD is not fully implemented yet.
-   'simd*': [SKIP],
 
    'func': ['variant == stress', SKIP],
 }],  # 'arch == riscv32'

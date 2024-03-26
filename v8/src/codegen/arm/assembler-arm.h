@@ -309,6 +309,9 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
 
   ~Assembler() override;
 
+  static RegList DefaultTmpList();
+  static VfpRegList DefaultFPTmpList();
+
   void AbortedCodeGeneration() override {
     pending_32_bit_constants_.clear();
     first_const_pool_32_use_ = -1;
@@ -316,9 +319,9 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
 
   // GetCode emits any pending (non-emitted) code and fills the descriptor desc.
   static constexpr int kNoHandlerTable = 0;
-  static constexpr SafepointTableBuilder* kNoSafepointTable = nullptr;
+  static constexpr SafepointTableBuilderBase* kNoSafepointTable = nullptr;
   void GetCode(Isolate* isolate, CodeDesc* desc,
-               SafepointTableBuilder* safepoint_table_builder,
+               SafepointTableBuilderBase* safepoint_table_builder,
                int handler_table_offset);
 
   // Convenience wrapper for code without safepoint or handler tables.
@@ -1412,6 +1415,16 @@ class V8_EXPORT_PRIVATE V8_NODISCARD UseScratchRegisterScope {
   bool CanAcquireD() const { return CanAcquireVfp<DwVfpRegister>(); }
   bool CanAcquireQ() const { return CanAcquireVfp<QwNeonRegister>(); }
 
+  RegList Available() { return *assembler_->GetScratchRegisterList(); }
+  void SetAvailable(RegList available) {
+    *assembler_->GetScratchRegisterList() = available;
+  }
+
+  VfpRegList AvailableVfp() { return *assembler_->GetScratchVfpRegisterList(); }
+  void SetAvailableVfp(VfpRegList available) {
+    *assembler_->GetScratchVfpRegisterList() = available;
+  }
+
   void Include(const Register& reg1, const Register& reg2 = no_reg) {
     RegList* available = assembler_->GetScratchRegisterList();
     DCHECK_NOT_NULL(available);
@@ -1419,6 +1432,11 @@ class V8_EXPORT_PRIVATE V8_NODISCARD UseScratchRegisterScope {
     DCHECK(!available->has(reg2));
     available->set(reg1);
     available->set(reg2);
+  }
+  void Include(RegList list) {
+    RegList* available = assembler_->GetScratchRegisterList();
+    DCHECK_NOT_NULL(available);
+    *available = *available | list;
   }
   void Include(VfpRegList list) {
     VfpRegList* available = assembler_->GetScratchVfpRegisterList();

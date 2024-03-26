@@ -8,6 +8,7 @@
 #include "src/compiler/machine-operator.h"
 #include "src/compiler/node-properties.h"
 #include "src/compiler/node.h"
+#include "src/compiler/opcodes.h"
 #include "src/compiler/operator.h"
 #include "src/compiler/revectorizer.h"
 #include "src/compiler/wasm-compiler.h"
@@ -34,8 +35,13 @@ class RevecTest : public TestWithIsolateAndZone {
                  MachineOperatorBuilder::Flag::kAllOptionalOps),
         mcgraph_(&graph_, &common_, &machine_) {}
 
-  void TestBinOp(const Operator* bin_op);
-  void TestShiftOp(const Operator* shift_op);
+  void TestBinOp(const Operator* bin_op,
+                 const IrOpcode::Value expected_simd256_op_code);
+  void TestShiftOp(const Operator* shift_op,
+                   const IrOpcode::Value expected_simd256_op_code);
+  void TestSplatOp(const Operator* splat_op,
+                   MachineType splat_input_machine_type,
+                   const IrOpcode::Value expected_simd256_op_code);
 
   Graph* graph() { return &graph_; }
   CommonOperatorBuilder* common() { return &common_; }
@@ -55,7 +61,8 @@ class RevecTest : public TestWithIsolateAndZone {
 // In Revectorization, two simd 128 nodes can be combined into one 256 node:
 // simd256 *d, *e, *f;
 // *f = *d bin_op *e;
-void RevecTest::TestBinOp(const Operator* bin_op) {
+void RevecTest::TestBinOp(const Operator* bin_op,
+                          const IrOpcode::Value expected_simd256_op_code) {
   if (!CpuFeatures::IsSupported(AVX2)) return;
   Node* start = graph()->NewNode(common()->Start(5));
   graph()->SetStart(start);
@@ -108,6 +115,7 @@ void RevecTest::TestBinOp(const Operator* bin_op) {
   Node* store_256 = ret->InputAt(1);
   EXPECT_EQ(StoreRepresentationOf(store_256->op()).representation(),
             MachineRepresentation::kSimd256);
+  EXPECT_EQ(store_256->InputAt(2)->opcode(), expected_simd256_op_code);
 }
 
 #define BIN_OP_LIST(V)     \
@@ -157,10 +165,16 @@ void RevecTest::TestBinOp(const Operator* bin_op) {
   V(I8x16MaxS, I8x32MaxS)  \
   V(I32x4MaxU, I32x8MaxU)  \
   V(I16x8MaxU, I16x16MaxU) \
-  V(I8x16MaxU, I8x32MaxU)
+  V(I8x16MaxU, I8x32MaxU)  \
+  V(F64x2Min, F64x4Min)    \
+  V(F64x2Max, F64x4Max)    \
+  V(F32x4Min, F32x8Min)    \
+  V(F32x4Max, F32x8Max)
 
-#define TEST_BIN_OP(op128, op256) \
-  TEST_F(RevecTest, op256) { TestBinOp(machine()->op128()); }
+#define TEST_BIN_OP(op128, op256)                      \
+  TEST_F(RevecTest, op256) {                           \
+    TestBinOp(machine()->op128(), IrOpcode::k##op256); \
+  }
 
 BIN_OP_LIST(TEST_BIN_OP)
 
@@ -236,7 +250,8 @@ TEST_F(RevecTest, ReorderLoadChain) {
 // In Revectorization, two simd128 nodes can be coalesced into one simd256 node
 // as below:
 //   simd256 *a, *c; *c = (*a shift_op 1) shift_op *b;
-void RevecTest::TestShiftOp(const Operator* shift_op) {
+void RevecTest::TestShiftOp(const Operator* shift_op,
+                            const IrOpcode::Value expected_simd256_op_code) {
   Node* start = graph()->NewNode(common()->Start(4));
   graph()->SetStart(start);
 
@@ -288,15 +303,162 @@ void RevecTest::TestShiftOp(const Operator* shift_op) {
     Node* store_256 = ret->InputAt(1);
     EXPECT_EQ(StoreRepresentationOf(store_256->op()).representation(),
               MachineRepresentation::kSimd256);
+    EXPECT_EQ(store_256->InputAt(2)->opcode(), expected_simd256_op_code);
     return;
   }
 
   EXPECT_FALSE(result);
 }
 
-TEST_F(RevecTest, I64x4Shl) { TestShiftOp(machine()->I64x2Shl()); }
-TEST_F(RevecTest, I32x8ShrS) { TestShiftOp(machine()->I32x4Shl()); }
-TEST_F(RevecTest, I16x16ShrU) { TestShiftOp(machine()->I16x8Shl()); }
+TEST_F(RevecTest, I64x4Shl) {
+  TestShiftOp(machine()->I64x2Shl(), IrOpcode::kI64x4Shl);
+}
+TEST_F(RevecTest, I32x8ShrS) {
+  TestShiftOp(machine()->I32x4Shl(), IrOpcode::kI32x8Shl);
+}
+TEST_F(RevecTest, I16x16ShrU) {
+  TestShiftOp(machine()->I16x8Shl(), IrOpcode::kI16x16Shl);
+}
+
+void RevecTest::TestSplatOp(const Operator* splat_op,
+                            MachineType splat_input_machine_type,
+                            const IrOpcode::Value expected_simd256_op_code) {
+  if (!CpuFeatures::IsSupported(AVX2)) {
+    return;
+  }
+  Node* start = graph()->NewNode(common()->Start(3));
+  graph()->SetStart(start);
+
+  Node* zero = graph()->NewNode(common()->Int32Constant(0));
+  Node* sixteen = graph()->NewNode(common()->Int64Constant(16));
+  Node* offset = graph()->NewNode(common()->Int64Constant(23));
+
+  Node* p0 = graph()->NewNode(common()->Parameter(0), start);
+  Node* p1 = graph()->NewNode(common()->Parameter(1), start);
+  Node* p2 = graph()->NewNode(common()->Parameter(2), start);
+
+  Node* base = graph()->NewNode(machine()->Load(MachineType::Uint64()), p0,
+                                offset, start, start);
+
+  Node* load =
+      graph()->NewNode(machine()->ProtectedLoad(splat_input_machine_type), base,
+                       p1, base, start);
+  Node* splat0 = graph()->NewNode(splat_op, load);
+  Node* splat1 = graph()->NewNode(splat_op, load);
+
+  StoreRepresentation store_rep(MachineRepresentation::kSimd128,
+                                WriteBarrierKind::kNoWriteBarrier);
+
+  Node* store0 = graph()->NewNode(machine()->Store(store_rep), base, p2, splat0,
+                                  load, start);
+  Node* store1 =
+      graph()->NewNode(machine()->Store(store_rep),
+                       graph()->NewNode(machine()->Int64Add(), base, sixteen),
+                       p2, splat1, store0, start);
+
+  Node* ret = graph()->NewNode(common()->Return(0), zero, store0, start);
+  Node* end = graph()->NewNode(common()->End(1), ret);
+  graph()->SetEnd(end);
+
+  graph()->RecordSimdStore(store0);
+  graph()->RecordSimdStore(store1);
+  graph()->SetSimd(true);
+
+  Revectorizer revec(zone(), graph(), mcgraph());
+  bool result = revec.TryRevectorize(nullptr);
+
+  EXPECT_TRUE(result);
+  Node* store_256 = ret->InputAt(1);
+  EXPECT_EQ(StoreRepresentationOf(store_256->op()).representation(),
+            MachineRepresentation::kSimd256);
+  EXPECT_EQ(store_256->InputAt(2)->opcode(), expected_simd256_op_code);
+  return;
+}
+
+#define SPLAT_OP_LIST(V)            \
+  V(I8x16Splat, I8x32Splat, Int8)   \
+  V(I16x8Splat, I16x16Splat, Int16) \
+  V(I32x4Splat, I32x8Splat, Int32)  \
+  V(I64x2Splat, I64x4Splat, Int64)
+
+#define TEST_SPLAT(op128, op256, machine_type)                   \
+  TEST_F(RevecTest, op256) {                                     \
+    TestSplatOp(machine()->op128(), MachineType::machine_type(), \
+                IrOpcode::k##op256);                             \
+  }
+
+SPLAT_OP_LIST(TEST_SPLAT)
+
+#undef TEST_SPLAT
+#undef SPLAT_OP_LIST
+
+// Create a graph which multiplies a F32x8 vector with a shuffle splat vector.
+//   float *a, *b, *c;
+//   c[0123] = a[0123] * b[1111];
+//   c[4567] = a[4567] * b[1111];
+//
+// After the revectorization phase, two consecutive 128-bit loads and multiplies
+// can be coalesced using 256-bit operators:
+//   c[01234567] = a[01234567] * b[11111111];
+TEST_F(RevecTest, ShuffleForSplat) {
+  if (!CpuFeatures::IsSupported(AVX2)) return;
+
+  Node* start = graph()->NewNode(common()->Start(4));
+  graph()->SetStart(start);
+
+  Node* zero = graph()->NewNode(common()->Int32Constant(0));
+  Node* sixteen = graph()->NewNode(common()->Int64Constant(16));
+  Node* offset = graph()->NewNode(common()->Int64Constant(23));
+
+  // Wasm array base address
+  Node* p0 = graph()->NewNode(common()->Parameter(0), start);
+  // Load base address a*
+  Node* p1 = graph()->NewNode(common()->Parameter(1), start);
+  // Load for shuffle base address b*
+  Node* p2 = graph()->NewNode(common()->Parameter(2), start);
+  // Store base address c*
+  Node* p3 = graph()->NewNode(common()->Parameter(3), start);
+
+  LoadRepresentation load_rep(MachineType::Simd128());
+  StoreRepresentation store_rep(MachineRepresentation::kSimd128,
+                                WriteBarrierKind::kNoWriteBarrier);
+  Node* base = graph()->NewNode(machine()->Load(MachineType::Int64()), p0,
+                                offset, start, start);
+  Node* load0 = graph()->NewNode(machine()->ProtectedLoad(load_rep), base, p1,
+                                 base, start);
+  Node* base16 = graph()->NewNode(machine()->Int64Add(), base, sixteen);
+  Node* load1 = graph()->NewNode(machine()->ProtectedLoad(load_rep), base16, p1,
+                                 load0, start);
+
+  // Load and shuffle for splat
+  Node* load2 = graph()->NewNode(machine()->ProtectedLoad(load_rep), base, p2,
+                                 load1, start);
+  const uint8_t mask[16] = {4, 5, 6, 7, 4, 5, 6, 7, 4, 5, 6, 7, 4, 5, 6, 7};
+  Node* shuffle = graph()->NewNode(machine()->I8x16Shuffle(mask), load2, load2);
+
+  Node* mul0 = graph()->NewNode(machine()->F32x4Mul(), load0, shuffle);
+  Node* mul1 = graph()->NewNode(machine()->F32x4Mul(), load1, shuffle);
+  Node* store0 = graph()->NewNode(machine()->Store(store_rep), base, p3, mul0,
+                                  load2, start);
+  Node* base16_store = graph()->NewNode(machine()->Int64Add(), base, sixteen);
+  Node* store1 = graph()->NewNode(machine()->Store(store_rep), base16_store, p3,
+                                  mul1, store0, start);
+  Node* ret = graph()->NewNode(common()->Return(0), zero, store1, start);
+  Node* end = graph()->NewNode(common()->End(1), ret);
+  graph()->SetEnd(end);
+
+  graph()->RecordSimdStore(store0);
+  graph()->RecordSimdStore(store1);
+  graph()->SetSimd(true);
+
+  Revectorizer revec(zone(), graph(), mcgraph());
+  EXPECT_TRUE(revec.TryRevectorize(nullptr));
+
+  // Test whether the graph has been revectorized
+  Node* store_256 = ret->InputAt(1);
+  EXPECT_EQ(StoreRepresentationOf(store_256->op()).representation(),
+            MachineRepresentation::kSimd256);
+}
 
 }  // namespace compiler
 }  // namespace internal

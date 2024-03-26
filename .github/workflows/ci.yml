@@ -18,7 +18,9 @@ jobs:
     steps:
       - uses: actions/checkout@v2
       - name: setup
-        run: cmake -E make_directory ${{runner.workspace}}/build
+        run: |
+          git config --global core.longpaths true
+          cmake -E make_directory ${{runner.workspace}}/build
       - name: configure
         run: cmake ${{runner.workspace}}/v8-cmake
         working-directory: ${{runner.workspace}}/build

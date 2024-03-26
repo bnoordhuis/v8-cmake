@@ -1016,14 +1016,13 @@ class AssemblerOpInterface {
 #undef DECL_SINGLE_REP_UNARY_V
 #undef DECL_MULTI_REP_UNARY
 
-  V<Float64> Float64InsertWord32(ConstOrV<Float64> float64,
-                                 ConstOrV<Word32> word32,
-                                 Float64InsertWord32Op::Kind kind) {
+  V<Float64> BitcastWord32PairToFloat64(ConstOrV<Word32> high_word32,
+                                        ConstOrV<Word32> low_word32) {
     if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
       return OpIndex::Invalid();
     }
-    return stack().ReduceFloat64InsertWord32(resolve(float64), resolve(word32),
-                                             kind);
+    return stack().ReduceBitcastWord32PairToFloat64(resolve(high_word32),
+                                                    resolve(low_word32));
   }
 
   OpIndex TaggedBitcast(OpIndex input, RegisterRepresentation from,
@@ -1037,8 +1036,12 @@ class AssemblerOpInterface {
     return TaggedBitcast(tagged, RegisterRepresentation::Tagged(),
                          RegisterRepresentation::PointerSized());
   }
-  V<Object> BitcastWordToTagged(V<WordPtr> word) {
+  V<Object> BitcastWordPtrToTagged(V<WordPtr> word) {
     return TaggedBitcast(word, RegisterRepresentation::PointerSized(),
+                         RegisterRepresentation::Tagged());
+  }
+  V<Object> BitcastWord32ToTagged(V<Word32> word) {
+    return TaggedBitcast(word, RegisterRepresentation::Word32(),
                          RegisterRepresentation::Tagged());
   }
 
@@ -1096,36 +1099,26 @@ class AssemblerOpInterface {
         Convert(input, ConvertOp::Kind::kString, ConvertOp::Kind::kNumber));
   }
 
-  V<Object> ConvertOrDeopt(V<Object> input, OpIndex frame_state,
-                           ConvertOrDeoptOp::Kind from,
-                           ConvertOrDeoptOp::Kind to,
-                           const FeedbackSource& feedback) {
-    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
-      return OpIndex::Invalid();
-    }
-    return stack().ReduceConvertOrDeopt(input, frame_state, from, to, feedback);
-  }
-
-  V<Object> ConvertPrimitiveToObject(
-      OpIndex input, ConvertPrimitiveToObjectOp::Kind kind,
+  V<Object> ConvertUntaggedToJSPrimitive(
+      OpIndex input, ConvertUntaggedToJSPrimitiveOp::JSPrimitiveKind kind,
       RegisterRepresentation input_rep,
-      ConvertPrimitiveToObjectOp::InputInterpretation input_interpretation,
+      ConvertUntaggedToJSPrimitiveOp::InputInterpretation input_interpretation,
       CheckForMinusZeroMode minus_zero_mode) {
     if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
       return OpIndex::Invalid();
     }
-    return stack().ReduceConvertPrimitiveToObject(
+    return stack().ReduceConvertUntaggedToJSPrimitive(
         input, kind, input_rep, input_interpretation, minus_zero_mode);
   }
-#define CONVERT_PRIMITIVE_TO_OBJECT(name, kind, input_rep, \
-                                    input_interpretation)  \
-  V<kind> name(V<input_rep> input) {                       \
-    return V<kind>::Cast(ConvertPrimitiveToObject(         \
-        input, ConvertPrimitiveToObjectOp::Kind::k##kind,  \
-        RegisterRepresentation::input_rep(),               \
-        ConvertPrimitiveToObjectOp::InputInterpretation::  \
-            k##input_interpretation,                       \
-        CheckForMinusZeroMode::kDontCheckForMinusZero));   \
+#define CONVERT_PRIMITIVE_TO_OBJECT(name, kind, input_rep,               \
+                                    input_interpretation)                \
+  V<kind> name(V<input_rep> input) {                                     \
+    return V<kind>::Cast(ConvertUntaggedToJSPrimitive(                   \
+        input, ConvertUntaggedToJSPrimitiveOp::JSPrimitiveKind::k##kind, \
+        RegisterRepresentation::input_rep(),                             \
+        ConvertUntaggedToJSPrimitiveOp::InputInterpretation::            \
+            k##input_interpretation,                                     \
+        CheckForMinusZeroMode::kDontCheckForMinusZero));                 \
   }
   CONVERT_PRIMITIVE_TO_OBJECT(ConvertInt32ToNumber, Number, Word32, Signed)
   CONVERT_PRIMITIVE_TO_OBJECT(ConvertUint32ToNumber, Number, Word32, Unsigned)
@@ -1133,77 +1126,78 @@ class AssemblerOpInterface {
 #undef CONVERT_PRIMITIVE_TO_OBJECT
   V<Number> ConvertFloat64ToNumber(V<Float64> input,
                                    CheckForMinusZeroMode minus_zero_mode) {
-    return V<Number>::Cast(ConvertPrimitiveToObject(
-        input, ConvertPrimitiveToObjectOp::Kind::kNumber,
+    return V<Number>::Cast(ConvertUntaggedToJSPrimitive(
+        input, ConvertUntaggedToJSPrimitiveOp::JSPrimitiveKind::kNumber,
         RegisterRepresentation::Float64(),
-        ConvertPrimitiveToObjectOp::InputInterpretation::kSigned,
+        ConvertUntaggedToJSPrimitiveOp::InputInterpretation::kSigned,
         minus_zero_mode));
   }
 
-  OpIndex ConvertPrimitiveToObjectOrDeopt(
+  OpIndex ConvertUntaggedToJSPrimitiveOrDeopt(
       OpIndex input, OpIndex frame_state,
-      ConvertPrimitiveToObjectOrDeoptOp::Kind kind,
+      ConvertUntaggedToJSPrimitiveOrDeoptOp::JSPrimitiveKind kind,
       RegisterRepresentation input_rep,
-      ConvertPrimitiveToObjectOrDeoptOp::InputInterpretation
+      ConvertUntaggedToJSPrimitiveOrDeoptOp::InputInterpretation
           input_interpretation,
       const FeedbackSource& feedback) {
     if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
       return OpIndex::Invalid();
     }
-    return stack().ReduceConvertPrimitiveToObjectOrDeopt(
+    return stack().ReduceConvertUntaggedToJSPrimitiveOrDeopt(
         input, frame_state, kind, input_rep, input_interpretation, feedback);
   }
 
-  OpIndex ConvertObjectToPrimitive(
-      V<Object> object, ConvertObjectToPrimitiveOp::Kind kind,
-      ConvertObjectToPrimitiveOp::InputAssumptions input_assumptions) {
+  OpIndex ConvertJSPrimitiveToUntagged(
+      V<Object> object, ConvertJSPrimitiveToUntaggedOp::UntaggedKind kind,
+      ConvertJSPrimitiveToUntaggedOp::InputAssumptions input_assumptions) {
     if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
       return OpIndex::Invalid();
     }
-    return stack().ReduceConvertObjectToPrimitive(object, kind,
-                                                  input_assumptions);
+    return stack().ReduceConvertJSPrimitiveToUntagged(object, kind,
+                                                      input_assumptions);
   }
 
-  OpIndex ConvertObjectToPrimitiveOrDeopt(
+  OpIndex ConvertJSPrimitiveToUntaggedOrDeopt(
       V<Object> object, OpIndex frame_state,
-      ConvertObjectToPrimitiveOrDeoptOp::ObjectKind from_kind,
-      ConvertObjectToPrimitiveOrDeoptOp::PrimitiveKind to_kind,
+      ConvertJSPrimitiveToUntaggedOrDeoptOp::JSPrimitiveKind from_kind,
+      ConvertJSPrimitiveToUntaggedOrDeoptOp::UntaggedKind to_kind,
       CheckForMinusZeroMode minus_zero_mode, const FeedbackSource& feedback) {
     if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
       return OpIndex::Invalid();
     }
-    return stack().ReduceConvertObjectToPrimitiveOrDeopt(
+    return stack().ReduceConvertJSPrimitiveToUntaggedOrDeopt(
         object, frame_state, from_kind, to_kind, minus_zero_mode, feedback);
   }
 
-  OpIndex TruncateObjectToPrimitive(
-      V<Object> object, TruncateObjectToPrimitiveOp::Kind kind,
-      TruncateObjectToPrimitiveOp::InputAssumptions input_assumptions) {
+  OpIndex TruncateJSPrimitiveToUntagged(
+      V<Object> object, TruncateJSPrimitiveToUntaggedOp::UntaggedKind kind,
+      TruncateJSPrimitiveToUntaggedOp::InputAssumptions input_assumptions) {
     if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
       return OpIndex::Invalid();
     }
-    return stack().ReduceTruncateObjectToPrimitive(object, kind,
-                                                   input_assumptions);
+    return stack().ReduceTruncateJSPrimitiveToUntagged(object, kind,
+                                                       input_assumptions);
   }
 
-  OpIndex TruncateObjectToPrimitiveOrDeopt(
+  OpIndex TruncateJSPrimitiveToUntaggedOrDeopt(
       V<Object> object, OpIndex frame_state,
-      TruncateObjectToPrimitiveOrDeoptOp::Kind kind,
-      TruncateObjectToPrimitiveOrDeoptOp::InputRequirement input_requirement,
+      TruncateJSPrimitiveToUntaggedOrDeoptOp::UntaggedKind kind,
+      TruncateJSPrimitiveToUntaggedOrDeoptOp::InputRequirement
+          input_requirement,
       const FeedbackSource& feedback) {
     if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
       return OpIndex::Invalid();
     }
-    return stack().ReduceTruncateObjectToPrimitiveOrDeopt(
+    return stack().ReduceTruncateJSPrimitiveToUntaggedOrDeopt(
         object, frame_state, kind, input_requirement, feedback);
   }
 
-  V<Object> ConvertReceiver(V<Object> value, V<Object> global_proxy,
-                            ConvertReceiverMode mode) {
+  V<Object> ConvertJSPrimitiveToObject(V<Object> value, V<Object> global_proxy,
+                                       ConvertReceiverMode mode) {
     if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
       return OpIndex::Invalid();
     }
-    return stack().ReduceConvertReceiver(value, global_proxy, mode);
+    return stack().ReduceConvertJSPrimitiveToObject(value, global_proxy, mode);
   }
 
   V<Word32> Word32Constant(uint32_t value) {
@@ -1308,7 +1302,7 @@ class AssemblerOpInterface {
         static_cast<uint64_t>(value));
   }
   V<Context> NoContextConstant() {
-    return V<Context>::Cast(SmiTag(Context::kNoContext));
+    return V<Context>::Cast(TagSmi(Context::kNoContext));
   }
   // TODO(nicohartmann@): Might want to get rid of the isolate when supporting
   // Wasm.
@@ -1417,9 +1411,6 @@ class AssemblerOpInterface {
   DECL_CHANGE(TruncateFloat##FloatBits##ToInt##ResultBits##OverflowUndefined, \
               kSignedFloatTruncateOverflowToMin, kNoOverflow,                 \
               Float##FloatBits, Word##ResultBits)                             \
-  DECL_CHANGE(TruncateFloat##FloatBits##ToInt##ResultBits##OverflowToMin,     \
-              kSignedFloatTruncateOverflowToMin, kNoAssumption,               \
-              Float##FloatBits, Word##ResultBits)                             \
   DECL_TRY_CHANGE(TryTruncateFloat##FloatBits##ToInt##ResultBits,             \
                   kSignedFloatTruncateOverflowUndefined, Float##FloatBits,    \
                   Word##ResultBits)
@@ -1429,6 +1420,10 @@ class AssemblerOpInterface {
   DECL_SIGNED_FLOAT_TRUNCATE(32, 64)
   DECL_SIGNED_FLOAT_TRUNCATE(32, 32)
 #undef DECL_SIGNED_FLOAT_TRUNCATE
+  DECL_CHANGE(TruncateFloat64ToInt64OverflowToMin,
+              kSignedFloatTruncateOverflowToMin, kNoAssumption, Float64, Word64)
+  DECL_CHANGE(TruncateFloat32ToInt32OverflowToMin,
+              kSignedFloatTruncateOverflowToMin, kNoAssumption, Float32, Word32)
 
 #define DECL_UNSIGNED_FLOAT_TRUNCATE(FloatBits, ResultBits)                    \
   DECL_CHANGE(TruncateFloat##FloatBits##ToUint##ResultBits##OverflowUndefined, \
@@ -1489,24 +1484,30 @@ class AssemblerOpInterface {
                          minus_zero_mode, feedback);
   }
 
-  OpIndex Tag(OpIndex input, TagKind kind) {
-    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
-      return OpIndex::Invalid();
+  V<Smi> TagSmi(ConstOrV<Word32> input) {
+    constexpr int kSmiShiftBits = kSmiShiftSize + kSmiTagSize;
+    // Do shift on 32bit values if Smis are stored in the lower word.
+    if constexpr (Is64() && SmiValuesAre31Bits()) {
+      V<Word32> shifted = Word32ShiftLeft(resolve(input), kSmiShiftBits);
+      // In pointer compression, we smi-corrupt. Then, the upper bits are not
+      // important.
+      return V<Smi>::Cast(COMPRESS_POINTERS_BOOL
+                              ? BitcastWord32ToWord64(shifted)
+                              : ChangeInt32ToIntPtr(shifted));
+    } else {
+      return V<Smi>::Cast(
+          WordPtrShiftLeft(ChangeInt32ToIntPtr(resolve(input)), kSmiShiftBits));
     }
-    return stack().ReduceTag(input, kind);
-  }
-  V<Smi> SmiTag(ConstOrV<Word32> input) {
-    return Tag(resolve(input), TagKind::kSmiTag);
   }
 
-  OpIndex Untag(OpIndex input, TagKind kind, RegisterRepresentation rep) {
-    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
-      return OpIndex::Invalid();
+  V<Word32> UntagSmi(V<Tagged> input) {
+    constexpr int kSmiShiftBits = kSmiShiftSize + kSmiTagSize;
+    if constexpr (Is64() && SmiValuesAre31Bits()) {
+      return Word32ShiftRightArithmeticShiftOutZeros(V<Word32>::Cast(input),
+                                                     kSmiShiftBits);
     }
-    return stack().ReduceUntag(input, kind, rep);
-  }
-  V<Word32> SmiUntag(V<Tagged> input) {
-    return Untag(input, TagKind::kSmiTag, RegisterRepresentation::Word32());
+    return V<Word32>::Cast(WordPtrShiftRightArithmeticShiftOutZeros(
+        V<WordPtr>::Cast(input), kSmiShiftBits));
   }
 
   OpIndex Load(OpIndex base, OpIndex index, LoadOp::Kind kind,
@@ -1801,9 +1802,10 @@ class AssemblerOpInterface {
   }
   template <typename T, typename U>
   V<std::common_type_t<T, U>> Conditional(V<Word32> cond, V<T> vtrue,
-                                          V<U> vfalse) {
-    return Select(cond, vtrue, vfalse, V<std::common_type_t<T, U>>::rep,
-                  BranchHint::kNone, SelectOp::Implementation::kBranch);
+                                          V<U> vfalse,
+                                          BranchHint hint = BranchHint::kNone) {
+    return Select(cond, vtrue, vfalse, V<std::common_type_t<T, U>>::rep, hint,
+                  SelectOp::Implementation::kBranch);
   }
   void Switch(OpIndex input, base::Vector<const SwitchOp::Case> cases,
               Block* default_case,
@@ -1935,11 +1937,10 @@ class AssemblerOpInterface {
         isolate, context, {object, allocated_type, node_id});
   }
   V<Object> CallBuiltin_CopyFastSmiOrObjectElements(Isolate* isolate,
-                                                    V<Context> context,
                                                     V<Object> object) {
     return CallBuiltin<
-        typename BuiltinCallDescriptor::CopyFastSmiOrObjectElements>(
-        isolate, context, {object});
+        typename BuiltinCallDescriptor::CopyFastSmiOrObjectElements>(isolate,
+                                                                     {object});
   }
   V<Smi> CallBuiltin_FindOrderedHashMapEntry(Isolate* isolate,
                                              V<Context> context,
@@ -1954,18 +1955,16 @@ class AssemblerOpInterface {
         isolate, context, {set, key});
   }
   V<Object> CallBuiltin_GrowFastDoubleElements(Isolate* isolate,
-                                               V<Context> context,
                                                V<Object> object, V<Smi> size) {
     return CallBuiltin<typename BuiltinCallDescriptor::GrowFastDoubleElements>(
-        isolate, context, {object, size});
+        isolate, {object, size});
   }
   V<Object> CallBuiltin_GrowFastSmiOrObjectElements(Isolate* isolate,
-                                                    V<Context> context,
                                                     V<Object> object,
                                                     V<Smi> size) {
     return CallBuiltin<
         typename BuiltinCallDescriptor::GrowFastSmiOrObjectElements>(
-        isolate, context, {object, size});
+        isolate, {object, size});
   }
   V<FixedArray> CallBuiltin_NewSloppyArgumentsElements(
       Isolate* isolate, V<WordPtr> frame, V<WordPtr> formal_parameter_count,
@@ -2430,6 +2429,7 @@ class AssemblerOpInterface {
     }
     stack().ReduceDebugBreak();
   }
+
   void DebugPrint(OpIndex input, RegisterRepresentation rep) {
     // TODO(nicohartmann@): Relax this.
     DCHECK_EQ(rep, RegisterRepresentation::PointerSized());
@@ -2437,6 +2437,9 @@ class AssemblerOpInterface {
       return;
     }
     stack().ReduceDebugPrint(input, rep);
+  }
+  void DebugPrint(V<WordPtr> input) {
+    return DebugPrint(input, RegisterRepresentation::PointerSized());
   }
 
   V<Tagged> BigIntBinop(V<Tagged> left, V<Tagged> right, OpIndex frame_state,
@@ -3023,7 +3026,7 @@ class Assembler : public GraphVisitor<Assembler<Reducers>>,
     op_to_block_[result] = current_block_;
     DCHECK(ValidInputs(result));
 #endif  // DEBUG
-    if (op.Properties().is_block_terminator) FinalizeBlock();
+    if (op.IsBlockTerminator()) FinalizeBlock();
     return result;
   }
 

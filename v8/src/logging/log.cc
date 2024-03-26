@@ -367,9 +367,8 @@ class LinuxPerfBasicLogger : public CodeEventLogger {
   static uint64_t reference_count_;
 };
 
-const char LinuxPerfBasicLogger::kFilenameFormatString[] = "/tmp/perf-%d.map";
-// Extra space for the PID in the filename
-const int LinuxPerfBasicLogger::kFilenameBufferPadding = 16;
+// Extra space for the "perf-%d.map" filename, including the PID.
+const int LinuxPerfBasicLogger::kFilenameBufferPadding = 32;
 
 // static
 base::LazyRecursiveMutex& LinuxPerfBasicLogger::GetFileMutex() {
@@ -390,10 +389,13 @@ LinuxPerfBasicLogger::LinuxPerfBasicLogger(Isolate* isolate)
   // If this is the first logger, open the file.
   if (reference_count_ == 1) {
     CHECK_NULL(perf_output_handle_);
+    CHECK_NOT_NULL(v8_flags.perf_basic_prof_path);
+    const char* base_dir = v8_flags.perf_basic_prof_path;
     // Open the perf JIT dump file.
-    int bufferSize = sizeof(kFilenameFormatString) + kFilenameBufferPadding;
-    base::ScopedVector<char> perf_dump_name(bufferSize);
-    int size = SNPrintF(perf_dump_name, kFilenameFormatString, process_id_);
+    base::ScopedVector<char> perf_dump_name(strlen(base_dir) +
+                                            kFilenameBufferPadding);
+    int size =
+        SNPrintF(perf_dump_name, "%s/perf-%d.map", base_dir, process_id_);
     CHECK_NE(size, -1);
     perf_output_handle_ =
         base::OS::FOpen(perf_dump_name.begin(), base::OS::LogFileOpenMode);
@@ -419,12 +421,18 @@ void LinuxPerfBasicLogger::WriteLogRecordedBuffer(uintptr_t address, int size,
                                                   int name_length) {
   // Linux perf expects hex literals without a leading 0x, while some
   // implementations of printf might prepend one when using the %p format
-  // for pointers, leading to wrongly formatted JIT symbols maps.
+  // for pointers, leading to wrongly formatted JIT symbols maps. On the other
+  // hand, Android's simpleperf does expect a leading 0x.
   //
   // Instead, we use V8PRIxPTR format string and cast pointer to uintpr_t,
   // so that we have control over the exact output format.
+#ifdef V8_OS_ANDROID
+  base::OS::FPrint(perf_output_handle_, "0x%" V8PRIxPTR " 0x%x %.*s\n", address,
+                   size, name_length, name);
+#else
   base::OS::FPrint(perf_output_handle_, "%" V8PRIxPTR " %x %.*s\n", address,
                    size, name_length, name);
+#endif
 }
 
 void LinuxPerfBasicLogger::LogRecordedBuffer(AbstractCode code,
@@ -1557,7 +1565,7 @@ void V8FileLogger::CodeCreateEvent(CodeTag tag, const wasm::WasmCode* code,
   // to the native module + function index works well enough.
   // TODO(herhut) Clean up the tick processor code instead.
   void* tag_ptr =
-      reinterpret_cast<byte*>(code->native_module()) + code->index();
+      reinterpret_cast<uint8_t*>(code->native_module()) + code->index();
   msg << kNext << tag_ptr << kNext << ComputeMarker(code);
   msg.WriteToLogFile();
 }
@@ -1700,7 +1708,7 @@ void V8FileLogger::CodeLinePosInfoRecordEvent(
 
 #if V8_ENABLE_WEBASSEMBLY
 void V8FileLogger::WasmCodeLinePosInfoRecordEvent(
-    Address code_start, base::Vector<const byte> source_position_table) {
+    Address code_start, base::Vector<const uint8_t> source_position_table) {
   if (!jit_logger_) return;
   SourcePositionTableIterator iter(source_position_table);
   CodeLinePosEvent(*jit_logger_, code_start, iter, JitCodeEvent::WASM_CODE);
@@ -1948,9 +1956,7 @@ void V8FileLogger::MapEvent(const char* type, Handle<Map> from, Handle<Map> to,
     } else if (name_or_sfi->IsSharedFunctionInfo()) {
       SharedFunctionInfo sfi = SharedFunctionInfo::cast(*name_or_sfi);
       msg << sfi.DebugNameCStr().get();
-#if V8_SFI_HAS_UNIQUE_ID
       msg << " " << sfi.unique_id();
-#endif  // V8_SFI_HAS_UNIQUE_ID
     }
   }
   msg.WriteToLogFile();
@@ -1975,6 +1981,15 @@ void V8FileLogger::MapDetails(Map map) {
     map.PrintMapDetails(buffer);
     msg << buffer.str().c_str();
   }
+  msg.WriteToLogFile();
+}
+
+void V8FileLogger::MapMoveEvent(Map from, Map to) {
+  if (!v8_flags.log_maps) return;
+  DisallowGarbageCollection no_gc;
+  MSG_BUILDER();
+  msg << "map-move" << kNext << Time() << kNext << AsHex::Address(from.ptr())
+      << kNext << AsHex::Address(to.ptr());
   msg.WriteToLogFile();
 }
 

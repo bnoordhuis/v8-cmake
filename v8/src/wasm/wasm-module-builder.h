@@ -317,8 +317,7 @@ class V8_EXPORT_PRIVATE WasmModuleBuilder : public ZoneObject {
                      base::Vector<const char> module = {});
   WasmFunctionBuilder* AddFunction(const FunctionSig* sig = nullptr);
   WasmFunctionBuilder* AddFunction(uint32_t sig_index);
-  uint32_t AddGlobal(ValueType type, bool mutability = true,
-                     WasmInitExpr init = WasmInitExpr());
+  uint32_t AddGlobal(ValueType type, bool mutability, WasmInitExpr init);
   uint32_t AddGlobalImport(base::Vector<const char> name, ValueType type,
                            bool mutability,
                            base::Vector<const char> module = {});
@@ -379,6 +378,10 @@ class V8_EXPORT_PRIVATE WasmModuleBuilder : public ZoneObject {
         current_recursive_group_start_,
         static_cast<uint32_t>(types_.size()) - current_recursive_group_start_);
     current_recursive_group_start_ = -1;
+  }
+
+  void AddRecursiveTypeGroup(uint32_t start, uint32_t size) {
+    recursive_groups_.emplace(start, size);
   }
 
   // Writing methods.
@@ -460,7 +463,7 @@ class V8_EXPORT_PRIVATE WasmModuleBuilder : public ZoneObject {
     uint32_t min_size;
     uint32_t max_size;
     bool has_maximum;
-    WasmInitExpr init;
+    base::Optional<WasmInitExpr> init;
   };
 
   struct WasmDataSegment {

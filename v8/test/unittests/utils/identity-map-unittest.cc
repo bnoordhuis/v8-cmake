@@ -11,6 +11,7 @@
 #include "src/objects/heap-number-inl.h"
 #include "src/objects/objects.h"
 #include "src/zone/zone.h"
+#include "test/unittests/heap/heap-utils.h"
 #include "test/unittests/test-utils.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
@@ -695,7 +696,7 @@ TEST_F(IdentityMapTest, ExplicitGC) {
   }
 
   // Do an explicit, real GC.
-  CollectGarbage(i::NEW_SPACE);
+  InvokeMinorGC();
 
   // Check that searching for the numbers finds the same values.
   for (size_t i = 0; i < arraysize(num_keys); i++) {
@@ -736,7 +737,7 @@ TEST_F(IdentityMapTest, GCShortCutting) {
 
     // Do an explicit, real GC, this should short-cut the thin string to point
     // to the internalized string (this is not implemented for MinorMC).
-    CollectGarbage(i::NEW_SPACE);
+    InvokeMinorGC();
     DCHECK_IMPLIES(!v8_flags.minor_mc && !v8_flags.optimize_for_size,
                    *thin_string == *internalized_string);
 

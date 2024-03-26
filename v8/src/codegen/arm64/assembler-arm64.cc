@@ -683,23 +683,24 @@ void Assembler::DeleteUnresolvedBranchInfoForLabelTraverse(Label* label) {
 
   while (!end_of_chain) {
     Instruction* link = InstructionAt(link_offset);
-    link_pcoffset = static_cast<int>(link->ImmPCOffset());
+    int max_reachable_pc = static_cast<int>(InstructionOffset(link));
 
-    // ADR instructions are not handled by veneers.
-    if (link->IsImmBranch()) {
-      int max_reachable_pc =
-          static_cast<int>(InstructionOffset(link) +
-                           Instruction::ImmBranchRange(link->BranchType()));
-      using unresolved_info_it = std::multimap<int, FarBranchInfo>::iterator;
-      std::pair<unresolved_info_it, unresolved_info_it> range;
-      range = unresolved_branches_.equal_range(max_reachable_pc);
-      unresolved_info_it it;
-      for (it = range.first; it != range.second; ++it) {
-        if (it->second.pc_offset_ == link_offset) {
-          unresolved_branches_.erase(it);
-          break;
-        }
-      }
+    // ADR instructions and unconditional branches are not handled by veneers.
+    if (link->IsCondBranchImm() || link->IsCompareBranch()) {
+      static_assert(Instruction::ImmBranchRange(CondBranchType) ==
+                    Instruction::ImmBranchRange(CompareBranchType));
+      max_reachable_pc += Instruction::ImmBranchRange(CondBranchType);
+      unresolved_branches_.erase(max_reachable_pc);
+      link_pcoffset = link->ImmCondBranch() * kInstrSize;
+    } else if (link->IsTestBranch()) {
+      // Add one to account for branch type tag bit.
+      max_reachable_pc += Instruction::ImmBranchRange(TestBranchType) + 1;
+      unresolved_branches_.erase(max_reachable_pc);
+      link_pcoffset = link->ImmTestBranch() * kInstrSize;
+    } else if (link->IsUncondBranchImm()) {
+      link_pcoffset = link->ImmUncondBranch() * kInstrSize;
+    } else {
+      link_pcoffset = static_cast<int>(link->ImmPCOffset());
     }
 
     end_of_chain = (link_pcoffset == 0);
@@ -4118,18 +4119,12 @@ void Assembler::LoadStore(const CPURegister& rt, const MemOperand& addr,
 
   if (addr.IsImmediateOffset()) {
     unsigned size = CalcLSDataSize(op);
+    int offset = static_cast<int>(addr.offset());
     if (IsImmLSScaled(addr.offset(), size)) {
-      int offset = static_cast<int>(addr.offset());
-      // Use the scaled addressing mode.
-      Emit(LoadStoreUnsignedOffsetFixed | memop |
-           ImmLSUnsigned(offset >> size));
-    } else if (IsImmLSUnscaled(addr.offset())) {
-      int offset = static_cast<int>(addr.offset());
-      // Use the unscaled addressing mode.
-      Emit(LoadStoreUnscaledOffsetFixed | memop | ImmLS(offset));
+      LoadStoreScaledImmOffset(memop, offset, size);
     } else {
-      // This case is handled in the macro assembler.
-      UNREACHABLE();
+      DCHECK(IsImmLSUnscaled(addr.offset()));
+      LoadStoreUnscaledImmOffset(memop, offset);
     }
   } else if (addr.IsRegisterOffset()) {
     Extend ext = addr.extend();
@@ -4149,29 +4144,16 @@ void Assembler::LoadStore(const CPURegister& rt, const MemOperand& addr,
          ExtendMode(ext) | ImmShiftLS((shift_amount > 0) ? 1 : 0));
   } else {
     // Pre-index and post-index modes.
+    DCHECK(IsImmLSUnscaled(addr.offset()));
     DCHECK_NE(rt, addr.base());
-    if (IsImmLSUnscaled(addr.offset())) {
-      int offset = static_cast<int>(addr.offset());
-      if (addr.IsPreIndex()) {
-        Emit(LoadStorePreIndexFixed | memop | ImmLS(offset));
-      } else {
-        DCHECK(addr.IsPostIndex());
-        Emit(LoadStorePostIndexFixed | memop | ImmLS(offset));
-      }
+    int offset = static_cast<int>(addr.offset());
+    if (addr.IsPreIndex()) {
+      Emit(LoadStorePreIndexFixed | memop | ImmLS(offset));
     } else {
-      // This case is handled in the macro assembler.
-      UNREACHABLE();
+      DCHECK(addr.IsPostIndex());
+      Emit(LoadStorePostIndexFixed | memop | ImmLS(offset));
     }
   }
-}
-
-bool Assembler::IsImmLSUnscaled(int64_t offset) { return is_int9(offset); }
-
-bool Assembler::IsImmLSScaled(int64_t offset, unsigned size) {
-  bool offset_is_size_multiple =
-      (static_cast<int64_t>(static_cast<uint64_t>(offset >> size) << size) ==
-       offset);
-  return offset_is_size_multiple && is_uint12(offset >> size);
 }
 
 bool Assembler::IsImmLSPair(int64_t offset, unsigned size) {
@@ -4688,17 +4670,24 @@ void Assembler::EmitVeneers(bool force_emit, bool need_protection,
   const intptr_t max_pc_after_veneers =
       MaxPCOffsetAfterVeneerPoolIfEmittedNow(margin);
 
-  // The `unresolved_branches_` multimap is sorted by max-reachable-pc in
-  // ascending order. For efficiency reasons, we want to call
+  // The `unresolved_branches_` map is sorted by max-reachable-pc in ascending
+  // order. For efficiency reasons, we want to call
   // RemoveBranchFromLabelLinkChain in descending order. The actual veneers are
   // then generated in ascending order.
   // TODO(jgruber): This is still inefficient in multiple ways, thoughts on how
   // we could improve in the future:
-  // - Don't erase individual elements from the multimap, erase a range instead.
-  // - Replace the multimap by a simpler data structure (like a plain vector or
-  //   a circular array).
   // - Refactor s.t. RemoveBranchFromLabelLinkChain does not need the linear
   //   lookup in the link chain.
+
+  class FarBranchInfo {
+   public:
+    FarBranchInfo(int offset, Label* label)
+        : pc_offset_(offset), label_(label) {}
+    // Offset of the branch in the code generation buffer.
+    int pc_offset_;
+    // The label branched to.
+    Label* label_;
+  };
 
   static constexpr int kStaticTasksSize = 16;  // Arbitrary.
   base::SmallVector<FarBranchInfo, kStaticTasksSize> tasks;
@@ -4706,11 +4695,24 @@ void Assembler::EmitVeneers(bool force_emit, bool need_protection,
   {
     auto it = unresolved_branches_.begin();
     while (it != unresolved_branches_.end()) {
-      const int max_reachable_pc = it->first;
+      const int max_reachable_pc = it->first & ~1;
       if (!force_emit && max_reachable_pc > max_pc_after_veneers) break;
 
       // Found a task. We'll emit a veneer for this.
-      tasks.emplace_back(it->second);
+
+      // Calculate the branch location from the maximum reachable PC. Only
+      // B.cond, CB[N]Z and TB[N]Z are veneered, and the first two branch types
+      // have the same range. The LSB (branch type tag bit) is set for TB[N]Z,
+      // clear otherwise.
+      int pc_offset = it->first;
+      if (pc_offset & 1) {
+        pc_offset -= (Instruction::ImmBranchRange(TestBranchType) + 1);
+      } else {
+        static_assert(Instruction::ImmBranchRange(CondBranchType) ==
+                      Instruction::ImmBranchRange(CompareBranchType));
+        pc_offset -= Instruction::ImmBranchRange(CondBranchType);
+      }
+      tasks.emplace_back(FarBranchInfo{pc_offset, it->second});
       auto eraser_it = it++;
       unresolved_branches_.erase(eraser_it);
     }
