@@ -25,12 +25,13 @@ endif()
 list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 
-find_package (Python3 COMPONENTS Interpreter)
-find_package(Threads)
+find_package(Python3 COMPONENTS Interpreter)
+find_package(Threads QUIET)
 
 include(CMakeDependentOption)
 include(GNUInstallDirs)
 
+include(CheckPythonModuleExists)
 include(GenerateBuiltinsList)
 
 check_python_module_exists(PYTHON_HAVE_MARKUPSAFE markupsafe)
@@ -726,7 +727,7 @@ add_custom_command(
 
 add_custom_command(
   COMMAND
-    Python::Interpreter
+    Python3::Interpreter
     v8/third_party/inspector_protocol/code_generator.py
     --config v8/src/inspector/inspector_protocol_config.json
     --config_value protocol.path=v8/include/js_protocol.pdl
