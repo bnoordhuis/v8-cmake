@@ -1,10 +1,4 @@
-if (CMAKE_VERSION VERSION_GREATER_EQUAL 3.10)
-  include_guard(GLOBAL)
-elseif (__check_python_module)
-  return()
-else()
-  set(__check_python_module ON)
-endif()
+include_guard(GLOBAL)
 
 function (check_python_module_exists result module)
   if (CACHE{result})

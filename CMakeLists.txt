@@ -1,9 +1,7 @@
-cmake_minimum_required(VERSION 3.4)
+cmake_minimum_required(VERSION 3.12)
 set(CMAKE_USER_MAKE_RULES_OVERRIDE "${CMAKE_CURRENT_SOURCE_DIR}/cmake/MSVC.cmake")
 set(CMAKE_DISABLE_IN_SOURCE_BUILD ON)
 project(V8 LANGUAGES CXX C ASM)
-
-option(V8CMAKE_FIND_PYTHON "Enable finding python" ON)
 
 if(MSVC)
   enable_language(ASM_MASM)
@@ -27,15 +25,12 @@ endif()
 list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 
-if (V8CMAKE_FIND_PYTHON)
-  find_package(Python 3 REQUIRED QUIET COMPONENTS Interpreter)
-endif()
-find_package(Threads QUIET)
+find_package (Python3 COMPONENTS Interpreter)
+find_package(Threads)
 
 include(CMakeDependentOption)
 include(GNUInstallDirs)
 
-include(CheckPythonModuleExists)
 include(GenerateBuiltinsList)
 
 check_python_module_exists(PYTHON_HAVE_MARKUPSAFE markupsafe)
