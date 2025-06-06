@@ -11,7 +11,10 @@ if(MSVC)
            v8/src/heap/base/asm/ia32/push_registers_masm.asm
            v8/src/heap/base/asm/x64/push_registers_masm.asm
     PROPERTY LANGUAGE ASM_MASM)
-
+  # The most important workaround is /utf-8, if you don't add this option, your complication will fail if you compile v8 in
+  # a non-english environment (for example, Simplified Chinese).
+  # The remaining options is aimed to let complier shut up.
+  set(msvc-workaround /utf-8 /wd4661 /wd4819 /wd4267 /wd4996 /wd4244 /wd4005 /wd4146 /wd4715 /wd4530 /wd4838 /wd4506 /wd4309 /wd4312 /wd4334)
 endif()
 
 add_definitions("-DV8_ENABLE_WEBASSEMBLY -DV8_ADVANCED_BIGINT_ALGORITHMS -DV8_ENABLE_WASM_SIMD256_REVEC")
@@ -137,13 +140,17 @@ add_executable(
   v8/src/d8/d8-js.cc
   v8/src/d8/d8-test.cc
   v8/src/d8/d8-platforms.cc
-  v8/src/d8/d8.cc
+  v8/src/d8/d8.cc  
 )
 
 target_compile_definitions(d8 PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 target_compile_options(d8 PRIVATE ${disable-exceptions})
 if(enable-fPIC)
   target_compile_options(d8 PRIVATE ${enable-fpic})
+endif()
+
+if (is-msvc)
+    target_compile_options(d8 PRIVATE ${msvc-workaround})
 endif()
 
 target_include_directories(d8
@@ -183,6 +190,9 @@ target_link_libraries(shell
         v8_inspector
         v8_libplatform
         )
+if(is-msvc)
+  target_compile_options(shell PRIVATE ${msvc-workaround})
+endif()
 
 add_executable(
         hello-world
@@ -203,6 +213,9 @@ target_link_libraries(hello-world
         v8_inspector
         v8_libplatform
         )
+if(is-msvc)
+  target_compile_options(hello-world PRIVATE ${msvc-workaround})
+endif()
 
 # more granular library support
 add_library(v8-i18n-support OBJECT)
@@ -232,6 +245,10 @@ target_sources(v8-i18n-support PRIVATE ${i18n-sources})
 target_compile_definitions(v8-i18n-support PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 target_compile_options(v8-i18n-support PRIVATE ${disable-exceptions})
 target_link_libraries(v8-i18n-support PRIVATE v8_torque_generated)
+
+if (is-msvc)
+    target_compile_options(v8-i18n-support PRIVATE ${msvc-workaround})
+endif()
 
 target_include_directories(v8-i18n-support
   PRIVATE
@@ -327,7 +344,7 @@ list(REMOVE_ITEM strings-sources v8/src/strings/char-predicates.cc)
 list(APPEND snapshot-sources v8/src/snapshot/embedded/embedded-data.cc)
 list(APPEND wasm-sources ${wasm-baseline-sources})
 
-add_library(v8_base_without_compiler STATIC
+list(APPEND v8_base_without_compiler_sources 
   $<${is-posix}:v8/src/trap-handler/handler-inside-posix.cc>
   $<${is-posix}:v8/src/trap-handler/handler-outside-posix.cc>
   $<$<AND:${is-x64},${is-win}>:v8/src/diagnostics/unwinding-info-win64.cc>
@@ -443,6 +460,10 @@ add_library(v8_base_without_compiler STATIC
   $<TARGET_OBJECTS:v8-adler32>
 )
 
+add_library(v8_base_without_compiler STATIC 
+  ${v8_base_without_compiler_sources}
+)
+
 if (WIN32)
   if (CMAKE_SYSTEM_VERSION VERSION_GREATER 10) # Windows 10
     set(windows-version 0x0A00)
@@ -468,6 +489,10 @@ target_compile_definitions(v8_base_without_compiler PRIVATE ${v8_defines} $<${is
 target_compile_options(v8_base_without_compiler PRIVATE ${disable-exceptions})
 if(enable-fPIC)
   target_compile_options(v8_base_without_compiler PRIVATE ${enable-fpic})
+endif()
+
+if(is-msvc)
+  target_compile_options(v8_base_without_compiler PRIVATE ${msvc-workaround})
 endif()
 
 target_include_directories(v8_base_without_compiler
@@ -506,6 +531,10 @@ if(enable-fPIC)
   target_compile_options(v8_compiler PRIVATE ${enable-fpic})
 endif()
 
+if(is-msvc)
+  target_compile_options(v8_compiler PRIVATE ${msvc-workaround})
+endif()
+
 target_include_directories(v8_compiler
   PUBLIC
     ${PROJECT_BINARY_DIR}
@@ -528,8 +557,7 @@ target_link_libraries(v8_compiler
 # v8_initializers
 #
 
-add_library(
-  v8_initializers STATIC
+list(APPEND v8_initializers_sources
   $<${is-arm64}:v8/src/builtins/arm64/builtins-arm64.cc>
   $<${is-arm}:v8/src/builtins/arm/builtins-arm.cc>
   $<${is-ia32}:v8/src/builtins/ia32/builtins-ia32.cc>
@@ -581,10 +609,16 @@ add_library(
   v8/src/interpreter/interpreter-intrinsics-generator.cc
 )
 
+add_library(v8_initializers STATIC ${v8_initializers_sources})
+
 target_compile_definitions(v8_initializers PRIVATE ${v8_defines} $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 target_compile_options(v8_initializers PRIVATE ${disable-exceptions})
 if(enable-fPIC)
   target_compile_options(v8_initializers PRIVATE ${enable-fpic})
+endif()
+
+if(is-msvc)
+  target_compile_options(v8_initializers PRIVATE ${msvc-workaround})
 endif()
 
 target_include_directories(v8_initializers
@@ -599,13 +633,17 @@ target_link_libraries(v8_initializers PRIVATE v8_torque_generated v8-bytecodes-b
 # v8_snapshot
 #
 
+list(APPEND v8_snapshot_sources 
+  ${PROJECT_BINARY_DIR}/embedded.S
+  ${PROJECT_BINARY_DIR}/snapshot.cc
+  v8/src/init/setup-isolate-deserialize.cc
+)
+
 # Note: v8_use_external_startup_data not currently supported.
 # Note: v8_use_multi_snapshots not currently supported.
 add_library(
   v8_snapshot STATIC
-  ${PROJECT_BINARY_DIR}/embedded.S
-  ${PROJECT_BINARY_DIR}/snapshot.cc
-  v8/src/init/setup-isolate-deserialize.cc
+  ${v8_snapshot_sources}
 )
 
 target_compile_definitions(v8_snapshot PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
@@ -613,6 +651,11 @@ target_compile_options(v8_snapshot PRIVATE ${disable-exceptions})
 if(enable-fPIC)
   target_compile_options(v8_snapshot PRIVATE ${enable-fpic})
 endif()
+
+if(is-msvc)
+  target_compile_options(v8_snapshot PRIVATE ${msvc-workaround})
+endif()
+
 target_include_directories(v8_snapshot PRIVATE ${PROJECT_SOURCE_DIR}/v8)
 
 target_link_libraries(v8_snapshot
@@ -700,6 +743,11 @@ target_compile_options(v8_inspector PRIVATE ${disable-exceptions})
 if(enable-fPIC)
   target_compile_options(v8_inspector PRIVATE ${enable-fpic})
 endif()
+
+if(is-msvc)
+  target_compile_options(v8_inspector PRIVATE ${msvc-workaround})
+endif()
+
 target_compile_definitions(v8_inspector PUBLIC $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 
 target_include_directories(v8_inspector
@@ -749,9 +797,7 @@ add_custom_command(
 # v8_libplatform
 #
 
-add_library(v8_libplatform STATIC)
-target_sources(v8_libplatform
-  PRIVATE
+list(APPEND v8_libplatform_sources
     $<${is-win}:v8/src/libplatform/tracing/recorder-win.cc>
     v8/src/libplatform/default-foreground-task-runner.cc
     v8/src/libplatform/default-job.cc
@@ -768,10 +814,17 @@ target_sources(v8_libplatform
     v8/src/libplatform/worker-thread.cc
 )
 
+add_library(v8_libplatform STATIC)
+target_sources(v8_libplatform PRIVATE ${v8_libplatform_sources})
+
 target_compile_definitions(v8_libplatform PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
 target_compile_options(v8_libplatform PRIVATE ${disable-exceptions})
 if(enable-fPIC)
   target_compile_options(v8_libplatform PRIVATE ${enable-fpic})
+endif()
+
+if(is-msvc)
+  target_compile_options(v8_libplatform PRIVATE ${msvc-workaround})
 endif()
 
 target_include_directories(v8_libplatform
@@ -787,7 +840,9 @@ target_link_libraries(v8_libplatform PRIVATE v8_libbase)
 # v8_libsampler
 #
 
-add_library(v8_libsampler STATIC v8/src/libsampler/sampler.cc)
+list(APPEND v8_libsampler_sources v8/src/libsampler/sampler.cc)
+
+add_library(v8_libsampler STATIC ${v8_libsampler_sources})
 
 target_include_directories(v8_libsampler
   PRIVATE
@@ -800,6 +855,11 @@ target_compile_options(v8_libsampler PRIVATE ${disable-exceptions})
 if(enable-fPIC)
   target_compile_options(v8_libsampler PRIVATE ${enable-fpic})
 endif()
+
+if(is-msvc)
+  target_compile_options(v8_libsampler PRIVATE ${msvc-workaround})
+endif()
+
 target_include_directories(v8_libsampler PRIVATE ${PROJECT_SOURCE_DIR}/v8)
 target_link_libraries(v8_libsampler PRIVATE v8_libbase)
 
@@ -807,7 +867,7 @@ target_link_libraries(v8_libsampler PRIVATE v8_libbase)
 # v8_libbase
 #
 
-add_library(v8_libbase STATIC
+list(APPEND v8_libbase_sources 
   v8/src/base/bits.cc
   v8/src/base/bounded-page-allocator.cc
   v8/src/base/cpu.cc
@@ -842,6 +902,8 @@ add_library(v8_libbase STATIC
   $<${is-posix}:v8/src/base/platform/platform-posix.cc>
 )
 
+add_library(v8_libbase STATIC ${v8_libbase_sources})
+
 set_property(SOURCE v8/src/base/utils/random-number-generator.cc
   APPEND PROPERTY COMPILE_DEFINITIONS _CRT_RAND_S
 )
@@ -851,6 +913,11 @@ target_compile_options(v8_libbase PRIVATE ${disable-exceptions})
 if(enable-fPIC)
   target_compile_options(v8_libbase PRIVATE ${enable-fpic})
 endif()
+
+if(is-msvc)
+  target_compile_options(v8_libbase PRIVATE ${msvc-workaround})
+endif()
+
 target_include_directories(v8_libbase PRIVATE ${PROJECT_SOURCE_DIR}/v8)
 target_link_libraries(v8_libbase
   PRIVATE
@@ -884,6 +951,10 @@ target_include_directories(bytecode_builtins_list_generator
 )
 
 target_link_libraries(bytecode_builtins_list_generator v8_libbase)
+
+if(is-msvc)
+  target_compile_options(bytecode_builtins_list_generator PRIVATE ${msvc-workaround})
+endif()
 
 #
 # v8_torque_generated
@@ -986,6 +1057,11 @@ target_compile_options(v8_torque_generated PRIVATE ${disable-exceptions})
 if(enable-fPIC)
   target_compile_options(v8_torque_generated PRIVATE ${enable-fpic})
 endif()
+
+if(is-msvc)
+  target_compile_options(v8_torque_generated PRIVATE ${msvc-workaround})
+endif()
+
 target_link_libraries(v8_torque_generated PRIVATE v8-bytecodes-builtin-list)
 
 target_include_directories(v8_torque_generated
@@ -1040,6 +1116,10 @@ target_compile_options(torque PRIVATE ${enable-exceptions})
 target_include_directories(torque PRIVATE ${PROJECT_SOURCE_DIR}/v8)
 target_link_libraries(torque PRIVATE v8_libbase)
 
+if(is-msvc)
+  target_compile_options(torque PRIVATE ${msvc-workaround})
+endif()
+
 #
 # mksnapshot
 #
@@ -1076,3 +1156,75 @@ target_include_directories(v8-adler32
   PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/v8/third_party/zlib>
 )
+
+if(is-msvc)
+  target_compile_options(mksnapshot PRIVATE ${msvc-workaround})
+endif()
+
+#
+# v8_monolithic
+#
+
+# HELP: Is there any idea for combining multiple static library into one single library?
+# This solution is suck, but I don't really know how to do a cleaner implementation.
+add_library(v8_monolithic STATIC
+    ${v8_base_without_compiler_sources}
+    ${v8_libplatform_sources}
+    ${compiler-sources}
+    ${v8_libbase_sources}
+    ${v8_libsampler_sources}
+)
+target_compile_definitions(v8_monolithic PRIVATE $<${is-win}:UNICODE> $<${is-msvc}:_HAS_EXCEPTIONS=0>)
+target_compile_options(v8_monolithic PRIVATE ${disable-exceptions})
+if(enable-fPIC)
+  target_compile_options(v8_monolithic PRIVATE ${enable-fpic})
+endif()
+
+if(is-msvc)
+  target_compile_options(v8_monolithic PRIVATE ${msvc-workaround})
+endif()
+
+target_include_directories(v8_monolithic
+  PUBLIC
+    ${PROJECT_SOURCE_DIR}/v8/include
+  PRIVATE
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/v8/include>
+    $<BUILD_INTERFACE:$<TARGET_PROPERTY:v8-bytecodes-builtin-list,INTERFACE_INCLUDE_DIRECTORIES>>
+    ${PROJECT_SOURCE_DIR}/v8
+    ${PROJECT_SOURCE_DIR}/v8/third_party/zlib
+    ${PROJECT_BINARY_DIR}
+)
+target_link_libraries(v8_monolithic
+    PRIVATE
+    Threads::Threads
+    $<${is-linux}:${CMAKE_DL_LIBS}>
+    $<${is-linux}:rt>
+    $<${is-win}:winmm>
+    $<${is-win}:dbghelp>
+    v8_torque_generated
+    v8-bytecodes-builtin-list
+)
+
+#
+# wee8
+#
+add_library(wee8 STATIC
+    v8/src/wasm/c-api.cc
+)
+target_compile_definitions(wee8 PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
+target_compile_options(wee8 PRIVATE ${disable-exceptions})
+if(enable-fPIC)
+  target_compile_options(wee8 PRIVATE ${enable-fpic})
+endif()
+
+if(is-msvc)
+  target_compile_options(wee8 PRIVATE ${msvc-workaround})
+endif()
+target_include_directories(wee8 
+    PUBLIC 
+        ${PROJECT_SOURCE_DIR}/v8/include
+    PRIVATE
+        ${PROJECT_SOURCE_DIR}/v8/third_party/wasm-api
+        ${PROJECT_SOURCE_DIR}/v8
+)
+target_link_libraries(wee8 PRIVATE v8_base_without_compiler v8_compiler v8_libplatform v8_snapshot)
