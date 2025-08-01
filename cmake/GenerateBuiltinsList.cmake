@@ -1,3 +1,7 @@
+if (is-riscv)
+	set(bblg-prefix ${RISCV_EMULATOR} -P --) # Proxy through the emulator
+endif()
+
 function(v8_generate_builtins_list target-dir)
   set(directory ${target-dir}/builtins-generated)
   set(output ${directory}/bytecodes-builtins-list.h)
@@ -7,7 +11,7 @@ function(v8_generate_builtins_list target-dir)
     COMMENT "Generating ${directory}"
     VERBATIM)
   add_custom_command(
-    COMMAND bytecode_builtins_list_generator ${output}
+    COMMAND ${bblg-prefix} bytecode_builtins_list_generator ${output}
     DEPENDS ${directory}
     OUTPUT ${output}
     COMMENT "Generating ${output}"

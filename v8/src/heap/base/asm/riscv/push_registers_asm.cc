@@ -10,6 +10,7 @@
 //
 // Calling convention source:
 // https://riscv.org/wp-content/uploads/2015/01/riscv-calling.pdf Table 18.2
+#include <v8config.h>
 #ifdef V8_TARGET_ARCH_RISCV64
 asm(".global PushAllRegistersAndIterateStack             \n"
     ".type PushAllRegistersAndIterateStack, %function    \n"
@@ -90,4 +91,6 @@ asm(".global PushAllRegistersAndIterateStack             \n"
     "  lw s0, 0(sp)                                      \n"
     "  addi sp, sp, 56                                   \n"
     "  jr ra                                             \n");
+#else
+#error "RISC-V PushAllRegistersAndIterateStack unable to determine target arch."
 #endif

@@ -32,7 +32,6 @@ include(CMakeDependentOption)
 include(GNUInstallDirs)
 
 include(CheckPythonModuleExists)
-include(GenerateBuiltinsList)
 
 check_python_module_exists(PYTHON_HAVE_MARKUPSAFE markupsafe)
 
@@ -75,13 +74,22 @@ if (CMAKE_SYSTEM_PROCESSOR MATCHES "^(ppc|powerpc)")
   else()
     set(is-ppc 1)
   endif()
-endif ()
+  endif ()
 
 set(is-s390 $<STREQUAL:${CMAKE_SYSTEM_PROCESSOR},S390>)
 string(CONCAT is-x64 $<OR:
   $<STREQUAL:${CMAKE_SYSTEM_PROCESSOR},AMD64>,
   $<STREQUAL:${CMAKE_SYSTEM_PROCESSOR},x86_64>
 >)
+
+set(is-riscv 0)
+if (CMAKE_CXX_COMPILER MATCHES "riscv64")
+  set(is-riscv 1)
+  set(RISCV_EMULATOR $ENV{HOME}/github/libriscv/emulator/rvlinux)
+  set(is-x64 0)
+endif()
+
+include(GenerateBuiltinsList)
 
 option(V8_ENABLE_CONCURRENT_MARKING "Enable concurrent marking" ON)
 option(V8_ENABLE_I18N "Enable Internationalization support")
@@ -301,6 +309,7 @@ else()
     $<${is-ppc}:v8/src/heap/base/asm/ppc/push_registers_asm.cc>
     $<${is-s390}:v8/src/heap/base/asm/s390/push_registers_asm.cc>
     $<${is-x64}:v8/src/heap/base/asm/x64/push_registers_asm.cc>
+	$<${is-riscv}:v8/src/heap/base/asm/riscv/push_registers_asm.cc>
   )
 endif()
 
@@ -379,6 +388,31 @@ add_library(v8_base_without_compiler STATIC
   $<$<AND:${is-ppc},${is-ppc64}>:v8/src/execution/ppc/simulator-ppc.cc>
   $<$<AND:${is-ppc},${is-ppc64}>:v8/src/regexp/ppc/regexp-macro-assembler-ppc.cc>
   $<$<BOOL:${V8_ENABLE_I18N}>:$<TARGET_OBJECTS:v8-i18n-support>>
+  $<${is-riscv}:v8/src/builtins/riscv/builtins-riscv.cc>
+  $<${is-riscv}:v8/src/codegen/riscv/assembler-riscv.cc>
+  $<${is-riscv}:v8/src/codegen/riscv/base-assembler-riscv.cc>
+  $<${is-riscv}:v8/src/codegen/riscv/base-constants-riscv.cc>
+  $<${is-riscv}:v8/src/codegen/riscv/base-riscv-i.cc>
+  $<${is-riscv}:v8/src/codegen/riscv/cpu-riscv.cc>
+  $<${is-riscv}:v8/src/codegen/riscv/extension-riscv-a.cc>
+  $<${is-riscv}:v8/src/codegen/riscv/extension-riscv-c.cc>
+  $<${is-riscv}:v8/src/codegen/riscv/extension-riscv-d.cc>
+  $<${is-riscv}:v8/src/codegen/riscv/extension-riscv-f.cc>
+  $<${is-riscv}:v8/src/codegen/riscv/extension-riscv-m.cc>
+  $<${is-riscv}:v8/src/codegen/riscv/extension-riscv-v.cc>
+  $<${is-riscv}:v8/src/codegen/riscv/extension-riscv-zicsr.cc>
+  $<${is-riscv}:v8/src/codegen/riscv/extension-riscv-zifencei.cc>
+  $<${is-riscv}:v8/src/codegen/riscv/macro-assembler-riscv.cc>
+  $<${is-riscv}:v8/src/compiler/backend/riscv/code-generator-riscv.cc>
+  $<${is-riscv}:v8/src/compiler/backend/riscv/instruction-scheduler-riscv.cc>
+  #$<${is-riscv}:v8/src/compiler/backend/riscv/instruction-selector-riscv32.cc>
+  $<${is-riscv}:v8/src/compiler/backend/riscv/instruction-selector-riscv64.cc>
+  $<${is-riscv}:v8/src/deoptimizer/riscv/deoptimizer-riscv.cc>
+  $<${is-riscv}:v8/src/diagnostics/riscv/disasm-riscv.cc>
+  $<${is-riscv}:v8/src/diagnostics/riscv/unwinder-riscv.cc>
+  $<${is-riscv}:v8/src/execution/riscv/frame-constants-riscv.cc>
+  $<${is-riscv}:v8/src/execution/riscv/simulator-riscv.cc>
+  $<${is-riscv}:v8/src/regexp/riscv/regexp-macro-assembler-riscv.cc>
   ${api-sources}
   ${asmjs-sources}
   ${ast-sources}
@@ -536,6 +570,7 @@ add_library(
   $<${is-mips64}:v8/src/builtins/mips64/builtins-mips64.cc>
   $<${is-mips}:v8/src/builtins/mips/builtins-mips.cc>
   $<${is-ppc}:v8/src/builtins/ppc/builtins-ppc.cc>
+  $<${is-riscv}:v8/src/builtins/riscv/builtins-riscv.cc>
   $<${is-s390}:v8/src/builtins/s390/builtins-s390.cc>
   $<${is-x64}:v8/src/builtins/x64/builtins-x64.cc>
   $<$<BOOL:${V8_ENABLE_I18N}>:v8/src/builtins/builtins-intl-gen.cc>
@@ -621,16 +656,21 @@ target_link_libraries(v8_snapshot
     v8-bytecodes-builtin-list
 )
 
+if (is-riscv)
+	set(mksnp-prefix ${RISCV_EMULATOR} -P --)
+endif()
+
 # Note: allow passing in v8_random_seed
 add_custom_command(
   COMMAND
-    mksnapshot
+    ${mksnp-prefix} mksnapshot
     --embedded_src ${PROJECT_BINARY_DIR}/embedded.S
     --startup_src ${PROJECT_BINARY_DIR}/snapshot.cc
     $<${is-arm64}:--target_arch=arm64>
     $<${is-x64}:--target_arch=x64>
     $<${is-ppc}:--target_arch=ppc>
     $<${is-ppc64}:--target_arch=ppc64>
+    $<${is-riscv}:--target_arch=riscv64>
     $<$<PLATFORM_ID:Darwin>:--target_os=mac>
     $<$<PLATFORM_ID:Linux>:--target_os=linux>
     $<$<PLATFORM_ID:Windows>:--target_os=win>
@@ -851,6 +891,9 @@ target_compile_options(v8_libbase PRIVATE ${disable-exceptions})
 if(enable-fPIC)
   target_compile_options(v8_libbase PRIVATE ${enable-fpic})
 endif()
+if (is-riscv)
+  target_link_libraries(v8_libbase PUBLIC -L/usr/riscv64-linux-gnu/lib -latomic)
+endif()
 target_include_directories(v8_libbase PRIVATE ${PROJECT_SOURCE_DIR}/v8)
 target_link_libraries(v8_libbase
   PRIVATE
@@ -884,6 +927,9 @@ target_include_directories(bytecode_builtins_list_generator
 )
 
 target_link_libraries(bytecode_builtins_list_generator v8_libbase)
+if (is-riscv)
+  target_link_libraries(bytecode_builtins_list_generator -static)
+endif()
 
 #
 # v8_torque_generated
@@ -1001,9 +1047,13 @@ target_include_directories(v8_torque_generated
 file(WRITE "${PROJECT_BINARY_DIR}/touch_torque_outputs.cmake"
            "file(TOUCH ${torque-outputs};${torque_outputs})")
 
+if(is-riscv)
+	set(torque-prefix ${RISCV_EMULATOR} -P --) # Proxy through RISC-V emulator
+endif()
+
 add_custom_command(
   COMMAND
-    torque
+    ${torque-prefix} torque
     -o ${PROJECT_BINARY_DIR}/torque-generated
     -v8-root ${PROJECT_SOURCE_DIR}/v8
     ${torque_files}
@@ -1038,7 +1088,7 @@ add_executable(torque)
 target_sources(torque PRIVATE ${torque-program-sources})
 target_compile_options(torque PRIVATE ${enable-exceptions})
 target_include_directories(torque PRIVATE ${PROJECT_SOURCE_DIR}/v8)
-target_link_libraries(torque PRIVATE v8_libbase)
+target_link_libraries(torque PRIVATE v8_libbase -static)
 
 #
 # mksnapshot
@@ -1069,6 +1119,7 @@ target_link_libraries(mksnapshot
     v8_initializers
     v8-bytecodes-builtin-list
     v8_torque_generated
+	-static
 )
 
 add_library(v8-adler32 OBJECT v8/third_party/zlib/adler32.c)
