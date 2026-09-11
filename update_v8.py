@@ -60,11 +60,13 @@ def update_one(dep):
   clonedir = repodir(dep)
 
   if not repodir_exists(dep):
-    git('clone', '--bare', url, clonedir, cwd=options.tmpdir, dry_run=dry_run)
+    git('clone', '--bare', '--config', 'core.autocrlf=false', url, clonedir,
+        cwd=options.tmpdir, dry_run=dry_run)
 
   what = commit
   if isv8(dep):
-    what = '+refs/{}:refs/{}'.format(branch, branch)
+    #what = '+refs/{}:refs/{}'.format(branch, branch)
+    what = '+refs/branch-heads/*:refs/branch-heads/*'
 
   git('fetch', url, what, cwd=clonedir, dry_run=dry_run)
 
@@ -93,7 +95,7 @@ def update_all():
   # Now for some arbitrary code execution...
   what = '{}:DEPS'.format(v8['commit'])
   source = git('show', what, check_output=True, cwd=repodir(v8))
-  code = compile('def Var(k): return vars[k]\n' + source, 'DEPS', 'exec')
+  code = compile('def Var(k): return vars[k]\ndef Str(k): return str(k)\n' + source, 'DEPS', 'exec')
   globls = {}
   eval(code, globls)
   v8_deps = globls['deps']
@@ -126,15 +128,33 @@ def update_all():
       update_one(dep)
 
   arg = '-n' if dry_run else '-q'
-  git('rm', arg, '-r', 'v8')
+  try:
+    git('rm', arg, '-r', 'v8')
+  except Exception as e:
+    print('Failed to remove v8: {}'.format(e)) # Not critical, continue.  Maybe a previous run removed it but then failed and we are re-running now.
 
   for dep in deps:
-    cmd = '(cd {} && {} archive --format=tar --prefix=v8/{}/ {}) | {} x'.format(
-        repodir(dep), options.git, dep['path'], dep['commit'], options.tar)
-    if dry_run:
-      print(cmd)
-    else:
-      subprocess.check_call([cmd], shell=True)
+    # debug: print dep contents
+    prefix = 'v8/{}'.format(dep['path'])
+    if len(dep['path']):
+      prefix += '/'
+
+    archive_cmd = [
+        options.git, 'archive', '--format=tar',
+        '--prefix={}'.format(prefix), dep['commit']
+    ]
+    tar_cmd = [options.tar, 'x']
+    print('{} | {}'.format(archive_cmd, tar_cmd))
+    if not dry_run:
+      archive = subprocess.Popen(
+          archive_cmd, cwd=repodir(dep), stdout=subprocess.PIPE)
+      try:
+        subprocess.check_call(tar_cmd, stdin=archive.stdout)
+      finally:
+        archive.stdout.close()
+        archive_status = archive.wait()
+      if archive_status:
+        raise subprocess.CalledProcessError(archive_status, archive_cmd)
 
   for filename in sorted(os.listdir('patches')):
     if filename.endswith('.patch'):
@@ -179,7 +199,8 @@ if __name__ == '__main__':
   try:
     update_all()
   finally:
+    lockfile.close()
     try:
       os.unlink(lockfile_name)
-    except:
+    except OSError:
       pass

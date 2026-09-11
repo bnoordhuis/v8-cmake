@@ -1,11 +1,18 @@
-cmake_minimum_required(VERSION 3.4)
+cmake_minimum_required(VERSION 3.15)
 set(CMAKE_USER_MAKE_RULES_OVERRIDE "${CMAKE_CURRENT_SOURCE_DIR}/cmake/MSVC.cmake")
 set(CMAKE_DISABLE_IN_SOURCE_BUILD ON)
 project(V8 LANGUAGES CXX C ASM)
 
+set(USE_PRECOMPILED_HEADERS 0)
+if(${CMAKE_VERSION} VERSION_GREATER_EQUAL "3.16.0") 
+set(USE_PRECOMPILED_HEADERS 1)
+endif()
+
 if(MSVC)
   enable_language(ASM_MASM)
   set_property(SOURCE ${PROJECT_BINARY_DIR}/embedded.S PROPERTY LANGUAGE ASM_MASM)
+  set_property(SOURCE ${PROJECT_BINARY_DIR}/embedded.S 
+    APPEND PROPERTY COMPILE_OPTIONS /safeseh)
 endif()
 
 list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
@@ -47,16 +54,17 @@ set(is-msvc $<CXX_COMPILER_ID:MSVC>)
 # FIXME obviously
 set(is-arm 0)
 set(is-arm64 0)
-set(is-ia32 0)
+set(is-ia32 $<OR:$<STREQUAL:${CMAKE_GENERATOR_PLATFORM},Win32>,$<STREQUAL:${CMAKE_GENERATOR_PLATFORM},x86>>)
+
 set(is-mips 0)
 set(is-mips64 0)
 set(is-ppc 0)
 
 set(is-s390 $<STREQUAL:${CMAKE_SYSTEM_PROCESSOR},S390>)
-string(CONCAT is-x64 $<OR:
-  $<STREQUAL:${CMAKE_SYSTEM_PROCESSOR},AMD64>,
-  $<STREQUAL:${CMAKE_SYSTEM_PROCESSOR},x86_64>
->)
+string(CONCAT is-x64 
+  $<OR:$<STREQUAL:${CMAKE_GENERATOR_PLATFORM},x64>,$<OR:$<STREQUAL:${CMAKE_GENERATOR_PLATFORM},AMD64>,$<STREQUAL:${CMAKE_GENERATOR_PLATFORM},x86_64>>>)
+
+message(STATUS "Building for platform: ${CMAKE_SYSTEM_NAME} ${CMAKE_GENERATOR_PLATFORM}")
 
 option(V8_ENABLE_CONCURRENT_MARKING "Enable concurrent marking" ON)
 option(V8_ENABLE_I18N "Enable Internationalization support")
@@ -69,9 +77,12 @@ set(
   $<${is-linux}:V8_TARGET_OS_LINUX>
   $<${is-win}:V8_HAVE_TARGET_OS>
   $<${is-win}:V8_TARGET_OS_WIN>
+  $<${is-win}:UNICODE>
   $<${is-x64}:V8_TARGET_ARCH_X64>
+  $<${is-ia32}:V8_TARGET_ARCH_IA32>
+  $<${is-ia32}:DISABLE_UNTRUSTED_CODE_MITIGATIONS> # Prevents "Poisoning not supported on ia32" build error.
   $<${is-win}:NOMINMAX>
-  $<$<AND:${is-win},${is-x64}>:V8_OS_WIN_X64>
+  # $<$<AND:${is-win},${is-x64}>:V8_OS_WIN_X64>
   $<$<BOOL:${V8_ENABLE_CONCURRENT_MARKING}>:V8_CONCURRENT_MARKING>
   $<${is-win}:V8_OS_WIN32>
 )
@@ -125,10 +136,6 @@ target_link_libraries(d8
     v8_libplatform
 )
 
-# more granular library support
-add_library(v8-i18n-support OBJECT)
-set_property(TARGET v8-i18n-support PROPERTY EXCLUDE_FROM_ALL ON)
-
 list(APPEND i18n-sources
   v8/src/builtins/builtins-intl.cc
   v8/src/objects/intl-objects.cc
@@ -148,17 +155,23 @@ list(APPEND i18n-sources
   v8/src/strings/char-predicates.cc
 )
 
-target_sources(v8-i18n-support PRIVATE ${i18n-sources})
-target_compile_definitions(v8-i18n-support PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
-target_compile_options(v8-i18n-support PRIVATE ${disable-exceptions})
-target_link_libraries(v8-i18n-support PRIVATE v8_torque_generated)
+if (V8_ENABLE_I18N)
+  # more granular library support
+  add_library(v8-i18n-support OBJECT)
+  set_property(TARGET v8-i18n-support PROPERTY EXCLUDE_FROM_ALL ON)
 
-target_include_directories(v8-i18n-support
-  PRIVATE
-    ${PROJECT_SOURCE_DIR}/v8
-    ${PROJECT_SOURCE_DIR}/v8/src/objects
-    ${PROJECT_SOURCE_DIR}/v8/include
-)
+  target_sources(v8-i18n-support PRIVATE ${i18n-sources})
+  target_compile_definitions(v8-i18n-support PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
+  target_compile_options(v8-i18n-support PRIVATE ${disable-exceptions})
+  target_link_libraries(v8-i18n-support PRIVATE v8_torque_generated)
+
+  target_include_directories(v8-i18n-support
+    PRIVATE
+      ${PROJECT_SOURCE_DIR}/v8
+      ${PROJECT_SOURCE_DIR}/v8/src/objects
+      ${PROJECT_SOURCE_DIR}/v8/include
+  )
+endif()
 
 file(GLOB api-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/api/*.cc)
 file(GLOB asmjs-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/asmjs/*.cc)
@@ -203,6 +216,20 @@ list(REMOVE_ITEM heap-sources
 )
 
 if(WIN32)
+  set_property(SOURCE "v8/src/heap/base/asm/arm64/push_registers_masm.S" PROPERTY LANGUAGE ASM_MASM)
+  set_property(SOURCE "v8/src/heap/base/asm/ia32/push_registers_masm.S" PROPERTY LANGUAGE ASM_MASM)
+  set_property(SOURCE "v8/src/heap/base/asm/x64/push_registers_masm.S" PROPERTY LANGUAGE ASM_MASM)
+
+  if (MSVC)
+    # Prevent build failing due to "module unsafe for SAFESE image" error.
+    set_property(SOURCE "v8/src/heap/base/asm/arm64/push_registers_masm.S" 
+      APPEND PROPERTY COMPILE_OPTIONS /safeseh)
+    set_property(SOURCE "v8/src/heap/base/asm/ia32/push_registers_masm.S" 
+      APPEND PROPERTY COMPILE_OPTIONS /safeseh)
+    set_property(SOURCE "v8/src/heap/base/asm/x64/push_registers_masm.S" 
+      APPEND PROPERTY COMPILE_OPTIONS /safeseh)
+  endif()
+
   list(APPEND heap-sources
     $<${is-arm64}:v8/src/heap/base/asm/arm64/push_registers_masm.S>
     $<${is-ia32}:v8/src/heap/base/asm/ia32/push_registers_masm.S>
@@ -246,6 +273,7 @@ add_library(v8_base_without_compiler STATIC
   $<$<AND:${is-x64},${is-win}>:v8/src/diagnostics/unwinding-info-win64.cc>
   $<$<AND:${is-x64},${is-win}>:v8/src/trap-handler/handler-inside-win.cc>
   $<$<AND:${is-x64},${is-win}>:v8/src/trap-handler/handler-outside-win.cc>
+
   $<${is-x64}:v8/src/codegen/x64/assembler-x64.cc>
   $<${is-x64}:v8/src/codegen/x64/cpu-x64.cc>
   $<${is-x64}:v8/src/codegen/x64/interface-descriptors-x64.cc>
@@ -260,7 +288,23 @@ add_library(v8_base_without_compiler STATIC
   $<${is-x64}:v8/src/diagnostics/x64/eh-frame-x64.cc>
   $<${is-x64}:v8/src/execution/x64/frame-constants-x64.cc>
   $<${is-x64}:v8/src/regexp/x64/regexp-macro-assembler-x64.cc>
+  
+  $<${is-ia32}:v8/src/codegen/ia32/assembler-ia32.cc>
+  $<${is-ia32}:v8/src/codegen/ia32/cpu-ia32.cc>
+  $<${is-ia32}:v8/src/codegen/ia32/interface-descriptors-ia32.cc>
+  $<${is-ia32}:v8/src/codegen/ia32/macro-assembler-ia32.cc>
+  $<${is-ia32}:v8/src/compiler/backend/ia32/code-generator-ia32.cc>
+  $<${is-ia32}:v8/src/compiler/backend/ia32/instruction-scheduler-ia32.cc>
+  $<${is-ia32}:v8/src/compiler/backend/ia32/instruction-selector-ia32.cc>
+  $<${is-ia32}:v8/src/debug/ia32/debug-ia32.cc>
+  $<${is-ia32}:v8/src/deoptimizer/ia32/deoptimizer-ia32.cc>
+  $<${is-ia32}:v8/src/diagnostics/ia32/disasm-ia32.cc>
+  $<${is-ia32}:v8/src/diagnostics/ia32/unwinder-ia32.cc>
+  $<${is-ia32}:v8/src/execution/ia32/frame-constants-ia32.cc>
+  $<${is-ia32}:v8/src/regexp/ia32/regexp-macro-assembler-ia32.cc>
+  
   $<$<BOOL:${V8_ENABLE_I18N}>:$<TARGET_OBJECTS:v8-i18n-support>>
+
   ${api-sources}
   ${asmjs-sources}
   ${ast-sources}
@@ -341,7 +385,8 @@ set_property(SOURCE v8/src/diagnostics/unwinding-info-win64.cc
       _WIN32_WINNT=${windows-version}
 )
 
-target_compile_definitions(v8_base_without_compiler PRIVATE ${v8_defines} $<${is-msvc}:_HAS_EXCEPTIONS=0>)
+target_compile_definitions(v8_base_without_compiler PRIVATE ${v8_defines} $<${is-msvc}:_HAS_EXCEPTIONS=0> UNICODE _WIN32_WINNT=${windows-version})
+
 target_compile_options(v8_base_without_compiler PRIVATE ${disable-exceptions})
 
 target_include_directories(v8_base_without_compiler
@@ -494,6 +539,7 @@ add_custom_command(
     --embedded_src ${PROJECT_BINARY_DIR}/embedded.S
     --startup_src ${PROJECT_BINARY_DIR}/snapshot.cc
     $<${is-x64}:--target_arch=x64>
+    $<${is-ia32}:--target_arch=ia32>
     $<$<PLATFORM_ID:Darwin>:--target_os=mac>
     $<$<PLATFORM_ID:Linux>:--target_os=linux>
     $<$<PLATFORM_ID:Windows>:--target_os=win>
@@ -691,11 +737,7 @@ add_library(v8_libbase STATIC
   $<${is-posix}:v8/src/base/platform/platform-posix.cc>
 )
 
-set_property(SOURCE v8/src/base/utils/random-number-generator.cc
-  APPEND PROPERTY COMPILE_DEFINITIONS _CRT_RAND_S
-)
-
-target_compile_definitions(v8_libbase PRIVATE $<${is-win}:UNICODE> $<${is-msvc}:_HAS_EXCEPTIONS=0>)
+target_compile_definitions(v8_libbase PRIVATE $<${is-win}:UNICODE> $<${is-msvc}:_HAS_EXCEPTIONS=0> _CRT_RAND_S)
 target_compile_options(v8_libbase PRIVATE ${disable-exceptions})
 target_include_directories(v8_libbase PRIVATE ${PROJECT_SOURCE_DIR}/v8)
 target_link_libraries(v8_libbase
@@ -836,6 +878,12 @@ target_include_directories(v8_torque_generated
     ${PROJECT_SOURCE_DIR}/v8
 )
 
+# The torque-outputs and torque_outputs variables can have too many characters
+# on Windows to be executed on the command line, so we have to write it to a
+# temporary file and execute that 
+file(WRITE "${PROJECT_BINARY_DIR}/touch_torque_outputs.cmake"
+           "file(TOUCH ${torque-outputs};${torque_outputs})")
+
 add_custom_command(
   COMMAND
     torque
@@ -843,7 +891,7 @@ add_custom_command(
     -v8-root ${PROJECT_SOURCE_DIR}/v8
     ${torque_files}
   COMMAND
-    ${CMAKE_COMMAND} -E touch ${torque-outputs} ${torque_outputs}
+    ${CMAKE_COMMAND} -P ${PROJECT_BINARY_DIR}/touch_torque_outputs.cmake
   DEPENDS
     torque
     ${torque_dirs}
@@ -910,3 +958,262 @@ target_include_directories(v8-adler32
   PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/v8/third_party/zlib>
 )
+
+if(${USE_PRECOMPILED_HEADERS}) 
+  # cant include everything in base
+  set(H_BASE 
+    "cmake/pch_common.h"
+    "v8/src/base/compiler-specific.h"
+    "v8/src/base/memory.h"
+    "v8/src/base/build_config.h"
+    "v8/src/base/atomicops.h"
+    "v8/src/base/base-export.h"
+    "v8/src/base/bits.h"
+    "v8/src/base/bounds.h"
+    "v8/src/base/bounded-page-allocator.h"
+    "v8/src/base/file-utils.h"
+    "v8/src/base/flags.h"
+    "v8/src/base/functional.h"
+    "v8/src/base/lazy-instance.h"
+    "v8/src/base/v8-fallthrough.h"
+  )
+  file(GLOB H_API "v8/src/api/*.h")
+  file(GLOB H_BUILTINS "v8/src/builtins/*.h")
+  file(GLOB H_COMMON "v8/src/common/*.h")
+  file(GLOB H_COMPILER "v8/src/compiler/*.h")
+  file(GLOB H_FLAGS "v8/src/flags/*.h")
+  file(GLOB H_HEAP "v8/src/heap/*.h")
+  file(GLOB H_LOGGING "v8/src/logging/*.h")
+  file(GLOB H_REGEXP "v8/src/regexp/*.h")
+  file(GLOB H_RUNTIME "v8/src/runtime/*.h")
+  file(GLOB H_STRINGS "v8/src/strings/*.h")
+  file(GLOB H_UTILS "v8/src/utils/*.h")
+  file(GLOB H_WASM "v8/src/wasm/*.h")
+
+  # Can't GLOB this one..
+  set(H_OBJECTS 
+    "v8/src/objects/elements.h"
+    "v8/src/objects/heap-number-inl.h"
+    "v8/src/objects/objects.h"
+    "v8/src/objects/objects-inl.h"
+    "v8/src/objects/slots.h"    
+    "v8/src/objects/smi.h"
+    "v8/src/objects/string.h"
+    "v8/src/objects/visitors.h"
+  )
+  set(H_PRECOMP 
+    ${H_BASE}
+    ${H_BUILTINS}
+    ${H_API}
+    ${H_COMMON}
+    ${H_COMPILER}
+    ${H_HEAP}
+    ${H_LOGGING}
+    ${H_OBJECTS}
+    ${H_REGEXP}
+    ${H_RUNTIME}
+    ${H_STRINGS}
+    ${H_UTILS}
+    ${H_WASM}
+    )
+  target_precompile_headers(v8_libplatform PRIVATE 
+    #${H_BASE}
+    "v8/include/libplatform/libplatform.h"
+  )
+  target_precompile_headers(v8_libbase PRIVATE ${H_BASE})
+  target_precompile_headers(bytecode_builtins_list_generator PRIVATE ${H_BASE})
+
+  target_precompile_headers(v8_base_without_compiler PRIVATE
+      "v8/include/v8.h"
+      "v8/include/v8config.h"
+      "v8/src/common/globals.h"
+      "v8/src/objects/js-array-buffer.h"
+      ${H_BASE}
+      ${H_BUILTINS}
+      ${H_API}
+      ${H_UTILS}
+      ${H_WASM}
+  )
+  target_precompile_headers(v8_initializers PRIVATE ${H_BASE})
+  target_precompile_headers(v8_compiler PRIVATE ${H_PRECOMP})
+  target_precompile_headers(mksnapshot PRIVATE ${H_PRECOMP})
+  
+  # Some surprising issues with explicit template instantiations
+  # going on for torque build if files in v8/src/torque included in PCH.
+  target_precompile_headers(torque
+     PRIVATE
+     ${H_BASE}
+     #${H_COMMON}
+  )
+  target_precompile_headers(v8_torque_generated PRIVATE ${H_PRECOMP}
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/aggregate-error-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/array-copywithin-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/array-every-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/array-filter-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/array-find-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/array-findindex-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/array-foreach-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/array-from-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/array-isarray-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/array-join-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/array-lastindexof-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/array-map-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/array-of-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/array-reduce-right-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/array-reduce-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/array-reverse-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/array-shift-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/array-slice-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/array-some-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/array-splice-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/array-unshift-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/array-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/arraybuffer-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/base-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/boolean-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/builtins-string-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/cast-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/collections-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/console-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/constructor-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/conversion-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/convert-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/data-view-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/finalization-registry-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/frame-arguments-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/frames-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/function-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/growable-fixed-array-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/ic-callable-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/ic-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/internal-coverage-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/internal-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/iterator-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/math-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/number-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/object-fromentries-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/object-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/promise-abstract-operations-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/promise-all-element-closure-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/promise-all-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/promise-any-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/promise-constructor-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/promise-finally-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/promise-jobs-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/promise-misc-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/promise-race-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/promise-reaction-job-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/promise-resolve-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/promise-then-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/proxy-constructor-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/proxy-delete-property-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/proxy-get-property-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/proxy-get-prototype-of-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/proxy-has-property-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/proxy-is-extensible-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/proxy-prevent-extensions-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/proxy-revocable-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/proxy-revoke-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/proxy-set-property-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/proxy-set-prototype-of-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/proxy-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/reflect-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/regexp-exec-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/regexp-match-all-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/regexp-match-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/regexp-replace-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/regexp-search-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/regexp-source-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/regexp-split-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/regexp-test-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/regexp-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/string-endswith-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/string-html-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/string-iterator-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/string-pad-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/string-repeat-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/string-replaceall-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/string-slice-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/string-startswith-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/string-substr-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/string-substring-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/symbol-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/torque-internal-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/typed-array-createtypedarray-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/typed-array-entries-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/typed-array-every-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/typed-array-filter-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/typed-array-find-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/typed-array-findindex-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/typed-array-foreach-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/typed-array-from-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/typed-array-keys-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/typed-array-of-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/typed-array-reduce-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/typed-array-reduceright-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/typed-array-set-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/typed-array-slice-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/typed-array-some-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/typed-array-sort-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/typed-array-subarray-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/typed-array-values-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/typed-array-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/wasm-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/builtins/weak-ref-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/allocation-site-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/api-callbacks-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/arguments-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/cell-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/code-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/contexts-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/data-handler-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/debug-objects-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/descriptor-array-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/embedder-data-array-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/feedback-cell-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/feedback-vector-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/fixed-array-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/foreign-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/free-space-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/heap-number-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/heap-object-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/js-array-buffer-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/js-array-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/js-collection-iterator-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/js-collection-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/js-generator-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/js-objects-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/js-promise-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/js-proxy-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/js-regexp-string-iterator-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/js-regexp-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/js-weak-refs-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/literal-objects-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/map-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/microtask-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/module-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/name-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/oddball-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/ordered-hash-table-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/primitive-heap-object-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/promise-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/property-array-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/property-cell-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/property-descriptor-object-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/prototype-info-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/regexp-match-info-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/scope-info-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/script-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/shared-function-info-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/source-text-module-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/stack-frame-info-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/string-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/struct-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/synthetic-module-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/objects/template-objects-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/ic/handler-configuration-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/src/wasm/wasm-objects-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/test/torque/test-torque-tq-csa.h"
+    "${PROJECT_BINARY_DIR}/torque-generated/third_party/v8/builtins/array-sort-tq-csa.h"
+  )
+endif()
