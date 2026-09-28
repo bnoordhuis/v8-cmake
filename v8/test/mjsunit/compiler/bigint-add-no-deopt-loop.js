@@ -2,16 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Flags: --allow-natives-syntax --turbofan --no-always-turbofan
+// Flags: --allow-natives-syntax --turbofan
 
-
-const big = 2n ** BigInt((2 ** 30)-1);
-
+const big = 2n ** BigInt(%BigIntMaxBits() - 1);
 
 function testAdd(x, y) {
   return x + y;
 }
-
 
 %PrepareFunctionForOptimization(testAdd);
 testAdd(3n, 7n);

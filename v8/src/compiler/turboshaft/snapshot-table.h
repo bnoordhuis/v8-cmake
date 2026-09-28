@@ -15,7 +15,7 @@
 
 // A `SnapshotTable` stores a mapping from keys to values and creates snapshots,
 // which capture the current state efficiently and allow us to return to a
-// previous snapshot later. It is opimized for the case where we switch between
+// previous snapshot later. It is optimized for the case where we switch between
 // similar snapshots with a closeby common ancestor.
 //
 // Complexity:
@@ -39,11 +39,8 @@ struct NoChangeCallback {
                   const Value& new_value) const {}
 };
 
-/*
 template <class Value, class KeyData>
 class SnapshotTable;
-
-namespace detail {
 
 // Place `KeyData` in a superclass to benefit from empty-base optimization.
 template <class Value, class KeyData>
@@ -80,55 +77,26 @@ class SnapshotTableKey {
   }
   const KeyData& data() const { return *entry_; }
   KeyData& data() { return *entry_; }
+  SnapshotTableKey() : entry_(nullptr) {}
+
+  bool valid() const { return entry_ != nullptr; }
 
  private:
   friend class SnapshotTable<Value, KeyData>;
-  friend struct fast_hash<SnapshotTableKey<Value, KeyData>>;
   SnapshotTableEntry<Value, KeyData>* entry_;
   explicit SnapshotTableKey(SnapshotTableEntry<Value, KeyData>& entry)
       : entry_(&entry) {}
 };
 
-}  // namespace detail
-
-template <class Value, class KeyData>
-struct fast_hash<detail::SnapshotTableKey<Value, KeyData>> {
-  size_t operator()(detail::SnapshotTableKey<Value, KeyData> v) const {
-    return fast_hash_combine(v.entry_);
-  }
-};
-
-template <class Value, class KeyData>
-V8_INLINE size_t hash_value(detail::SnapshotTableKey<Value, KeyData> v) {
-  return fast_hash<decltype(v)>{}(v);
-}
-*/
-
 template <class Value, class KeyData = NoKeyData>
 class SnapshotTable {
  private:
-  struct TableEntry;
   struct LogEntry;
   struct SnapshotData;
 
  public:
-  // A `Key` identifies an entry in the `SnapshotTable`. For better performance,
-  // keys always have identity. The template parameter `KeyData` can be used to
-  // embed additional data in the keys.
-  // A Key is implemented as a pointer into the table, which also contains the
-  // `KeyData`. Therefore, keys have pointer-size and are cheap to copy.
-  class Key {
-   public:
-    bool operator==(Key other) const { return entry_ == other.entry_; }
-    const KeyData& data() const { return *entry_; }
-    KeyData& data() { return *entry_; }
-
-   private:
-    friend SnapshotTable;
-    friend size_t hash_value(Key key) { return fast_hash_combine(key.entry_); }
-    TableEntry* entry_;
-    explicit Key(TableEntry& entry) : entry_(&entry) {}
-  };
+  using TableEntry = SnapshotTableEntry<Value, KeyData>;
+  using Key = SnapshotTableKey<Value, KeyData>;
 
   // A `Snapshot` captures the state of the `SnapshotTable`.
   // A `Snapshot` is implemented as a pointer to internal data and is therefore
@@ -150,9 +118,15 @@ class SnapshotTable {
   class MaybeSnapshot {
    public:
     bool has_value() const { return data_ != nullptr; }
-    Snapshot value() const { return Snapshot{data_}; }
+    Snapshot value() const {
+      DCHECK(has_value());
+      return Snapshot{data_};
+    }
 
     void Set(Snapshot snapshot) { data_ = snapshot.data_; }
+
+    MaybeSnapshot() = default;
+    explicit MaybeSnapshot(Snapshot snapshot) : data_(snapshot.data_) {}
 
    private:
     SnapshotData* data_ = nullptr;
@@ -174,53 +148,51 @@ class SnapshotTable {
   // only on the fact that the updates collectively transform the table into the
   // new state. The motivation for this feature are secondary indices that need
   // to be kept in sync with the main table.
-  template <class ChangeCallback = NoChangeCallback,
-            std::enable_if_t<std::is_invocable_v<ChangeCallback, Key, Value,
-                                                 Value>>* = nullptr>
+  template <class ChangeCallback = NoChangeCallback>
   void StartNewSnapshot(base::Vector<const Snapshot> predecessors,
-                        const ChangeCallback& change_callback = {}) {
+                        const ChangeCallback& change_callback = {})
+    requires(std::is_invocable_v<ChangeCallback, Key, Value, Value>)
+  {
     DCHECK(current_snapshot_->IsSealed());
     MoveToNewSnapshot(predecessors, change_callback);
 #ifdef DEBUG
     snapshot_was_created_with_merge = false;
 #endif
   }
-  template <class ChangeCallback = NoChangeCallback,
-            std::enable_if_t<std::is_invocable_v<ChangeCallback, Key, Value,
-                                                 Value>>* = nullptr>
+  template <class ChangeCallback = NoChangeCallback>
   void StartNewSnapshot(std::initializer_list<Snapshot> predecessors = {},
-                        const ChangeCallback& change_callback = {}) {
+                        const ChangeCallback& change_callback = {})
+    requires(std::is_invocable_v<ChangeCallback, Key, Value, Value>)
+  {
     StartNewSnapshot(base::VectorOf(predecessors), change_callback);
   }
-  template <class ChangeCallback = NoChangeCallback,
-            std::enable_if_t<std::is_invocable_v<ChangeCallback, Key, Value,
-                                                 Value>>* = nullptr>
+  template <class ChangeCallback = NoChangeCallback>
   void StartNewSnapshot(Snapshot parent,
-                        const ChangeCallback& change_callback = {}) {
+                        const ChangeCallback& change_callback = {})
+    requires(std::is_invocable_v<ChangeCallback, Key, Value, Value>)
+  {
     StartNewSnapshot({parent}, change_callback);
   }
-  template <
-      class MergeFun, class ChangeCallback = NoChangeCallback,
-      std::enable_if_t<
-          std::is_invocable_v<MergeFun, Key, base::Vector<const Value>> &&
-          std::is_invocable_v<ChangeCallback, Key, Value, Value>>* = nullptr>
+  template <class MergeFun, class ChangeCallback = NoChangeCallback>
   void StartNewSnapshot(base::Vector<const Snapshot> predecessors,
                         const MergeFun& merge_fun,
-                        const ChangeCallback& change_callback = {}) {
+                        const ChangeCallback& change_callback = {})
+    requires(std::is_invocable_v<MergeFun, Key, base::Vector<const Value>> &&
+             std::is_invocable_v<ChangeCallback, Key, Value, Value>)
+  {
     StartNewSnapshot(predecessors, change_callback);
     MergePredecessors(predecessors, merge_fun, change_callback);
 #ifdef DEBUG
     snapshot_was_created_with_merge = true;
 #endif
   }
-  template <
-      class MergeFun, class ChangeCallback = NoChangeCallback,
-      std::enable_if_t<
-          std::is_invocable_v<MergeFun, Key, base::Vector<const Value>> &&
-          std::is_invocable_v<ChangeCallback, Key, Value, Value>>* = nullptr>
+  template <class MergeFun, class ChangeCallback = NoChangeCallback>
   void StartNewSnapshot(std::initializer_list<Snapshot> predecessors,
                         const MergeFun& merge_fun,
-                        const ChangeCallback& change_callback = {}) {
+                        const ChangeCallback& change_callback = {})
+    requires(std::is_invocable_v<MergeFun, Key, base::Vector<const Value>> &&
+             std::is_invocable_v<ChangeCallback, Key, Value, Value>)
+  {
     StartNewSnapshot(base::VectorOf(predecessors), merge_fun, change_callback);
   }
 
@@ -304,10 +276,13 @@ class SnapshotTable {
   SnapshotData* root_snapshot_;
   SnapshotData* current_snapshot_;
 
-  // The following members are only used during a merge operation. They are
-  // declared here to recycle the memory, avoiding repeated Zone-allocation.
+  // The following members are only used temporarily during a merge operation
+  // or when creating a new snapshot.
+  // They are declared here to recycle the memory, avoiding repeated
+  // Zone-allocation.
   ZoneVector<TableEntry*> merging_entries_{zone_};
   ZoneVector<Value> merge_values_{zone_};
+  ZoneVector<SnapshotData*> path_{zone_};
 
 #ifdef DEBUG
   bool snapshot_was_created_with_merge = false;
@@ -363,23 +338,6 @@ class SnapshotTable {
       std::numeric_limits<uint32_t>::max();
 };
 
-// Place `KeyData` in a superclass to benefit from empty-base optimization.
-template <class Value, class KeyData>
-struct SnapshotTable<Value, KeyData>::TableEntry : KeyData {
-  Value value;
-  // `merge_offset` is the offset in `merge_values_` where we store the
-  // merged values. It is used during merging (to know what to merge) and when
-  // calling GetPredecessorValue.
-  uint32_t merge_offset = kNoMergeOffset;
-  // Used during merging: the index of the predecessor for which we last
-  // recorded a value. This allows us to only use the last value for a given
-  // predecessor and skip over all earlier ones.
-  uint32_t last_merged_predecessor = kNoMergedPredecessor;
-
-  explicit TableEntry(Value value, KeyData data)
-      : KeyData(std::move(data)), value(std::move(value)) {}
-};
-
 template <class Value, class KeyData>
 struct SnapshotTable<Value, KeyData>::LogEntry {
   TableEntry& table_entry;
@@ -410,9 +368,9 @@ struct SnapshotTable<Value, KeyData>::SnapshotData {
     }
     return self;
   }
-  void Seal(size_t log_end) {
-    DCHECK_WITH_MSG(!IsSealed(), "A Snapshot can only be sealed once.");
-    this->log_end = log_end;
+  void Seal(size_t end) {
+    DCHECK_WITH_MSG(!IsSealed(), "A Snapshot can only be sealed once");
+    this->log_end = end;
   }
 
   bool IsSealed() const { return log_end != kInvalidOffset; }
@@ -437,9 +395,7 @@ void SnapshotTable<Value, KeyData>::RecordMergeValue(
              std::numeric_limits<uint32_t>::max());
     entry.merge_offset = static_cast<uint32_t>(merge_values_.size());
     merging_entries_.push_back(&entry);
-    for (size_t i = 0; i < predecessor_count; ++i) {
-      merge_values_.push_back(entry.value);
-    }
+    merge_values_.insert(merge_values_.end(), predecessor_count, entry.value);
   }
   merge_values_[entry.merge_offset + predecessor_index] = value;
   entry.last_merged_predecessor = predecessor_index;
@@ -474,7 +430,7 @@ SnapshotTable<Value, KeyData>::MoveToNewSnapshot(
     const ChangeCallback& change_callback) {
   DCHECK_WITH_MSG(
       current_snapshot_->IsSealed(),
-      "A new Snapshot was opened before the previous Snapshot was sealed.");
+      "A new Snapshot was opened before the previous Snapshot was sealed");
 
   SnapshotData* common_ancestor;
   if (predecessors.empty()) {
@@ -491,11 +447,11 @@ SnapshotTable<Value, KeyData>::MoveToNewSnapshot(
   }
   {
     // Replay to common_ancestor.
-    base::SmallVector<SnapshotData*, 16> path;
+    path_.clear();
     for (SnapshotData* s = common_ancestor; s != go_back_to; s = s->parent) {
-      path.push_back(s);
+      path_.push_back(s);
     }
-    for (SnapshotData* s : base::Reversed(path)) {
+    for (SnapshotData* s : base::Reversed(path_)) {
       ReplaySnapshot(s, change_callback);
     }
   }
@@ -578,22 +534,22 @@ class ChangeTrackingSnapshotTable : public SnapshotTable<Value, KeyData> {
     StartNewSnapshot(base::VectorOf(predecessors));
   }
   void StartNewSnapshot(Snapshot parent) { StartNewSnapshot({parent}); }
-  template <class MergeFun,
-            std::enable_if_t<std::is_invocable_v<
-                MergeFun, Key, base::Vector<const Value>>>* = nullptr>
+  template <class MergeFun>
   void StartNewSnapshot(base::Vector<const Snapshot> predecessors,
-                        const MergeFun& merge_fun) {
+                        const MergeFun& merge_fun)
+    requires(std::is_invocable_v<MergeFun, Key, base::Vector<const Value>>)
+  {
     Super::StartNewSnapshot(
         predecessors, merge_fun,
         [this](Key key, const Value& old_value, const Value& new_value) {
           static_cast<Derived*>(this)->OnValueChange(key, old_value, new_value);
         });
   }
-  template <class MergeFun,
-            std::enable_if_t<std::is_invocable_v<
-                MergeFun, Key, base::Vector<const Value>>>* = nullptr>
+  template <class MergeFun>
   void StartNewSnapshot(std::initializer_list<Snapshot> predecessors,
-                        const MergeFun& merge_fun) {
+                        const MergeFun& merge_fun)
+    requires(std::is_invocable_v<MergeFun, Key, base::Vector<const Value>>)
+  {
     StartNewSnapshot(base::VectorOf(predecessors), merge_fun);
   }
 
@@ -603,6 +559,10 @@ class ChangeTrackingSnapshotTable : public SnapshotTable<Value, KeyData> {
       static_cast<Derived*>(this)->OnValueChange(key, old_value,
                                                  Super::Get(key));
     }
+  }
+
+  void SetNoNotify(Key key, Value new_value) {
+    Super::Set(key, std::move(new_value));
   }
 
   Key NewKey(KeyData data, Value initial_value = Value{}) {

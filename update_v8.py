@@ -60,13 +60,18 @@ def update_one(dep):
   clonedir = repodir(dep)
 
   if not repodir_exists(dep):
-    git('clone', '--bare', url, clonedir, cwd=options.tmpdir, dry_run=dry_run)
+    if not dry_run:
+      os.makedirs(clonedir, exist_ok=True)
+    git('init', '--bare', clonedir, cwd=options.tmpdir, dry_run=dry_run)
 
   what = commit
   if isv8(dep):
     what = '+refs/{}:refs/{}'.format(branch, branch)
 
-  git('fetch', url, what, cwd=clonedir, dry_run=dry_run)
+  try:
+    git('fetch', '--depth=1', url, what, cwd=clonedir, dry_run=dry_run)
+  except subprocess.CalledProcessError:
+    git('fetch', url, what, cwd=clonedir, dry_run=dry_run)
 
 
 def update_all():
@@ -87,12 +92,19 @@ def update_all():
   assert isv8(v8)
 
   update_one(v8)
-  v8['commit'] = (
-      git('rev-parse', v8['branch'], check_output=True, cwd=repodir(v8)))
+  if repodir_exists(v8):
+    v8['commit'] = (
+        git('rev-parse', v8['branch'], check_output=True, cwd=repodir(v8)))
 
-  # Now for some arbitrary code execution...
-  what = '{}:DEPS'.format(v8['commit'])
-  source = git('show', what, check_output=True, cwd=repodir(v8))
+    # Now for some arbitrary code execution...
+    what = '{}:DEPS'.format(v8['commit'])
+    source = git('show', what, check_output=True, cwd=repodir(v8))
+  elif dry_run and exists('v8/DEPS'):
+    with open('v8/DEPS') as fp:
+      source = fp.read()
+  else:
+    raise Exception('Bare repository {} does not exist'.format(repodir(v8)))
+
   code = compile('def Var(k): return vars[k]\ndef Str(k): return str(k)\n' + source, 'DEPS', 'exec')
   globls = {}
   eval(code, globls)
@@ -126,7 +138,7 @@ def update_all():
       update_one(dep)
 
   arg = '-n' if dry_run else '-q'
-  git('rm', arg, '-r', 'v8')
+  git('rm', arg, '-r', 'v8', dry_run=dry_run)
 
   for dep in deps:
     cmd = '(cd {} && {} archive --format=tar --prefix=v8/{}/ {}) | {} x'.format(
@@ -146,7 +158,8 @@ def update_all():
         os.remove(join(path, filename))
 
   git('add', '-f', 'v8', dry_run=dry_run)
-  git('log', '-1', '--oneline', v8['commit'], cwd=repodir(v8))
+  git('log', '-1', '--oneline', v8['commit'], cwd=repodir(v8),
+      dry_run=dry_run and not repodir_exists(v8))
 
   newdeps = json.dumps(deps, indent=2)
   newdeps = re.sub(r'\s+$', '\n', newdeps)
@@ -171,15 +184,17 @@ if __name__ == '__main__':
   os.chdir(options.workspace)
 
   lockfile_name = '{}.lock'.format(DATABASE)
-  try:
-    lockfile = open(lockfile_name, 'x') # python 3
-  except ValueError:
-    lockfile = open(lockfile_name, 'wx') # python 2
+  if not dry_run:
+    try:
+      lockfile = open(lockfile_name, 'x') # python 3
+    except ValueError:
+      lockfile = open(lockfile_name, 'wx') # python 2
 
   try:
     update_all()
   finally:
-    try:
-      os.unlink(lockfile_name)
-    except:
-      pass
+    if not dry_run:
+      try:
+        os.unlink(lockfile_name)
+      except:
+        pass

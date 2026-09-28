@@ -5,18 +5,28 @@
 #ifndef V8_SANDBOX_EXTERNAL_ENTITY_TABLE_H_
 #define V8_SANDBOX_EXTERNAL_ENTITY_TABLE_H_
 
+#include <set>
+
+#include "include/v8-platform.h"
 #include "include/v8config.h"
 #include "src/base/atomicops.h"
 #include "src/base/memory.h"
 #include "src/base/platform/mutex.h"
+#include "src/common/code-memory-access.h"
 #include "src/common/globals.h"
-
-#ifdef V8_COMPRESS_POINTERS
+#include "src/sandbox/segmented-table.h"
+#include "src/utils/utils.h"
 
 namespace v8 {
 namespace internal {
 
 class Isolate;
+
+#ifdef OBJECT_PRINT
+// Create a specialization of this printer for entry types to enable printing.
+template <typename EntryType>
+class TableEntryPrinter;
+#endif  // OBJECT_PRINT
 
 /**
  * A thread-safe table with a fixed maximum size for storing references to
@@ -30,122 +40,184 @@ class Isolate;
  * The ExternalEntityTable class should be seen an an incomplete class that
  * needs to be extended by a concrete implementation class, such as the
  * ExternalPointerTable class, as it is lacking some functionality. In
- * particular, while the ExternalEntityTable implements the reserving, growing,
- * and shrinking of the backing memory as well as entry allocation routines, it
- * does not implement any logic for reclaiming entries such as garbage
- * collection. This must be done by the child classes.
+ * particular, while the ExternalEntityTable implements basic table memory
+ * management as well as entry allocation routines, it does not implement any
+ * logic for reclaiming entries such as garbage collection. This must be done
+ * by the child classes.
+ *
+ * For the purpose of memory management, the table is partitioned into Segments
+ * (for example 64kb memory chunks) that are grouped together in "Spaces". All
+ * segments in a space share a freelist, and so entry allocation and garbage
+ * collection happen on the level of spaces.
  */
 template <typename Entry, size_t size>
-class V8_EXPORT_PRIVATE ExternalEntityTable {
+class V8_EXPORT_PRIVATE ExternalEntityTable
+    : public SegmentedTable<Entry, size> {
  protected:
-  static constexpr int kEntrySize = sizeof(Entry);
-  static constexpr size_t kReservationSize = size;
-  static constexpr size_t kMaxCapacity = kReservationSize / kEntrySize;
+  using Base = SegmentedTable<Entry, size>;
+  using FreelistHead = Base::FreelistHead;
+  using Segment = Base::Segment;
+  static constexpr size_t kSegmentSize = Base::kSegmentSize;
+  static constexpr size_t kEntriesPerSegment = Base::kEntriesPerSegment;
+  static constexpr size_t kEntrySize = Base::kEntrySize;
+  static constexpr size_t kNumReadOnlySegments = 64 * KB / kSegmentSize;
+
+  // A collection of segments in an external entity table.
+  //
+  // For the purpose of memory management, a table is partitioned into segments
+  // of a fixed size (e.g. 64kb). A Space is a collection of segments that all
+  // share the same freelist. As such, entry allocation and freeing (e.g.
+  // through garbage collection) all happen on the level of spaces.
+  //
+  // Spaces allow implementing features such as:
+  // * Young generation GC support (a separate space is used for all entries
+  //   belonging to the young generation)
+  // * Having double-width entries in a table (a dedicated space is used that
+  //   contains only double-width entries)
+  // * Sharing one table between multiple isolates that perform GC independently
+  //   (each Isolate owns one space)
+  struct Space {
+   public:
+    Space() = default;
+    Space(const Space&) = delete;
+    Space& operator=(const Space&) = delete;
+    ~Space();
+
+    // Determines the number of entries currently on the freelist.
+    // As entries can be allocated from other threads, the freelist size may
+    // have changed by the time this method returns. As such, the returned
+    // value should only be treated as an approximation.
+    uint32_t freelist_length() const;
+
+    // Returns the current number of segments currently associated with this
+    // space.
+    // The caller must lock the mutex.
+    uint32_t num_segments();
+
+    // Returns whether this space is currently empty.
+    // The caller must lock the mutex.
+    bool is_empty() { return num_segments() == 0; }
+
+    // Returns the current capacity of this space.
+    // The capacity of a space is the total number of entries it can contain.
+    // The caller must lock the mutex.
+    uint32_t capacity() { return num_segments() * kEntriesPerSegment; }
+
+    // Returns true if this space contains the entry with the given index.
+    bool Contains(uint32_t index);
+
+    // Whether this space is attached to a table's internal read-only segment.
+    bool is_internal_read_only_space() const {
+      return is_internal_read_only_space_;
+    }
+
+#ifdef DEBUG
+    // Check whether this space belongs to the given external entity table.
+    bool BelongsTo(const void* table) const { return owning_table_ == table; }
+#endif  // DEBUG
+
+    // Similar to `num_segments()` but also locks the mutex.
+    uint32_t NumSegmentsForTesting() {
+      base::MutexGuard guard(&mutex_);
+      return num_segments();
+    }
+
+    bool allocate_black() { return allocate_black_; }
+
+    void set_allocate_black(bool allocate_black) {
+      allocate_black_ = allocate_black;
+    }
+
+   protected:
+    friend class ExternalEntityTable<Entry, size>;
+
+#ifdef DEBUG
+    // In debug builds we keep track of which table a space belongs to to be
+    // able to insert additional DCHECKs that verify that spaces are always used
+    // with the correct table.
+    std::atomic<void*> owning_table_ = nullptr;
+#endif
+
+    // The freelist used by this space.
+    // This contains both the index of the first entry in the freelist and the
+    // total length of the freelist as both values need to be updated together
+    // in a single atomic operation to stay consistent in the case of concurrent
+    // entry allocations.
+    std::atomic<FreelistHead> freelist_head_ = FreelistHead();
+
+    // The collection of segments belonging to this space.
+    std::set<Segment> segments_;
+
+    // Whether this is the internal RO space, which has special semantics:
+    // - read-only page permissions after initialization,
+    // - the space is not swept since slots are live by definition,
+    // - contains exactly one segment, located at offset 0, and
+    // - the segment's lifecycle is managed by `owning_table_`.
+    bool is_internal_read_only_space_ = false;
+
+    // Mutex guarding access to the segments_ set.
+    base::Mutex mutex_;
+
+    bool allocate_black_ = false;
+  };
 
   ExternalEntityTable() = default;
   ExternalEntityTable(const ExternalEntityTable&) = delete;
   ExternalEntityTable& operator=(const ExternalEntityTable&) = delete;
 
-  // Access the entry at the specified index.
-  // The index must be less than the current capacity.
-  Entry& at(uint32_t index);
-  const Entry& at(uint32_t index) const;
-
-  // Returns true if this table has been initialized.
-  bool is_initialized() const;
-
-  // Returns the current capacity of the table, expressed as number of entries.
+  // Allocates a new entry in the given space and return its index.
   //
-  // The capacity of the table may increase during entry allocation (if the
-  // table is grown) and may decrease during sweeping (if blocks at the end are
-  // free). As the former may happen concurrently, the capacity can only be
-  // used reliably if either the table mutex is held or if all mutator threads
-  // are currently stopped. However, it is fine to use this value to
-  // sanity-check incoming ExternalPointerHandles in debug builds (there's no
-  // need for actual bounds-checks because out-of-bounds accesses are guaranteed
-  // to result in a harmless crash).
-  uint32_t capacity() const;
-
-  // Determines the number of entries currently on the freelist.
-  // As table entries can be allocated from other threads, the freelist size
-  // may have changed by the time this method returns. As such, the returned
-  // value should only be treated as an approximation.
-  uint32_t freelist_length() const;
-
-  // Initializes the table by reserving the backing memory, allocating an
-  // initial block, and populating the freelist.
-  void InitializeTable();
-
-  // Deallocates all memory associated with this table.
-  void TearDownTable();
-
-  // Allocates a new entry and return its index.
-  //
-  // If there are no free entries, then this will grow the table.
+  // If there are no free entries, then this will extend the space by
+  // allocating a new segment.
   // This method is atomic and can be called from background threads.
-  uint32_t AllocateEntry();
+  uint32_t AllocateEntry(Space* space);
+  std::optional<uint32_t> TryAllocateEntry(Space* space);
 
-  // Attempts to allocate an entry below the specified index.
+  // Attempts to allocate an entry in the given space below the specified index.
   //
   // If there are no free entries at a lower index, this method will fail and
-  // return zero. The threshold index must be at or below the current capacity.
-  // This method will therefore never grow the table.
+  // return zero. This method will therefore never allocate a new segment.
   // This method is atomic and can be called from background threads.
-  uint32_t AllocateEntryBelow(uint32_t threshold_index);
-
-  // Struct representing the head of the freelist of a table.
-  //
-  // An external entity table uses a simple, singly-linked list to manage free
-  // entries. Each entry on the freelist contains the 32-bit index of the next
-  // entry. The last entry points to zero.
-  struct FreelistHead {
-    constexpr FreelistHead() : next_(0), length_(0) {}
-    constexpr FreelistHead(uint32_t next, uint32_t length)
-        : next_(next), length_(length) {}
-
-    // Returns the index of the next entry on the freelist.
-    // If the freelist is empty, this returns zero.
-    uint32_t next() const { return next_; }
-
-    // Returns the total length of the freelist.
-    uint32_t length() const { return length_; }
-
-    bool is_empty() const {
-      // It would be enough to just check that the size is zero. However, when
-      // the size is zero, the next entry must also be zero, and checking that
-      // both values are zero allows the compiler to insert a single 64-bit
-      // comparison against zero.
-      DCHECK_EQ(next_ == 0, length_ == 0);
-      return next_ == 0 && length_ == 0;
-    }
-
-   private:
-    uint32_t next_;
-    uint32_t length_;
-  };
+  uint32_t AllocateEntryBelow(Space* space, uint32_t threshold_index);
 
   // Try to allocate the first entry of the freelist.
   //
   // This method is mostly a wrapper around an atomic compare-and-swap which
   // replaces the current freelist head with the next entry in the freelist,
   // thereby allocating the entry at the start of the freelist.
-  bool TryAllocateEntryFromFreelist(FreelistHead freelist);
+  bool TryAllocateEntryFromFreelist(Space* space, FreelistHead freelist);
 
-  // Extends the table and adds newly created entries to the freelist.
-  // Returns the new freelist head.
-  // When calling this method, mutex_ must be locked.
-  // If the table cannot be grown, either because it is already at its maximum
-  // size or because the memory for it could not be allocated, this method will
-  // fail with an OOM crash.
-  FreelistHead Grow();
+  // Trey to allocate a new segment and add it to the given space.
+  //
+  // This should only be called when the freelist of the space is currently
+  // empty. It will then refill the freelist with all entries in the newly
+  // allocated segment. Fails if there is no space left.
+  std::optional<FreelistHead> TryExtend(Space* space);
 
-  // Shrink the table to the new capacity.
-  // The new capacity must be less than the current capacity and must be a
-  // multiple of the block size. The now-unused blocks at the end of the table
-  // are decommitted from memory. It is therefore guaranteed that they will be
-  // inaccessible afterwards, and that they will be zero-initialized when they
-  // are "brought back".
-  void Shrink(uint32_t new_capacity);
+  // Sweeps the given space.
+  //
+  // This will free all unmarked entries to the freelist and unmark all live
+  // entries. The table is swept top-to-bottom so that the freelist ends up
+  // sorted. During sweeping, new entries must not be allocated.
+  //
+  // This is a generic implementation of table sweeping and requires that the
+  // Entry type implements the following additional methods:
+  // - bool IsMarked()
+  // - void Unmark()
+  //
+  // Returns the number of live entries after sweeping.
+  uint32_t GenericSweep(Space* space);
+
+  // Variant of the above that invokes a callback for every live entry.
+  template <typename Callback>
+  uint32_t GenericSweep(Space* space, Callback marked);
+
+  // Iterate over all entries in the given space.
+  //
+  // The callback function will be invoked for every entry and be passed the
+  // index of that entry as argument.
+  template <typename Callback>
+  void IterateEntriesIn(Space* space, Callback callback);
 
   // Marker value for the freelist_head_ member to indicate that entry
   // allocation is currently forbidden, for example because the table is being
@@ -155,51 +227,53 @@ class V8_EXPORT_PRIVATE ExternalEntityTable {
   static constexpr FreelistHead kEntryAllocationIsForbiddenMarker =
       FreelistHead(-1, -1);
 
-  // The table grows and shrinks in blocks of this size. This is also the
-  // initial size of the table.
-#if V8_TARGET_ARCH_PPC64
-  // PPC64 uses 64KB pages, and this must be a multiple of the page size.
-  static constexpr size_t kBlockSize = 64 * KB;
-#else
-  static constexpr size_t kBlockSize = 16 * KB;
+ public:
+  // Generally, ExternalEntityTables are not compactible. The exception are
+  // CompactibleExternalEntityTables such as the ExternalPointerTable. This
+  // constant can be used to static_assert this property in locations that rely
+  // on a table (not) supporting compaction.
+  static constexpr bool kSupportsCompaction = false;
+
+  // Initializes the table by reserving the backing memory, allocating an
+  // initial segment, and populating the freelist.
+  void Initialize();
+
+  // Deallocates all memory associated with this table.
+  void TearDown();
+
+  // Initializes the given space for use with this table.
+  void InitializeSpace(Space* space);
+
+  // Deallocates all segments owned by the given space.
+  void TearDownSpace(Space* space);
+
+  // Attaches/detaches the given space to the internal read-only segment. Note
+  // the lifetime of the underlying segment itself is managed by the table.
+  void AttachSpaceToReadOnlySegments(Space* space);
+  void DetachSpaceFromReadOnlySegments(Space* space);
+  void ZeroInternalNullEntry();
+
+#ifdef OBJECT_PRINT
+  template <typename EntryCallback>
+  void Print(Space* space, const char* space_name, uint32_t lower,
+             uint32_t upper, EntryCallback entry_callback) const;
 #endif
-  static constexpr size_t kEntriesPerBlock = kBlockSize / kEntrySize;
 
-  // The buffer backing this table.
-  // This is effectively const after initialization: the underlying buffer is
-  // never reallocated, only grown/shrunk in place.
-  Entry* buffer_ = nullptr;
+ protected:
+  static constexpr uint32_t kInternalReadOnlySegmentsOffset = 0;
+  static constexpr uint32_t kInternalNullEntryIndex = 0;
+  static constexpr uint32_t kEndOfReadOnlyIndex =
+      kEntriesPerSegment * kNumReadOnlySegments;
 
-  // Lock protecting the slow path for entry allocation, in particular Grow().
-  // As the size of this class must be predictable (it is e.g. part of
-  // IsolateData), it cannot directly contain a Mutex and so instead contains a
-  // pointer to one.
-  base::Mutex* mutex_ = nullptr;
+ private:
+  // Required for Isolate::CheckIsolateLayout().
+  friend class Isolate;
 
-  // The freelist used by this table.
-  // This contains both the index of the first entry in the freelist and the
-  // total length of the freelist as both values need to be updated together in
-  // a single atomic operation to stay consistent in the case of concurrent
-  // entry allocations.
-  // We expect the FreelistHead struct to fit into a single atomic word.
-  // Otherwise, access to it would be slow.
-  static_assert(std::atomic<FreelistHead>::is_always_lock_free);
-  std::atomic<FreelistHead> freelist_head_ = FreelistHead();
-
-  // The current capacity of this table, as number of entries.
-  std::atomic<uint32_t> capacity_{0};
-
-  // An additional 32-bit atomic word that derived classes can use. For example,
-  // the ExternalPointerTable uses this for the table compaction algorithm. This
-  // is stored in this class so that std::is_standard_layout is true for derived
-  // classes (for a class to have standard layout, only one class in the
-  // inheritance hierarchy must have non-static data properties).
-  std::atomic<uint32_t> extra_{0};
+  // Extends the given space with the given segment.
+  void Extend(Space* space, Segment segment, FreelistHead freelist);
 };
 
 }  // namespace internal
 }  // namespace v8
-
-#endif  // V8_COMPRESS_POINTERS
 
 #endif  // V8_SANDBOX_EXTERNAL_ENTITY_TABLE_H_

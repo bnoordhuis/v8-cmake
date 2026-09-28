@@ -2,12 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#ifndef V8_WASM_WASM_OPCODES_H_
+#define V8_WASM_WASM_OPCODES_H_
+
 #if !V8_ENABLE_WEBASSEMBLY
 #error This header should only be included if WebAssembly is enabled.
 #endif  // !V8_ENABLE_WEBASSEMBLY
-
-#ifndef V8_WASM_WASM_OPCODES_H_
-#define V8_WASM_WASM_OPCODES_H_
 
 #include <memory>
 
@@ -21,64 +21,67 @@ namespace internal {
 
 namespace wasm {
 
-class WasmFeatures;
 struct WasmModule;
 
 V8_EXPORT_PRIVATE std::ostream& operator<<(std::ostream& os,
                                            const FunctionSig& function);
-V8_EXPORT_PRIVATE bool IsJSCompatibleSignature(const FunctionSig* sig);
+
+V8_EXPORT_PRIVATE bool IsJSCompatibleSignature(const CanonicalSig* sig);
 
 // Format of all opcode macros: kExprName, binary, signature, wat name
 
 // Control expressions and blocks.
-#define FOREACH_CONTROL_OPCODE(V)                              \
-  V(Unreachable, 0x00, _, "unreachable")                       \
-  V(Nop, 0x01, _, "nop")                                       \
-  V(Block, 0x02, _, "block")                                   \
-  V(Loop, 0x03, _, "loop")                                     \
-  V(If, 0x04, _, "if")                                         \
-  V(Else, 0x05, _, "else")                                     \
-  V(Try, 0x06, _, "try")                                       \
-  V(Catch, 0x07, _, "catch")                                   \
-  V(Throw, 0x08, _, "throw")                                   \
-  V(Rethrow, 0x09, _, "rethrow")                               \
-  V(End, 0x0b, _, "end")                                       \
-  V(Br, 0x0c, _, "br")                                         \
-  V(BrIf, 0x0d, _, "br_if")                                    \
-  V(BrTable, 0x0e, _, "br_table")                              \
-  V(Return, 0x0f, _, "return")                                 \
-  V(Delegate, 0x18, _, "delegate")                             \
-  V(CatchAll, 0x19, _, "catch_all")                            \
-  V(BrOnNull, 0xd4, _, "br_on_null")        /* gc prototype */ \
-  V(BrOnNonNull, 0xd6, _, "br_on_non_null") /* gc prototype */ \
+#define FOREACH_CONTROL_OPCODE(V)           \
+  V(Unreachable, 0x00, _, "unreachable")    \
+  V(Nop, 0x01, _, "nop")                    \
+  V(Block, 0x02, _, "block")                \
+  V(Loop, 0x03, _, "loop")                  \
+  V(If, 0x04, _, "if")                      \
+  V(Else, 0x05, _, "else")                  \
+  V(Try, 0x06, _, "try")                    \
+  V(Catch, 0x07, _, "catch")                \
+  V(Throw, 0x08, _, "throw")                \
+  V(Rethrow, 0x09, _, "rethrow")            \
+  V(TryTable, 0x1f, _, "try_table")         \
+  V(ThrowRef, 0x0a, _, "throw_ref")         \
+  V(End, 0x0b, _, "end")                    \
+  V(Br, 0x0c, _, "br")                      \
+  V(BrIf, 0x0d, _, "br_if")                 \
+  V(BrTable, 0x0e, _, "br_table")           \
+  V(Return, 0x0f, _, "return")              \
+  V(Delegate, 0x18, _, "delegate")          \
+  V(CatchAll, 0x19, _, "catch_all")         \
+  V(BrOnNull, 0xd5, _, "br_on_null")        \
+  V(BrOnNonNull, 0xd6, _, "br_on_non_null") \
   V(NopForTestingUnsupportedInLiftoff, 0x16, _, "nop_for_testing")
 
-// Constants, locals, globals, and calls.
-#define FOREACH_MISC_OPCODE(V)                                               \
-  V(CallFunction, 0x10, _, "call")                                           \
-  V(CallIndirect, 0x11, _, "call_indirect")                                  \
-  V(ReturnCall, 0x12, _, "return_call")                                      \
-  V(ReturnCallIndirect, 0x13, _, "return_call_indirect")                     \
-  V(CallRef, 0x14, _, "call_ref")              /* typed_funcref prototype */ \
-  V(ReturnCallRef, 0x15, _, "return_call_ref") /* typed_funcref prototype */ \
-  V(Drop, 0x1a, _, "drop")                                                   \
-  V(Select, 0x1b, _, "select")                                               \
-  V(SelectWithType, 0x1c, _, "select")                                       \
-  V(LocalGet, 0x20, _, "local.get")                                          \
-  V(LocalSet, 0x21, _, "local.set")                                          \
-  V(LocalTee, 0x22, _, "local.tee")                                          \
-  V(GlobalGet, 0x23, _, "global.get")                                        \
-  V(GlobalSet, 0x24, _, "global.set")                                        \
-  V(TableGet, 0x25, _, "table.get")                                          \
-  V(TableSet, 0x26, _, "table.set")                                          \
-  V(I32Const, 0x41, _, "i32.const")                                          \
-  V(I64Const, 0x42, _, "i64.const")                                          \
-  V(F32Const, 0x43, _, "f32.const")                                          \
-  V(F64Const, 0x44, _, "f64.const")                                          \
-  V(RefNull, 0xd0, _, "ref.null")                                            \
-  V(RefIsNull, 0xd1, _, "ref.is_null")                                       \
-  V(RefFunc, 0xd2, _, "ref.func")                                            \
-  V(RefAsNonNull, 0xd3, _, "ref.as_non_null") /* typed_funcref prototype */
+// Constants, locals, globals, calls, etc.
+#define FOREACH_MISC_OPCODE(V)                           \
+  V(CallFunction, 0x10, _, "call")                       \
+  V(CallIndirect, 0x11, _, "call_indirect")              \
+  V(ReturnCall, 0x12, _, "return_call")                  \
+  V(ReturnCallIndirect, 0x13, _, "return_call_indirect") \
+  V(CallRef, 0x14, _, "call_ref")                        \
+  V(ReturnCallRef, 0x15, _, "return_call_ref")           \
+  V(Drop, 0x1a, _, "drop")                               \
+  V(Select, 0x1b, _, "select")                           \
+  V(SelectWithType, 0x1c, _, "select")                   \
+  V(LocalGet, 0x20, _, "local.get")                      \
+  V(LocalSet, 0x21, _, "local.set")                      \
+  V(LocalTee, 0x22, _, "local.tee")                      \
+  V(GlobalGet, 0x23, _, "global.get")                    \
+  V(GlobalSet, 0x24, _, "global.set")                    \
+  V(TableGet, 0x25, _, "table.get")                      \
+  V(TableSet, 0x26, _, "table.set")                      \
+  V(I32Const, 0x41, _, "i32.const")                      \
+  V(I64Const, 0x42, _, "i64.const")                      \
+  V(F32Const, 0x43, _, "f32.const")                      \
+  V(F64Const, 0x44, _, "f64.const")                      \
+  V(RefNull, 0xd0, _, "ref.null")                        \
+  V(RefIsNull, 0xd1, _, "ref.is_null")                   \
+  V(RefFunc, 0xd2, _, "ref.func")                        \
+  V(RefAsNonNull, 0xd4, _, "ref.as_non_null")            \
+  V(RefEq, 0xd3, _, "ref.eq")
 
 // Load memory expressions.
 #define FOREACH_LOAD_MEM_OPCODE(V)            \
@@ -95,7 +98,8 @@ V8_EXPORT_PRIVATE bool IsJSCompatibleSignature(const FunctionSig* sig);
   V(I64LoadMem16S, 0x32, l_i, "i64.load16_s") \
   V(I64LoadMem16U, 0x33, l_i, "i64.load16_u") \
   V(I64LoadMem32S, 0x34, l_i, "i64.load32_s") \
-  V(I64LoadMem32U, 0x35, l_i, "i64.load32_u")
+  V(I64LoadMem32U, 0x35, l_i, "i64.load32_u") \
+  V(F32LoadMemF16, 0xfc30, f_i, "f32.load_f16")
 
 // Store memory expressions.
 #define FOREACH_STORE_MEM_OPCODE(V)           \
@@ -107,7 +111,8 @@ V8_EXPORT_PRIVATE bool IsJSCompatibleSignature(const FunctionSig* sig);
   V(I32StoreMem16, 0x3b, v_ii, "i32.store16") \
   V(I64StoreMem8, 0x3c, v_il, "i64.store8")   \
   V(I64StoreMem16, 0x3d, v_il, "i64.store16") \
-  V(I64StoreMem32, 0x3e, v_il, "i64.store32")
+  V(I64StoreMem32, 0x3e, v_il, "i64.store32") \
+  V(F32StoreMemF16, 0xfc31, v_if, "f32.store_f16")
 
 // Miscellaneous memory expressions
 #define FOREACH_MISC_MEM_OPCODE(V)        \
@@ -116,8 +121,8 @@ V8_EXPORT_PRIVATE bool IsJSCompatibleSignature(const FunctionSig* sig);
 
 // Expressions with signatures.
 
-// The following opcodes can be used as constant expressions under
-// --experimental-wasm-extended-const.
+// Opcodes that can also be used in constant expressions (via the 'extended
+// constant expressions' proposal).
 #define FOREACH_SIMPLE_EXTENDED_CONST_OPCODE(V) \
   V(I32Add, 0x6a, i_ii, "i32.add")              \
   V(I32Sub, 0x6b, i_ii, "i32.sub")              \
@@ -243,54 +248,29 @@ V8_EXPORT_PRIVATE bool IsJSCompatibleSignature(const FunctionSig* sig);
   V(I32ReinterpretF32, 0xbc, i_f, "i32.reinterpret_f32") \
   V(I64ReinterpretF64, 0xbd, l_d, "i64.reinterpret_f64") \
   V(F32ReinterpretI32, 0xbe, f_i, "f32.reinterpret_i32") \
-  V(F64ReinterpretI64, 0xbf, d_l, "f64.reinterpret_i64") \
-  V(I32SExtendI8, 0xc0, i_i, "i32.extend8_s")            \
-  V(I32SExtendI16, 0xc1, i_i, "i32.extend16_s")          \
-  V(I64SExtendI8, 0xc2, l_l, "i64.extend8_s")            \
-  V(I64SExtendI16, 0xc3, l_l, "i64.extend16_s")          \
+  V(F64ReinterpretI64, 0xbf, d_l, "f64.reinterpret_i64")
+
+#define FOREACH_SIGN_EXTENSION_OPCODE(V)        \
+  V(I32SExtendI8, 0xc0, i_i, "i32.extend8_s")   \
+  V(I32SExtendI16, 0xc1, i_i, "i32.extend16_s") \
+  V(I64SExtendI8, 0xc2, l_l, "i64.extend8_s")   \
+  V(I64SExtendI16, 0xc3, l_l, "i64.extend16_s") \
   V(I64SExtendI32, 0xc4, l_l, "i64.extend32_s")
+
+#define FOREACH_WASMFX_OPCODE(V)                 \
+  V(ContNew, 0xe0, _, "cont.new")                \
+  V(ContBind, 0xe1, _, "cont.bind")              \
+  V(Suspend, 0xe2, _, "suspend")                 \
+  V(Resume, 0xe3, _, "resume")                   \
+  V(ResumeThrow, 0xe4, _, "resume_throw")        \
+  V(ResumeThrowRef, 0xe5, _, "resume_throw_ref") \
+  V(Switch, 0xe6, _, "switch")
 
 #define FOREACH_SIMPLE_OPCODE(V)          \
   FOREACH_SIMPLE_EXTENDED_CONST_OPCODE(V) \
   FOREACH_SIMPLE_NON_CONST_OPCODE(V)
 
-#define FOREACH_SIMPLE_PROTOTYPE_OPCODE(V) V(RefEq, 0xd5, i_qq, "ref.eq")
-
-// For compatibility with Asm.js.
-// These opcodes are not spec'ed (or visible) externally; the idea is
-// to use unused ranges for internal purposes.
-#define FOREACH_ASMJS_COMPAT_OPCODE(V)                         \
-  V(F64Acos, 0xdc, d_d, "f64.acos")                            \
-  V(F64Asin, 0xdd, d_d, "f64.asin")                            \
-  V(F64Atan, 0xde, d_d, "f64.atan")                            \
-  V(F64Cos, 0xdf, d_d, "f64.cos")                              \
-  V(F64Sin, 0xe0, d_d, "f64.sin")                              \
-  V(F64Tan, 0xe1, d_d, "f64.tan")                              \
-  V(F64Exp, 0xe2, d_d, "f64.exp")                              \
-  V(F64Log, 0xe3, d_d, "f64.log")                              \
-  V(F64Atan2, 0xe4, d_dd, "f64.atan2")                         \
-  V(F64Pow, 0xe5, d_dd, "f64.pow")                             \
-  V(F64Mod, 0xe6, d_dd, "f64.mod")                             \
-  V(I32AsmjsDivS, 0xe7, i_ii, "i32.asmjs_div_s")               \
-  V(I32AsmjsDivU, 0xe8, i_ii, "i32.asmjs_div_u")               \
-  V(I32AsmjsRemS, 0xe9, i_ii, "i32.asmjs_rem_s")               \
-  V(I32AsmjsRemU, 0xea, i_ii, "i32.asmjs_rem_u")               \
-  V(I32AsmjsLoadMem8S, 0xeb, i_i, "i32.asmjs_load8_s")         \
-  V(I32AsmjsLoadMem8U, 0xec, i_i, "i32.asmjs_load8_u")         \
-  V(I32AsmjsLoadMem16S, 0xed, i_i, "i32.asmjs_load16_s")       \
-  V(I32AsmjsLoadMem16U, 0xee, i_i, "i32.asmjs_load16_u")       \
-  V(I32AsmjsLoadMem, 0xef, i_i, "i32.asmjs_load32")            \
-  V(F32AsmjsLoadMem, 0xf0, f_i, "f32.asmjs_load")              \
-  V(F64AsmjsLoadMem, 0xf1, d_i, "f64.asmjs_load")              \
-  V(I32AsmjsStoreMem8, 0xf2, i_ii, "i32.asmjs_store8")         \
-  V(I32AsmjsStoreMem16, 0xf3, i_ii, "i32.asmjs_store16")       \
-  V(I32AsmjsStoreMem, 0xf4, i_ii, "i32.asmjs_store")           \
-  V(F32AsmjsStoreMem, 0xf5, f_if, "f32.asmjs_store")           \
-  V(F64AsmjsStoreMem, 0xf6, d_id, "f64.asmjs_store")           \
-  V(I32AsmjsSConvertF32, 0xf7, i_f, "i32.asmjs_convert_f32_s") \
-  V(I32AsmjsUConvertF32, 0xf8, i_f, "i32.asmjs_convert_f32_u") \
-  V(I32AsmjsSConvertF64, 0xf9, i_d, "i32.asmjs_convert_f64_s") \
-  V(I32AsmjsUConvertF64, 0xfa, i_d, "i32.asmjs_convert_f64_u")
+#define FOREACH_SIMPLE_PROTOTYPE_OPCODE(V)
 
 #define FOREACH_SIMD_MEM_OPCODE(V)                     \
   V(S128LoadMem, 0xfd00, s_i, "v128.load")             \
@@ -523,29 +503,60 @@ V8_EXPORT_PRIVATE bool IsJSCompatibleSignature(const FunctionSig* sig);
   V(F64x2ConvertLowI32x4S, 0xfdfe, s_s, "f64x2.convert_low_i32x4_s")         \
   V(F64x2ConvertLowI32x4U, 0xfdff, s_s, "f64x2.convert_low_i32x4_u")
 
-#define FOREACH_RELAXED_SIMD_OPCODE(V)                                    \
-  V(I8x16RelaxedSwizzle, 0xfd100, s_ss, "i8x16.relaxed_swizzle")          \
-  V(I32x4RelaxedTruncF32x4S, 0xfd101, s_s, "i32x4.relaxed_trunc_f32x4_s") \
-  V(I32x4RelaxedTruncF32x4U, 0xfd102, s_s, "i32x4.relaxed_trunc_f32x4_u") \
-  V(I32x4RelaxedTruncF64x2SZero, 0xfd103, s_s,                            \
-    "i32x4.relaxed_trunc_f64x2_s_zero")                                   \
-  V(I32x4RelaxedTruncF64x2UZero, 0xfd104, s_s,                            \
-    "i32x4.relaxed_trunc_f64x2_u_zero")                                   \
-  V(F32x4Qfma, 0xfd105, s_sss, "f32x4.qfma")                              \
-  V(F32x4Qfms, 0xfd106, s_sss, "f32x4.qfms")                              \
-  V(F64x2Qfma, 0xfd107, s_sss, "f64x2.qfma")                              \
-  V(F64x2Qfms, 0xfd108, s_sss, "f64x2.qfms")                              \
-  V(I8x16RelaxedLaneSelect, 0xfd109, s_sss, "i8x16.relaxed_laneselect")   \
-  V(I16x8RelaxedLaneSelect, 0xfd10a, s_sss, "i16x8.relaxed_laneselect")   \
-  V(I32x4RelaxedLaneSelect, 0xfd10b, s_sss, "i32x4.relaxed_laneselect")   \
-  V(I64x2RelaxedLaneSelect, 0xfd10c, s_sss, "i64x2.relaxed_laneselect")   \
-  V(F32x4RelaxedMin, 0xfd10d, s_ss, "f32x4.relaxed_min")                  \
-  V(F32x4RelaxedMax, 0xfd10e, s_ss, "f32x4.relaxed_max")                  \
-  V(F64x2RelaxedMin, 0xfd10f, s_ss, "f64x2.relaxed_min")                  \
-  V(F64x2RelaxedMax, 0xfd110, s_ss, "f64x2.relaxed_max")                  \
-  V(I16x8RelaxedQ15MulRS, 0xfd111, s_ss, "i16x8.relaxed_q15mulr_s")       \
-  V(I16x8DotI8x16I7x16S, 0xfd112, s_ss, "i16x8.dot_i8x16_i7x16_s")        \
-  V(I32x4DotI8x16I7x16AddS, 0xfd113, s_sss, "i32x4.dot_i8x16_i7x16_add_s")
+#define FOREACH_RELAXED_SIMD_OPCODE(V)                                     \
+  V(I8x16RelaxedSwizzle, 0xfd100, s_ss, "i8x16.relaxed_swizzle")           \
+  V(I32x4RelaxedTruncF32x4S, 0xfd101, s_s, "i32x4.relaxed_trunc_f32x4_s")  \
+  V(I32x4RelaxedTruncF32x4U, 0xfd102, s_s, "i32x4.relaxed_trunc_f32x4_u")  \
+  V(I32x4RelaxedTruncF64x2SZero, 0xfd103, s_s,                             \
+    "i32x4.relaxed_trunc_f64x2_s_zero")                                    \
+  V(I32x4RelaxedTruncF64x2UZero, 0xfd104, s_s,                             \
+    "i32x4.relaxed_trunc_f64x2_u_zero")                                    \
+  V(F32x4Qfma, 0xfd105, s_sss, "f32x4.qfma")                               \
+  V(F32x4Qfms, 0xfd106, s_sss, "f32x4.qfms")                               \
+  V(F64x2Qfma, 0xfd107, s_sss, "f64x2.qfma")                               \
+  V(F64x2Qfms, 0xfd108, s_sss, "f64x2.qfms")                               \
+  V(I8x16RelaxedLaneSelect, 0xfd109, s_sss, "i8x16.relaxed_laneselect")    \
+  V(I16x8RelaxedLaneSelect, 0xfd10a, s_sss, "i16x8.relaxed_laneselect")    \
+  V(I32x4RelaxedLaneSelect, 0xfd10b, s_sss, "i32x4.relaxed_laneselect")    \
+  V(I64x2RelaxedLaneSelect, 0xfd10c, s_sss, "i64x2.relaxed_laneselect")    \
+  V(F32x4RelaxedMin, 0xfd10d, s_ss, "f32x4.relaxed_min")                   \
+  V(F32x4RelaxedMax, 0xfd10e, s_ss, "f32x4.relaxed_max")                   \
+  V(F64x2RelaxedMin, 0xfd10f, s_ss, "f64x2.relaxed_min")                   \
+  V(F64x2RelaxedMax, 0xfd110, s_ss, "f64x2.relaxed_max")                   \
+  V(I16x8RelaxedQ15MulRS, 0xfd111, s_ss, "i16x8.relaxed_q15mulr_s")        \
+  V(I16x8DotI8x16I7x16S, 0xfd112, s_ss, "i16x8.dot_i8x16_i7x16_s")         \
+  V(I32x4DotI8x16I7x16AddS, 0xfd113, s_sss, "i32x4.dot_i8x16_i7x16_add_s") \
+  V(F16x8Splat, 0xfd120, s_f, "f16x8.splat")                               \
+  V(F16x8Abs, 0xfd130, s_s, "f16x8.abs")                                   \
+  V(F16x8Neg, 0xfd131, s_s, "f16x8.neg")                                   \
+  V(F16x8Sqrt, 0xfd132, s_s, "f16x8.sqrt")                                 \
+  V(F16x8Ceil, 0xfd133, s_s, "f16x8.ceil")                                 \
+  V(F16x8Floor, 0xfd134, s_s, "f16x8.floor")                               \
+  V(F16x8Trunc, 0xfd135, s_s, "f16x8.trunc")                               \
+  V(F16x8NearestInt, 0xfd136, s_s, "f16x8.nearest")                        \
+  V(F16x8Eq, 0xfd137, s_ss, "f16x8.eq")                                    \
+  V(F16x8Ne, 0xfd138, s_ss, "f16x8.ne")                                    \
+  V(F16x8Lt, 0xfd139, s_ss, "f16x8.lt")                                    \
+  V(F16x8Gt, 0xfd13a, s_ss, "f16x8.gt")                                    \
+  V(F16x8Le, 0xfd13b, s_ss, "f16x8.le")                                    \
+  V(F16x8Ge, 0xfd13c, s_ss, "f16x8.ge")                                    \
+  V(F16x8Add, 0xfd13d, s_ss, "f16x8.add")                                  \
+  V(F16x8Sub, 0xfd13e, s_ss, "f16x8.sub")                                  \
+  V(F16x8Mul, 0xfd13f, s_ss, "f16x8.mul")                                  \
+  V(F16x8Div, 0xfd140, s_ss, "f16x8.div")                                  \
+  V(F16x8Min, 0xfd141, s_ss, "f16x8.min")                                  \
+  V(F16x8Max, 0xfd142, s_ss, "f16x8.max")                                  \
+  V(F16x8Pmin, 0xfd143, s_ss, "f16x8.pmin")                                \
+  V(F16x8Pmax, 0xfd144, s_ss, "f16x8.pmax")                                \
+  V(I16x8SConvertF16x8, 0xfd145, s_s, "i16x8.trunc_sat_f16x8_s")           \
+  V(I16x8UConvertF16x8, 0xfd146, s_s, "i16x8.trunc_sat_f16x8_u")           \
+  V(F16x8SConvertI16x8, 0xfd147, s_s, "f16x8.convert_i16x8_s")             \
+  V(F16x8UConvertI16x8, 0xfd148, s_s, "f16x8.convert_i16x8_u")             \
+  V(F16x8DemoteF32x4Zero, 0xfd149, s_s, "f16x8.demote_f32x4_zero")         \
+  V(F16x8DemoteF64x2Zero, 0xfd14a, s_s, "f16x8.demote_f64x2_zero")         \
+  V(F32x4PromoteLowF16x8, 0xfd14b, s_s, "f32x4.promote_low_f16x8")         \
+  V(F16x8Qfma, 0xfd14e, s_sss, "f16x8.madd")                               \
+  V(F16x8Qfms, 0xfd14f, s_sss, "f16x8.nmadd")
 
 #define FOREACH_SIMD_1_OPERAND_1_PARAM_OPCODE(V)          \
   V(I8x16ExtractLaneS, 0xfd15, _, "i8x16.extract_lane_s") \
@@ -555,7 +566,8 @@ V8_EXPORT_PRIVATE bool IsJSCompatibleSignature(const FunctionSig* sig);
   V(I32x4ExtractLane, 0xfd1b, _, "i32x4.extract_lane")    \
   V(I64x2ExtractLane, 0xfd1d, _, "i64x2.extract_lane")    \
   V(F32x4ExtractLane, 0xfd1f, _, "f32x4.extract_lane")    \
-  V(F64x2ExtractLane, 0xfd21, _, "f64x2.extract_lane")
+  V(F64x2ExtractLane, 0xfd21, _, "f64x2.extract_lane")    \
+  V(F16x8ExtractLane, 0xfd121, _, "f16x8.extract_lane")
 
 #define FOREACH_SIMD_1_OPERAND_2_PARAM_OPCODE(V)       \
   V(I8x16ReplaceLane, 0xfd17, _, "i8x16.replace_lane") \
@@ -563,7 +575,8 @@ V8_EXPORT_PRIVATE bool IsJSCompatibleSignature(const FunctionSig* sig);
   V(I32x4ReplaceLane, 0xfd1c, _, "i32x4.replace_lane") \
   V(I64x2ReplaceLane, 0xfd1e, _, "i64x2.replace_lane") \
   V(F32x4ReplaceLane, 0xfd20, _, "f32x4.replace_lane") \
-  V(F64x2ReplaceLane, 0xfd22, _, "f64x2.replace_lane")
+  V(F64x2ReplaceLane, 0xfd22, _, "f64x2.replace_lane") \
+  V(F16x8ReplaceLane, 0xfd122, _, "f16x8.replace_lane")
 
 #define FOREACH_SIMD_0_OPERAND_OPCODE(V) \
   FOREACH_SIMD_MVP_0_OPERAND_OPCODE(V)   \
@@ -580,6 +593,12 @@ V8_EXPORT_PRIVATE bool IsJSCompatibleSignature(const FunctionSig* sig);
   FOREACH_SIMD_MEM_OPCODE(V)           \
   FOREACH_SIMD_MEM_1_OPERAND_OPCODE(V) \
   FOREACH_SIMD_CONST_OPCODE(V)
+
+#define FOREACH_NUMERIC_OPCODE_WIDE(V)        \
+  V(I64Add128, 0xfc13, _, "i64.add128")       \
+  V(I64Sub128, 0xfc14, _, "i64.sub128")       \
+  V(I64MulWideS, 0xfc15, _, "i64.mul_wide_s") \
+  V(I64MulWideU, 0xfc16, _, "i64.mul_wide_u")
 
 #define FOREACH_NUMERIC_OPCODE_WITH_SIG(V)                 \
   V(I32SConvertSatF32, 0xfc00, i_f, "i32.trunc_sat_f32_s") \
@@ -607,8 +626,10 @@ V8_EXPORT_PRIVATE bool IsJSCompatibleSignature(const FunctionSig* sig);
   /* It's whatever the table type is. */                  \
   V(TableFill, 0xfc11, _, "table.fill")
 
-#define FOREACH_NUMERIC_OPCODE(V) \
-  FOREACH_NUMERIC_OPCODE_WITH_SIG(V) FOREACH_NUMERIC_OPCODE_VARIADIC(V)
+#define FOREACH_NUMERIC_OPCODE(V)    \
+  FOREACH_NUMERIC_OPCODE_WITH_SIG(V) \
+  FOREACH_NUMERIC_OPCODE_WIDE(V)     \
+  FOREACH_NUMERIC_OPCODE_VARIADIC(V)
 
 // kExprName, binary, signature for memory32, wat name, signature for memory64.
 #define FOREACH_ATOMIC_OPCODE(V)                                              \
@@ -689,58 +710,48 @@ V8_EXPORT_PRIVATE bool IsJSCompatibleSignature(const FunctionSig* sig);
   V(AtomicFence, 0xfe03, v_v, "atomic.fence", v_v)
 
 #define FOREACH_GC_OPCODE(V) /*              Force 80 columns               */ \
-  V(StructGet, 0xfb03, _, "struct.get")                                        \
-  V(StructGetS, 0xfb04, _, "struct.get_s")                                     \
-  V(StructGetU, 0xfb05, _, "struct.get_u")                                     \
-  V(StructSet, 0xfb06, _, "struct.set")                                        \
-  V(StructNew, 0xfb07, _, "struct.new")                                        \
-  V(StructNewDefault, 0xfb08, _, "struct.new_default")                         \
-  V(ArrayGet, 0xfb13, _, "array.get")                                          \
-  V(ArrayGetS, 0xfb14, _, "array.get_s")                                       \
-  V(ArrayGetU, 0xfb15, _, "array.get_u")                                       \
-  V(ArraySet, 0xfb16, _, "array.set")                                          \
-  V(ArrayCopy, 0xfb18, _, "array.copy")                                        \
-  V(ArrayLen, 0xfb19, _, "array.len")                                          \
-  V(ArrayNewFixed, 0xfb1a, _, "array.new_fixed")                               \
-  V(ArrayNew, 0xfb1b, _, "array.new")                                          \
-  V(ArrayNewDefault, 0xfb1c, _, "array.new_default")                           \
-  V(ArrayNewData, 0xfb1d, _, "array.new_data")                                 \
-  V(ArrayNewElem, 0xfb1f, _, "array.new_elem")                                 \
-  V(ArrayFill, 0xfb0f, _, "array.fill")                                        \
-  V(ArrayInitData, 0xfb54, _, "array.init_data")                               \
-  V(ArrayInitElem, 0xfb55, _, "array.init_elem")                               \
-  V(I31New, 0xfb20, _, "i31.new")                                              \
-  V(I31GetS, 0xfb21, _, "i31.get_s")                                           \
-  V(I31GetU, 0xfb22, _, "i31.get_u")                                           \
-  V(RefTest, 0xfb40, _, "ref.test")                                            \
-  V(RefTestNull, 0xfb48, _, "ref.test null")                                   \
-  V(RefTestDeprecated, 0xfb44, _, "ref.test")                                  \
-  V(RefCast, 0xfb41, _, "ref.cast")                                            \
-  V(RefCastNull, 0xfb49, _, "ref.cast null")                                   \
-  V(RefCastDeprecated, 0xfb45, _, "ref.cast")                                  \
-  V(BrOnCast, 0xfb42, _, "br_on_cast")                                         \
-  V(BrOnCastNull, 0xfb4a, _, "br_on_cast null")                                \
-  V(BrOnCastDeprecated, 0xfb46, _, "br_on_cast")                               \
-  V(BrOnCastFail, 0xfb43, _, "br_on_cast_fail")                                \
-  V(BrOnCastFailNull, 0xfb4b, _, "br_on_cast_fail null")                       \
-  V(BrOnCastFailDeprecated, 0xfb47, _, "br_on_cast_fail")                      \
-  V(BrOnCastGeneric, 0xfb4e, _, "br_on_cast")                                  \
-  V(BrOnCastFailGeneric, 0xfb4f, _, "br_on_cast_fail")                         \
+  V(StructNew, 0xfb00, _, "struct.new")                                        \
+  V(StructNewDefault, 0xfb01, _, "struct.new_default")                         \
+  V(StructGet, 0xfb02, _, "struct.get")                                        \
+  V(StructGetS, 0xfb03, _, "struct.get_s")                                     \
+  V(StructGetU, 0xfb04, _, "struct.get_u")                                     \
+  V(StructSet, 0xfb05, _, "struct.set")                                        \
+  V(ArrayNew, 0xfb06, _, "array.new")                                          \
+  V(ArrayNewDefault, 0xfb07, _, "array.new_default")                           \
+  V(ArrayNewFixed, 0xfb08, _, "array.new_fixed")                               \
+  V(ArrayNewData, 0xfb09, _, "array.new_data")                                 \
+  V(ArrayNewElem, 0xfb0a, _, "array.new_elem")                                 \
+  V(ArrayGet, 0xfb0b, _, "array.get")                                          \
+  V(ArrayGetS, 0xfb0c, _, "array.get_s")                                       \
+  V(ArrayGetU, 0xfb0d, _, "array.get_u")                                       \
+  V(ArraySet, 0xfb0e, _, "array.set")                                          \
+  V(ArrayLen, 0xfb0f, _, "array.len")                                          \
+  V(ArrayFill, 0xfb10, _, "array.fill")                                        \
+  V(ArrayCopy, 0xfb11, _, "array.copy")                                        \
+  V(ArrayInitData, 0xfb12, _, "array.init_data")                               \
+  V(ArrayInitElem, 0xfb13, _, "array.init_elem")                               \
+  V(RefTest, 0xfb14, _, "ref.test")                                            \
+  V(RefTestNull, 0xfb15, _, "ref.test null")                                   \
+  V(RefCast, 0xfb16, _, "ref.cast")                                            \
+  V(RefCastNull, 0xfb17, _, "ref.cast null")                                   \
+  V(BrOnCast, 0xfb18, _, "br_on_cast")                                         \
+  V(BrOnCastFail, 0xfb19, _, "br_on_cast_fail")                                \
+  V(AnyConvertExtern, 0xfb1a, _, "any.convert_extern")                         \
+  V(ExternConvertAny, 0xfb1b, _, "extern.convert_any")                         \
+  V(RefI31, 0xfb1c, _, "ref.i31")                                              \
+  V(I31GetS, 0xfb1d, _, "i31.get_s")                                           \
+  V(I31GetU, 0xfb1e, _, "i31.get_u")                                           \
+  V(RefI31Shared, 0xfb1f, _, "ref.i31_shared")                                 \
+  /* Custom Descriptors proposal */                                            \
+  V(StructNewDesc, 0xfb20, _, "struct.new_desc")                               \
+  V(StructNewDefaultDesc, 0xfb21, _, "struct.new_default_desc")                \
+  V(RefGetDesc, 0xfb22, _, "ref.get_desc")                                     \
+  V(RefCastDescEq, 0xfb23, _, "ref.cast_desc_eq")                              \
+  V(RefCastDescEqNull, 0xfb24, _, "ref.cast_desc_eq null")                     \
+  V(BrOnCastDescEq, 0xfb25, _, "br_on_cast_desc_eq")                           \
+  V(BrOnCastDescEqFail, 0xfb26, _, "br_on_cast_desc_eq_fail")                  \
   V(RefCastNop, 0xfb4c, _, "ref.cast_nop")                                     \
-  V(RefIsStruct, 0xfb51, _, "ref.is_struct")                                   \
-  V(RefIsI31, 0xfb52, _, "ref.is_i31")                                         \
-  V(RefIsArray, 0xfb53, _, "ref.is_array")                                     \
-  V(RefAsStruct, 0xfb59, _, "ref.as_struct")                                   \
-  V(RefAsI31, 0xfb5a, _, "ref.as_i31")                                         \
-  V(RefAsArray, 0xfb5b, _, "ref.as_array")                                     \
-  V(BrOnStruct, 0xfb61, _, "br_on_struct")                                     \
-  V(BrOnI31, 0xfb62, _, "br_on_i31")                                           \
-  V(BrOnArray, 0xfb66, _, "br_on_array")                                       \
-  V(BrOnNonStruct, 0xfb64, _, "br_on_non_struct")                              \
-  V(BrOnNonI31, 0xfb65, _, "br_on_non_i31")                                    \
-  V(BrOnNonArray, 0xfb67, _, "br_on_non_array")                                \
-  V(ExternInternalize, 0xfb70, _, "extern.internalize")                        \
-  V(ExternExternalize, 0xfb71, _, "extern.externalize")                        \
+  /* Stringref proposal. */                                                    \
   V(StringNewUtf8, 0xfb80, _, "string.new_utf8")                               \
   V(StringNewWtf16, 0xfb81, _, "string.new_wtf16")                             \
   V(StringConst, 0xfb82, _, "string.const")                                    \
@@ -787,6 +798,35 @@ V8_EXPORT_PRIVATE bool IsJSCompatibleSignature(const FunctionSig* sig);
   V(StringEncodeWtf8Array, 0xfbb7, _, "string.encode_wtf8_array")              \
   V(StringNewUtf8ArrayTry, 0xfbb8, _, "string.new_utf8_array_try")
 
+#define FOREACH_ATOMIC_GC_OPCODE(V) /*          Force 80 columns            */ \
+  V(Pause, 0xfe04, _, "pause")                                                 \
+  /* Adjust the next three when the spec defines them. */                      \
+  V(StructWait, 0xfe05, _, "struct.wait")                                      \
+  V(WaitqueueNotify, 0xfe06, _, "waitqueue.notify")                            \
+  V(WaitqueueNew, 0xfe07, _, "waitqueue.new")                                  \
+  V(StructAtomicGet, 0xfe5c, _, "struct.atomic.get")                           \
+  V(StructAtomicGetS, 0xfe5d, _, "struct.atomic.get_s")                        \
+  V(StructAtomicGetU, 0xfe5e, _, "struct.atomic.get_u")                        \
+  V(StructAtomicSet, 0xfe5f, _, "struct.atomic.set")                           \
+  V(StructAtomicAdd, 0xfe60, _, "struct.atomic.rmw.add")                       \
+  V(StructAtomicSub, 0xfe61, _, "struct.atomic.rmw.sub")                       \
+  V(StructAtomicAnd, 0xfe62, _, "struct.atomic.rmw.and")                       \
+  V(StructAtomicOr, 0xfe63, _, "struct.atomic.rmw.or")                         \
+  V(StructAtomicXor, 0xfe64, _, "struct.atomic.rmw.xor")                       \
+  V(StructAtomicExchange, 0xfe65, _, "struct.atomic.rmw.xchg")                 \
+  V(StructAtomicCompareExchange, 0xfe66, _, "struct.atomic.rmw.cmpxchg")       \
+  V(ArrayAtomicGet, 0xfe67, _, "array.atomic.get")                             \
+  V(ArrayAtomicGetS, 0xfe68, _, "array.atomic.get_s")                          \
+  V(ArrayAtomicGetU, 0xfe69, _, "array.atomic.get_u")                          \
+  V(ArrayAtomicSet, 0xfe6a, _, "array.atomic.set")                             \
+  V(ArrayAtomicAdd, 0xfe6b, _, "array.atomic.rmw.add")                         \
+  V(ArrayAtomicSub, 0xfe6c, _, "array.atomic.rmw.sub")                         \
+  V(ArrayAtomicAnd, 0xfe6d, _, "array.atomic.rmw.and")                         \
+  V(ArrayAtomicOr, 0xfe6e, _, "array.atomic.rmw.or")                           \
+  V(ArrayAtomicXor, 0xfe6f, _, "array.atomic.rmw.xor")                         \
+  V(ArrayAtomicExchange, 0xfe70, _, "array.atomic.rmw.xchg")                   \
+  V(ArrayAtomicCompareExchange, 0xfe71, _, "array.atomic.rmw.cmpxchg")
+
 // All opcodes.
 #define FOREACH_OPCODE(V)            \
   FOREACH_CONTROL_OPCODE(V)          \
@@ -796,12 +836,14 @@ V8_EXPORT_PRIVATE bool IsJSCompatibleSignature(const FunctionSig* sig);
   FOREACH_STORE_MEM_OPCODE(V)        \
   FOREACH_LOAD_MEM_OPCODE(V)         \
   FOREACH_MISC_MEM_OPCODE(V)         \
-  FOREACH_ASMJS_COMPAT_OPCODE(V)     \
   FOREACH_SIMD_OPCODE(V)             \
   FOREACH_ATOMIC_OPCODE(V)           \
   FOREACH_ATOMIC_0_OPERAND_OPCODE(V) \
   FOREACH_NUMERIC_OPCODE(V)          \
-  FOREACH_GC_OPCODE(V)
+  FOREACH_GC_OPCODE(V)               \
+  FOREACH_ATOMIC_GC_OPCODE(V)        \
+  FOREACH_SIGN_EXTENSION_OPCODE(V)   \
+  FOREACH_WASMFX_OPCODE(V)
 
 // All signatures.
 #define FOREACH_SIGNATURE(V)                        \
@@ -915,23 +957,15 @@ class V8_EXPORT_PRIVATE WasmOpcodes {
   static constexpr const FunctionSig* Signature(WasmOpcode);
   static constexpr const FunctionSig* SignatureForAtomicOp(WasmOpcode opcode,
                                                            bool is_memory64);
-  static constexpr const FunctionSig* AsmjsSignature(WasmOpcode);
   static constexpr bool IsPrefixOpcode(WasmOpcode);
-  static constexpr bool IsControlOpcode(WasmOpcode);
-  static constexpr bool IsExternRefOpcode(WasmOpcode);
-  static constexpr bool IsThrowingOpcode(WasmOpcode);
   static constexpr bool IsRelaxedSimdOpcode(WasmOpcode);
-  // Check whether the given opcode always jumps, i.e. all instructions after
-  // this one in the current block are dead. Returns false for |end|.
-  static constexpr bool IsUnconditionalJump(WasmOpcode);
-  static constexpr bool IsBreakable(WasmOpcode);
+  static constexpr bool IsFP16SimdOpcode(WasmOpcode);
+  static constexpr bool IsAtomicRmwOpcode(WasmOpcode);
 
-  static constexpr MessageTemplate TrapReasonToMessageId(TrapReason);
-  static constexpr TrapReason MessageIdToTrapReason(MessageTemplate message);
+  static constexpr bool IsBreakable(WasmOpcode);
 
   // Extract the prefix byte (or 0x00) from a {WasmOpcode}.
   static constexpr uint8_t ExtractPrefix(WasmOpcode);
-  static inline const char* TrapReasonMessage(TrapReason);
 };
 
 }  // namespace wasm

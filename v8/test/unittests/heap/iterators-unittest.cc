@@ -46,16 +46,16 @@ TEST_F(IteratorsTest, CombinedHeapObjectIteratorNullPastEnd) {
 
 namespace {
 // An arbitrary object guaranteed to live on the non-read-only heap.
-Object CreateWritableObject(v8::Isolate* isolate) {
-  return *v8::Utils::OpenHandle(*v8::Object::New(isolate));
+Tagged<Object> CreateWritableObject(v8::Isolate* isolate) {
+  return *v8::Utils::OpenDirectHandle(*v8::Object::New(isolate));
 }
 }  // namespace
 
 TEST_F(IteratorsTest, ReadOnlyHeapObjectIterator) {
   HandleScope handle_scope(i_isolate());
-  const Object sample_object = CreateWritableObject(v8_isolate());
+  const Tagged<Object> sample_object = CreateWritableObject(v8_isolate());
   ReadOnlyHeapObjectIterator iterator(i_isolate()->read_only_heap());
-  for (HeapObject obj = iterator.Next(); !obj.is_null();
+  for (Tagged<HeapObject> obj = iterator.Next(); !obj.is_null();
        obj = iterator.Next()) {
     CHECK(ReadOnlyHeap::Contains(obj));
     CHECK(!i_isolate()->heap()->Contains(obj));
@@ -66,13 +66,12 @@ TEST_F(IteratorsTest, ReadOnlyHeapObjectIterator) {
 TEST_F(IteratorsTest, HeapObjectIterator) {
   Heap* const heap = i_isolate()->heap();
   HandleScope handle_scope(i_isolate());
-  const Object sample_object = CreateWritableObject(v8_isolate());
+  const Tagged<Object> sample_object = CreateWritableObject(v8_isolate());
   bool seen_sample_object = false;
   HeapObjectIterator iterator(heap);
-  for (HeapObject obj = iterator.Next(); !obj.is_null();
+  for (Tagged<HeapObject> obj = iterator.Next(); !obj.is_null();
        obj = iterator.Next()) {
-    CHECK_IMPLIES(!v8_flags.enable_third_party_heap,
-                  !ReadOnlyHeap::Contains(obj));
+    CHECK(!ReadOnlyHeap::Contains(obj));
     CHECK(heap->Contains(obj));
     if (sample_object.SafeEquals(obj)) seen_sample_object = true;
   }
@@ -82,10 +81,10 @@ TEST_F(IteratorsTest, HeapObjectIterator) {
 TEST_F(IteratorsTest, CombinedHeapObjectIterator) {
   Heap* const heap = i_isolate()->heap();
   HandleScope handle_scope(i_isolate());
-  const Object sample_object = CreateWritableObject(v8_isolate());
+  const Tagged<Object> sample_object = CreateWritableObject(v8_isolate());
   bool seen_sample_object = false;
   CombinedHeapObjectIterator iterator(heap);
-  for (HeapObject obj = iterator.Next(); !obj.is_null();
+  for (Tagged<HeapObject> obj = iterator.Next(); !obj.is_null();
        obj = iterator.Next()) {
     CHECK(IsValidHeapObject(heap, obj));
     if (sample_object.SafeEquals(obj)) seen_sample_object = true;
@@ -98,6 +97,13 @@ TEST_F(IteratorsTest, PagedSpaceIterator) {
   PagedSpaceIterator iterator(heap);
   CHECK_EQ(heap->old_space(), iterator.Next());
   CHECK_EQ(heap->code_space(), iterator.Next());
+  if (v8_flags.shared_heap) {
+    CHECK_EQ(heap->shared_space(), iterator.Next());
+  }
+  CHECK_EQ(heap->trusted_space(), iterator.Next());
+  if (v8_flags.shared_heap) {
+    CHECK_EQ(heap->shared_trusted_space(), iterator.Next());
+  }
   for (int i = 0; i < 20; i++) {
     CHECK_NULL(iterator.Next());
   }
@@ -110,6 +116,48 @@ TEST_F(IteratorsTest, SpaceIterator) {
     // ReadOnlySpace is not actually a Space but is instead a BaseSpace, but
     // ensure it's not been inserted incorrectly.
     CHECK_NE(it.Next(), reinterpret_cast<BaseSpace*>(read_only_space));
+  }
+}
+
+TEST_F(IteratorsTest, HeapObjectIteratorMultipleSpaces) {
+  Factory* factory = i_isolate()->factory();
+  Heap* const heap = i_isolate()->heap();
+  HandleScope scope(i_isolate());
+
+  std::vector<Handle<HeapObject>> objs;
+
+  // Allocate a JS array in Young Space and Old Space.
+  objs.push_back(factory->NewJSArray(10));
+  objs.push_back(factory->NewJSArray(10, HOLEY_ELEMENTS, AllocationType::kOld));
+
+  // Allocate a small string in Young Space and Old Space.
+  objs.push_back(factory->NewStringFromStaticChars("abcdefghij"));
+  objs.push_back(
+      factory->NewStringFromStaticChars("abcdefghij", AllocationType::kOld));
+
+  // Allocate a large string in Large Object Space.
+  const int large_size = kMaxRegularHeapObjectSize + 1;
+  std::string large_str(large_size - 1, 'a');
+  objs.push_back(factory->NewStringFromAsciiChecked(large_str.c_str(),
+                                                    AllocationType::kOld));
+
+  // Add a Map object to check.
+  objs.push_back(handle(objs[0]->map(), i_isolate()));
+
+  std::vector<bool> found(objs.size(), false);
+
+  HeapObjectIterator iterator(heap);
+  for (Tagged<HeapObject> obj = iterator.Next(); !obj.is_null();
+       obj = iterator.Next()) {
+    for (size_t i = 0; i < objs.size(); i++) {
+      if (objs[i]->ptr() == obj.ptr()) {
+        found[i] = true;
+      }
+    }
+  }
+
+  for (size_t i = 0; i < found.size(); i++) {
+    EXPECT_TRUE(found[i]);
   }
 }
 

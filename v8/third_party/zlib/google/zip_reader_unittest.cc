@@ -9,7 +9,9 @@
 #include <string.h>
 
 #include <iterator>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "base/check.h"
@@ -18,16 +20,18 @@
 #include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
 #include "base/functional/bind.h"
-#include "base/hash/md5.h"
+#include "base/i18n/time_formatting.h"
 #include "base/path_service.h"
 #include "base/run_loop.h"
-#include "base/strings/string_piece.h"
+#include "base/strings/string_number_conversions.h"
+#include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/test/bind.h"
 #include "base/test/task_environment.h"
 #include "base/time/time.h"
 #include "build/build_config.h"
+#include "crypto/sha2.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "testing/platform_test.h"
@@ -41,7 +45,8 @@ using ::testing::SizeIs;
 
 namespace {
 
-const static std::string kQuuxExpectedMD5 = "d1ae4ac8a17a0e09317113ab284b57a6";
+const static std::string kQuuxExpectedSHA256 =
+    "8B50F75A113622698B1DBA78B799A0D242F0369DA2E58DA8522A334197241C6E";
 
 class FileWrapper {
  public:
@@ -70,7 +75,7 @@ class FileWrapper {
 // A mock that provides methods that can be used as callbacks in asynchronous
 // unzip functions.  Tracks the number of calls and number of bytes reported.
 // Assumes that progress callbacks will be executed in-order.
-class MockUnzipListener : public base::SupportsWeakPtr<MockUnzipListener> {
+class MockUnzipListener final {
  public:
   MockUnzipListener()
       : success_calls_(0),
@@ -96,18 +101,24 @@ class MockUnzipListener : public base::SupportsWeakPtr<MockUnzipListener> {
   int progress_calls() { return progress_calls_; }
   int current_progress() { return current_progress_; }
 
+  base::WeakPtr<MockUnzipListener> AsWeakPtr() {
+    return weak_ptr_factory_.GetWeakPtr();
+  }
+
  private:
   int success_calls_;
   int failure_calls_;
   int progress_calls_;
 
   int64_t current_progress_;
+
+  base::WeakPtrFactory<MockUnzipListener> weak_ptr_factory_{this};
 };
 
 class MockWriterDelegate : public zip::WriterDelegate {
  public:
   MOCK_METHOD0(PrepareOutput, bool());
-  MOCK_METHOD2(WriteBytes, bool(const char*, int));
+  MOCK_METHOD1(WriteBytes, bool(base::span<const uint8_t>));
   MOCK_METHOD1(SetTimeModified, void(const base::Time&));
   MOCK_METHOD1(SetPosixFilePermissions, void(int));
   MOCK_METHOD0(OnError, void());
@@ -139,6 +150,38 @@ const zip::ZipReader::Entry* LocateAndOpenEntry(
 
 using Paths = std::vector<base::FilePath>;
 
+// A reader delegate that reads from a string.
+class StringReaderDelegate : public zip::ReaderDelegate {
+ public:
+  explicit StringReaderDelegate(std::string data) : data_(std::move(data)) {}
+
+  int64_t ReadBytes(base::span<uint8_t> data) override {
+    auto full_span = base::as_byte_span(data_);
+    if (offset_ >= full_span.size())
+      return 0;
+    auto source = full_span.subspan(offset_);
+    size_t to_read = std::min(data.size(), source.size());
+    data.first(to_read).copy_from(source.first(to_read));
+    offset_ += to_read;
+    return to_read;
+  }
+
+  bool Seek(int64_t offset) override {
+    if (offset < 0 || static_cast<size_t>(offset) > data_.size())
+      return false;
+    offset_ = offset;
+    return true;
+  }
+
+  int64_t Tell() override { return offset_; }
+
+  int64_t GetLength() override { return data_.size(); }
+
+ private:
+  std::string data_;
+  size_t offset_ = 0;
+};
+
 }  // namespace
 
 namespace zip {
@@ -155,7 +198,7 @@ class ZipReaderTest : public PlatformTest {
 
   static base::FilePath GetTestDataDirectory() {
     base::FilePath path;
-    CHECK(base::PathService::Get(base::DIR_SOURCE_ROOT, &path));
+    CHECK(base::PathService::Get(base::DIR_SRC_TEST_DATA_ROOT, &path));
     return path.AppendASCII("third_party")
         .AppendASCII("zlib")
         .AppendASCII("google")
@@ -164,7 +207,7 @@ class ZipReaderTest : public PlatformTest {
   }
 
   static Paths GetPaths(const base::FilePath& zip_path,
-                        base::StringPiece encoding = {}) {
+                        std::string_view encoding = {}) {
     Paths paths;
 
     if (ZipReader reader; reader.Open(zip_path)) {
@@ -215,6 +258,39 @@ TEST_F(ZipReaderTest, Open_ValidZipPlatformFile) {
   EXPECT_TRUE(reader.ok());
 }
 
+TEST_F(ZipReaderTest, OpenFromReaderDelegate) {
+  const char kTestData[] =
+      "\x50\x4b\x03\x04\x0a\x00\x00\x00\x00\x00\xa4\x66\x24\x41\x13\xe8"
+      "\xcb\x27\x10\x00\x00\x00\x10\x00\x00\x00\x08\x00\x1c\x00\x74\x65"
+      "\x73\x74\x2e\x74\x78\x74\x55\x54\x09\x00\x03\x34\x89\x45\x50\x34"
+      "\x89\x45\x50\x75\x78\x0b\x00\x01\x04\x8e\xf0\x00\x00\x04\x88\x13"
+      "\x00\x00\x54\x68\x69\x73\x20\x69\x73\x20\x61\x20\x74\x65\x73\x74"
+      "\x2e\x0a\x50\x4b\x01\x02\x1e\x03\x0a\x00\x00\x00\x00\x00\xa4\x66"
+      "\x24\x41\x13\xe8\xcb\x27\x10\x00\x00\x00\x10\x00\x00\x00\x08\x00"
+      "\x18\x00\x00\x00\x00\x00\x01\x00\x00\x00\xa4\x81\x00\x00\x00\x00"
+      "\x74\x65\x73\x74\x2e\x74\x78\x74\x55\x54\x05\x00\x03\x34\x89\x45"
+      "\x50\x75\x78\x0b\x00\x01\x04\x8e\xf0\x00\x00\x04\x88\x13\x00\x00"
+      "\x50\x4b\x05\x06\x00\x00\x00\x00\x01\x00\x01\x00\x4e\x00\x00\x00"
+      "\x52\x00\x00\x00\x00\x00";
+  std::string data(kTestData, std::size(kTestData));
+  auto delegate = std::make_unique<StringReaderDelegate>(data);
+
+  ZipReader reader;
+  EXPECT_FALSE(reader.ok());
+  EXPECT_TRUE(reader.OpenFromReaderDelegate(delegate.get()));
+  EXPECT_TRUE(reader.ok());
+
+  base::FilePath target_path(FILE_PATH_LITERAL("test.txt"));
+  ASSERT_TRUE(LocateAndOpenEntry(&reader, target_path));
+  ASSERT_TRUE(ExtractCurrentEntryToFilePath(&reader,
+                                            test_dir_.AppendASCII("test.txt")));
+
+  std::string actual;
+  ASSERT_TRUE(
+      base::ReadFileToString(test_dir_.AppendASCII("test.txt"), &actual));
+  EXPECT_EQ(std::string("This is a test.\n"), actual);
+}
+
 TEST_F(ZipReaderTest, Open_NonExistentFile) {
   ZipReader reader;
   EXPECT_FALSE(reader.ok());
@@ -232,8 +308,10 @@ TEST_F(ZipReaderTest, Open_ExistentButNonZipFile) {
 TEST_F(ZipReaderTest, Open_EmptyFile) {
   ZipReader reader;
   EXPECT_FALSE(reader.ok());
-  EXPECT_FALSE(reader.Open(data_dir_.AppendASCII("empty.zip")));
-  EXPECT_FALSE(reader.ok());
+  EXPECT_TRUE(reader.Open(data_dir_.AppendASCII("empty.zip")));
+  EXPECT_TRUE(reader.ok());
+  EXPECT_EQ(0, reader.num_entries());
+  EXPECT_EQ(nullptr, reader.Next());
 }
 
 // Iterate through the contents in the test ZIP archive, and compare that the
@@ -288,18 +366,8 @@ TEST_F(ZipReaderTest, RegularFile) {
 
   EXPECT_EQ(target_path, entry->path);
   EXPECT_EQ(13527, entry->original_size);
-
-  // The expected time stamp: 2009-05-29 06:22:20
-  base::Time::Exploded exploded = {};  // Zero-clear.
-  entry->last_modified.UTCExplode(&exploded);
-  EXPECT_EQ(2009, exploded.year);
-  EXPECT_EQ(5, exploded.month);
-  EXPECT_EQ(29, exploded.day_of_month);
-  EXPECT_EQ(6, exploded.hour);
-  EXPECT_EQ(22, exploded.minute);
-  EXPECT_EQ(20, exploded.second);
-  EXPECT_EQ(0, exploded.millisecond);
-
+  EXPECT_EQ("2009-05-29T06:22:20.000Z",
+            base::TimeFormatAsIso8601(entry->last_modified));
   EXPECT_FALSE(entry->is_unsafe);
   EXPECT_FALSE(entry->is_directory);
 }
@@ -396,18 +464,8 @@ TEST_F(ZipReaderTest, Directory) {
   EXPECT_EQ(target_path, entry->path);
   // The directory size should be zero.
   EXPECT_EQ(0, entry->original_size);
-
-  // The expected time stamp: 2009-05-31 15:49:52
-  base::Time::Exploded exploded = {};  // Zero-clear.
-  entry->last_modified.UTCExplode(&exploded);
-  EXPECT_EQ(2009, exploded.year);
-  EXPECT_EQ(5, exploded.month);
-  EXPECT_EQ(31, exploded.day_of_month);
-  EXPECT_EQ(15, exploded.hour);
-  EXPECT_EQ(49, exploded.minute);
-  EXPECT_EQ(52, exploded.second);
-  EXPECT_EQ(0, exploded.millisecond);
-
+  EXPECT_EQ("2009-05-31T15:49:52.000Z",
+            base::TimeFormatAsIso8601(entry->last_modified));
   EXPECT_FALSE(entry->is_unsafe);
   EXPECT_TRUE(entry->is_directory);
 }
@@ -428,7 +486,7 @@ TEST_F(ZipReaderTest, EncryptedFile_WrongPassword) {
     EXPECT_EQ("This is not encrypted.\n", contents);
   }
 
-  for (const base::StringPiece path : {
+  for (const std::string_view path : {
            "Encrypted AES-128.txt",
            "Encrypted AES-192.txt",
            "Encrypted AES-256.txt",
@@ -464,7 +522,7 @@ TEST_F(ZipReaderTest, EncryptedFile_RightPassword) {
   }
 
   // TODO(crbug.com/1296838) Support AES encryption.
-  for (const base::StringPiece path : {
+  for (const std::string_view path : {
            "Encrypted AES-128.txt",
            "Encrypted AES-192.txt",
            "Encrypted AES-256.txt",
@@ -490,6 +548,24 @@ TEST_F(ZipReaderTest, EncryptedFile_RightPassword) {
     EXPECT_TRUE(reader.ExtractCurrentEntryToString(&contents));
     EXPECT_EQ("This is encrypted with ZipCrypto.\n", contents);
   }
+
+  EXPECT_FALSE(reader.Next());
+  EXPECT_TRUE(reader.ok());
+}
+
+// An entry whose local file header has the "encrypted" general-purpose flag
+// bit set while the central directory does not should be rejected.
+TEST_F(ZipReaderTest, MismatchedEncryptionFlag) {
+  ZipReader reader;
+  ASSERT_TRUE(reader.Open(data_dir_.AppendASCII("enc_flag_mismatch.zip")));
+
+  const ZipReader::Entry* entry = reader.Next();
+  ASSERT_TRUE(entry);
+  EXPECT_EQ(base::FilePath::FromASCII("A"), entry->path);
+  EXPECT_FALSE(entry->is_directory);
+  std::string contents = "dummy";
+  EXPECT_FALSE(reader.ExtractCurrentEntryToString(&contents));
+  EXPECT_EQ("", contents);
 
   EXPECT_FALSE(reader.Next());
   EXPECT_TRUE(reader.ok());
@@ -555,16 +631,16 @@ TEST_F(ZipReaderTest, ExtractToFileAsync_RegularFile) {
   EXPECT_EQ(0, listener.failure_calls());
   EXPECT_LE(1, listener.progress_calls());
 
-  std::string output;
-  ASSERT_TRUE(
-      base::ReadFileToString(test_dir_.AppendASCII("quux.txt"), &output));
-  const std::string md5 = base::MD5String(output);
-  EXPECT_EQ(kQuuxExpectedMD5, md5);
+  std::optional<std::vector<uint8_t>> output =
+      base::ReadFileToBytes(test_dir_.AppendASCII("quux.txt"));
+  ASSERT_TRUE(output.has_value());
+  const std::string sha256 = base::HexEncode(crypto::SHA256Hash(*output));
+  EXPECT_EQ(kQuuxExpectedSHA256, sha256);
 
-  int64_t file_size = 0;
-  ASSERT_TRUE(base::GetFileSize(target_file, &file_size));
+  std::optional<int64_t> file_size = base::GetFileSize(target_file);
+  ASSERT_TRUE(file_size.has_value());
 
-  EXPECT_EQ(file_size, listener.current_progress());
+  EXPECT_EQ(file_size.value(), listener.current_progress());
 }
 
 TEST_F(ZipReaderTest, ExtractToFileAsync_Encrypted_NoPassword) {
@@ -719,12 +795,12 @@ TEST_F(ZipReaderTest, ExtractCurrentEntryToString) {
     if (i > 0) {
       // Exact byte read limit: must pass.
       EXPECT_TRUE(reader.ExtractCurrentEntryToString(i, &contents));
-      EXPECT_EQ(std::string(base::StringPiece("0123456", i)), contents);
+      EXPECT_EQ(std::string(std::string_view("0123456", i)), contents);
     }
 
     // More than necessary byte read limit: must pass.
     EXPECT_TRUE(reader.ExtractCurrentEntryToString(&contents));
-    EXPECT_EQ(std::string(base::StringPiece("0123456", i)), contents);
+    EXPECT_EQ(std::string(std::string_view("0123456", i)), contents);
   }
   reader.Close();
 }
@@ -833,7 +909,7 @@ TEST_F(ZipReaderTest, ExtractCurrentEntryWriteBytesFailure) {
   testing::StrictMock<MockWriterDelegate> mock_writer;
 
   EXPECT_CALL(mock_writer, PrepareOutput()).WillOnce(Return(true));
-  EXPECT_CALL(mock_writer, WriteBytes(_, _)).WillOnce(Return(false));
+  EXPECT_CALL(mock_writer, WriteBytes).WillOnce(Return(false));
   EXPECT_CALL(mock_writer, OnError());
 
   base::FilePath target_path(FILE_PATH_LITERAL("foo/bar/quux.txt"));
@@ -849,7 +925,7 @@ TEST_F(ZipReaderTest, ExtractCurrentEntrySuccess) {
   testing::StrictMock<MockWriterDelegate> mock_writer;
 
   EXPECT_CALL(mock_writer, PrepareOutput()).WillOnce(Return(true));
-  EXPECT_CALL(mock_writer, WriteBytes(_, _)).WillRepeatedly(Return(true));
+  EXPECT_CALL(mock_writer, WriteBytes).WillRepeatedly(Return(true));
   EXPECT_CALL(mock_writer, SetPosixFilePermissions(_));
   EXPECT_CALL(mock_writer, SetTimeModified(_));
 
@@ -892,6 +968,148 @@ TEST_F(ZipReaderTest, WrongCrc) {
   EXPECT_EQ("This file has been changed after its CRC was computed.", contents);
 }
 
+// The Unicode Path Extra field overrides the regular filename. Make sure the
+// size_filename field is also correctly updated (ZipReader has a DCHECK for
+// this).
+TEST_F(ZipReaderTest, WrongFilenameLength) {
+  static const char test_data[] = {
+      0x50, 0x4b, 0x03, 0x04, 0x0a, 0x03, 0x00, 0x00, 0x00, 0x00, 0xd0, 0x71,
+      0x91, 0x4e, 0xbc, 0x2c, 0x7f, 0x06, 0x09, 0x00, 0x00, 0x00, 0x09, 0x00,
+      0x00, 0x00, 0x0b, 0x00, 0x00, 0x00, 0xc8, 0xfe, 0x20, 0xc8, 0xfe, 0xc8,
+      0xfe, 0x2e, 0x74, 0x78, 0x74, 0xed, 0x95, 0x9c, 0xea, 0xb5, 0xad, 0xeb,
+      0xa7, 0x90, 0x50, 0x4b, 0x01, 0x02, 0x3f, 0x03, 0x0a, 0x03, 0x00, 0x00,
+      0x00, 0x00, 0xd0, 0x71, 0x91, 0x4e, 0xbc, 0x2c, 0x7f, 0x06, 0x09, 0x00,
+      0x00, 0x00, 0x09, 0x00, 0x00, 0x00, 0x0b, 0x00, 0x17, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x20, 0x80, 0xc9, 0x81, 0x00, 0x00, 0x00, 0x00,
+      0xc8, 0xfe, 0x20, 0xc8, 0xfe, 0xc8, 0xfe, 0x2e, 0x74, 0x78, 0x74, 0x75,
+      0x70, 0x13, 0x00, 0x01, 0xe9, 0x73, 0xbf, 0xc8, 0xec, 0x83, 0x88, 0x20,
+      0xeb, 0xac, 0xb8, 0xec, 0x84, 0x9c, 0x2e, 0x74, 0x78, 0x74, 0x50, 0x4b,
+      0x05, 0x06, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x50, 0x00,
+      0x00, 0x00, 0x32, 0x00, 0x00, 0x00, 0x00, 0x00};
+
+  std::string test_string(test_data, sizeof(test_data));
+  ZipReader reader;
+  ASSERT_TRUE(reader.OpenFromString(test_string));
+  reader.Next();
+}
+
+TEST_F(ZipReaderTest, UnicodePathExtraFieldPreservesPhysicalPath) {
+  static const char test_data[] = {
+      0x50, 0x4b, 0x03, 0x04, 0x0a, 0x03, 0x00, 0x00, 0x00, 0x00, 0xd0, 0x71,
+      0x91, 0x4e, 0x11, 0x2c, 0xf9, 0x51, 0x09, 0x00, 0x00, 0x00, 0x09, 0x00,
+      0x00, 0x00, 0x0b, 0x00, 0x00, 0x00, 0x6d, 0x61, 0x6c, 0x77, 0x61, 0x72,
+      0x65, 0x2e, 0x65, 0x78, 0x65, 0x54, 0x65, 0x73, 0x74, 0x20, 0x64, 0x61,
+      0x74, 0x61, 0x50, 0x4b, 0x01, 0x02, 0x3f, 0x03, 0x0a, 0x03, 0x00, 0x00,
+      0x00, 0x00, 0xd0, 0x71, 0x91, 0x4e, 0x11, 0x2c, 0xf9, 0x51, 0x09, 0x00,
+      0x00, 0x00, 0x09, 0x00, 0x00, 0x00, 0x0b, 0x00, 0x15, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x20, 0x80, 0xc9, 0x81, 0x00, 0x00, 0x00, 0x00,
+      0x6d, 0x61, 0x6c, 0x77, 0x61, 0x72, 0x65, 0x2e, 0x65, 0x78, 0x65, 0x75,
+      0x70, 0x11, 0x00, 0x01, 0xed, 0x4b, 0x16, 0x3c, 0x64, 0x6f, 0x77, 0x6e,
+      0x6c, 0x6f, 0x61, 0x64, 0x2e, 0x74, 0x78, 0x74, 0x50, 0x4b, 0x05, 0x06,
+      0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x4e, 0x00, 0x00, 0x00,
+      0x32, 0x00, 0x00, 0x00, 0x00, 0x00};
+
+  std::string test_string(test_data, sizeof(test_data));
+  ZipReader reader;
+  ASSERT_TRUE(reader.OpenFromString(test_string));
+  const ZipReader::Entry* entry = reader.Next();
+  ASSERT_TRUE(entry);
+  // The Unicode Path Extra Field overrides the Central Directory filename,
+  // but the original physical path is preserved separately. `is_unsafe` tracks
+  // path traversal safety, not whether the filename looks executable.
+  EXPECT_EQ(base::FilePath::FromUTF8Unsafe("download.txt"), entry->path);
+  EXPECT_EQ(base::FilePath::FromUTF8Unsafe("malware.exe"),
+            entry->physical_path);
+  EXPECT_FALSE(entry->is_directory);
+  EXPECT_FALSE(entry->is_unsafe);
+}
+
+TEST_F(ZipReaderTest, UnicodePathExtraFieldUsesUtf8WithConfiguredEncoding) {
+  static constexpr uint8_t test_data[] = {
+      0x50, 0x4b, 0x03, 0x04, 0x0a, 0x03, 0x00, 0x00, 0x00, 0x00, 0xd0, 0x71,
+      0x91, 0x4e, 0x11, 0x2c, 0xf9, 0x51, 0x09, 0x00, 0x00, 0x00, 0x09, 0x00,
+      0x00, 0x00, 0x0b, 0x00, 0x00, 0x00, 0x6d, 0x61, 0x6c, 0x77, 0x61, 0x72,
+      0x65, 0x2e, 0x65, 0x78, 0x65, 0x54, 0x65, 0x73, 0x74, 0x20, 0x64, 0x61,
+      0x74, 0x61, 0x50, 0x4b, 0x01, 0x02, 0x3f, 0x03, 0x0a, 0x03, 0x00, 0x00,
+      0x00, 0x00, 0xd0, 0x71, 0x91, 0x4e, 0x11, 0x2c, 0xf9, 0x51, 0x09, 0x00,
+      0x00, 0x00, 0x09, 0x00, 0x00, 0x00, 0x0b, 0x00, 0x15, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x20, 0x80, 0xc9, 0x81, 0x00, 0x00, 0x00, 0x00,
+      0x6d, 0x61, 0x6c, 0x77, 0x61, 0x72, 0x65, 0x2e, 0x65, 0x78, 0x65, 0x75,
+      0x70, 0x11, 0x00, 0x01, 0xed, 0x4b, 0x16, 0x3c, 0x72, 0xc3, 0xa9, 0x73,
+      0x75, 0x6d, 0xc3, 0xa9, 0x2e, 0x74, 0x78, 0x74, 0x50, 0x4b, 0x05, 0x06,
+      0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x4e, 0x00, 0x00, 0x00,
+      0x32, 0x00, 0x00, 0x00, 0x00, 0x00};
+
+  std::string test_string(reinterpret_cast<const char*>(test_data),
+                          sizeof(test_data));
+  ZipReader reader;
+  ASSERT_TRUE(reader.OpenFromString(test_string));
+  reader.SetEncoding("windows-1252");
+  const ZipReader::Entry* entry = reader.Next();
+  ASSERT_TRUE(entry);
+  EXPECT_EQ(base::FilePath::FromUTF8Unsafe("résumé.txt"), entry->path);
+  EXPECT_EQ(base::FilePath::FromUTF8Unsafe("malware.exe"),
+            entry->physical_path);
+}
+
+TEST_F(ZipReaderTest, UnicodePathExtraFieldFileIfEitherPathIsFile) {
+  static const char test_data[] = {
+      0x50, 0x4b, 0x03, 0x04, 0x0a, 0x03, 0x00, 0x00, 0x00, 0x00, 0xd0, 0x71,
+      0x91, 0x4e, 0x11, 0x2c, 0xf9, 0x51, 0x09, 0x00, 0x00, 0x00, 0x09, 0x00,
+      0x00, 0x00, 0x0c, 0x00, 0x00, 0x00, 0x6d, 0x61, 0x6c, 0x77, 0x61, 0x72,
+      0x65, 0x2e, 0x65, 0x78, 0x65, 0x2f, 0x54, 0x65, 0x73, 0x74, 0x20, 0x64,
+      0x61, 0x74, 0x61, 0x50, 0x4b, 0x01, 0x02, 0x3f, 0x03, 0x0a, 0x03, 0x00,
+      0x00, 0x00, 0x00, 0xd0, 0x71, 0x91, 0x4e, 0x11, 0x2c, 0xf9, 0x51, 0x09,
+      0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x14, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x20, 0x80, 0xc9, 0x81, 0x00, 0x00, 0x00,
+      0x00, 0x6d, 0x61, 0x6c, 0x77, 0x61, 0x72, 0x65, 0x2e, 0x65, 0x78, 0x65,
+      0x2f, 0x75, 0x70, 0x10, 0x00, 0x01, 0x5a, 0x5a, 0x54, 0xa7, 0x6d, 0x61,
+      0x6c, 0x77, 0x61, 0x72, 0x65, 0x2e, 0x65, 0x78, 0x65, 0x50, 0x4b, 0x05,
+      0x06, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x4e, 0x00, 0x00,
+      0x00, 0x33, 0x00, 0x00, 0x00, 0x00, 0x00};
+
+  std::string test_string(test_data, sizeof(test_data));
+  ZipReader reader;
+  ASSERT_TRUE(reader.OpenFromString(test_string));
+  const ZipReader::Entry* entry = reader.Next();
+  ASSERT_TRUE(entry);
+  EXPECT_EQ(base::FilePath::FromUTF8Unsafe("malware.exe"), entry->path);
+  EXPECT_EQ(base::FilePath::FromUTF8Unsafe("malware.exe/"),
+            entry->physical_path);
+  EXPECT_FALSE(entry->is_directory);
+  EXPECT_FALSE(entry->is_unsafe);
+}
+
+TEST_F(ZipReaderTest, UnicodePathExtraFieldPreservesUnsafePhysicalPath) {
+  static const char test_data[] = {
+      0x50, 0x4b, 0x03, 0x04, 0x0a, 0x03, 0x00, 0x00, 0x00, 0x00, 0xd0, 0x71,
+      0x91, 0x4e, 0x11, 0x2c, 0xf9, 0x51, 0x09, 0x00, 0x00, 0x00, 0x09, 0x00,
+        0x00, 0x00, 0x0e, 0x00, 0x00, 0x00, 0x6d, 0x61, 0x6c,
+        0x77, 0x61, 0x72, 0x65, 0x2e, 0x65, 0x78, 0x65, 0x2f,
+        0x2e, 0x2e, 0x54, 0x65, 0x73, 0x74,
+      0x20, 0x64, 0x61, 0x74, 0x61, 0x50, 0x4b, 0x01, 0x02, 0x3f, 0x03, 0x0a,
+      0x03, 0x00, 0x00, 0x00, 0x00, 0xd0, 0x71, 0x91, 0x4e, 0x11, 0x2c, 0xf9,
+      0x51, 0x09, 0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00, 0x0e, 0x00, 0x15,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20, 0x80, 0xc9, 0x81, 0x00,
+        0x00, 0x00, 0x00, 0x6d, 0x61, 0x6c, 0x77, 0x61, 0x72,
+        0x65, 0x2e, 0x65, 0x78, 0x65, 0x2f, 0x2e, 0x2e, 0x75,
+        0x70, 0x11, 0x00, 0x01, 0x7c, 0xbc, 0xe2, 0x5d, 0x64,
+        0x6f, 0x77, 0x6e, 0x6c, 0x6f, 0x61, 0x64, 0x2e, 0x74,
+      0x78, 0x74, 0x50, 0x4b, 0x05, 0x06, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
+      0x01, 0x00, 0x51, 0x00, 0x00, 0x00, 0x35, 0x00, 0x00, 0x00, 0x00, 0x00};
+
+  std::string test_string(test_data, sizeof(test_data));
+  ZipReader reader;
+  ASSERT_TRUE(reader.OpenFromString(test_string));
+  const ZipReader::Entry* entry = reader.Next();
+  ASSERT_TRUE(entry);
+  EXPECT_EQ(base::FilePath::FromUTF8Unsafe("download.txt"), entry->path);
+  EXPECT_EQ(base::FilePath::FromUTF8Unsafe("malware.exe/UP"),
+            entry->physical_path);
+  EXPECT_FALSE(entry->is_directory);
+  EXPECT_TRUE(entry->is_unsafe);
+}
+
 class FileWriterDelegateTest : public ::testing::Test {
  protected:
   void SetUp() override {
@@ -914,7 +1132,7 @@ TEST_F(FileWriterDelegateTest, WriteToEnd) {
     FileWriterDelegate writer(&file_);
     EXPECT_EQ(0, writer.file_length());
     ASSERT_TRUE(writer.PrepareOutput());
-    ASSERT_TRUE(writer.WriteBytes(payload.data(), payload.size()));
+    ASSERT_TRUE(writer.WriteBytes(base::as_byte_span(payload)));
     EXPECT_EQ(payload.size(), writer.file_length());
   }
 
@@ -928,7 +1146,7 @@ TEST_F(FileWriterDelegateTest, EmptyOnError) {
     FileWriterDelegate writer(&file_);
     EXPECT_EQ(0, writer.file_length());
     ASSERT_TRUE(writer.PrepareOutput());
-    ASSERT_TRUE(writer.WriteBytes(payload.data(), payload.size()));
+    ASSERT_TRUE(writer.WriteBytes(base::as_byte_span(payload)));
     EXPECT_EQ(payload.size(), writer.file_length());
     EXPECT_EQ(payload.size(), file_.GetLength());
     writer.OnError();

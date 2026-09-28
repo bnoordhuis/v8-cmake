@@ -3,23 +3,25 @@
 // found in the LICENSE file.
 
 // Tier up quickly to save time:
-// Flags: --wasm-tiering-budget=100 --experimental-wasm-gc
+// Flags: --wasm-tiering-budget=100
 
 d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
 
 var builder = new WasmModuleBuilder();
 let supertype = builder.addStruct([makeField(kWasmI32, true)]);
 let subtype = builder.addStruct(
-    [makeField(kWasmI32, true), makeField(kWasmI32, true)], supertype);
+    {fields: [makeField(kWasmI32, true), makeField(kWasmI32, true)],
+     supertype: supertype});
 let unused_type = builder.addStruct(
-    [makeField(kWasmI32, true), makeField(kWasmF64, true)], supertype);
+    {fields: [makeField(kWasmI32, true), makeField(kWasmF64, true)],
+     supertype: supertype});
 
 let sig = makeSig([wasmRefNullType(supertype)], [kWasmI32]);
 
 let callee1 = builder.addFunction('callee1', sig).addBody([
     kExprBlock, kWasmRef, subtype,
         kExprLocalGet, 0,
-        kGCPrefix, kExprBrOnCast, 0, subtype,
+        kGCPrefix, kExprBrOnCast, 0b01, 0, supertype, subtype,
         kGCPrefix, kExprRefCast, unused_type,
         kGCPrefix, kExprStructGet, unused_type, 0,
         kExprReturn,
@@ -30,7 +32,7 @@ let callee1 = builder.addFunction('callee1', sig).addBody([
 let callee2 = builder.addFunction('callee2', sig).addBody([
     kExprBlock, kWasmRef, subtype,
         kExprLocalGet, 0,
-        kGCPrefix, kExprBrOnCast, 0, subtype,
+        kGCPrefix, kExprBrOnCast, 0b01, 0, supertype, subtype,
         kExprUnreachable,
         kExprReturn,
     kExprEnd,

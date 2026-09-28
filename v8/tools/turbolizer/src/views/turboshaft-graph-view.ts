@@ -14,7 +14,7 @@ import {
 import { MovableView } from "./movable-view";
 import { SelectionBroker } from "../selection/selection-broker";
 import { SelectionMap } from "../selection/selection-map";
-import { TurboshaftGraphNode } from "../phases/turboshaft-graph-phase/turboshaft-graph-node";
+import { TurboshaftGraphOperation } from "../phases/turboshaft-graph-phase/turboshaft-graph-operation";
 import { TurboshaftGraphEdge } from "../phases/turboshaft-graph-phase/turboshaft-graph-edge";
 import { TurboshaftGraph } from "../turboshaft-graph";
 import { TurboshaftGraphLayout } from "../turboshaft-graph-layout";
@@ -40,7 +40,7 @@ export class TurboshaftGraphView extends MovableView<TurboshaftGraph> {
   graphLayout: TurboshaftGraphLayout;
   blockSelectionHandler: BlockSelectionHandler & ClearableHandler;
   visibleBlocks: d3.Selection<any, TurboshaftGraphBlock, any, any>;
-  visibleNodes: d3.Selection<any, TurboshaftGraphNode, any, any>;
+  visibleNodes: d3.Selection<any, TurboshaftGraphOperation, any, any>;
   visibleEdges: d3.Selection<any, TurboshaftGraphEdge<TurboshaftGraphBlock>, any, any>;
   visibleBubbles: d3.Selection<any, any, any, any>;
   blockDrag: d3.DragBehavior<any, TurboshaftGraphBlock, TurboshaftGraphBlock>;
@@ -96,6 +96,9 @@ export class TurboshaftGraphView extends MovableView<TurboshaftGraph> {
     this.phaseName = data.name;
     this.addCustomDataSelect(data.customData);
 
+    this.addToggleImgInput("toggle-compact-view",  "compact view",
+      this.state.compactView, partial(this.toggleCompactViewAction, this));
+
     const adaptedSelection = this.createGraph(data, rememberedSelection);
     this.broker.addNodeHandler(this.nodeSelectionHandler);
     this.broker.addBlockHandler(this.blockSelectionHandler);
@@ -123,6 +126,7 @@ export class TurboshaftGraphView extends MovableView<TurboshaftGraph> {
 
   public updateGraphVisibility(): void {
     if (!this.graph) return;
+    this.updateNodesPositions();
     this.updateVisibleBlocksAndEdges();
     this.visibleNodes = this.visibleBlocks.selectAll(".turboshaft-node");
     this.visibleBubbles = d3.selectAll("circle");
@@ -198,7 +202,7 @@ export class TurboshaftGraphView extends MovableView<TurboshaftGraph> {
       if (query.length == 0) return;
 
       const reg = new RegExp(query);
-      const filterFunction = (node: TurboshaftGraphNode) => {
+      const filterFunction = (node: TurboshaftGraphOperation) => {
         if (!onlyVisible) node.block.collapsed = false;
         const customDataTitle = this.graph.customData.getTitle(node.id, DataTarget.Nodes);
         return (!onlyVisible || !node.block.collapsed) &&
@@ -262,7 +266,7 @@ export class TurboshaftGraphView extends MovableView<TurboshaftGraph> {
   private initializeNodeSelectionHandler(): NodeSelectionHandler & ClearableHandler {
     const view = this;
     return {
-      select: function (selectedNodes: Array<TurboshaftGraphNode>, selected: boolean,
+      select: function (selectedNodes: Array<TurboshaftGraphOperation>, selected: boolean,
                         scrollIntoView: boolean) {
         const sourcePositions = new Array<SourcePosition>();
         const nodes = new Set<string>();
@@ -394,15 +398,34 @@ export class TurboshaftGraphView extends MovableView<TurboshaftGraph> {
   }
 
   private updateBlockLocation(block: TurboshaftGraphBlock): void {
+    let currentY = block.labelBox.height;
+    const showCustomData = this.nodesCustomDataShowed();
+    for (const node of block.nodes) {
+      node.x = block.x + C.TURBOSHAFT_NODE_X_INDENT;
+      node.y = block.y + currentY;
+      currentY += node.getHeight(showCustomData, this.state?.compactView);
+    }
+
     this.visibleBlocks
       .selectAll<SVGGElement, TurboshaftGraphBlock>(".turboshaft-block")
       .filter(b => b == block)
       .attr("transform", block => `translate(${block.x},${block.y})`);
 
     this.visibleEdges
-      .selectAll<SVGPathElement, TurboshaftGraphEdge<TurboshaftGraphBlock>>("path")
-      .filter(edge => edge.target === block || edge.source === block)
-      .attr("d", edge => edge.generatePath(this.graph, this.nodesCustomDataShowed()));
+      .selectAll<SVGPathElement, TurboshaftGraphEdge<TurboshaftGraphBlock | TurboshaftGraphOperation>>("path")
+      .filter(edge => {
+        const targetBlock = edge.target instanceof TurboshaftGraphBlock ? edge.target : edge.target.block;
+        const sourceBlock = edge.source instanceof TurboshaftGraphBlock ? edge.source : edge.source.block;
+        return targetBlock === block || sourceBlock === block;
+      })
+      .each(edge => {
+        if (edge.source instanceof TurboshaftGraphOperation &&
+            edge.target instanceof TurboshaftGraphOperation &&
+            edge.type === "control") {
+          this.updateNodeOutputBubble(edge.source);
+        }
+      })
+      .attr("d", edge => edge.generatePath(this.graph, this.nodesCustomDataShowed(), this.state.compactView));
   }
 
   private updateVisibleBlocksAndEdges(): void {
@@ -410,11 +433,16 @@ export class TurboshaftGraphView extends MovableView<TurboshaftGraph> {
     const iconsPath = "img/turboshaft/";
 
     // select existing edges
-    const filteredEdges = [...view.graph.blocksEdges(_ => view.graph.isRendered())];
+    const filteredBlockEdges = [...view.graph.blocksEdges(edge =>
+      view.graph.isRendered() && !edge.target.exception
+    )];
+    const filteredNodeControlEdges = [...view.graph.nodesEdges(edge => view.graph.isRendered() && edge.type === "control")];
+    const allFilteredEdges = (filteredBlockEdges as Array<TurboshaftGraphEdge<TurboshaftGraphBlock | TurboshaftGraphOperation>>)
+      .concat(filteredNodeControlEdges);
 
     const selEdges = view.visibleEdges
-      .selectAll<SVGPathElement, TurboshaftGraphEdge<TurboshaftGraphBlock>>("path")
-      .data(filteredEdges, edge => edge.toString());
+      .selectAll<SVGPathElement, TurboshaftGraphEdge<TurboshaftGraphBlock | TurboshaftGraphOperation>>("path")
+      .data(allFilteredEdges, edge => edge.toString());
 
     // remove old edges
     selEdges.exit().remove();
@@ -430,7 +458,9 @@ export class TurboshaftGraphView extends MovableView<TurboshaftGraph> {
         if (!d3.event.shiftKey) {
           view.blockSelectionHandler.clear();
         }
-        view.blockSelectionHandler.select([edge.source, edge.target], true, false);
+        const sourceBlock = edge.source instanceof TurboshaftGraphBlock ? edge.source : edge.source.block;
+        const targetBlock = edge.target instanceof TurboshaftGraphBlock ? edge.target : edge.target.block;
+        view.blockSelectionHandler.select([sourceBlock, targetBlock], true, false);
       })
       .attr("adjacentToHover", "false");
 
@@ -484,7 +514,7 @@ export class TurboshaftGraphView extends MovableView<TurboshaftGraph> {
       .attr("rx", C.TURBOSHAFT_BLOCK_BORDER_RADIUS)
       .attr("ry", C.TURBOSHAFT_BLOCK_BORDER_RADIUS)
       .attr("width", block => block.getWidth())
-      .attr("height", block => block.getHeight(view.nodesCustomDataShowed()));
+      .attr("height", block => block.getHeight(view.nodesCustomDataShowed(), this.state?.compactView));
 
     newBlocks.each(function (block: TurboshaftGraphBlock) {
       const svg = d3.select<SVGGElement, TurboshaftGraphBlock>(this);
@@ -529,7 +559,7 @@ export class TurboshaftGraphView extends MovableView<TurboshaftGraph> {
       .classed("selected", block => view.state.blocksSelection.isSelected(block))
       .attr("transform", block => `translate(${block.x},${block.y})`)
       .select("rect")
-      .attr("height", block =>  block.getHeight(view.nodesCustomDataShowed()));
+      .attr("height", block =>  block.getHeight(view.nodesCustomDataShowed(), this.state?.compactView));
 
     newAndOldBlocks.select("image")
       .attr("xlink:href", block => `${iconsPath}collapse_${block.collapsed ? "down" : "up"}.svg`);
@@ -537,7 +567,7 @@ export class TurboshaftGraphView extends MovableView<TurboshaftGraph> {
     newAndOldBlocks.select(".block-collapsed-label")
       .attr("visibility", block => block.collapsed ? "visible" : "hidden");
 
-    newAndOldEdges.attr("d", edge => edge.generatePath(view.graph, view.nodesCustomDataShowed()));
+    newAndOldEdges.attr("d", edge => edge.generatePath(view.graph, view.nodesCustomDataShowed(), view.state.compactView));
   }
 
   private appendInlineNodes(svg: d3.Selection<SVGGElement, TurboshaftGraphBlock, any, any>,
@@ -545,7 +575,7 @@ export class TurboshaftGraphView extends MovableView<TurboshaftGraph> {
     const state = this.state;
     const graph = this.graph;
     const filteredNodes = [...block.nodes.filter(_ => graph.isRendered())];
-    const allNodes = svg.selectAll<SVGGElement, TurboshaftGraphNode>(".inline-node");
+    const allNodes = svg.selectAll<SVGGElement, TurboshaftGraphOperation>(".inline-node");
     const selNodes = allNodes.data(filteredNodes, node => node.toString());
 
     // remove old nodes
@@ -563,44 +593,81 @@ export class TurboshaftGraphView extends MovableView<TurboshaftGraph> {
     const customData = this.graph.customData;
     const storageKey = this.customDataStorageKey();
     const selectedCustomData = storageGetItem(storageKey, null, false);
-    newNodes.each(function (node: TurboshaftGraphNode) {
+    newNodes.each(function (node: TurboshaftGraphOperation) {
       const nodeSvg = d3.select(this);
       nodeSvg
-        .attr("id", node.id)
+        .attr("id", node.id);
+
+      if (node.title === "*FrameState") {
+        nodeSvg.classed("frame-state-node", true);
+      } else if (node.title.startsWith("*VirtualObject")) {
+        nodeSvg.classed("virtual-object-node", true);
+      }
+
+      nodeSvg
         .append("text")
         .attr("dx", C.TURBOSHAFT_NODE_X_INDENT)
         .classed("inline-node-label", true)
         .attr("dy", nodeY)
         .append("tspan")
-        .text(node.displayLabel)
+        .html(node.buildOperationText(state.compactView))
         .append("title")
         .text(`${node.getTitle()}${customData.getTitle(node.id, DataTarget.Nodes)}`);
 
+      const controlInputs = node.inputs.filter(edge => edge.type === "control" && edge.source instanceof TurboshaftGraphOperation);
+      const controlOutputs = node.outputs.filter(edge => edge.type === "control" && edge.target instanceof TurboshaftGraphOperation);
+
+      const isCatchBlockTarget = block.exception;
+      for (let i = 0; i < controlInputs.length; i++) {
+        const edge = controlInputs[i];
+        const bubbleX = isCatchBlockTarget
+          ? view.getCatchBlockInputX(block, i, controlInputs.length)
+          : C.TURBOSHAFT_NODE_X_INDENT + node.getInputX(node.inputs.indexOf(edge));
+        const bubbleY = isCatchBlockTarget
+          ? -C.DEFAULT_NODE_BUBBLE_RADIUS
+          : nodeY;
+        nodeSvg.append("circle")
+          .classed("filledBubbleStyle", true)
+          .attr("id", `nib,${edge.toString()}`)
+          .attr("r", C.DEFAULT_NODE_BUBBLE_RADIUS)
+          .attr("transform", `translate(${bubbleX},${bubbleY})`);
+      }
+
+      if (controlOutputs.length > 0) {
+        const bubbleX = C.TURBOSHAFT_NODE_X_INDENT + node.getWidth() + C.DEFAULT_NODE_BUBBLE_RADIUS;
+        const bubbleY = nodeY + node.labelBox.height / 2;
+        nodeSvg.append("circle")
+          .classed("filledBubbleStyle", true)
+          .attr("id", `nob,${node.id}`)
+          .attr("r", C.DEFAULT_NODE_BUBBLE_RADIUS)
+          .attr("transform", `translate(${bubbleX},${bubbleY})`);
+      }
+
       nodeSvg
-        .on("mouseenter", (node: TurboshaftGraphNode) => {
-          view.visibleNodes.data<TurboshaftGraphNode>(
+        .on("mouseenter", (node: TurboshaftGraphOperation) => {
+          view.visibleNodes.data<TurboshaftGraphOperation>(
             node.inputs.map(edge => edge.source), source => source.toString())
             .classed("input", true);
-          view.visibleNodes.data<TurboshaftGraphNode>(
+          view.visibleNodes.data<TurboshaftGraphOperation>(
             node.outputs.map(edge => edge.target), target => target.toString())
             .classed("output", true);
           view.hoveredNodeIdentifier = node.identifier();
           view.updateGraphVisibility();
         })
-        .on("mouseleave", (node: TurboshaftGraphNode) => {
+        .on("mouseleave", (node: TurboshaftGraphOperation) => {
           const inOutNodes = node.inputs.map(edge => edge.source)
             .concat(node.outputs.map(edge => edge.target));
-          view.visibleNodes.data<TurboshaftGraphNode>(inOutNodes, inOut => inOut.toString())
+          view.visibleNodes.data<TurboshaftGraphOperation>(inOutNodes, inOut => inOut.toString())
             .classed("input output", false);
           view.hoveredNodeIdentifier = null;
           view.updateGraphVisibility();
         })
-        .on("click", (node: TurboshaftGraphNode) => {
+        .on("click", (node: TurboshaftGraphOperation) => {
           if (!d3.event.shiftKey) view.nodeSelectionHandler.clear();
           view.nodeSelectionHandler.select([node], undefined, false);
           d3.event.stopPropagation();
         });
-      nodeY += node.labelBox.height;
+      nodeY += node.getHeight(false, state.compactView);
       if (view.graph.customData.nodes.size > 0) {
         const customData = view.graph.getCustomData(selectedCustomData, node.id, DataTarget.Nodes);
         nodeSvg
@@ -612,7 +679,7 @@ export class TurboshaftGraphView extends MovableView<TurboshaftGraph> {
           .text(view.getReadableString(customData, blockWidth))
           .append("title")
           .text(customData);
-        nodeY += node.labelBox.height;
+          nodeY += node.labelBox.height;
       }
     });
 
@@ -620,30 +687,88 @@ export class TurboshaftGraphView extends MovableView<TurboshaftGraph> {
       .classed("selected", node => state.selection.isSelected(node));
   }
 
+  private updateNodesPositions(): void {
+    const state = this.state;
+    const showCustomData = this.nodesCustomDataShowed();
+
+    for (const block of this.graph.blocks()) {
+      if (!block.visible || block.collapsed) continue;
+      let currentY = block.labelBox.height;
+      for (const node of block.nodes) {
+        node.x = block.x + C.TURBOSHAFT_NODE_X_INDENT;
+        node.y = block.y + currentY;
+        currentY += node.getHeight(showCustomData, state?.compactView);
+      }
+    }
+  }
+
   private updateInlineNodes(): void {
     const view = this;
     const state = this.state;
     const showCustomData = this.nodesCustomDataShowed();
+    const customData = this.graph.customData;
+
     let totalHeight = 0;
     let blockId = 0;
-    view.visibleNodes.each(function (node: TurboshaftGraphNode) {
+    view.visibleNodes.each(function (node: TurboshaftGraphOperation) {
       const nodeSvg = d3.select(this);
       if (blockId != node.block.id) {
         blockId = node.block.id;
         totalHeight = 0;
       }
-      totalHeight += node.getHeight(showCustomData);
+      totalHeight += node.getHeight(showCustomData, state?.compactView);
       const nodeY = showCustomData ? totalHeight - node.labelBox.height : totalHeight;
 
       nodeSvg
         .select(".inline-node-label")
         .classed("selected", node => state.selection.isSelected(node))
         .attr("dy", nodeY)
-        .attr("visibility", !node.block.collapsed ? "visible" : "hidden");
+        .attr("visibility", !node.block.collapsed ? "visible" : "hidden")
+        .select("tspan")
+        .html(node.buildOperationText(state.compactView))
+        .append("title")
+        .text(`${node.getTitle()}${customData.getTitle(node.id, DataTarget.Nodes)}`);
 
+      // node.getHeight() == 0 iff node is fully inlined in compact view, so we
+      // don't want this to be visible.
+      const isVisible = !node.block.collapsed && showCustomData &&
+        node.getHeight(showCustomData, state.compactView) > 0;
       nodeSvg
         .select(".inline-node-custom-data")
-        .attr("visibility", !node.block.collapsed && showCustomData ? "visible" : "hidden");
+        .attr("dy", nodeY + node.labelBox.height)
+        .attr("visibility", isVisible ? "visible" : "hidden");
+
+      const relativeTopY = totalHeight - node.getHeight(showCustomData, state?.compactView) + node.block.labelBox.height;
+      const relativeMiddleY = relativeTopY + node.labelBox.height / 2;
+
+      const controlInputs = node.inputs.filter(edge => edge.type === "control" && edge.source instanceof TurboshaftGraphOperation);
+      nodeSvg.selectAll<SVGCircleElement, any>("[id^='nib,']").each(function () {
+        const edgeStr = this.id.substring(4);
+        const edge = controlInputs.find(e => e.toString() === edgeStr);
+        if (!edge) return;
+        const i = controlInputs.indexOf(edge);
+        const index = node.inputs.indexOf(edge);
+
+        const isCatchBlockTarget = node.block.exception;
+        const bubbleX = isCatchBlockTarget
+          ? view.getCatchBlockInputX(node.block, i, controlInputs.length)
+          : C.TURBOSHAFT_NODE_X_INDENT + node.getInputX(index);
+        const bubbleY = isCatchBlockTarget
+          ? -C.DEFAULT_NODE_BUBBLE_RADIUS
+          : relativeTopY;
+
+        this.setAttribute("transform", `translate(${bubbleX},${bubbleY})`);
+        this.setAttribute("visibility", !node.block.collapsed ? "visible" : "hidden");
+      });
+
+      nodeSvg.selectAll<SVGCircleElement, any>("[id^='nob,']").each(function () {
+        const exitLeft = view.isExceptionEdgeExitingLeft(node);
+        const bubbleX = exitLeft
+          ? C.TURBOSHAFT_NODE_X_INDENT - C.DEFAULT_NODE_BUBBLE_RADIUS
+          : C.TURBOSHAFT_NODE_X_INDENT + node.getWidth() + C.DEFAULT_NODE_BUBBLE_RADIUS;
+        this.setAttribute("transform", `translate(${bubbleX},${relativeMiddleY})`);
+        this.setAttribute("visibility", !node.block.collapsed ? "visible" : "hidden");
+      });
     });
   }
 
@@ -652,7 +777,7 @@ export class TurboshaftGraphView extends MovableView<TurboshaftGraph> {
     const storageKey = this.customDataStorageKey();
     const selectedCustomData = storageGetItem(storageKey, null, false);
     if (!this.nodesCustomDataShowed()) return;
-    view.visibleNodes.each(function (node: TurboshaftGraphNode) {
+    view.visibleNodes.each(function (node: TurboshaftGraphOperation) {
       const customData = view.graph.getCustomData(selectedCustomData, node.id, DataTarget.Nodes);
       d3.select(this)
         .select(".inline-node-custom-data")
@@ -667,17 +792,20 @@ export class TurboshaftGraphView extends MovableView<TurboshaftGraph> {
     svg: d3.Selection<SVGGElement, TurboshaftGraphBlock, any, any>,
     block: TurboshaftGraphBlock): void {
     for (let i = 0; i < block.inputs.length; i++) {
+      const edge = block.inputs[i];
+      if (edge.target.exception) continue;
       const x = block.getInputX(i);
       const y = -C.DEFAULT_NODE_BUBBLE_RADIUS;
       svg.append("circle")
         .classed("filledBubbleStyle", true)
-        .attr("id", `ib,${block.inputs[i].toString()}`)
+        .attr("id", `ib,${edge.toString()}`)
         .attr("r", C.DEFAULT_NODE_BUBBLE_RADIUS)
         .attr("transform", `translate(${x},${y})`);
     }
-    if (block.outputs.length > 0) {
+    const hasVisibleOutput = block.outputs.some(edge => !edge.target.exception);
+    if (hasVisibleOutput) {
       const x = block.getOutputX();
-      const y = block.getHeight(this.nodesCustomDataShowed()) + C.DEFAULT_NODE_BUBBLE_RADIUS;
+      const y = block.getHeight(this.nodesCustomDataShowed(), this.state?.compactView) + C.DEFAULT_NODE_BUBBLE_RADIUS;
       svg.append("circle")
         .classed("filledBubbleStyle", true)
         .attr("id", `ob,${block.id}`)
@@ -692,8 +820,9 @@ export class TurboshaftGraphView extends MovableView<TurboshaftGraph> {
       const components = this.id.split(",");
       if (components[0] === "ob") {
         const from = view.graph.blockMap[components[1]];
+        if (!from) return;
         const x = from.getOutputX();
-        const y = from.getHeight(view.nodesCustomDataShowed()) + C.DEFAULT_NODE_BUBBLE_RADIUS;
+        const y = from.getHeight(view.nodesCustomDataShowed(), view.state?.compactView) + C.DEFAULT_NODE_BUBBLE_RADIUS;
         this.setAttribute("transform", `translate(${x},${y})`);
       }
     });
@@ -715,8 +844,8 @@ export class TurboshaftGraphView extends MovableView<TurboshaftGraph> {
           maxX = maxX ? Math.max(maxX, block.x + block.getWidth()) : block.x + block.getWidth();
           minY = minY ? Math.min(minY, block.y) : block.y;
           maxY = maxY
-            ? Math.max(maxY, block.y + block.getHeight(this.nodesCustomDataShowed()))
-            : block.y + block.getHeight(this.nodesCustomDataShowed());
+            ? Math.max(maxY, block.y + block.getHeight(this.nodesCustomDataShowed(), this.state?.compactView))
+            : block.y + block.getHeight(this.nodesCustomDataShowed(), this.state?.compactView);
         }
         if (blockHasSelection) {
           hasSelection = true;
@@ -817,6 +946,17 @@ export class TurboshaftGraphView extends MovableView<TurboshaftGraph> {
     view.focusOnSvg();
   }
 
+  private toggleCompactViewAction(view: TurboshaftGraphView): void {
+    view.state.compactView = !view.state.compactView;
+
+    const element = document.getElementById("toggle-compact-view");
+    element.classList.toggle("button-input-toggled", view.state.compactView);
+    const extent = view.graph.redetermineGraphBoundingBox(view.state.showCustomData);
+    view.panZoom.translateExtent(extent);
+    view.adaptiveUpdateGraphVisibility();
+    view.updateInlineNodesCustomData();
+  }
+
   private toggleCustomDataAction(view: TurboshaftGraphView): void {
     view.state.showCustomData = !view.state.showCustomData;
     const ranksMaxBlockHeight = new Array<number>();
@@ -825,7 +965,7 @@ export class TurboshaftGraphView extends MovableView<TurboshaftGraph> {
       ranksMaxBlockHeight[block.rank] = Math.max(ranksMaxBlockHeight[block.rank] ?? 0,
         block.collapsed
           ? block.height
-          : block.getHeight(view.nodesCustomDataShowed()));
+          : block.getHeight(view.nodesCustomDataShowed(), this.state?.compactView));
     }
 
     for (const block of view.graph.blocks()) {
@@ -850,11 +990,11 @@ export class TurboshaftGraphView extends MovableView<TurboshaftGraph> {
 
   // Hotkeys handlers
   private selectAllNodes(): void {
-    this.nodeSelectionHandler.select(this.graph.nodeMap, true, false);
+    this.nodeSelectionHandler.select([...this.graph.nodes()], true, false);
     this.updateGraphVisibility();
   }
 
-  private collapseUnusedBlocks(usedNodes: Iterable<TurboshaftGraphNode>): void {
+  private collapseUnusedBlocks(usedNodes: Iterable<TurboshaftGraphOperation>): void {
     const usedBlocks = new Set<TurboshaftGraphBlock>();
     for (const node of usedNodes) {
       usedBlocks.add(node.block);
@@ -870,7 +1010,7 @@ export class TurboshaftGraphView extends MovableView<TurboshaftGraph> {
 
     if (usedBlocks.size == 0) return;
 
-    for (const block of this.graph.blockMap) {
+    for (const block of this.graph.blocks()) {
       block.collapsed = !usedBlocks.has(block);
     }
 
@@ -885,7 +1025,7 @@ export class TurboshaftGraphView extends MovableView<TurboshaftGraph> {
   }
 
   private selectNodesOfSelectedBlocks(): void {
-    let selectedNodes = new Array<TurboshaftGraphNode>();
+    let selectedNodes = new Array<TurboshaftGraphOperation>();
     for (const key of this.state.blocksSelection.selectedKeys()) {
       const block = this.graph.blockMap[key];
       if (!block) continue;
@@ -894,5 +1034,39 @@ export class TurboshaftGraphView extends MovableView<TurboshaftGraph> {
     }
     this.nodeSelectionHandler.select(selectedNodes, true, false);
     this.updateGraphVisibility();
+  }
+
+  private getCatchBlockInputX(block: TurboshaftGraphBlock, index: number, total: number): number {
+    return block.getWidth() - (C.NODE_INPUT_WIDTH / 2) +
+      (index - total + 1) * C.NODE_INPUT_WIDTH;
+  }
+
+  private isExceptionEdgeExitingLeft(node: TurboshaftGraphOperation): boolean {
+    const controlOutputs = node.outputs.filter(edge => edge.type === "control" && edge.target instanceof TurboshaftGraphOperation);
+    if (controlOutputs.length === 0) return false;
+    const targetBlock = controlOutputs[0].target.block;
+    return targetBlock.x < node.block.x;
+  }
+
+  private updateNodeOutputBubble(node: TurboshaftGraphOperation): void {
+    const view = this;
+    const block = node.block;
+    const bubble = d3.select(`#nob\\,${node.id}`);
+    if (bubble.empty()) return;
+
+    let currentY = block.labelBox.height;
+    const showCustomData = this.nodesCustomDataShowed();
+    for (const n of block.nodes) {
+      if (n === node) break;
+      currentY += n.getHeight(showCustomData, this.state?.compactView);
+    }
+    const relativeMiddleY = currentY + node.labelBox.height / 2;
+
+    const exitLeft = view.isExceptionEdgeExitingLeft(node);
+    const bubbleX = exitLeft
+      ? C.TURBOSHAFT_NODE_X_INDENT - C.DEFAULT_NODE_BUBBLE_RADIUS
+      : C.TURBOSHAFT_NODE_X_INDENT + node.getWidth() + C.DEFAULT_NODE_BUBBLE_RADIUS;
+
+    bubble.attr("transform", `translate(${bubbleX},${relativeMiddleY})`);
   }
 }

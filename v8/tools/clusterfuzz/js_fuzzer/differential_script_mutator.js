@@ -14,15 +14,15 @@ const path = require('path');
 
 const common = require('./mutators/common.js');
 const random = require('./random.js');
+const runner = require('./runner.js');
 const sourceHelpers = require('./source_helpers.js');
 
 const { filterDifferentialFuzzFlags } = require('./exceptions.js');
 const { DifferentialFuzzMutator, DifferentialFuzzSuppressions } = require(
     './mutators/differential_fuzz_mutator.js');
-const { ScriptMutator } = require('./script_mutator.js');
+const { ScriptMutator, loadJSONFromBuild } = require('./script_mutator.js');
 
-
-const USE_ORIGINAL_FLAGS_PROB = 0.2;
+const USE_ORIGINAL_FLAGS_PROB = 0.5;
 
 /**
  * Randomly chooses a configuration from experiments. The configuration
@@ -64,12 +64,6 @@ function chooseRandomFlags(experiments, additionalFlags) {
   assert(false);
 }
 
-function loadJSONFromBuild(name) {
-  assert(process.env.APP_DIR);
-  const fullPath = path.join(path.resolve(process.env.APP_DIR), name);
-  return JSON.parse(fs.readFileSync(fullPath, 'utf-8'));
-}
-
 function hasMjsunit(dependencies) {
   return dependencies.some(dep => dep.relPath.endsWith('mjsunit.js'));
 }
@@ -91,6 +85,14 @@ class DifferentialScriptMutator extends ScriptMutator {
     // Flag configurations from the V8 build directory.
     this.experiments = loadJSONFromBuild('v8_fuzz_experiments.json');
     this.additionalFlags = loadJSONFromBuild('v8_fuzz_flags.json');
+  }
+
+  get runnerClass() {
+    // Choose a setup with the Fuzzilli corpus in 1 of 2.
+    return random.single([
+        runner.RandomCorpusRunner,
+        runner.RandomCorpusRunnerWithFuzzilli,
+    ]);
   }
 
   /**
@@ -124,7 +126,7 @@ class DifferentialScriptMutator extends ScriptMutator {
    * differential-fuzz mutators, adding extra printing and other substitutions.
    */
   mutateInputs(inputs) {
-    inputs.forEach(input => common.setOriginalPath(input, input.relPath));
+    inputs.forEach(input => common.setOriginalPath(input, input.diffFuzzPath));
 
     const result = super.mutateInputs(inputs);
     this.differential.forEach(mutator => mutator.mutate(result));
@@ -163,6 +165,44 @@ class DifferentialScriptMutator extends ScriptMutator {
   }
 }
 
+/**
+ * Script mutator that only outputs single Fuzzilli cases without random
+ * mutations and without try-catch. I.e. mostly a pass-through of Fuzzilli
+ * cases for differential fuzzing, but with random fuzz experiments and flags.
+ */
+class FuzzilliDifferentialScriptMutator extends DifferentialScriptMutator {
+  constructor(settings, db_path) {
+    super(settings, db_path);
+
+    // Slightly higher probabilities for extra printing and exception
+    // tracking, since we don't do any other mutations.
+    this.settings.DIFF_FUZZ_EXTRA_PRINT = 0.2;
+    this.settings.DIFF_FUZZ_TRACK_CAUGHT = 0.6;
+  }
+
+  get runnerClass() {
+    return runner.RandomFuzzilliNoCrashCorpusRunner;
+  }
+
+  // Pure pass-through behavior without mutations.
+  mutate() {}
+
+  // We don't require any test-suite dependencies like mjsunit, nor their
+  // stubs and replacements. We also don't need the standard fuzz library
+  // that's used by mutators that don't run here. We add extra printing
+  // for differential fuzzing and a stub for the absence of mjsunit for
+  // differential fuzzing.
+  resolveDependencies(inputs) {
+    const dependencies = this.resolveInputDependencies(inputs);
+    dependencies.push(
+        sourceHelpers.loadResource('differential_fuzz_mjsunit.js'));
+    dependencies.push(
+        sourceHelpers.loadResource('differential_fuzz_library.js'));
+    return dependencies;
+  }
+}
+
 module.exports = {
   DifferentialScriptMutator: DifferentialScriptMutator,
+  FuzzilliDifferentialScriptMutator: FuzzilliDifferentialScriptMutator,
 };

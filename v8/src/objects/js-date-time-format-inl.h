@@ -2,14 +2,16 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#ifndef V8_OBJECTS_JS_DATE_TIME_FORMAT_INL_H_
+#define V8_OBJECTS_JS_DATE_TIME_FORMAT_INL_H_
+
 #ifndef V8_INTL_SUPPORT
 #error Internationalization is expected to be enabled.
 #endif  // V8_INTL_SUPPORT
 
-#ifndef V8_OBJECTS_JS_DATE_TIME_FORMAT_INL_H_
-#define V8_OBJECTS_JS_DATE_TIME_FORMAT_INL_H_
-
 #include "src/objects/js-date-time-format.h"
+// Include the non-inl header before the rest of the headers.
+
 #include "src/objects/objects-inl.h"
 
 // Has to be the last include (doesn't have include guards):
@@ -18,17 +20,67 @@
 namespace v8 {
 namespace internal {
 
-#include "torque-generated/src/objects/js-date-time-format-tq-inl.inc"
+Tagged<String> JSDateTimeFormat::locale() const { return locale_.load(); }
+void JSDateTimeFormat::set_locale(Tagged<String> value, WriteBarrierMode mode) {
+  locale_.store(this, value, mode);
+}
 
-TQ_OBJECT_CONSTRUCTORS_IMPL(JSDateTimeFormat)
+Tagged<CppGCManaged<icu::Locale>> JSDateTimeFormat::icu_locale() const {
+  return Cast<CppGCManaged<icu::Locale>>(icu_locale_.load());
+}
+void JSDateTimeFormat::set_icu_locale(
+    Tagged<CppGCManaged<icu::Locale>> value, WriteBarrierMode mode) {
+  icu_locale_.store(this, value, mode);
+}
 
-ACCESSORS(JSDateTimeFormat, icu_locale, Managed<icu::Locale>, kIcuLocaleOffset)
-ACCESSORS(JSDateTimeFormat, icu_simple_date_format,
-          Managed<icu::SimpleDateFormat>, kIcuSimpleDateFormatOffset)
-ACCESSORS(JSDateTimeFormat, icu_date_interval_format,
-          Managed<icu::DateIntervalFormat>, kIcuDateIntervalFormatOffset)
+Tagged<CppGCManaged<icu::SimpleDateFormat>>
+JSDateTimeFormat::icu_simple_date_format() const {
+  return Cast<CppGCManaged<icu::SimpleDateFormat>>(
+      icu_simple_date_format_.load());
+}
+void JSDateTimeFormat::set_icu_simple_date_format(
+    Tagged<CppGCManaged<icu::SimpleDateFormat>> value, WriteBarrierMode mode) {
+  icu_simple_date_format_.store(this, value, mode);
+}
 
-BOOL_ACCESSORS(JSDateTimeFormat, flags, alt_calendar, AltCalendarBit::kShift)
+Tagged<CppGCManaged<icu::DateIntervalFormat>>
+JSDateTimeFormat::icu_date_interval_format() const {
+  return Cast<CppGCManaged<icu::DateIntervalFormat>>(
+      icu_date_interval_format_.load());
+}
+void JSDateTimeFormat::set_icu_date_interval_format(
+    Tagged<CppGCManaged<icu::DateIntervalFormat>> value,
+    WriteBarrierMode mode) {
+  icu_date_interval_format_.store(this, value, mode);
+}
+
+Tagged<UnionOf<JSFunction, Undefined>> JSDateTimeFormat::bound_format() const {
+  return bound_format_.load();
+}
+void JSDateTimeFormat::set_bound_format(
+    Tagged<UnionOf<JSFunction, Undefined>> value, WriteBarrierMode mode) {
+  bound_format_.store(this, value, mode);
+}
+
+int JSDateTimeFormat::flags() const { return flags_.load().value(); }
+void JSDateTimeFormat::set_flags(int value) {
+  flags_.store(this, Smi::FromInt(value));
+}
+
+BIT_FIELD_ACCESSORS(JSDateTimeFormat, flags, has_to_locale_string_time_zone,
+                    JSDateTimeFormat::HasToLocaleStringTimeZoneBit)
+
+inline void JSDateTimeFormat::set_explicit_components_in_options(
+    int32_t explicit_components_in_options) {
+  int hints = flags();
+  hints = ExplicitComponentsInOptionsBits::update(
+      hints, explicit_components_in_options);
+  set_flags(hints);
+}
+
+inline int32_t JSDateTimeFormat::explicit_components_in_options() const {
+  return ExplicitComponentsInOptionsBits::decode(flags());
+}
 
 inline void JSDateTimeFormat::set_hour_cycle(HourCycle hour_cycle) {
   int hints = flags();

@@ -64,8 +64,7 @@ struct WordOperationTyper {
       return type_t::Set(elements, zone);
     }
 
-    auto range =
-        MakeRange(base::Vector<const word_t>{elements.data(), elements.size()});
+    auto range = MakeRange(base::VectorOf(elements));
     auto result = type_t::Range(range.first, range.second, zone);
     DCHECK(
         base::all_of(elements, [&](word_t e) { return result.Contains(e); }));
@@ -140,10 +139,10 @@ struct WordOperationTyper {
     std::pair<word_t, word_t> y = MakeRange(rhs);
 
     // If the result would not be a complete range, we compute it.
-    // Check: (lhs.to + rhs.to + 1) - (lhs.from + rhs.from + 1) < max
-    // =====> (lhs.to - lhs.from) + (rhs.to - rhs.from) < max
-    // =====> (lhs.to - lhs.from) < max - (rhs.to - rhs.from)
-    if (distance(x) < max - distance(y)) {
+    // Check: (lhs.to - lhs.from + 1) + rhs.to - rhs.from < max
+    // =====> (lhs.to - lhs.from + 1) < max - rhs.to + rhs.from
+    // =====> (lhs.to - lhs.from + 1) < max - (rhs.to - rhs.from)
+    if (distance(x) + 1 < max - distance(y)) {
       return type_t::Range(x.first + y.first, x.second + y.second, zone);
     }
 
@@ -169,8 +168,14 @@ struct WordOperationTyper {
     std::pair<word_t, word_t> x = MakeRange(lhs);
     std::pair<word_t, word_t> y = MakeRange(rhs);
 
-    if (is_wrapping(x) && is_wrapping(y)) {
-      return type_t::Range(x.first - y.second, x.second - y.first, zone);
+    if (!is_wrapping(x) && !is_wrapping(y)) {
+      // If the result would not be a complete range, we compute it.
+      // Check: (lhs.to - lhs.from + 1) + rhs.to - rhs.from < max
+      // =====> (lhs.to - lhs.from + 1) < max - rhs.to + rhs.from
+      // =====> (lhs.to - lhs.from + 1) < max - (rhs.to - rhs.from)
+      if (distance(x) + 1 < max - distance(y)) {
+        return type_t::Range(x.first - y.second, x.second - y.first, zone);
+      }
     }
 
     // TODO(nicohartmann@): Improve the wrapping cases.
@@ -492,8 +497,9 @@ struct FloatOperationTyper {
     }
     base::sort(results);
     auto it = std::unique(results.begin(), results.end());
-    if (std::distance(results.begin(), it) > kSetThreshold)
+    if (std::distance(results.begin(), it) > kSetThreshold) {
       return Type::Invalid();
+    }
     results.erase(it, results.end());
     if (results.empty()) return type_t::OnlySpecialValues(special_values);
     return Set(std::move(results), special_values, zone);
@@ -680,12 +686,12 @@ struct FloatOperationTyper {
       }
       if V8_UNLIKELY (IsMinusZero(b)) {
         // +-0 / -0 ==> NaN
-        if (a == 0) return nan_v<Bits>;
+        if (a == 0 || std::isnan(a)) return nan_v<Bits>;
         return a > 0 ? -inf : inf;
       }
       if V8_UNLIKELY (b == 0) {
         // +-0 / 0 ==> NaN
-        if (a == 0) return nan_v<Bits>;
+        if (a == 0 || std::isnan(a)) return nan_v<Bits>;
         return a > 0 ? inf : -inf;
       }
       return a / b;
@@ -703,15 +709,26 @@ struct FloatOperationTyper {
         ((l_min == -inf || l_max == inf) && (r_min == -inf || r_max == inf));
 
     // Try to rule out -0.
-    // -0 / r (r > 0)
     bool maybe_minuszero =
+        // -0 / r (r > 0)
         (l.has_minus_zero() && r_max > 0)
-        // 0 / r (r < 0 || r == -0)
-        || (l.Contains(0) && (r_min < 0 || r.has_minus_zero()))
-        // l / inf (l < 0 || l == -0)
-        || (r_max == inf && (l_min < 0 || l.has_minus_zero()))
-        // l / -inf (l >= 0)
-        || (r_min == -inf && l_max >= 0);
+        // 0 / r (r < 0)
+        || (l.Contains(0) && r_min < 0);
+
+    // if l can be negative and r can be positive, check if it can happen that
+    // the division can produce a minus zero. by dividing a small negative
+    // number by a large positive number.
+    if (!maybe_minuszero && l_min < 0 && r_max > 0) {
+      float_t closest_neg =
+          l_max < 0 ? l_max : -std::numeric_limits<float_t>::denorm_min();
+      maybe_minuszero = detail::is_minus_zero(closest_neg / r_max);
+    }
+    // Repeat the same for a small positive number and a large negative number.
+    if (!maybe_minuszero && l_max > 0 && r_min < 0) {
+      float_t closest_pos =
+          l_min > 0 ? l_min : std::numeric_limits<float_t>::denorm_min();
+      maybe_minuszero = detail::is_minus_zero(closest_pos / r_min);
+    }
 
     uint32_t special_values = (maybe_nan ? type_t::kNaN : 0) |
                               (maybe_minuszero ? type_t::kMinusZero : 0);
@@ -729,8 +746,8 @@ struct FloatOperationTyper {
         results[2] = l_max / r_min;
         results[3] = l_max / r_max;
 
-        for (float_t r : results) {
-          if (std::isnan(r)) return type_t::Any();
+        for (float_t res : results) {
+          if (std::isnan(res)) return type_t::Any();
         }
 
         const float_t result_min = array_min(results);
@@ -901,6 +918,10 @@ struct FloatOperationTyper {
       return type_t::NaN();
     }
     bool maybe_nan = l.has_nan() || r.has_nan();
+    // +-1 ** +-Infinity => NaN.
+    if (r.Contains(-inf) || r.Contains(inf)) {
+      if (l.Contains(1) || l.Contains(-1)) maybe_nan = true;
+    }
 
     // a ** b produces NaN if a < 0 && b is fraction.
     if (l.min() < 0.0 && !IsIntegerSet(r)) maybe_nan = true;
@@ -1141,9 +1162,12 @@ class Typer {
 
       case RegisterRepresentation::Tagged():
       case RegisterRepresentation::Compressed():
+      case RegisterRepresentation::Simd128():
+      case RegisterRepresentation::Simd256():
         // TODO(nicohartmann@): Support these representations.
         return Type::Any();
     }
+    UNREACHABLE();
   }
 
   static Type TypeForRepresentation(
@@ -1158,13 +1182,17 @@ class Typer {
   static Type TypeConstant(ConstantOp::Kind kind, ConstantOp::Storage value) {
     switch (kind) {
       case ConstantOp::Kind::kFloat32:
-        if (std::isnan(value.float32)) return Float32Type::NaN();
-        if (IsMinusZero(value.float32)) return Float32Type::MinusZero();
-        return Float32Type::Constant(value.float32);
+        if (value.float32.is_nan()) return Float32Type::NaN();
+        if (IsMinusZero(value.float32.get_scalar())) {
+          return Float32Type::MinusZero();
+        }
+        return Float32Type::Constant(value.float32.get_scalar());
       case ConstantOp::Kind::kFloat64:
-        if (std::isnan(value.float64)) return Float64Type::NaN();
-        if (IsMinusZero(value.float64)) return Float64Type::MinusZero();
-        return Float64Type::Constant(value.float64);
+        if (value.float64.is_nan()) return Float64Type::NaN();
+        if (IsMinusZero(value.float64.get_scalar())) {
+          return Float64Type::MinusZero();
+        }
+        return Float64Type::Constant(value.float64.get_scalar());
       case ConstantOp::Kind::kWord32:
         return Word32Type::Constant(static_cast<uint32_t>(value.integral));
       case ConstantOp::Kind::kWord64:
@@ -1274,6 +1302,7 @@ class Typer {
         FLOAT_BINOP(Power, 32)
         FLOAT_BINOP(Atan2, 32)
       }
+      UNREACHABLE();
     } else {
       DCHECK_EQ(rep, FloatRepresentation::Float64());
       switch (kind) {
@@ -1287,6 +1316,7 @@ class Typer {
         FLOAT_BINOP(Power, 64)
         FLOAT_BINOP(Atan2, 64)
       }
+      UNREACHABLE();
     }
 
 #undef FLOAT_BINOP
@@ -1344,6 +1374,7 @@ class Typer {
           return TupleType::Tuple(Word32Type::Any(),
                                   Word32Type::Set({0, 1}, zone), zone);
       }
+      UNREACHABLE();
     } else {
       DCHECK_EQ(rep, WordRepresentation::Word64());
       switch (kind) {
@@ -1354,6 +1385,7 @@ class Typer {
           return TupleType::Tuple(Word64Type::Any(),
                                   Word32Type::Set({0, 1}, zone), zone);
       }
+      UNREACHABLE();
     }
   }
 
@@ -1403,10 +1435,13 @@ class Typer {
         return TypeFloat64Comparison(lhs, rhs, kind, zone);
       case RegisterRepresentation::Tagged():
       case RegisterRepresentation::Compressed():
+      case RegisterRepresentation::Simd128():
+      case RegisterRepresentation::Simd256():
         if (lhs.IsNone() || rhs.IsNone()) return Type::None();
         // TODO(nicohartmann@): Support those cases.
         return Word32Type::Set({0, 1}, zone);
     }
+    UNREACHABLE();
   }
 
   static Type TypeWord32Comparison(const Type& lhs, const Type& rhs,
@@ -1415,6 +1450,7 @@ class Typer {
     auto l = TruncateWord32Input(lhs, true, zone);
     auto r = TruncateWord32Input(rhs, true, zone);
     switch (kind) {
+      case ComparisonOp::Kind::kEqual:
       case ComparisonOp::Kind::kSignedLessThan:
       case ComparisonOp::Kind::kSignedLessThanOrEqual:
         // TODO(nicohartmann@): Support this.
@@ -1431,6 +1467,7 @@ class Typer {
                                    ComparisonOp::Kind kind, Zone* zone) {
     if (lhs.IsNone() || rhs.IsNone()) return Type::None();
     switch (kind) {
+      case ComparisonOp::Kind::kEqual:
       case ComparisonOp::Kind::kSignedLessThan:
       case ComparisonOp::Kind::kSignedLessThanOrEqual:
         // TODO(nicohartmann@): Support this.
@@ -1449,6 +1486,9 @@ class Typer {
                                     ComparisonOp::Kind kind, Zone* zone) {
     if (lhs.IsNone() || rhs.IsNone()) return Type::None();
     switch (kind) {
+      case ComparisonOp::Kind::kEqual:
+        // TODO(nicohartmann@): Support this.
+        return Word32Type::Set({0, 1}, zone);
       case ComparisonOp::Kind::kSignedLessThan:
         return FloatOperationTyper<32>::LessThan(lhs.AsFloat32(),
                                                  rhs.AsFloat32(), zone);
@@ -1459,12 +1499,16 @@ class Typer {
       case ComparisonOp::Kind::kUnsignedLessThanOrEqual:
         UNREACHABLE();
     }
+    UNREACHABLE();
   }
 
   static Type TypeFloat64Comparison(const Type& lhs, const Type& rhs,
                                     ComparisonOp::Kind kind, Zone* zone) {
     if (lhs.IsNone() || rhs.IsNone()) return Type::None();
     switch (kind) {
+      case ComparisonOp::Kind::kEqual:
+        // TODO(nicohartmann@): Support this.
+        return Word32Type::Set({0, 1}, zone);
       case ComparisonOp::Kind::kSignedLessThan:
         return FloatOperationTyper<64>::LessThan(lhs.AsFloat64(),
                                                  rhs.AsFloat64(), zone);
@@ -1475,6 +1519,7 @@ class Typer {
       case ComparisonOp::Kind::kUnsignedLessThanOrEqual:
         UNREACHABLE();
     }
+    UNREACHABLE();
   }
 
   static Word64Type ExtendWord32ToWord64(const Word32Type& t, Zone* zone) {

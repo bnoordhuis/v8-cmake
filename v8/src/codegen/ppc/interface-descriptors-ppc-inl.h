@@ -5,7 +5,7 @@
 #ifndef V8_CODEGEN_PPC_INTERFACE_DESCRIPTORS_PPC_INL_H_
 #define V8_CODEGEN_PPC_INTERFACE_DESCRIPTORS_PPC_INL_H_
 
-#if V8_TARGET_ARCH_PPC || V8_TARGET_ARCH_PPC64
+#if V8_TARGET_ARCH_PPC64
 
 #include "src/codegen/interface-descriptors.h"
 #include "src/execution/frames.h"
@@ -21,6 +21,18 @@ constexpr auto CallInterfaceDescriptor::DefaultRegisterArray() {
 
 constexpr auto CallInterfaceDescriptor::DefaultDoubleRegisterArray() {
   auto registers = DoubleRegisterArray(d1, d2, d3, d4, d5, d6, d7);
+  return registers;
+}
+
+constexpr auto CallInterfaceDescriptor::DefaultReturnRegisterArray() {
+  auto registers =
+      RegisterArray(kReturnRegister0, kReturnRegister1, kReturnRegister2);
+  return registers;
+}
+
+constexpr auto CallInterfaceDescriptor::DefaultReturnDoubleRegisterArray() {
+  // Padding to have as many double return registers as GP return registers.
+  auto registers = DoubleRegisterArray(kFPReturnRegister0, no_dreg, no_dreg);
   return registers;
 }
 
@@ -73,6 +85,21 @@ constexpr Register KeyedLoadWithVectorDescriptor::VectorRegister() {
 }
 
 // static
+constexpr Register EnumeratedKeyedLoadBaselineDescriptor::EnumIndexRegister() {
+  return r7;
+}
+
+// static
+constexpr Register EnumeratedKeyedLoadBaselineDescriptor::CacheTypeRegister() {
+  return r8;
+}
+
+// static
+constexpr Register EnumeratedKeyedLoadBaselineDescriptor::SlotRegister() {
+  return r5;
+}
+
+// static
 constexpr Register KeyedHasICBaselineDescriptor::ReceiverRegister() {
   return kInterpreterAccumulatorRegister;
 }
@@ -111,9 +138,11 @@ constexpr Register DefineKeyedOwnDescriptor::FlagsRegister() { return r8; }
 constexpr Register StoreTransitionDescriptor::MapRegister() { return r8; }
 
 // static
-constexpr Register ApiGetterDescriptor::HolderRegister() { return r3; }
+constexpr Register CallApiGetterDescriptor::NameRegister() {
+  return kCArgRegs[0];
+}
 // static
-constexpr Register ApiGetterDescriptor::CallbackRegister() { return r6; }
+constexpr Register CallApiGetterDescriptor::CallbackRegister() { return r6; }
 
 // static
 constexpr Register GrowArrayElementsDescriptor::ObjectRegister() { return r3; }
@@ -133,6 +162,22 @@ constexpr Register TypeConversionDescriptor::ArgumentRegister() { return r3; }
 
 // static
 constexpr auto TypeofDescriptor::registers() { return RegisterArray(r3); }
+
+// static
+constexpr Register
+MaglevOptimizeCodeOrTailCallOptimizedCodeSlotDescriptor::FlagsRegister() {
+  return r5;
+}
+// static
+constexpr Register MaglevOptimizeCodeOrTailCallOptimizedCodeSlotDescriptor::
+    FeedbackVectorRegister() {
+  return r8;
+}
+// static
+constexpr Register
+MaglevOptimizeCodeOrTailCallOptimizedCodeSlotDescriptor::TemporaryRegister() {
+  return r7;
+}
 
 // static
 constexpr auto CallTrampolineDescriptor::registers() {
@@ -179,6 +224,14 @@ constexpr auto CallFunctionTemplateDescriptor::registers() {
   // r4 : function template info
   // r5 : number of arguments (on the stack)
   return RegisterArray(r4, r5);
+}
+
+// static
+constexpr auto CallFunctionTemplateGenericDescriptor::registers() {
+  // r4 : function template info
+  // r5 : number of arguments (on the stack)
+  // r6 : topmost script-having context
+  return RegisterArray(r4, r5, r6);
 }
 
 // static
@@ -252,6 +305,11 @@ constexpr auto Compare_BaselineDescriptor::registers() {
 }
 
 // static
+constexpr auto Compare_WithEmbeddedFeedbackOffsetDescriptor::registers() {
+  return RegisterArray(r4, r3, r5);
+}
+
+// static
 constexpr auto BinaryOpDescriptor::registers() { return RegisterArray(r4, r3); }
 
 // static
@@ -260,8 +318,8 @@ constexpr auto BinaryOp_BaselineDescriptor::registers() {
 }
 
 // static
-constexpr auto BinarySmiOp_BaselineDescriptor::registers() {
-  return RegisterArray(r3, r4, r5);
+constexpr auto BinaryOp_WithEmbeddedFeedbackOffsetDescriptor::registers() {
+  return RegisterArray(r4, r3, r5);
 }
 
 // static
@@ -275,25 +333,25 @@ CallApiCallbackOptimizedDescriptor::ActualArgumentsCountRegister() {
   return r5;
 }
 // static
-constexpr Register CallApiCallbackOptimizedDescriptor::CallDataRegister() {
+constexpr Register
+CallApiCallbackOptimizedDescriptor::FunctionTemplateInfoRegister() {
   return r6;
 }
-// static
-constexpr Register CallApiCallbackOptimizedDescriptor::HolderRegister() {
-  return r3;
-}
+
 // static
 constexpr Register
 CallApiCallbackGenericDescriptor::ActualArgumentsCountRegister() {
   return r5;
 }
 // static
-constexpr Register CallApiCallbackGenericDescriptor::CallHandlerInfoRegister() {
-  return r6;
+constexpr Register
+CallApiCallbackGenericDescriptor::TopmostScriptHavingContextRegister() {
+  return r4;
 }
 // static
-constexpr Register CallApiCallbackGenericDescriptor::HolderRegister() {
-  return r3;
+constexpr Register
+CallApiCallbackGenericDescriptor::FunctionTemplateInfoRegister() {
+  return r6;
 }
 
 // static
@@ -321,6 +379,12 @@ constexpr auto InterpreterPushArgsThenConstructDescriptor::registers() {
 }
 
 // static
+constexpr auto ConstructForwardAllArgsDescriptor::registers() {
+  return RegisterArray(r4,   // constructor to call
+                       r6);  // new target
+}
+
+// static
 constexpr auto ResumeGeneratorDescriptor::registers() {
   return RegisterArray(r3,   // the value to pass to the generator
                        r4);  // the JSGeneratorObject to resume
@@ -331,13 +395,13 @@ constexpr auto RunMicrotasksEntryDescriptor::registers() {
   return RegisterArray(r3, r4);
 }
 
-constexpr auto WasmNewJSToWasmWrapperDescriptor::registers() {
+constexpr auto WasmJSToWasmWrapperDescriptor::registers() {
   // Arbitrarily picked register.
-  return RegisterArray(r11);
+  return RegisterArray(r14);
 }
 }  // namespace internal
 }  // namespace v8
 
-#endif  // V8_TARGET_ARCH_PPC || V8_TARGET_ARCH_PPC64
+#endif  // V8_TARGET_ARCH_PPC64
 
 #endif  // V8_CODEGEN_PPC_INTERFACE_DESCRIPTORS_PPC_INL_H_

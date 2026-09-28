@@ -8,14 +8,16 @@
 #include <memory>
 
 #include "include/v8-script.h"
+#include "src/base/bit-field.h"
 #include "src/base/export-template.h"
 #include "src/heap/factory-base.h"
 #include "src/heap/factory.h"
 #include "src/heap/local-factory.h"
 #include "src/objects/fixed-array.h"
+#include "src/objects/managed.h"
 #include "src/objects/objects.h"
+#include "src/objects/string.h"
 #include "src/objects/struct.h"
-#include "torque-generated/bit-fields.h"
 
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
@@ -31,16 +33,13 @@ namespace wasm {
 class NativeModule;
 }  // namespace wasm
 
-#include "torque-generated/src/objects/script-tq.inc"
-
 // Script describes a script which has been added to the VM.
-class Script : public TorqueGeneratedScript<Script, Struct> {
+V8_OBJECT class Script : public Struct {
  public:
   // Script ID used for temporary scripts, which shouldn't be added to the
   // script list.
   static constexpr int kTemporaryScriptId = -2;
 
-  NEVER_READ_ONLY_SPACE
   // Script types.
   enum class Type {
     kNative = 0,
@@ -58,17 +57,57 @@ class Script : public TorqueGeneratedScript<Script, Struct> {
   // Script compilation state.
   enum class CompilationState { kInitial = 0, kCompiled = 1 };
 
-  // [type]: the script type.
-  DECL_PRIMITIVE_ACCESSORS(type, Type)
+  // [source]: the script source.
+  inline Tagged<UnionOf<String, Undefined>> source() const;
+  inline void set_source(Tagged<UnionOf<String, Undefined>> value,
+                         WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
 
-  DECL_ACCESSORS(eval_from_shared_or_wrapped_arguments, Object)
+  // [name]: the script name.
+  inline Tagged<Object> name() const;
+  inline void set_name(Tagged<Object> value,
+                       WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+
+  // [line_offset]: script line offset in resource from where it was extracted.
+  inline int line_offset() const;
+  inline void set_line_offset(int value);
+
+  // [column_offset]: script column offset in resource from where it was
+  // extracted.
+  inline int column_offset() const;
+  inline void set_column_offset(int value);
+
+  // [context_data]: context data for the context this script was compiled in.
+  inline Tagged<UnionOf<Smi, Undefined, Symbol>> context_data() const;
+  inline void set_context_data(Tagged<UnionOf<Smi, Undefined, Symbol>> value,
+                               WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+
+  // [type]: the script type.
+  inline Type type() const;
+  inline void set_type(Type value);
+
+  // [line_ends]: FixedArray of line ends positions.
+  inline Tagged<UnionOf<FixedArray, Smi>> line_ends() const;
+  inline void set_line_ends(Tagged<UnionOf<FixedArray, Smi>> value,
+                            WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+
+  // [id]: the script id.
+  inline int id() const;
+  inline void set_id(int value);
+
+  inline Tagged<Object> eval_from_shared_or_wrapped_arguments() const;
+  inline void set_eval_from_shared_or_wrapped_arguments(
+      Tagged<Object> value, WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
 
   // [eval_from_shared]: for eval scripts the shared function info for the
   // function from which eval was called.
-  DECL_ACCESSORS(eval_from_shared, SharedFunctionInfo)
+  Tagged<SharedFunctionInfo> eval_from_shared() const;
+  void set_eval_from_shared(Tagged<SharedFunctionInfo> shared,
+                            WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
 
   // [wrapped_arguments]: for the list of arguments in a wrapped script.
-  DECL_ACCESSORS(wrapped_arguments, FixedArray)
+  inline Tagged<FixedArray> wrapped_arguments() const;
+  inline void set_wrapped_arguments(
+      Tagged<FixedArray> value, WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
 
   // Whether the script is implicitly wrapped in a function.
   inline bool is_wrapped() const;
@@ -80,30 +119,46 @@ class Script : public TorqueGeneratedScript<Script, Struct> {
   // [eval_from_position]: the source position in the code for the function
   // from which eval was called, as positive integer. Or the code offset in the
   // code from which eval was called, as negative integer.
-  DECL_INT_ACCESSORS(eval_from_position)
+  inline int eval_from_position() const;
+  inline void set_eval_from_position(int value);
 
-  // [shared_function_infos]: weak fixed array containing all shared
-  // function infos created from this script.
-  DECL_ACCESSORS(shared_function_infos, WeakFixedArray)
+  inline Tagged<Object> eval_from_scope_info() const;
+  inline void set_eval_from_scope_info(
+      Tagged<Object> value, WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
 
-  inline int shared_function_info_count() const;
+  inline bool has_eval_from_scope_info() const;
+
+  // [infos]: weak fixed array containing all shared function infos and scope
+  // infos for eval created from this script.
+  inline Tagged<WeakFixedArray> infos() const;
+  inline void set_infos(Tagged<WeakFixedArray> value,
+                        WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
 
 #if V8_ENABLE_WEBASSEMBLY
   // [wasm_breakpoint_infos]: the list of {BreakPointInfo} objects describing
   // all WebAssembly breakpoints for modules/instances managed via this script.
   // This must only be called if the type of this script is TYPE_WASM.
-  DECL_ACCESSORS(wasm_breakpoint_infos, FixedArray)
+  inline Tagged<FixedArray> wasm_breakpoint_infos() const;
+  inline void set_wasm_breakpoint_infos(
+      Tagged<FixedArray> value, WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+
   inline bool has_wasm_breakpoint_infos() const;
 
   // [wasm_native_module]: the wasm {NativeModule} this script belongs to.
   // This must only be called if the type of this script is TYPE_WASM.
-  DECL_ACCESSORS(wasm_managed_native_module, Object)
-  inline wasm::NativeModule* wasm_native_module() const;
+  inline Tagged<Object> wasm_managed_native_module() const;
+  inline void set_wasm_managed_native_module(
+      Tagged<Object> value, WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+
+  inline CppGCManaged<wasm::NativeModule>::Ptr wasm_native_module() const;
 
   // [wasm_weak_instance_list]: the list of all {WasmInstanceObject} being
   // affected by breakpoints that are managed via this script.
   // This must only be called if the type of this script is TYPE_WASM.
-  DECL_ACCESSORS(wasm_weak_instance_list, WeakArrayList)
+  inline Tagged<WeakArrayList> wasm_weak_instance_list() const;
+  inline void set_wasm_weak_instance_list(
+      Tagged<WeakArrayList> value,
+      WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
 
   // [break_on_entry] (wasm only): whether an instrumentation breakpoint is set
   // for this script; this information will be transferred to existing and
@@ -111,18 +166,24 @@ class Script : public TorqueGeneratedScript<Script, Struct> {
   // this wasm module.
   inline bool break_on_entry() const;
   inline void set_break_on_entry(bool value);
-
-  // Check if the script contains any Asm modules.
-  bool ContainsAsmModule();
 #endif  // V8_ENABLE_WEBASSEMBLY
 
-  // [compilation_type]: how the the script was compiled. Encoded in the
+  // Read/write the raw 'flags' field. This uses relaxed atomic loads/stores
+  // because the flags are read by background compile threads and updated by the
+  // main thread.
+  inline uint32_t flags() const;
+  inline void set_flags(uint32_t new_flags);
+
+  // [compilation_type]: how the script was compiled. Encoded in the
   // 'flags' field.
-  inline CompilationType compilation_type();
+  inline CompilationType compilation_type() const;
   inline void set_compilation_type(CompilationType type);
 
   inline bool produce_compile_hints() const;
   inline void set_produce_compile_hints(bool produce_compile_hints);
+
+  inline bool deserialized() const;
+  inline void set_deserialized(bool value);
 
   // [compilation_state]: determines whether the script has already been
   // compiled. Encoded in the 'flags' field.
@@ -140,7 +201,37 @@ class Script : public TorqueGeneratedScript<Script, Struct> {
   inline v8::ScriptOriginOptions origin_options();
   inline void set_origin_options(ScriptOriginOptions origin_options);
 
-  DECL_ACCESSORS(compiled_lazy_function_positions, Object)
+  inline Tagged<UnionOf<ArrayList, Undefined>>
+  compiled_lazy_function_positions() const;
+  inline void set_compiled_lazy_function_positions(
+      Tagged<UnionOf<ArrayList, Undefined>> value,
+      WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+
+  inline Tagged<UnionOf<String, Undefined>> source_url() const;
+  inline void set_source_url(Tagged<UnionOf<String, Undefined>> value,
+                             WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+
+  inline Tagged<Object> source_mapping_url() const;
+  inline void set_source_mapping_url(
+      Tagged<Object> value, WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+
+  inline Tagged<UnionOf<String, Undefined>> debug_id() const;
+  inline void set_debug_id(Tagged<UnionOf<String, Undefined>> value,
+                           WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+
+  inline Tagged<FixedArray> host_defined_options() const;
+  inline void set_host_defined_options(
+      Tagged<FixedArray> value, WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+
+#if V8_SCRIPTORMODULE_LEGACY_LIFETIME
+  inline Tagged<ArrayList> script_or_modules() const;
+  inline void set_script_or_modules(
+      Tagged<ArrayList> value, WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+#endif
+
+  inline Tagged<UnionOf<String, Undefined>> source_hash() const;
+  inline void set_source_hash(Tagged<UnionOf<String, Undefined>> value,
+                              WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
 
   // If script source is an external string, check that the underlying
   // resource is accessible. Otherwise, always return true.
@@ -149,28 +240,40 @@ class Script : public TorqueGeneratedScript<Script, Struct> {
   // If the script has a non-empty sourceURL comment.
   inline bool HasSourceURLComment() const;
 
+  // If the script has a non-empty sourceMappingURL comment.
+  inline bool HasSourceMappingURLComment() const;
+
   // Streaming compilation only attaches the source to the Script upon
   // finalization. This predicate returns true, if this script may still be
   // unfinalized.
   inline bool IsMaybeUnfinalized(Isolate* isolate) const;
 
-  Object GetNameOrSourceURL();
-  static Handle<String> GetScriptHash(Isolate* isolate, Handle<Script> script,
-                                      bool forceForInspector);
+  Tagged<Object> GetNameOrSourceURL();
+  static DirectHandle<String> GetScriptHash(Isolate* isolate,
+                                            DirectHandle<Script> script,
+                                            bool forceForInspector);
 
   // Retrieve source position from where eval was called.
-  static int GetEvalPosition(Isolate* isolate, Handle<Script> script);
+  static int GetEvalPosition(Isolate* isolate, DirectHandle<Script> script);
+
+  Tagged<Script> GetEvalOrigin();
 
   // Initialize line_ends array with source code positions of line ends if
   // it doesn't exist yet.
-  static inline void InitLineEnds(Isolate* isolate, Handle<Script> script);
-  static inline void InitLineEnds(LocalIsolate* isolate, Handle<Script> script);
+  static inline void InitLineEnds(Isolate* isolate,
+                                  DirectHandle<Script> script);
+  static inline void InitLineEnds(LocalIsolate* isolate,
+                                  DirectHandle<Script> script);
+
+  // Obtain line ends as a vector, without modifying the script object
+  V8_EXPORT_PRIVATE static String::LineEndsVector GetLineEnds(
+      Isolate* isolate, DirectHandle<Script> script);
 
   inline bool has_line_ends() const;
 
   // Will initialize the line ends if required.
-  static void SetSource(Isolate* isolate, Handle<Script> script,
-                        Handle<String> source);
+  static void SetSource(Isolate* isolate, DirectHandle<Script> script,
+                        DirectHandle<String> source);
 
   bool inline CanHaveLineEnds() const;
 
@@ -194,11 +297,20 @@ class Script : public TorqueGeneratedScript<Script, Struct> {
   // initializes the line ends array, avoiding expensive recomputations.
   // The non-static version is not allocating and safe for unhandlified
   // callsites.
-  static bool GetPositionInfo(Handle<Script> script, int position,
+  static bool GetPositionInfo(DirectHandle<Script> script, int position,
                               PositionInfo* info,
                               OffsetFlag offset_flag = OffsetFlag::kWithOffset);
+  static bool GetLineColumnWithLineEnds(
+      int position, int& line, int& column,
+      const String::LineEndsVector& line_ends);
   V8_EXPORT_PRIVATE bool GetPositionInfo(
       int position, PositionInfo* info,
+      OffsetFlag offset_flag = OffsetFlag::kWithOffset) const;
+  V8_EXPORT_PRIVATE bool GetPositionInfoWithLineEnds(
+      int position, PositionInfo* info, const String::LineEndsVector& line_ends,
+      OffsetFlag offset_flag = OffsetFlag::kWithOffset) const;
+  V8_EXPORT_PRIVATE void AddPositionInfoOffset(
+      PositionInfo* info,
       OffsetFlag offset_flag = OffsetFlag::kWithOffset) const;
 
   // Tells whether this script should be subject to debugging, e.g. for
@@ -210,10 +322,13 @@ class Script : public TorqueGeneratedScript<Script, Struct> {
 
   bool IsUserJavaScript() const;
 
+  void TraceScriptRundown();
+  void TraceScriptRundownSources();
+
   // Wrappers for GetPositionInfo
-  static int GetColumnNumber(Handle<Script> script, int code_offset);
+  static int GetColumnNumber(DirectHandle<Script> script, int code_offset);
   int GetColumnNumber(int code_pos) const;
-  V8_EXPORT_PRIVATE static int GetLineNumber(Handle<Script> script,
+  V8_EXPORT_PRIVATE static int GetLineNumber(DirectHandle<Script> script,
                                              int code_offset);
   int GetLineNumber(int code_pos) const;
 
@@ -221,7 +336,7 @@ class Script : public TorqueGeneratedScript<Script, Struct> {
   // that matches the function literal. Return empty handle if not found.
   template <typename IsolateT>
   static MaybeHandle<SharedFunctionInfo> FindSharedFunctionInfo(
-      Handle<Script> script, IsolateT* isolate,
+      DirectHandle<Script> script, IsolateT* isolate,
       FunctionLiteral* function_literal);
 
   // Iterate over all script objects on the heap.
@@ -230,7 +345,7 @@ class Script : public TorqueGeneratedScript<Script, Struct> {
     explicit Iterator(Isolate* isolate);
     Iterator(const Iterator&) = delete;
     Iterator& operator=(const Iterator&) = delete;
-    Script Next();
+    Tagged<Script> Next();
 
    private:
     WeakArrayList::Iterator iterator_;
@@ -242,24 +357,61 @@ class Script : public TorqueGeneratedScript<Script, Struct> {
 
   using BodyDescriptor = StructBodyDescriptor;
 
+ public:
+  TaggedMember<UnionOf<String, Undefined>> source_;
+  TaggedMember<Object> name_;
+  TaggedMember<Smi> line_offset_;
+  TaggedMember<Smi> column_offset_;
+  TaggedMember<UnionOf<Smi, Undefined, Symbol>> context_data_;
+  TaggedMember<Smi> script_type_;
+  TaggedMember<UnionOf<FixedArray, Smi>> line_ends_;
+  TaggedMember<Smi> id_;
+  TaggedMember<Object> eval_from_shared_or_wrapped_arguments_;
+  TaggedMember<UnionOf<Smi, CppGCManagedBase>> eval_from_position_;
+  TaggedMember<UnionOf<ScopeInfo, Undefined>> eval_from_scope_info_;
+  TaggedMember<UnionOf<WeakFixedArray, WeakArrayList>> infos_;
+  TaggedMember<UnionOf<ArrayList, Undefined>> compiled_lazy_function_positions_;
+  TaggedMember<Smi> flags_;
+  TaggedMember<UnionOf<String, Undefined>> source_url_;
+  TaggedMember<Object> source_mapping_url_;
+  TaggedMember<UnionOf<String, Undefined>> debug_id_;
+  TaggedMember<FixedArray> host_defined_options_;
+#if V8_SCRIPTORMODULE_LEGACY_LIFETIME
+  TaggedMember<ArrayList> script_or_modules_;
+#endif
+  TaggedMember<UnionOf<String, Undefined>> source_hash_;
+
  private:
+  template <typename LineEndsContainer>
+  bool GetPositionInfoInternal(const LineEndsContainer& ends, int position,
+                               Script::PositionInfo* info,
+                               const DisallowGarbageCollection& no_gc) const;
+
   friend Factory;
   friend FactoryBase<Factory>;
   friend FactoryBase<LocalFactory>;
-
-  // Hide torque-generated accessor, use Script::SetSource instead.
-  using TorqueGeneratedScript::set_source;
+  friend class TorqueGeneratedBitFieldAsserts;
 
   // Bit positions in the flags field.
-  DEFINE_TORQUE_GENERATED_SCRIPT_FLAGS()
-
-  TQ_OBJECT_CONSTRUCTORS(Script)
+  using CompilationTypeBit =
+      base::BitField<Script::CompilationType, 0, 1, uint32_t>;
+  using CompilationStateBit =
+      CompilationTypeBit::Next<Script::CompilationState, 1>;
+  using IsReplModeBit = CompilationStateBit::Next<bool, 1>;
+  using OriginOptionsBits = IsReplModeBit::Next<int32_t, 4>;
+  using BreakOnEntryBit = OriginOptionsBits::Next<bool, 1>;
+  using ProduceCompileHintsBit = BreakOnEntryBit::Next<bool, 1>;
+  using DeserializedBit = ProduceCompileHintsBit::Next<bool, 1>;
 
   template <typename IsolateT>
   EXPORT_TEMPLATE_DECLARE(V8_EXPORT_PRIVATE)
   static void V8_PRESERVE_MOST
-      InitLineEndsInternal(IsolateT* isolate, Handle<Script> script);
-};
+      InitLineEndsInternal(IsolateT* isolate, DirectHandle<Script> script);
+} V8_OBJECT_END;
+
+V8_EXPORT_PRIVATE const char* ToString(Script::Type type);
+V8_EXPORT_PRIVATE const char* ToString(Script::CompilationType type);
+V8_EXPORT_PRIVATE const char* ToString(Script::CompilationState type);
 
 }  // namespace internal
 }  // namespace v8

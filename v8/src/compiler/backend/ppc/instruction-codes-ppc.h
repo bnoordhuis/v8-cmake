@@ -22,13 +22,10 @@ namespace compiler {
   V(PPC_Xor)                         \
   V(PPC_ShiftLeft32)                 \
   V(PPC_ShiftLeft64)                 \
-  V(PPC_ShiftLeftPair)               \
   V(PPC_ShiftRight32)                \
   V(PPC_ShiftRight64)                \
-  V(PPC_ShiftRightPair)              \
   V(PPC_ShiftRightAlg32)             \
   V(PPC_ShiftRightAlg64)             \
-  V(PPC_ShiftRightAlgPair)           \
   V(PPC_RotRight32)                  \
   V(PPC_RotRight64)                  \
   V(PPC_Not)                         \
@@ -38,21 +35,16 @@ namespace compiler {
   V(PPC_RotLeftAndClearRight64)      \
   V(PPC_Add32)                       \
   V(PPC_Add64)                       \
-  V(PPC_AddWithOverflow32)           \
-  V(PPC_AddPair)                     \
   V(PPC_AddDouble)                   \
-  V(PPC_Sub)                         \
-  V(PPC_SubWithOverflow32)           \
-  V(PPC_SubPair)                     \
+  V(PPC_Sub32)                       \
+  V(PPC_Sub64)                       \
   V(PPC_SubDouble)                   \
   V(PPC_Mul32)                       \
-  V(PPC_Mul32WithHigh32)             \
   V(PPC_Mul64)                       \
   V(PPC_MulHighS64)                  \
   V(PPC_MulHighU64)                  \
   V(PPC_MulHigh32)                   \
   V(PPC_MulHighU32)                  \
-  V(PPC_MulPair)                     \
   V(PPC_MulDouble)                   \
   V(PPC_Div32)                       \
   V(PPC_Div64)                       \
@@ -64,7 +56,8 @@ namespace compiler {
   V(PPC_ModU32)                      \
   V(PPC_ModU64)                      \
   V(PPC_ModDouble)                   \
-  V(PPC_Neg)                         \
+  V(PPC_Neg32)                       \
+  V(PPC_Neg64)                       \
   V(PPC_NegDouble)                   \
   V(PPC_SqrtDouble)                  \
   V(PPC_FloorDouble)                 \
@@ -110,6 +103,7 @@ namespace compiler {
   V(PPC_DoubleToFloat32)             \
   V(PPC_DoubleExtractLowWord32)      \
   V(PPC_DoubleExtractHighWord32)     \
+  V(PPC_DoubleFromWord32Pair)        \
   V(PPC_DoubleInsertLowWord32)       \
   V(PPC_DoubleInsertHighWord32)      \
   V(PPC_DoubleConstruct)             \
@@ -189,9 +183,6 @@ namespace compiler {
   V(PPC_AtomicXorInt16)              \
   V(PPC_AtomicXorInt32)              \
   V(PPC_AtomicXorInt64)              \
-  V(PPC_F64x2Splat)                  \
-  V(PPC_F64x2ExtractLane)            \
-  V(PPC_F64x2ReplaceLane)            \
   V(PPC_F64x2Add)                    \
   V(PPC_F64x2Sub)                    \
   V(PPC_F64x2Mul)                    \
@@ -215,9 +206,6 @@ namespace compiler {
   V(PPC_F64x2ConvertLowI32x4S)       \
   V(PPC_F64x2ConvertLowI32x4U)       \
   V(PPC_F64x2PromoteLowF32x4)        \
-  V(PPC_F32x4Splat)                  \
-  V(PPC_F32x4ExtractLane)            \
-  V(PPC_F32x4ReplaceLane)            \
   V(PPC_F32x4Add)                    \
   V(PPC_F32x4Sub)                    \
   V(PPC_F32x4Mul)                    \
@@ -241,9 +229,6 @@ namespace compiler {
   V(PPC_F32x4Qfma)                   \
   V(PPC_F32x4Qfms)                   \
   V(PPC_F32x4DemoteF64x2Zero)        \
-  V(PPC_I64x2Splat)                  \
-  V(PPC_I64x2ExtractLane)            \
-  V(PPC_I64x2ReplaceLane)            \
   V(PPC_I64x2Add)                    \
   V(PPC_I64x2Sub)                    \
   V(PPC_I64x2Mul)                    \
@@ -265,9 +250,6 @@ namespace compiler {
   V(PPC_I64x2ExtMulLowI32x4U)        \
   V(PPC_I64x2ExtMulHighI32x4U)       \
   V(PPC_I64x2Abs)                    \
-  V(PPC_I32x4Splat)                  \
-  V(PPC_I32x4ExtractLane)            \
-  V(PPC_I32x4ReplaceLane)            \
   V(PPC_I32x4Add)                    \
   V(PPC_I32x4Sub)                    \
   V(PPC_I32x4Mul)                    \
@@ -303,10 +285,6 @@ namespace compiler {
   V(PPC_I32x4TruncSatF64x2SZero)     \
   V(PPC_I32x4TruncSatF64x2UZero)     \
   V(PPC_I32x4DotI8x16AddS)           \
-  V(PPC_I16x8Splat)                  \
-  V(PPC_I16x8ExtractLaneU)           \
-  V(PPC_I16x8ExtractLaneS)           \
-  V(PPC_I16x8ReplaceLane)            \
   V(PPC_I16x8Add)                    \
   V(PPC_I16x8Sub)                    \
   V(PPC_I16x8Mul)                    \
@@ -345,10 +323,6 @@ namespace compiler {
   V(PPC_I16x8ExtMulLowI8x16U)        \
   V(PPC_I16x8ExtMulHighI8x16U)       \
   V(PPC_I16x8DotI8x16S)              \
-  V(PPC_I8x16Splat)                  \
-  V(PPC_I8x16ExtractLaneU)           \
-  V(PPC_I8x16ExtractLaneS)           \
-  V(PPC_I8x16ReplaceLane)            \
   V(PPC_I8x16Add)                    \
   V(PPC_I8x16Sub)                    \
   V(PPC_I8x16MinS)                   \
@@ -411,6 +385,14 @@ namespace compiler {
   V(PPC_S128Store16Lane)             \
   V(PPC_S128Store32Lane)             \
   V(PPC_S128Store64Lane)             \
+  V(PPC_FExtractLane)                \
+  V(PPC_IExtractLane)                \
+  V(PPC_IExtractLaneU)               \
+  V(PPC_IExtractLaneS)               \
+  V(PPC_FReplaceLane)                \
+  V(PPC_IReplaceLane)                \
+  V(PPC_FSplat)                      \
+  V(PPC_ISplat)                      \
   V(PPC_StoreCompressTagged)         \
   V(PPC_LoadDecompressTaggedSigned)  \
   V(PPC_LoadDecompressTagged)

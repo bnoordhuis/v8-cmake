@@ -2,12 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#ifndef V8_WASM_DECODER_H_
+#define V8_WASM_DECODER_H_
+
 #if !V8_ENABLE_WEBASSEMBLY
 #error This header should only be included if WebAssembly is enabled.
 #endif  // !V8_ENABLE_WEBASSEMBLY
-
-#ifndef V8_WASM_DECODER_H_
-#define V8_WASM_DECODER_H_
 
 #include <cinttypes>
 #include <cstdarg>
@@ -47,7 +47,7 @@ class ITracer {
   // Hooks for extracting byte offsets of things.
   virtual void TypeOffset(uint32_t offset) = 0;
   virtual void ImportOffset(uint32_t offset) = 0;
-  virtual void ImportsDone() = 0;
+  virtual void ImportsDone(const WasmModule* module) = 0;
   virtual void TableOffset(uint32_t offset) = 0;
   virtual void MemoryOffset(uint32_t offset) = 0;
   virtual void TagOffset(uint32_t offset) = 0;
@@ -56,6 +56,7 @@ class ITracer {
   virtual void ElementOffset(uint32_t offset) = 0;
   virtual void DataOffset(uint32_t offset) = 0;
   virtual void StringOffset(uint32_t offset) = 0;
+  virtual void RecGroupOffset(uint32_t offset, uint32_t group_size) = 0;
 
   // Hooks for annotated hex dumps.
   virtual void Bytes(const uint8_t* start, uint32_t count) = 0;
@@ -63,6 +64,7 @@ class ITracer {
   virtual void Description(const char* desc) = 0;
   virtual void Description(const char* desc, size_t length) = 0;
   virtual void Description(uint32_t number) = 0;
+  virtual void Description(uint64_t number) = 0;
   virtual void Description(ValueType type) = 0;
   virtual void Description(HeapType type) = 0;
   virtual void Description(const FunctionSig* sig) = 0;
@@ -88,21 +90,14 @@ class Decoder {
   // Don't run validation, assume valid input.
   static constexpr struct NoValidationTag {
     static constexpr bool validate = false;
-    static constexpr bool full_validation = false;
   } kNoValidation = {};
-  // Run validation but only store a generic error.
-  static constexpr struct BooleanValidationTag {
-    static constexpr bool validate = true;
-    static constexpr bool full_validation = false;
-  } kBooleanValidation = {};
   // Run full validation with error message and location.
   static constexpr struct FullValidationTag {
     static constexpr bool validate = true;
-    static constexpr bool full_validation = true;
   } kFullValidation = {};
 
   struct NoName {
-    constexpr NoName(const char*) {}
+    constexpr NoName(const char*) {}  // NOLINT(runtime/explicit)
     operator const char*() const { UNREACHABLE(); }
   };
   // Pass a {NoName} if we know statically that we do not use it anyway (we are
@@ -112,8 +107,7 @@ class Decoder {
   using Name = const char*;
 #else
   template <typename ValidationTag>
-  using Name =
-      std::conditional_t<ValidationTag::full_validation, const char*, NoName>;
+  using Name = std::conditional_t<ValidationTag::validate, const char*, NoName>;
 #endif
 
   enum TraceFlag : bool { kTrace = true, kNoTrace = false };
@@ -122,7 +116,7 @@ class Decoder {
       : Decoder(start, start, end, buffer_offset) {}
   explicit Decoder(const base::Vector<const uint8_t> bytes,
                    uint32_t buffer_offset = 0)
-      : Decoder(bytes.begin(), bytes.begin() + bytes.length(), buffer_offset) {}
+      : Decoder(bytes.begin(), bytes.end(), buffer_offset) {}
   Decoder(const uint8_t* start, const uint8_t* pc, const uint8_t* end,
           uint32_t buffer_offset = 0)
       : start_(start), pc_(pc), end_(end), buffer_offset_(buffer_offset) {
@@ -138,13 +132,6 @@ class Decoder {
   uint8_t read_u8(const uint8_t* pc,
                   Name<ValidationTag> msg = "expected 1 byte") {
     return read_little_endian<uint8_t, ValidationTag>(pc, msg);
-  }
-
-  // Reads a 16-bit unsigned integer (little endian).
-  template <typename ValidationTag>
-  uint16_t read_u16(const uint8_t* pc,
-                    Name<ValidationTag> msg = "expected 2 bytes") {
-    return read_little_endian<uint16_t, ValidationTag>(pc, msg);
   }
 
   // Reads a 32-bit unsigned integer (little endian).
@@ -239,11 +226,6 @@ class Decoder {
     return consume_little_endian<uint8_t, kNoTrace>(name);
   }
 
-  // Reads a 16-bit unsigned integer (little endian) and advances {pc_}.
-  uint16_t consume_u16(const char* name = "uint16_t") {
-    return consume_little_endian<uint16_t, kTrace>(name);
-  }
-
   // Reads a single 32-bit unsigned integer (little endian) and advances {pc_}.
   uint32_t consume_u32(const char* name, ITracer* tracer) {
     if (tracer) {
@@ -291,14 +273,6 @@ class Decoder {
     return result;
   }
 
-  // Reads a LEB128 variable-length signed 64-bit integer and advances {pc_}.
-  int64_t consume_i64v(const char* name = "var_int64") {
-    auto [result, length] =
-        read_leb<int64_t, FullValidationTag, kTrace>(pc_, name);
-    pc_ += length;
-    return result;
-  }
-
   // Consume {size} bytes and send them to the bit bucket, advancing {pc_}.
   void consume_bytes(uint32_t size, const char* name = "skip") {
     // Only trace if the name is not null.
@@ -330,14 +304,6 @@ class Decoder {
       return false;
     }
     return true;
-  }
-
-  // Use this for "boolean validation", i.e. if the error message is not used
-  // anyway.
-  void V8_NOINLINE V8_PRESERVE_MOST MarkError() {
-    if (!ok()) return;
-    error_ = {0, "validation failed"};
-    onFirstError();
   }
 
   // Do not inline error methods. This has measurable impact on validation time,
@@ -414,7 +380,7 @@ class Decoder {
   }
 
   bool ok() const { return !failed(); }
-  bool failed() const { return error_.has_error(); }
+  bool failed() const { return V8_UNLIKELY(error_.has_error()); }
   bool more() const { return pc_ < end_; }
   const WasmError& error() const { return error_; }
 
@@ -478,11 +444,7 @@ class Decoder {
       DCHECK_LE(pc, end_);
       DCHECK_LE(sizeof(IntType), end_ - pc);
     } else if (V8_UNLIKELY(ptrdiff_t{sizeof(IntType)} > end_ - pc)) {
-      if (ValidationTag::full_validation) {
-        error(pc, msg);
-      } else {
-        MarkError();
-      }
+      error(pc, msg);
       return 0;
     }
     return base::ReadLittleEndianValue<IntType>(reinterpret_cast<Address>(pc));
@@ -517,7 +479,7 @@ class Decoder {
     if (V8_LIKELY((!ValidationTag::validate || pc < end_) && !(*pc & 0x80))) {
       TRACE_IF(trace, "%02x ", *pc);
       IntType result = *pc;
-      if (std::is_signed<IntType>::value) {
+      if (std::is_signed_v<IntType>) {
         // Perform sign extension.
         constexpr int sign_ext_shift = int{8 * sizeof(IntType)} - 7;
         result = (result << sign_ext_shift) >> sign_ext_shift;
@@ -549,7 +511,7 @@ class Decoder {
   V8_INLINE std::pair<IntType, uint32_t> read_leb_tail(
       const uint8_t* pc, Name<ValidationTag> name,
       IntType intermediate_result) {
-    constexpr bool is_signed = std::is_signed<IntType>::value;
+    constexpr bool is_signed = std::is_signed_v<IntType>;
     constexpr int kMaxLength = (size_in_bits + 6) / 7;
     static_assert(byte_index < kMaxLength, "invalid template instantiation");
     constexpr int shift = byte_index * 7;
@@ -560,7 +522,7 @@ class Decoder {
       DCHECK_LT(pc, end_);
       b = *pc;
       TRACE_IF(trace, "%02x ", b);
-      using Unsigned = typename std::make_unsigned<IntType>::type;
+      using Unsigned = std::make_unsigned_t<IntType>;
       intermediate_result |=
           (static_cast<Unsigned>(static_cast<IntType>(b) & 0x7f) << shift);
     }
@@ -574,12 +536,8 @@ class Decoder {
     }
     if (ValidationTag::validate && V8_UNLIKELY(at_end || (b & 0x80))) {
       TRACE_IF(trace, at_end ? "<end> " : "<length overflow> ");
-      if constexpr (ValidationTag::full_validation) {
-        errorf(pc, "%s while decoding %s",
-               at_end ? "reached end" : "length overflow", name);
-      } else {
-        MarkError();
-      }
+      errorf(pc, "%s while decoding %s",
+             at_end ? "reached end" : "length overflow", name);
       return {0, 0};
     }
     if constexpr (is_last_byte) {
@@ -599,11 +557,7 @@ class Decoder {
       if (!ValidationTag::validate) {
         DCHECK(valid_extra_bits);
       } else if (V8_UNLIKELY(!valid_extra_bits)) {
-        if (ValidationTag::full_validation) {
-          error(pc, "extra bits in varint");
-        } else {
-          MarkError();
-        }
+        error(pc, "extra bits in varint");
         return {0, 0};
       }
     }

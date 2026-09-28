@@ -1,55 +1,68 @@
 // Copyright 2012 the V8 project authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
-//
+
+#ifndef V8_OBJECTS_OBJECTS_INL_H_
+#define V8_OBJECTS_OBJECTS_INL_H_
+
 // Review notes:
 //
 // - The use of macros in these inline functions may seem superfluous
 // but it is absolutely needed to make sure gcc generates optimal
 // code. gcc is not happy when attempting to inline too deep.
-//
 
-#ifndef V8_OBJECTS_OBJECTS_INL_H_
-#define V8_OBJECTS_OBJECTS_INL_H_
+#include "src/objects/objects.h"
+// Include the non-inl header before the rest of the headers.
 
+#include "include/v8-internal.h"
 #include "src/base/bits.h"
+#include "src/base/bounds.h"
 #include "src/base/memory.h"
 #include "src/base/numbers/double.h"
+#include "src/base/strong-alias.h"
 #include "src/builtins/builtins.h"
 #include "src/common/globals.h"
 #include "src/common/ptr-compr-inl.h"
 #include "src/handles/handles-inl.h"
 #include "src/heap/factory.h"
+#include "src/heap/heap-layout-inl.h"
 #include "src/heap/heap-verifier.h"
 #include "src/heap/heap-write-barrier-inl.h"
 #include "src/heap/read-only-heap-inl.h"
 #include "src/numbers/conversions-inl.h"
+#include "src/objects/allocation-site.h"
 #include "src/objects/bigint.h"
-#include "src/objects/deoptimization-data-inl.h"
+#include "src/objects/casting.h"
+#include "src/objects/contexts-inl.h"
+#include "src/objects/deoptimization-data.h"
+#include "src/objects/descriptor-array.h"
+#include "src/objects/field-type.h"
+#include "src/objects/foreign.h"
 #include "src/objects/heap-number-inl.h"
-#include "src/objects/heap-object.h"
-#include "src/objects/hole-inl.h"
-#include "src/objects/js-proxy-inl.h"  // TODO(jkummerow): Drop.
+#include "src/objects/heap-object-inl.h"
+#include "src/objects/hole.h"
+#include "src/objects/instance-type-checker.h"
+#include "src/objects/js-proxy.h"
 #include "src/objects/keys.h"
 #include "src/objects/literal-objects.h"
-#include "src/objects/lookup-inl.h"  // TODO(jkummerow): Drop.
-#include "src/objects/objects.h"
+#include "src/objects/map-word-inl.h"
+#include "src/objects/number-string-cache-inl.h"
+#include "src/objects/object-list-macros.h"
+#include "src/objects/object-predicates-inl.h"
 #include "src/objects/oddball-inl.h"
-#include "src/objects/property-details.h"
+#include "src/objects/property-details-inl.h"
 #include "src/objects/property.h"
 #include "src/objects/regexp-match-info-inl.h"
+#include "src/objects/scope-info-inl.h"
 #include "src/objects/shared-function-info.h"
-#include "src/objects/slots-inl.h"
 #include "src/objects/smi-inl.h"
 #include "src/objects/tagged-field-inl.h"
 #include "src/objects/tagged-impl-inl.h"
 #include "src/objects/tagged-index.h"
-#include "src/objects/templates.h"
+#include "src/objects/templates-inl.h"
+#include "src/objects/trusted-pointer-inl.h"
 #include "src/roots/roots.h"
-#include "src/sandbox/bounded-size-inl.h"
-#include "src/sandbox/code-pointer-inl.h"
-#include "src/sandbox/external-pointer-inl.h"
-#include "src/sandbox/sandboxed-pointer-inl.h"
+#include "src/sandbox/isolate-inl.h"
 
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
@@ -57,129 +70,327 @@
 namespace v8 {
 namespace internal {
 
-PropertyDetails::PropertyDetails(Smi smi) { value_ = smi.value(); }
+template <typename T>
+class Managed;
+template <typename T>
+class TrustedManaged;
 
-Smi PropertyDetails::AsSmi() const {
-  // Ensure the upper 2 bits have the same value by sign extending it. This is
-  // necessary to be able to use the 31st bit of the property details.
-  int value = value_ << 1;
-  return Smi::FromInt(value >> 1);
-}
+// TODO(jkummerow): Most DEF_CAST_TRAITS(Foo) macro invocations should move to
+// wherever `IsFoo(Tagged<HeapObject>)` is defined.
+// TODO(leszeks): Expand Is<T> to all types.
 
-int PropertyDetails::field_width_in_words() const {
-  DCHECK_EQ(location(), PropertyLocation::kField);
-  return 1;
-}
+DEF_CAST_TRAITS(AbstractCode)
+DEF_CAST_TRAITS(AccessorInfo)
+DEF_CAST_TRAITS(AllocationSite)
+DEF_CAST_TRAITS(BigInt)
+DEF_CAST_TRAITS(BigIntBase)
+DEF_CAST_TRAITS(Boolean)
+DEF_CAST_TRAITS(Cell)
+DEF_CAST_TRAITS(CompilationCacheTable)
+DEF_CAST_TRAITS(Context)
+DEF_CAST_TRAITS(ContextCell)
+DEF_CAST_TRAITS(CoverageInfo)
+DEF_CAST_TRAITS(CppHeapExternalObject)
+DEF_CAST_TRAITS(CppGCManagedBase)
+DEF_CAST_TRAITS(DataHandler)
+DEF_CAST_TRAITS(DeoptimizationData)
+DEF_CAST_TRAITS(DescriptorArray)
+DEF_CAST_TRAITS(DictionaryTemplateInfo)
+DEF_CAST_TRAITS(EmbedderDataArray)
+DEF_CAST_TRAITS(EphemeronHashTable)
+DEF_CAST_TRAITS(FeedbackCell)
+DEF_CAST_TRAITS(FeedbackMetadata)
+DEF_CAST_TRAITS(FeedbackVector)
+DEF_CAST_TRAITS(FixedArrayBase)
+DEF_CAST_TRAITS(FixedArrayExact)
+DEF_CAST_TRAITS(Foreign)
+DEF_CAST_TRAITS(GcSafeCode)
+DEF_CAST_TRAITS(GlobalDictionary)
+DEF_CAST_TRAITS(HashSeedWrapper)
+DEF_CAST_TRAITS(InterceptorInfo)
+DEF_CAST_TRAITS(JSArgumentsObject)
+DEF_CAST_TRAITS(JSArray)
+DEF_CAST_TRAITS(JSArrayBuffer)
+DEF_CAST_TRAITS(JSArrayBufferView)
+DEF_CAST_TRAITS(JSArrayIterator)
+DEF_CAST_TRAITS(JSAsyncFromSyncIterator)
+DEF_CAST_TRAITS(JSAsyncFunctionObject)
+DEF_CAST_TRAITS(JSAsyncGeneratorObject)
+DEF_CAST_TRAITS(JSAtomicsCondition)
+DEF_CAST_TRAITS(JSAtomicsMutex)
+DEF_CAST_TRAITS(JSBoundFunction)
+DEF_CAST_TRAITS(JSCollection)
+DEF_CAST_TRAITS(JSCollectionIterator)
+DEF_CAST_TRAITS(JSCustomElementsObject)
+DEF_CAST_TRAITS(JSDataView)
+DEF_CAST_TRAITS(JSDataViewOrRabGsabDataView)
+DEF_CAST_TRAITS(JSDate)
+DEF_CAST_TRAITS(JSDisposableStackBase)
+DEF_CAST_TRAITS(JSSyncDisposableStack)
+DEF_CAST_TRAITS(JSAsyncDisposableStack)
+DEF_CAST_TRAITS(JSExternalObject)
+DEF_CAST_TRAITS(JSFinalizationRegistry)
+DEF_CAST_TRAITS(JSFunction)
+DEF_CAST_TRAITS(JSFunctionWithoutPrototype)
+DEF_CAST_TRAITS(JSFunctionWithPrototype)
+DEF_CAST_TRAITS(JSFunctionOrBoundFunctionOrWrappedFunction)
+DEF_CAST_TRAITS(JSGeneratorObject)
+DEF_CAST_TRAITS(JSGlobalObject)
+DEF_CAST_TRAITS(JSGlobalProxy)
+DEF_CAST_TRAITS(JSIteratorHelper)
+DEF_CAST_TRAITS(JSIteratorHelperSimple)
+DEF_CAST_TRAITS(JSIteratorFilterHelper)
+DEF_CAST_TRAITS(JSIteratorMapHelper)
+DEF_CAST_TRAITS(JSIteratorTakeHelper)
+DEF_CAST_TRAITS(JSIteratorDropHelper)
+DEF_CAST_TRAITS(JSIteratorFlatMapHelper)
+DEF_CAST_TRAITS(JSIteratorConcatHelper)
+DEF_CAST_TRAITS(JSIteratorZipHelper)
+DEF_CAST_TRAITS(JSIteratorZipKeyedHelper)
+DEF_CAST_TRAITS(JSMap)
+DEF_CAST_TRAITS(JSMapIterator)
+DEF_CAST_TRAITS(JSMessageObject)
+DEF_CAST_TRAITS(JSModuleNamespace)
+DEF_CAST_TRAITS(JSDeferredModuleNamespace)
+DEF_CAST_TRAITS(JSObject)
+DEF_CAST_TRAITS(JSAPIObjectWithEmbedderSlots)
+DEF_CAST_TRAITS(JSObjectWithEmbedderSlots)
+DEF_CAST_TRAITS(JSPrimitiveWrapper)
+DEF_CAST_TRAITS(JSPromise)
+DEF_CAST_TRAITS(JSRabGsabDataView)
+DEF_CAST_TRAITS(JSRawJson)
+DEF_CAST_TRAITS(JSReceiver)
+DEF_CAST_TRAITS(JSRegExp)
+DEF_CAST_TRAITS(JSRegExpStringIterator)
+DEF_CAST_TRAITS(JSSet)
+DEF_CAST_TRAITS(JSSetIterator)
+DEF_CAST_TRAITS(JSShadowRealm)
+DEF_CAST_TRAITS(JSSharedArray)
+DEF_CAST_TRAITS(JSSharedStruct)
+DEF_CAST_TRAITS(JSSpecialObject)
+DEF_CAST_TRAITS(JSStringIterator)
+DEF_CAST_TRAITS(JSSynchronizationPrimitive)
+DEF_CAST_TRAITS(JSDetachedTypedArray)
+DEF_CAST_TRAITS(JSTypedArray)
+DEF_CAST_TRAITS(JSValidIteratorWrapper)
+DEF_CAST_TRAITS(JSWeakCollection)
+DEF_CAST_TRAITS(JSWeakRef)
+DEF_CAST_TRAITS(JSWeakMap)
+DEF_CAST_TRAITS(JSWeakSet)
+DEF_CAST_TRAITS(JSWrappedFunction)
+DEF_CAST_TRAITS(LoadHandler)
+DEF_CAST_TRAITS(MegaDomHandler)
+DEF_CAST_TRAITS(Module)
+DEF_CAST_TRAITS(Microtask)
+DEF_CAST_TRAITS(NameDictionary)
+DEF_CAST_TRAITS(NativeContext)
+DEF_CAST_TRAITS(NormalizedMapCache)
+DEF_CAST_TRAITS(NumberDictionary)
+DEF_CAST_TRAITS(ObjectHashSet)
+DEF_CAST_TRAITS(ObjectHashTable)
+DEF_CAST_TRAITS(ObjectTwoHashTable)
+DEF_CAST_TRAITS(OnHeapBasicBlockProfilerData)
+DEF_CAST_TRAITS(Hole)
+DEF_CAST_TRAITS(OrderedHashMap)
+DEF_CAST_TRAITS(OrderedHashSet)
+DEF_CAST_TRAITS(OrderedNameDictionary)
+DEF_CAST_TRAITS(PreparseData)
+DEF_CAST_TRAITS(PrimitiveHeapObject)
+DEF_CAST_TRAITS(PromiseReactionJobTask)
+DEF_CAST_TRAITS(PropertyCell)
+DEF_CAST_TRAITS(SharedFunctionInfo)
+DEF_CAST_TRAITS(SimpleNameDictionary)
+DEF_CAST_TRAITS(SimpleNumberDictionary)
+DEF_CAST_TRAITS(SmallOrderedHashMap)
+DEF_CAST_TRAITS(SmallOrderedHashSet)
+DEF_CAST_TRAITS(SmallOrderedNameDictionary)
+DEF_CAST_TRAITS(SortState)
+DEF_CAST_TRAITS(SourceTextModule)
+DEF_CAST_TRAITS(SourceTextModuleInfo)
+DEF_CAST_TRAITS(StoreHandler)
+DEF_CAST_TRAITS(StringSet)
+DEF_CAST_TRAITS(RegisteredSymbolTable)
+DEF_CAST_TRAITS(Struct)
+DEF_CAST_TRAITS(SwissNameDictionary)
+DEF_CAST_TRAITS(SyntheticModule)
+DEF_CAST_TRAITS(TemplateInfo)
+DEF_CAST_TRAITS(TemplateInfoWithProperties)
+DEF_CAST_TRAITS(TemplateLiteralObject)
+DEF_CAST_TRAITS(TransitionArray)
+DEF_CAST_TRAITS(TurbofanBitsetType)
+DEF_CAST_TRAITS(TurbofanHeapConstantType)
+DEF_CAST_TRAITS(TurbofanOtherNumberConstantType)
+DEF_CAST_TRAITS(TurbofanRangeType)
+DEF_CAST_TRAITS(TurbofanType)
+DEF_CAST_TRAITS(TurbofanUnionType)
+DEF_CAST_TRAITS(TurboshaftFloat64RangeType)
+DEF_CAST_TRAITS(TurboshaftFloat64SetType)
+DEF_CAST_TRAITS(TurboshaftFloat64Type)
+DEF_CAST_TRAITS(TurboshaftType)
+DEF_CAST_TRAITS(TurboshaftWord32RangeType)
+DEF_CAST_TRAITS(TurboshaftWord32SetType)
+DEF_CAST_TRAITS(TurboshaftWord32Type)
+DEF_CAST_TRAITS(TurboshaftWord64RangeType)
+DEF_CAST_TRAITS(TurboshaftWord64SetType)
+DEF_CAST_TRAITS(TurboshaftWord64Type)
+#if V8_ENABLE_WEBASSEMBLY
+DEF_CAST_TRAITS(WasmArray)
+DEF_CAST_TRAITS(WasmExceptionPackage)
+DEF_CAST_TRAITS(WasmFastApiCallData)
+DEF_CAST_TRAITS(WasmFuncRef)
+DEF_CAST_TRAITS(WasmGlobalObject)
+DEF_CAST_TRAITS(WasmInstanceObject)
+DEF_CAST_TRAITS(WasmMemoryObject)
+DEF_CAST_TRAITS(WasmModuleObject)
+DEF_CAST_TRAITS(WasmNull)
+DEF_CAST_TRAITS(WasmObject)
+DEF_CAST_TRAITS(WasmResumeData)
+DEF_CAST_TRAITS(WasmStringViewIter)
+DEF_CAST_TRAITS(WasmStruct)
+DEF_CAST_TRAITS(WasmSuspendingObject)
+DEF_CAST_TRAITS(WasmContinuationObject)
+DEF_CAST_TRAITS(WasmStackObject)
+DEF_CAST_TRAITS(WasmTableObject)
+DEF_CAST_TRAITS(WasmTagObject)
+DEF_CAST_TRAITS(WasmTypeInfo)
+DEF_CAST_TRAITS(WasmValueObject)
+#endif  // V8_ENABLE_WEBASSEMBLY
+DEF_CAST_TRAITS(WeakCell)
+DEF_CAST_TRAITS(ClosureFeedbackCellArray)
+DEF_CAST_TRAITS(ObjectBoilerplateDescription)
+DEF_CAST_TRAITS(RegExpMatchInfo)
+DEF_CAST_TRAITS(ScriptContextTable)
+DEF_CAST_TRAITS(SloppyArgumentsElements)
+DEF_CAST_TRAITS(WeakHomomorphicFixedArray)
 
-DEF_GETTER(HeapObject, IsClassBoilerplate, bool) {
-  return IsFixedArrayExact(cage_base);
-}
+#ifdef V8_INTL_SUPPORT
+DEF_CAST_TRAITS(JSV8BreakIterator)
+DEF_CAST_TRAITS(JSCollator)
+DEF_CAST_TRAITS(JSDateTimeFormat)
+DEF_CAST_TRAITS(JSDisplayNames)
+DEF_CAST_TRAITS(JSDurationFormat)
+DEF_CAST_TRAITS(JSListFormat)
+DEF_CAST_TRAITS(JSLocale)
+DEF_CAST_TRAITS(JSNumberFormat)
+DEF_CAST_TRAITS(JSPluralRules)
+DEF_CAST_TRAITS(JSRelativeTimeFormat)
+DEF_CAST_TRAITS(JSSegmentDataObject)
+DEF_CAST_TRAITS(JSSegmentDataObjectWithIsWordLike)
+DEF_CAST_TRAITS(JSSegmentIterator)
+DEF_CAST_TRAITS(JSSegmenter)
+DEF_CAST_TRAITS(JSSegments)
+#endif  // V8_INTL_SUPPORT
 
-bool Object::IsTaggedIndex() const {
-  return IsSmi() && TaggedIndex::IsValid(TaggedIndex(ptr()).value());
-}
+#ifdef V8_TEMPORAL_SUPPORT
+DEF_CAST_TRAITS(JSTemporalDuration)
+DEF_CAST_TRAITS(JSTemporalPlainDate)
+DEF_CAST_TRAITS(JSTemporalPlainTime)
+DEF_CAST_TRAITS(JSTemporalPlainDateTime)
+DEF_CAST_TRAITS(JSTemporalPlainMonthDay)
+DEF_CAST_TRAITS(JSTemporalPlainYearMonth)
+DEF_CAST_TRAITS(JSTemporalZonedDateTime)
+DEF_CAST_TRAITS(JSTemporalInstant)
+#endif  // V8_TEMPORAL_SUPPORT
 
-bool Object::InSharedHeap() const {
-  return IsHeapObject() && HeapObject::cast(*this).InAnySharedSpace();
-}
+HEAP_OBJECT_TRUSTED_TYPE_LIST(DEF_CAST_TRAITS)
+HOLE_LIST(DEF_CAST_TRAITS)
 
-bool Object::InWritableSharedSpace() const {
-  return IsHeapObject() && HeapObject::cast(*this).InWritableSharedSpace();
-}
 
-bool Object::IsJSObjectThatCanBeTrackedAsPrototype() const {
-  return IsHeapObject() &&
-         HeapObject::cast(*this).IsJSObjectThatCanBeTrackedAsPrototype();
-}
+DEF_CAST_TRAITS(AccessCheckNeeded)
+DEF_CAST_TRAITS(AlwaysSharedSpaceJSObject)
+DEF_CAST_TRAITS(BigIntWrapper)
+DEF_CAST_TRAITS(BooleanWrapper)
+DEF_CAST_TRAITS(Callable)
+DEF_CAST_TRAITS(Constructor)
+DEF_CAST_TRAITS(Filler)
+DEF_CAST_TRAITS(HandlerTable)
+DEF_CAST_TRAITS(JSContextExtensionObject)
+DEF_CAST_TRAITS(JSError)
+DEF_CAST_TRAITS(MapCache)
+DEF_CAST_TRAITS(Number)
+DEF_CAST_TRAITS(NumberWrapper)
+DEF_CAST_TRAITS(OSROptimizedCodeCache)
+DEF_CAST_TRAITS(ScriptWrapper)
+DEF_CAST_TRAITS(StringWrapper)
+DEF_CAST_TRAITS(SymbolWrapper)
+DEF_CAST_TRAITS(UniqueName)
+DEF_CAST_TRAITS(Undetectable)
 
-#define IS_TYPE_FUNCTION_DEF(type_)                                        \
-  bool Object::Is##type_() const {                                         \
-    return IsHeapObject() && HeapObject::cast(*this).Is##type_();          \
-  }                                                                        \
-  bool Object::Is##type_(PtrComprCageBase cage_base) const {               \
-    return IsHeapObject() && HeapObject::cast(*this).Is##type_(cage_base); \
+template <>
+struct CastTraits<JSPrimitive> {
+  static inline bool AllowFrom(Tagged<Object> value) {
+    return IsPrimitive(value);
   }
-HEAP_OBJECT_TYPE_LIST(IS_TYPE_FUNCTION_DEF)
-IS_TYPE_FUNCTION_DEF(HashTableBase)
-IS_TYPE_FUNCTION_DEF(SmallOrderedHashTable)
-#undef IS_TYPE_FUNCTION_DEF
-
-#define IS_TYPE_FUNCTION_DEF(Type, Value, _)                     \
-  bool Object::Is##Type(Isolate* isolate) const {                \
-    return Is##Type(ReadOnlyRoots(isolate));                     \
-  }                                                              \
-  bool Object::Is##Type(LocalIsolate* isolate) const {           \
-    return Is##Type(ReadOnlyRoots(isolate));                     \
-  }                                                              \
-  bool Object::Is##Type() const {                                \
-    return IsHeapObject() && HeapObject::cast(*this).Is##Type(); \
-  }                                                              \
-  bool HeapObject::Is##Type(Isolate* isolate) const {            \
-    return Object::Is##Type(isolate);                            \
-  }                                                              \
-  bool HeapObject::Is##Type(LocalIsolate* isolate) const {       \
-    return Object::Is##Type(isolate);                            \
-  }                                                              \
-  bool HeapObject::Is##Type(ReadOnlyRoots roots) const {         \
-    return Object::Is##Type(roots);                              \
-  }                                                              \
-  bool HeapObject::Is##Type() const { return Is##Type(GetReadOnlyRoots()); }
-ODDBALL_LIST(IS_TYPE_FUNCTION_DEF)
-HOLE_LIST(IS_TYPE_FUNCTION_DEF)
-#undef IS_TYPE_FUNCTION_DEF
-
-#if V8_STATIC_ROOTS_BOOL
-#define IS_TYPE_FUNCTION_DEF(Type, Value, CamelName)                       \
-  bool Object::Is##Type(ReadOnlyRoots roots) const {                       \
-    SLOW_DCHECK(CheckObjectComparisonAllowed(ptr(), roots.Value().ptr())); \
-    return V8HeapCompressionScheme::CompressObject(ptr()) ==               \
-           StaticReadOnlyRoot::k##CamelName;                               \
+  static inline bool AllowFrom(Tagged<HeapObject> value) {
+    return IsPrimitive(value);
   }
-#else
-#define IS_TYPE_FUNCTION_DEF(Type, Value, _)         \
-  bool Object::Is##Type(ReadOnlyRoots roots) const { \
-    return (*this) == roots.Value();                 \
+};
+template <>
+struct CastTraits<JSAny> {
+  static inline bool AllowFrom(Tagged<Object> value) {
+    return IsPrimitive(value) || IsJSReceiver(value);
   }
-#endif
-ODDBALL_LIST(IS_TYPE_FUNCTION_DEF)
-HOLE_LIST(IS_TYPE_FUNCTION_DEF)
-#undef IS_TYPE_FUNCTION_DEF
+  static inline bool AllowFrom(Tagged<HeapObject> value) {
+    return IsPrimitive(value) || IsJSReceiver(value);
+  }
+};
+template <>
+struct CastTraits<AllocationSiteWithWeakNext> {
+  template <typename From>
+  static inline bool AllowFrom(Tagged<From> value) {
+    Tagged<AllocationSite> site;
+    return TryCast<AllocationSite>(value, &site) && site->HasWeakNext();
+  }
+};
 
-bool Object::IsNullOrUndefined(Isolate* isolate) const {
-  return IsNullOrUndefined(ReadOnlyRoots(isolate));
-}
+template <>
+struct CastTraits<FieldType> {
+  static inline bool AllowFrom(Tagged<Object> value) {
+    return value == FieldType::None() || value == FieldType::Any() ||
+           IsMap(value);
+  }
+  static inline bool AllowFrom(Tagged<HeapObject> value) {
+    return IsMap(value);
+  }
+};
 
-bool Object::IsNullOrUndefined(LocalIsolate* local_isolate) const {
-  return IsNullOrUndefined(ReadOnlyRoots(local_isolate));
-}
+template <typename T>
+struct CastTraits<Managed<T>> : public CastTraits<Foreign> {};
+template <typename T>
+struct CastTraits<CppGCManaged<T>> : public CastTraits<CppGCManagedBase> {};
+template <typename T>
+struct CastTraits<TrustedManaged<T>> : public CastTraits<TrustedForeign> {};
+template <typename T>
+struct CastTraits<PodArray<T>> : public CastTraits<ByteArray> {};
+template <typename T>
+struct CastTraits<TrustedPodArray<T>> : public CastTraits<TrustedByteArray> {};
+template <typename T, typename Base>
+struct CastTraits<FixedIntegerArrayBase<T, Base>> : public CastTraits<Base> {};
+template <>
+struct CastTraits<TrustedFixedAddressArray>
+    : public CastTraits<TrustedByteArray> {};
 
-bool Object::IsNullOrUndefined(ReadOnlyRoots roots) const {
-  return IsNull(roots) || IsUndefined(roots);
-}
+template <>
+struct CastTraits<JSRegExpResultIndices> : public CastTraits<JSArray> {};
+template <>
+struct CastTraits<DeoptimizationLiteralArray>
+    : public CastTraits<TrustedWeakFixedArray> {};
+template <>
+struct CastTraits<FreshlyAllocatedBigInt> : public CastTraits<BigInt> {};
+template <>
+struct CastTraits<JSIteratorResult> : public CastTraits<JSObject> {};
+template <>
+struct CastTraits<JSUint8ArraySetFromResult> : public CastTraits<JSObject> {};
 
-bool Object::IsNullOrUndefined() const {
-  return IsHeapObject() && HeapObject::cast(*this).IsNullOrUndefined();
-}
+template <>
+struct CastTraits<DeoptimizationFrameTranslation>
+    : public CastTraits<TrustedByteArray> {};
 
-bool Object::IsZero() const { return *this == Smi::zero(); }
-
-bool Object::IsPublicSymbol() const {
-  return IsSymbol() && !Symbol::cast(*this).is_private();
-}
-bool Object::IsPrivateSymbol() const {
-  return IsSymbol() && Symbol::cast(*this).is_private();
-}
-
-bool Object::IsNoSharedNameSentinel() const {
-  return *this == SharedFunctionInfo::kNoSharedNameSentinel;
-}
-
-template <class T,
-          typename std::enable_if<(std::is_arithmetic<T>::value ||
-                                   std::is_enum<T>::value) &&
-                                      !std::is_floating_point<T>::value,
-                                  int>::type>
-T Object::Relaxed_ReadField(size_t offset) const {
+template <class T>
+T HeapObject::Relaxed_ReadField(size_t offset) const
+  requires((std::is_arithmetic_v<T> || std::is_enum_v<T>) &&
+           !std::is_floating_point_v<T>)
+{
   // Pointer compression causes types larger than kTaggedSize to be
   // unaligned. Atomic loads must be aligned.
   DCHECK_IMPLIES(COMPRESS_POINTERS_BOOL, sizeof(T) <= kTaggedSize);
@@ -188,12 +399,11 @@ T Object::Relaxed_ReadField(size_t offset) const {
       reinterpret_cast<AtomicT*>(field_address(offset))));
 }
 
-template <class T,
-          typename std::enable_if<(std::is_arithmetic<T>::value ||
-                                   std::is_enum<T>::value) &&
-                                      !std::is_floating_point<T>::value,
-                                  int>::type>
-void Object::Relaxed_WriteField(size_t offset, T value) {
+template <class T>
+void HeapObject::Relaxed_WriteField(size_t offset, T value)
+  requires((std::is_arithmetic_v<T> || std::is_enum_v<T>) &&
+           !std::is_floating_point_v<T>)
+{
   // Pointer compression causes types larger than kTaggedSize to be
   // unaligned. Atomic stores must be aligned.
   DCHECK_IMPLIES(COMPRESS_POINTERS_BOOL, sizeof(T) <= kTaggedSize);
@@ -203,445 +413,419 @@ void Object::Relaxed_WriteField(size_t offset, T value) {
       static_cast<AtomicT>(value));
 }
 
-bool HeapObject::InAnySharedSpace() const {
-  if (IsReadOnlyHeapObject(*this)) return V8_SHARED_RO_HEAP_BOOL;
-  return InWritableSharedSpace();
+template <class T>
+T HeapObject::Acquire_ReadField(size_t offset) const
+  requires((std::is_arithmetic_v<T> || std::is_enum_v<T>) &&
+           !std::is_floating_point_v<T>)
+{
+  // Pointer compression causes types larger than kTaggedSize to be
+  // unaligned. Atomic loads must be aligned.
+  DCHECK_IMPLIES(COMPRESS_POINTERS_BOOL, sizeof(T) <= kTaggedSize);
+  using AtomicT = typename base::AtomicTypeFromByteWidth<sizeof(T)>::type;
+  return static_cast<T>(base::AsAtomicImpl<AtomicT>::Acquire_Load(
+      reinterpret_cast<AtomicT*>(field_address(offset))));
 }
 
-bool HeapObject::InWritableSharedSpace() const {
-  return BasicMemoryChunk::FromHeapObject(*this)->InWritableSharedSpace();
+// static
+template <typename CompareAndSwapImpl>
+Tagged<Object> HeapObject::SeqCst_CompareAndSwapField(
+    Tagged<Object> expected, Tagged<Object> value,
+    CompareAndSwapImpl compare_and_swap_impl) {
+  Tagged<Object> actual_expected = expected;
+  do {
+    Tagged<Object> old_value = compare_and_swap_impl(actual_expected, value);
+    if (old_value == actual_expected || !IsNumber(old_value) ||
+        !IsNumber(actual_expected)) {
+      return old_value;
+    }
+    if (!Object::SameNumberValue(
+            Object::NumberValue(Cast<Number>(old_value)),
+            Object::NumberValue(Cast<Number>(actual_expected)))) {
+      return old_value;
+    }
+    // The pointer comparison failed, but the numbers are equal. This can
+    // happen even if both numbers are HeapNumbers with the same value.
+    // Try again in the next iteration.
+    actual_expected = old_value;
+  } while (true);
 }
 
-bool HeapObject::InReadOnlySpace() const { return IsReadOnlyHeapObject(*this); }
-
-bool HeapObject::IsJSObjectThatCanBeTrackedAsPrototype() const {
-  // Do not optimize objects in the shared heap because it is not
-  // threadsafe. Objects in the shared heap have fixed layouts and their maps
-  // never change.
-  return IsJSObject() && !InWritableSharedSpace();
+constexpr bool FastInReadOnlySpaceOrSmallSmi(Tagged_t obj) {
+#if V8_STATIC_ROOTS_BOOL && CONTIGUOUS_COMPRESSED_READ_ONLY_SPACE_BOOL
+  // The following assert ensures that the page size check covers all our static
+  // roots. This is not strictly necessary and can be relaxed in future as the
+  // most prominent static roots are anyways allocated at the beginning of the
+  // first page.
+  // This optimization requires contiguous compressed RO space to ensure RO
+  // space is at the beginning of the cage; otherwise, objects from other spaces
+  // could alias with low addresses.
+  constexpr int kLastStaticRootPage =
+      RoundUp<kRegularPageSize>(StaticReadOnlyRoot::kLastAllocatedRoot);
+  static_assert(kLastStaticRootPage <= kContiguousReadOnlyReservationSize);
+  return obj < kContiguousReadOnlyReservationSize;
+#else
+  return false;
+#endif
 }
 
-bool HeapObject::IsNullOrUndefined(Isolate* isolate) const {
-  return IsNullOrUndefined(ReadOnlyRoots(isolate));
+constexpr bool FastInReadOnlySpaceOrSmallSmi(Tagged<MaybeObject> obj) {
+#ifdef V8_COMPRESS_POINTERS
+  // This check is only valid for objects in the main cage.
+  DCHECK(obj.IsSmi() || obj.IsInMainCageBase());
+  return FastInReadOnlySpaceOrSmallSmi(
+      V8HeapCompressionScheme::CompressAny(obj.ptr()));
+#else   // V8_COMPRESS_POINTERS
+  return false;
+#endif  // V8_COMPRESS_POINTERS
 }
 
-bool HeapObject::IsNullOrUndefined(ReadOnlyRoots roots) const {
-  return Object::IsNullOrUndefined(roots);
+bool OutsideSandboxOrInReadonlySpace(Tagged<HeapObject> obj) {
+#ifdef V8_ENABLE_SANDBOX
+  return OutsideSandbox(obj.address()) ||
+         MemoryChunk::FromHeapObject(obj)->SandboxSafeInReadOnlySpace();
+#else
+  return true;
+#endif
 }
 
-bool HeapObject::IsNullOrUndefined() const {
-  return IsNullOrUndefined(GetReadOnlyRoots());
+DEF_HEAP_OBJECT_PREDICATE(IsCallable) { return obj->map()->is_callable(); }
+
+DEF_HEAP_OBJECT_PREDICATE(IsCallableJSProxy) {
+  return IsCallable(obj) && IsJSProxy(obj);
 }
 
-DEF_GETTER(HeapObject, IsUniqueName, bool) {
-  return IsInternalizedString(cage_base) || IsSymbol(cage_base);
-}
-
-DEF_GETTER(HeapObject, IsFunction, bool) {
-  return IsJSFunctionOrBoundFunctionOrWrappedFunction();
-}
-
-DEF_GETTER(HeapObject, IsCallable, bool) {
-  return map(cage_base).is_callable();
-}
-
-DEF_GETTER(HeapObject, IsCallableJSProxy, bool) {
-  return IsCallable(cage_base) && IsJSProxy(cage_base);
-}
-
-DEF_GETTER(HeapObject, IsCallableApiObject, bool) {
-  InstanceType type = map(cage_base).instance_type();
-  return IsCallable(cage_base) &&
+DEF_HEAP_OBJECT_PREDICATE(IsCallableApiObject) {
+  InstanceType type = obj->map()->instance_type();
+  return IsCallable(obj) &&
          (type == JS_API_OBJECT_TYPE || type == JS_SPECIAL_API_OBJECT_TYPE);
 }
 
-DEF_GETTER(HeapObject, IsNonNullForeign, bool) {
-  return IsForeign(cage_base) &&
-         Foreign::cast(*this).foreign_address() != kNullAddress;
+DEF_HEAP_OBJECT_PREDICATE(IsNonNullForeign) {
+  return IsForeign(obj) &&
+         Cast<Foreign>(obj)->foreign_address_unchecked() != kNullAddress;
 }
 
-DEF_GETTER(HeapObject, IsConstructor, bool) {
-  return map(cage_base).is_constructor();
+DEF_HEAP_OBJECT_PREDICATE(IsConstructor) {
+  return obj->map()->is_constructor();
 }
 
-DEF_GETTER(HeapObject, IsSourceTextModuleInfo, bool) {
-  return map(cage_base) == GetReadOnlyRoots(cage_base).module_info_map();
+DEF_HEAP_OBJECT_PREDICATE(IsSourceTextModuleInfo) {
+  return obj->map() == GetReadOnlyRoots().module_info_map();
 }
 
-DEF_GETTER(HeapObject, IsConsString, bool) {
-  if (!IsString(cage_base)) return false;
-  return StringShape(String::cast(*this).map(cage_base)).IsCons();
-}
+DEF_HEAP_OBJECT_PREDICATE(IsTemplateLiteralObject) { return IsJSArray(obj); }
 
-DEF_GETTER(HeapObject, IsThinString, bool) {
-  InstanceType type = map(cage_base).instance_type();
-  return type == THIN_STRING_TYPE;
+#if V8_INTL_SUPPORT
+DEF_HEAP_OBJECT_PREDICATE(IsJSSegmentDataObject) { return IsJSObject(obj); }
+DEF_HEAP_OBJECT_PREDICATE(IsJSSegmentDataObjectWithIsWordLike) {
+  return IsJSObject(obj);
 }
+#endif  // V8_INTL_SUPPORT
 
-DEF_GETTER(HeapObject, IsSlicedString, bool) {
-  if (!IsString(cage_base)) return false;
-  return StringShape(String::cast(*this).map(cage_base)).IsSliced();
-}
-
-DEF_GETTER(HeapObject, IsSeqString, bool) {
-  if (!IsString(cage_base)) return false;
-  return StringShape(String::cast(*this).map(cage_base)).IsSequential();
-}
-
-DEF_GETTER(HeapObject, IsSeqOneByteString, bool) {
-  if (!IsString(cage_base)) return false;
-  return StringShape(String::cast(*this).map(cage_base)).IsSequentialOneByte();
-}
-
-DEF_GETTER(HeapObject, IsSeqTwoByteString, bool) {
-  if (!IsString(cage_base)) return false;
-  return StringShape(String::cast(*this).map(cage_base)).IsSequentialTwoByte();
-}
-
-DEF_GETTER(HeapObject, IsExternalOneByteString, bool) {
-  if (!IsString(cage_base)) return false;
-  return StringShape(String::cast(*this).map(cage_base)).IsExternalOneByte();
-}
-
-DEF_GETTER(HeapObject, IsExternalTwoByteString, bool) {
-  if (!IsString(cage_base)) return false;
-  return StringShape(String::cast(*this).map(cage_base)).IsExternalTwoByte();
-}
-
-bool Object::IsNumber() const {
-  if (IsSmi()) return true;
-  HeapObject this_heap_object = HeapObject::cast(*this);
-  PtrComprCageBase cage_base = GetPtrComprCageBase(this_heap_object);
-  return this_heap_object.IsHeapNumber(cage_base);
-}
-
-bool Object::IsNumber(PtrComprCageBase cage_base) const {
-  return IsSmi() || IsHeapNumber(cage_base);
-}
-
-bool Object::IsNumeric() const {
-  if (IsSmi()) return true;
-  HeapObject this_heap_object = HeapObject::cast(*this);
-  PtrComprCageBase cage_base = GetPtrComprCageBase(this_heap_object);
-  return this_heap_object.IsHeapNumber(cage_base) ||
-         this_heap_object.IsBigInt(cage_base);
-}
-
-bool Object::IsNumeric(PtrComprCageBase cage_base) const {
-  return IsNumber(cage_base) || IsBigInt(cage_base);
-}
-
-DEF_GETTER(HeapObject, IsTemplateLiteralObject, bool) {
-  return IsJSArray(cage_base);
-}
-
-DEF_GETTER(HeapObject, IsArrayList, bool) {
-  return map(cage_base) ==
-         GetReadOnlyRoots(cage_base).unchecked_array_list_map();
-}
-
-DEF_GETTER(HeapObject, IsRegExpMatchInfo, bool) {
-  return IsFixedArrayExact(cage_base);
-}
-
-DEF_GETTER(HeapObject, IsDeoptimizationData, bool) {
-  // Must be a fixed array.
-  if (!IsFixedArrayExact(cage_base)) return false;
+DEF_HEAP_OBJECT_PREDICATE(IsDeoptimizationData) {
+  if (!Is<ProtectedFixedArray>(obj)) return false;
+  Tagged<ProtectedFixedArray> array = TrustedCast<ProtectedFixedArray>(obj);
 
   // There's no sure way to detect the difference between a fixed array and
   // a deoptimization data array.  Since this is used for asserts we can
   // check that the length is zero or else the fixed size plus a multiple of
   // the entry size.
-  int length = FixedArray::cast(*this).length();
+  uint32_t length = array->ulength().value();
   if (length == 0) return true;
 
+  if (length < DeoptimizationData::kFirstDeoptEntryIndex) return false;
   length -= DeoptimizationData::kFirstDeoptEntryIndex;
-  return length >= 0 && length % DeoptimizationData::kDeoptEntrySize == 0;
+  return length % DeoptimizationData::kDeoptEntrySize == 0;
 }
 
-DEF_GETTER(HeapObject, IsHandlerTable, bool) {
-  return IsFixedArrayExact(cage_base);
+DEF_HEAP_OBJECT_PREDICATE(IsHandlerTable) { return IsFixedArrayExact(obj); }
+
+DEF_HEAP_OBJECT_PREDICATE(IsOSROptimizedCodeCache) {
+  return IsWeakFixedArray(obj);
 }
 
-DEF_GETTER(HeapObject, IsTemplateList, bool) {
-  if (!IsFixedArrayExact(cage_base)) return false;
-  if (FixedArray::cast(*this).length() < 1) return false;
-  return true;
+DEF_HEAP_OBJECT_PREDICATE(IsStringWrapper) {
+  return IsJSPrimitiveWrapper(obj) &&
+         IsString(Cast<JSPrimitiveWrapper>(obj)->value());
 }
 
-DEF_GETTER(HeapObject, IsDependentCode, bool) {
-  return IsWeakArrayList(cage_base);
+DEF_HEAP_OBJECT_PREDICATE(IsBooleanWrapper) {
+  return IsJSPrimitiveWrapper(obj) &&
+         IsBoolean(Cast<JSPrimitiveWrapper>(obj)->value());
 }
 
-DEF_GETTER(HeapObject, IsOSROptimizedCodeCache, bool) {
-  return IsWeakFixedArray(cage_base);
+DEF_HEAP_OBJECT_PREDICATE(IsScriptWrapper) {
+  return IsJSPrimitiveWrapper(obj) &&
+         IsScript(Cast<JSPrimitiveWrapper>(obj)->value());
 }
 
-DEF_GETTER(HeapObject, IsStringWrapper, bool) {
-  return IsJSPrimitiveWrapper(cage_base) &&
-         JSPrimitiveWrapper::cast(*this).value().IsString(cage_base);
+DEF_HEAP_OBJECT_PREDICATE(IsNumberWrapper) {
+  return IsJSPrimitiveWrapper(obj) &&
+         IsNumber(Cast<JSPrimitiveWrapper>(obj)->value());
 }
 
-DEF_GETTER(HeapObject, IsBooleanWrapper, bool) {
-  return IsJSPrimitiveWrapper(cage_base) &&
-         JSPrimitiveWrapper::cast(*this).value().IsBoolean(cage_base);
+DEF_HEAP_OBJECT_PREDICATE(IsBigIntWrapper) {
+  return IsJSPrimitiveWrapper(obj) &&
+         IsBigInt(Cast<JSPrimitiveWrapper>(obj)->value());
 }
 
-DEF_GETTER(HeapObject, IsScriptWrapper, bool) {
-  return IsJSPrimitiveWrapper(cage_base) &&
-         JSPrimitiveWrapper::cast(*this).value().IsScript(cage_base);
+DEF_HEAP_OBJECT_PREDICATE(IsSymbolWrapper) {
+  return IsJSPrimitiveWrapper(obj) &&
+         IsSymbol(Cast<JSPrimitiveWrapper>(obj)->value());
 }
 
-DEF_GETTER(HeapObject, IsNumberWrapper, bool) {
-  return IsJSPrimitiveWrapper(cage_base) &&
-         JSPrimitiveWrapper::cast(*this).value().IsNumber(cage_base);
+DEF_HEAP_OBJECT_PREDICATE(IsStringSet) { return IsHashTable(obj); }
+
+DEF_HEAP_OBJECT_PREDICATE(IsObjectHashSet) { return IsHashTable(obj); }
+
+DEF_HEAP_OBJECT_PREDICATE(IsCompilationCacheTable) { return IsHashTable(obj); }
+
+DEF_HEAP_OBJECT_PREDICATE(IsMapCache) { return IsHashTable(obj); }
+
+DEF_HEAP_OBJECT_PREDICATE(IsObjectHashTable) { return IsHashTable(obj); }
+
+DEF_HEAP_OBJECT_PREDICATE(IsObjectTwoHashTable) { return IsHashTable(obj); }
+
+DEF_HEAP_OBJECT_PREDICATE(IsHashTableBase) { return IsHashTable(obj); }
+
+// static
+Maybe<bool> Object::IsArray(DirectHandle<Object> object) {
+  if (IsSmi(*object)) return Just(false);
+  auto heap_object = Cast<HeapObject>(object);
+  if (IsJSArray(*heap_object)) return Just(true);
+  if (!IsJSProxy(*heap_object)) return Just(false);
+  return JSProxy::IsArray(Cast<JSProxy>(object));
 }
 
-DEF_GETTER(HeapObject, IsBigIntWrapper, bool) {
-  return IsJSPrimitiveWrapper(cage_base) &&
-         JSPrimitiveWrapper::cast(*this).value().IsBigInt(cage_base);
+DEF_HEAP_OBJECT_PREDICATE(IsUndetectable) {
+  return obj->map()->is_undetectable();
 }
 
-DEF_GETTER(HeapObject, IsSymbolWrapper, bool) {
-  return IsJSPrimitiveWrapper(cage_base) &&
-         JSPrimitiveWrapper::cast(*this).value().IsSymbol(cage_base);
-}
-
-DEF_GETTER(HeapObject, IsStringSet, bool) { return IsHashTable(cage_base); }
-
-DEF_GETTER(HeapObject, IsObjectHashSet, bool) { return IsHashTable(cage_base); }
-
-DEF_GETTER(HeapObject, IsCompilationCacheTable, bool) {
-  return IsHashTable(cage_base);
-}
-
-DEF_GETTER(HeapObject, IsMapCache, bool) { return IsHashTable(cage_base); }
-
-DEF_GETTER(HeapObject, IsObjectHashTable, bool) {
-  return IsHashTable(cage_base);
-}
-
-DEF_GETTER(HeapObject, IsObjectTwoHashTable, bool) {
-  return IsHashTable(cage_base);
-}
-
-DEF_GETTER(HeapObject, IsHashTableBase, bool) { return IsHashTable(cage_base); }
-
-bool Object::IsPrimitive() const {
-  if (IsSmi()) return true;
-  HeapObject this_heap_object = HeapObject::cast(*this);
-  PtrComprCageBase cage_base = GetPtrComprCageBase(this_heap_object);
-  return this_heap_object.map(cage_base).IsPrimitiveMap();
-}
-
-bool Object::IsPrimitive(PtrComprCageBase cage_base) const {
-  return IsSmi() || HeapObject::cast(*this).map(cage_base).IsPrimitiveMap();
+DEF_HEAP_OBJECT_PREDICATE(IsAccessCheckNeeded) {
+  if (IsJSGlobalProxy(obj)) {
+    const Tagged<JSGlobalProxy> proxy = Cast<JSGlobalProxy>(obj);
+    Isolate* isolate = Isolate::Current();
+    // TODO(ishell): compare security tokens here in order to allow ICs to
+    // take fast paths for cross context accesses.
+    Tagged<JSGlobalObject> global = isolate->context()->global_object();
+    return proxy->IsDetachedFrom(global);
+  }
+  return obj->map()->is_access_check_needed();
 }
 
 // static
-Maybe<bool> Object::IsArray(Handle<Object> object) {
-  if (object->IsSmi()) return Just(false);
-  Handle<HeapObject> heap_object = Handle<HeapObject>::cast(object);
-  if (heap_object->IsJSArray()) return Just(true);
-  if (!heap_object->IsJSProxy()) return Just(false);
-  return JSProxy::IsArray(Handle<JSProxy>::cast(object));
-}
-
-DEF_GETTER(HeapObject, IsUndetectable, bool) {
-  return map(cage_base).is_undetectable();
-}
-
-DEF_GETTER(HeapObject, IsAccessCheckNeeded, bool) {
-  if (IsJSGlobalProxy(cage_base)) {
-    const JSGlobalProxy proxy = JSGlobalProxy::cast(*this);
-    JSGlobalObject global = proxy.GetIsolate()->context().global_object();
-    return proxy.IsDetachedFrom(global);
+template <typename T, template <typename> typename HandleType>
+  requires(std::is_convertible_v<HandleType<T>, DirectHandle<T>>)
+Maybe<double> Object::IntegerValue(Isolate* isolate, HandleType<T> input) {
+  ASSIGN_RETURN_ON_EXCEPTION(isolate, input, ConvertToNumber(isolate, input));
+  if (IsSmi(*input)) {
+    return Just(static_cast<double>(Cast<Smi>(*input).value()));
   }
-  return map(cage_base).is_access_check_needed();
-}
-
-#define MAKE_STRUCT_PREDICATE(NAME, Name, name)                           \
-  bool Object::Is##Name() const {                                         \
-    return IsHeapObject() && HeapObject::cast(*this).Is##Name();          \
-  }                                                                       \
-  bool Object::Is##Name(PtrComprCageBase cage_base) const {               \
-    return IsHeapObject() && HeapObject::cast(*this).Is##Name(cage_base); \
-  }
-STRUCT_LIST(MAKE_STRUCT_PREDICATE)
-#undef MAKE_STRUCT_PREDICATE
-
-double Object::Number() const {
-  DCHECK(IsNumber());
-  return IsSmi() ? static_cast<double>(Smi(this->ptr()).value())
-                 : HeapNumber::unchecked_cast(*this).value();
+  return Just(DoubleToInteger(Cast<HeapNumber>(*input)->value()));
 }
 
 // static
 bool Object::SameNumberValue(double value1, double value2) {
-  // SameNumberValue(NaN, NaN) is true.
-  if (value1 != value2) {
-    return std::isnan(value1) && std::isnan(value2);
+  // Compare values bitwise, to cover -0 being different from 0 -- we'd need to
+  // look at sign bits anyway if we'd done a double comparison, so we may as
+  // well compare bitwise immediately.
+  uint64_t value1_bits = base::bit_cast<uint64_t>(value1);
+  uint64_t value2_bits = base::bit_cast<uint64_t>(value2);
+  if (value1_bits == value2_bits) {
+    return true;
   }
-  // SameNumberValue(0.0, -0.0) is false.
-  return (std::signbit(value1) == std::signbit(value2));
+  // SameNumberValue(NaN, NaN) is true even for NaNs with different bit
+  // representations.
+  return std::isnan(value1) && std::isnan(value2);
 }
 
-bool Object::IsNaN() const {
-  return this->IsHeapNumber() && std::isnan(HeapNumber::cast(*this).value());
+// static
+bool IsNaN(Tagged<Object> obj) {
+  return IsHeapNumber(obj) && std::isnan(Cast<HeapNumber>(obj)->value());
 }
 
-bool Object::IsMinusZero() const {
-  return this->IsHeapNumber() &&
-         i::IsMinusZero(HeapNumber::cast(*this).value());
+// static
+bool IsMinusZero(Tagged<Object> obj) {
+  return IsHeapNumber(obj) && i::IsMinusZero(Cast<HeapNumber>(obj)->value());
 }
 
-OBJECT_CONSTRUCTORS_IMPL(BigIntBase, PrimitiveHeapObject)
-OBJECT_CONSTRUCTORS_IMPL(BigInt, BigIntBase)
-OBJECT_CONSTRUCTORS_IMPL(FreshlyAllocatedBigInt, BigIntBase)
-
-// ------------------------------------
-// Cast operations
-
-CAST_ACCESSOR(BigIntBase)
-CAST_ACCESSOR(BigInt)
-
-bool Object::HasValidElements() {
+// static
+bool Object::HasValidElements(Tagged<Object> obj) {
   // Dictionary is covered under FixedArray. ByteArray is used
   // for the JSTypedArray backing stores.
-  return IsFixedArray() || IsFixedDoubleArray() || IsByteArray();
+  return IsFixedArray(obj) || IsFixedDoubleArray(obj) || IsByteArray(obj);
 }
 
-bool Object::FilterKey(PropertyFilter filter) {
-  DCHECK(!IsPropertyCell());
+// static
+bool Object::FilterKey(Tagged<Object> obj, PropertyFilter filter) {
+  DCHECK(!IsPropertyCell(obj));
   if (filter == PRIVATE_NAMES_ONLY) {
-    if (!IsSymbol()) return true;
-    return !Symbol::cast(*this).is_private_name();
-  } else if (IsSymbol()) {
+    if (!IsSymbol(obj)) return true;
+    return !Cast<Symbol>(obj)->is_any_private_name();
+  } else if (IsSymbol(obj)) {
     if (filter & SKIP_SYMBOLS) return true;
 
-    if (Symbol::cast(*this).is_private()) return true;
+    if (Cast<Symbol>(obj)->is_any_private()) return true;
   } else {
     if (filter & SKIP_STRINGS) return true;
   }
   return false;
 }
 
-Representation Object::OptimalRepresentation(PtrComprCageBase cage_base) const {
-  if (IsSmi()) {
-    return Representation::Smi();
+// static
+std::pair<Representation, PropertyConstness> Object::OptimalRepresentation(
+    Tagged<Object> obj, PropertyConstness constness) {
+  if (IsSmi(obj)) {
+    return {Representation::Smi(), constness};
   }
-  HeapObject heap_object = HeapObject::cast(*this);
-  if (heap_object.IsHeapNumber(cage_base)) {
-    return Representation::Double();
-  } else if (heap_object.IsUninitialized(
-                 heap_object.GetReadOnlyRoots(cage_base))) {
-    return Representation::None();
+  Tagged<HeapObject> heap_object = Cast<HeapObject>(obj);
+  if (IsUninitializedHole(heap_object)) {
+    return {Representation::None(), constness};
   }
-  return Representation::HeapObject();
+  if (IsHeapNumber(heap_object)) {
+    if (constness == PropertyConstness::kConst &&
+        Cast<HeapNumber>(heap_object)->is_the_hole()) {
+      // Make sure that even an initializing store of a double value with
+      // the hole NaN pattern removes constness, otherwise it wouldn't be
+      // possible to distinguish whether subsequent stores to a double field
+      // is initializing or not.
+      constness = PropertyConstness::kMutable;
+    }
+    return {Representation::Double(), constness};
+  }
+  return {Representation::HeapObject(), constness};
 }
 
-ElementsKind Object::OptimalElementsKind(PtrComprCageBase cage_base) const {
-  if (IsSmi()) return PACKED_SMI_ELEMENTS;
-  if (IsNumber(cage_base)) return PACKED_DOUBLE_ELEMENTS;
+// static
+ElementsKind Object::OptimalElementsKind(Tagged<Object> obj) {
+  if (IsSmi(obj)) return PACKED_SMI_ELEMENTS;
+  Tagged<HeapObject> heap_object = Cast<HeapObject>(obj);
+  if (IsHeapNumber(heap_object)) return PACKED_DOUBLE_ELEMENTS;
+  // if (IsUninitializedHole(heap_object)) {
+  //   return PACKED_SMI_ELEMENTS;
+  // }
+#ifdef V8_ENABLE_UNDEFINED_DOUBLE
+  if (IsUndefined(heap_object)) {
+    return HOLEY_DOUBLE_ELEMENTS;
+  }
+#endif  // V8_ENABLE_UNDEFINED_DOUBLE
   return PACKED_ELEMENTS;
 }
 
-bool Object::FitsRepresentation(Representation representation,
-                                bool allow_coercion) const {
+// static
+bool Object::FitsRepresentation(Tagged<Object> obj,
+                                Representation representation,
+                                bool allow_coercion) {
   if (representation.IsSmi()) {
-    return IsSmi();
+    return IsSmi(obj);
   } else if (representation.IsDouble()) {
-    return allow_coercion ? IsNumber() : IsHeapNumber();
+    return allow_coercion ? IsNumber(obj) : IsHeapNumber(obj);
   } else if (representation.IsHeapObject()) {
-    return IsHeapObject();
+    return IsHeapObject(obj);
   } else if (representation.IsNone()) {
     return false;
   }
   return true;
 }
 
-bool Object::ToUint32(uint32_t* value) const {
-  if (IsSmi()) {
-    int num = Smi::ToInt(*this);
-    if (num < 0) return false;
-    *value = static_cast<uint32_t>(num);
-    return true;
-  }
-  if (IsHeapNumber()) {
-    double num = HeapNumber::cast(*this).value();
-    return DoubleToUint32IfEqualToSelf(num, value);
-  }
-  return false;
-}
-
 // static
-MaybeHandle<JSReceiver> Object::ToObject(Isolate* isolate,
-                                         Handle<Object> object,
-                                         const char* method_name) {
-  if (object->IsJSReceiver()) return Handle<JSReceiver>::cast(object);
+template <typename T, template <typename> typename HandleType>
+  requires(std::is_convertible_v<HandleType<T>, DirectHandle<T>>)
+typename HandleType<JSReceiver>::MaybeType Object::ToObject(
+    Isolate* isolate, HandleType<T> object, const char* method_name) {
+  if (V8_LIKELY(IsJSReceiver(*object))) return Cast<JSReceiver>(object);
   return ToObjectImpl(isolate, object, method_name);
 }
 
 // static
-MaybeHandle<Name> Object::ToName(Isolate* isolate, Handle<Object> input) {
-  if (input->IsName()) return Handle<Name>::cast(input);
+template <template <typename> typename HandleType>
+typename HandleType<Name>::MaybeType Object::ToName(Isolate* isolate,
+                                                    HandleType<Object> input)
+  requires(std::is_convertible_v<HandleType<Object>, DirectHandle<Object>>)
+{
+  if (IsName(*input)) return Cast<Name>(input);
   return ConvertToName(isolate, input);
 }
 
 // static
-MaybeHandle<Object> Object::ToPropertyKey(Isolate* isolate,
-                                          Handle<Object> value) {
-  if (value->IsSmi() || HeapObject::cast(*value).IsName()) return value;
+template <typename T, template <typename> typename HandleType>
+  requires(std::is_convertible_v<HandleType<T>, DirectHandle<T>>)
+typename HandleType<Object>::MaybeType Object::ToPropertyKey(
+    Isolate* isolate, HandleType<T> value) {
+  if (IsSmi(*value) || IsName(Cast<HeapObject>(*value))) return value;
   return ConvertToPropertyKey(isolate, value);
 }
 
 // static
-MaybeHandle<Object> Object::ToPrimitive(Isolate* isolate, Handle<Object> input,
-                                        ToPrimitiveHint hint) {
-  if (input->IsPrimitive()) return input;
-  return JSReceiver::ToPrimitive(isolate, Handle<JSReceiver>::cast(input),
-                                 hint);
+template <typename T, template <typename> typename HandleType>
+  requires(std::is_convertible_v<HandleType<T>, DirectHandle<T>>)
+typename HandleType<Object>::MaybeType Object::ToPrimitive(
+    Isolate* isolate, HandleType<T> input, ToPrimitiveHint hint) {
+  if (IsPrimitive(*input)) return input;
+  return JSReceiver::ToPrimitive(isolate, Cast<JSReceiver>(input), hint);
 }
 
 // static
-MaybeHandle<Object> Object::ToNumber(Isolate* isolate, Handle<Object> input) {
-  if (input->IsNumber()) return input;  // Shortcut.
-  return ConvertToNumberOrNumeric(isolate, input, Conversion::kToNumber);
+template <typename T, template <typename> typename HandleType>
+  requires(std::is_convertible_v<HandleType<T>, DirectHandle<T>>)
+typename HandleType<Number>::MaybeType Object::ToNumber(Isolate* isolate,
+                                                        HandleType<T> input) {
+  if (IsNumber(*input)) return Cast<Number>(input);  // Shortcut.
+  return ConvertToNumber(isolate, Cast<Object>(input));
 }
 
 // static
-MaybeHandle<Object> Object::ToNumeric(Isolate* isolate, Handle<Object> input) {
-  if (input->IsNumber() || input->IsBigInt()) return input;  // Shortcut.
-  return ConvertToNumberOrNumeric(isolate, input, Conversion::kToNumeric);
+template <typename T, template <typename> typename HandleType>
+  requires(std::is_convertible_v<HandleType<T>, DirectHandle<T>>)
+typename HandleType<Object>::MaybeType Object::ToNumeric(Isolate* isolate,
+                                                         HandleType<T> input) {
+  if (IsNumber(*input) || IsBigInt(*input)) return input;  // Shortcut.
+  return ConvertToNumeric(isolate, Cast<Object>(input));
 }
 
 // static
-MaybeHandle<Object> Object::ToInteger(Isolate* isolate, Handle<Object> input) {
-  if (input->IsSmi()) return input;
-  return ConvertToInteger(isolate, input);
+template <typename T, template <typename> typename HandleType>
+  requires(std::is_convertible_v<HandleType<T>, DirectHandle<T>>)
+typename HandleType<Number>::MaybeType Object::ToInteger(Isolate* isolate,
+                                                         HandleType<T> input) {
+  if (IsSmi(*input)) return Cast<Smi>(input);
+  return ConvertToInteger(isolate, Cast<Object>(input));
 }
 
 // static
-MaybeHandle<Object> Object::ToInt32(Isolate* isolate, Handle<Object> input) {
-  if (input->IsSmi()) return input;
-  return ConvertToInt32(isolate, input);
+template <typename T, template <typename> typename HandleType>
+  requires(std::is_convertible_v<HandleType<T>, DirectHandle<T>>)
+typename HandleType<Number>::MaybeType Object::ToInt32(Isolate* isolate,
+                                                       HandleType<T> input) {
+  if (IsSmi(*input)) return Cast<Smi>(input);
+  return ConvertToInt32(isolate, Cast<Object>(input));
 }
 
 // static
-MaybeHandle<Object> Object::ToUint32(Isolate* isolate, Handle<Object> input) {
-  if (input->IsSmi()) return handle(Smi::cast(*input).ToUint32Smi(), isolate);
-  return ConvertToUint32(isolate, input);
+template <typename T, template <typename> typename HandleType>
+  requires(std::is_convertible_v<HandleType<T>, DirectHandle<T>>)
+typename HandleType<Number>::MaybeType Object::ToUint32(Isolate* isolate,
+                                                        HandleType<T> input) {
+  if (IsSmi(*input)) {
+    return typename HandleType<Number>::MaybeType(
+        Smi::ToUint32Smi(Cast<Smi>(*input)), isolate);
+  }
+  return ConvertToUint32(isolate, Cast<Object>(input));
 }
 
 // static
-MaybeHandle<String> Object::ToString(Isolate* isolate, Handle<Object> input) {
-  if (input->IsString()) return Handle<String>::cast(input);
-  return ConvertToString(isolate, input);
+template <typename T, template <typename> typename HandleType>
+  requires(std::is_convertible_v<HandleType<T>, DirectHandle<T>>)
+typename HandleType<String>::MaybeType Object::ToString(Isolate* isolate,
+                                                        HandleType<T> input) {
+  if (IsString(*input)) return Cast<String>(input);
+  return ConvertToString(isolate, Cast<Object>(input));
 }
 
 // static
-MaybeHandle<Object> Object::ToLength(Isolate* isolate, Handle<Object> input) {
-  if (input->IsSmi()) {
+MaybeHandle<Object> Object::ToLength(Isolate* isolate,
+                                     DirectHandle<Object> input) {
+  if (IsSmi(*input)) {
     int value = std::max(Smi::ToInt(*input), 0);
     return handle(Smi::FromInt(value), isolate);
   }
@@ -649,371 +833,82 @@ MaybeHandle<Object> Object::ToLength(Isolate* isolate, Handle<Object> input) {
 }
 
 // static
-MaybeHandle<Object> Object::ToIndex(Isolate* isolate, Handle<Object> input,
-                                    MessageTemplate error_index) {
-  if (input->IsSmi() && Smi::ToInt(*input) >= 0) return input;
-  return ConvertToIndex(isolate, input, error_index);
+template <typename T, template <typename> typename HandleType>
+  requires(std::is_convertible_v<HandleType<T>, DirectHandle<T>>)
+typename HandleType<Object>::MaybeType Object::ToIndex(
+    Isolate* isolate, HandleType<T> input, MessageTemplate error_index) {
+  if (IsSmi(*input) && Smi::ToInt(*input) >= 0) return input;
+  return ConvertToIndex(isolate, Cast<Object>(input), error_index);
 }
 
-MaybeHandle<Object> Object::GetProperty(Isolate* isolate, Handle<Object> object,
-                                        Handle<Name> name) {
-  LookupIterator it(isolate, object, name);
-  if (!it.IsFound()) return it.factory()->undefined_value();
-  return GetProperty(&it);
-}
 
-MaybeHandle<Object> Object::GetElement(Isolate* isolate, Handle<Object> object,
-                                       uint32_t index) {
-  LookupIterator it(isolate, object, index);
-  if (!it.IsFound()) return it.factory()->undefined_value();
-  return GetProperty(&it);
-}
+// static
+template <typename ObjectType>
+JSDispatchHandle HeapObject::AllocateAndInstallJSDispatchHandle(
+    DirectHandle<ObjectType> host, size_t offset, Isolate* isolate,
+    uint16_t parameter_count, DirectHandle<Code> code, WriteBarrierMode mode) {
+  JSDispatchTable::Space* space =
+      isolate->GetJSDispatchTableSpaceFor(host->field_address(offset));
+  JSDispatchHandle handle =
+      isolate->factory()->NewJSDispatchHandle(parameter_count, code, space);
 
-MaybeHandle<Object> Object::SetElement(Isolate* isolate, Handle<Object> object,
-                                       uint32_t index, Handle<Object> value,
-                                       ShouldThrow should_throw) {
-  LookupIterator it(isolate, object, index);
-  MAYBE_RETURN_NULL(
-      SetProperty(&it, value, StoreOrigin::kMaybeKeyed, Just(should_throw)));
-  return value;
-}
+  // Use a Release_Store to ensure that the store of the pointer into the table
+  // is not reordered after the store of the handle. Otherwise, other threads
+  // may access an uninitialized table entry and crash.
+  auto location =
+      reinterpret_cast<JSDispatchHandle*>(host->field_address(offset));
+  base::AsAtomic32::Release_Store(location, handle);
+  CONDITIONAL_JS_DISPATCH_HANDLE_WRITE_BARRIER(*host, handle, mode);
 
-Address Object::ReadSandboxedPointerField(size_t offset,
-                                          PtrComprCageBase cage_base) const {
-  return i::ReadSandboxedPointerField(field_address(offset), cage_base);
-}
-
-void Object::WriteSandboxedPointerField(size_t offset,
-                                        PtrComprCageBase cage_base,
-                                        Address value) {
-  i::WriteSandboxedPointerField(field_address(offset), cage_base, value);
-}
-
-void Object::WriteSandboxedPointerField(size_t offset, Isolate* isolate,
-                                        Address value) {
-  i::WriteSandboxedPointerField(field_address(offset),
-                                PtrComprCageBase(isolate), value);
-}
-
-size_t Object::ReadBoundedSizeField(size_t offset) const {
-  return i::ReadBoundedSizeField(field_address(offset));
-}
-
-void Object::WriteBoundedSizeField(size_t offset, size_t value) {
-  i::WriteBoundedSizeField(field_address(offset), value);
-}
-
-template <ExternalPointerTag tag>
-void Object::InitExternalPointerField(size_t offset, Isolate* isolate,
-                                      Address value) {
-  i::InitExternalPointerField<tag>(field_address(offset), isolate, value);
-}
-
-template <ExternalPointerTag tag>
-Address Object::ReadExternalPointerField(size_t offset,
-                                         Isolate* isolate) const {
-  return i::ReadExternalPointerField<tag>(field_address(offset), isolate);
-}
-
-template <ExternalPointerTag tag>
-void Object::WriteExternalPointerField(size_t offset, Isolate* isolate,
-                                       Address value) {
-  i::WriteExternalPointerField<tag>(field_address(offset), isolate, value);
-}
-
-void Object::InitCodePointerField(size_t offset, Isolate* isolate,
-                                  Address value) {
-  i::InitCodePointerField(field_address(offset), isolate, value);
-}
-
-Address Object::ReadCodePointerField(size_t offset) const {
-  return i::ReadCodePointerField(field_address(offset));
-}
-
-void Object::WriteCodePointerField(size_t offset, Address value) {
-  i::WriteCodePointerField(field_address(offset), value);
-}
-
-ObjectSlot HeapObject::RawField(int byte_offset) const {
-  return ObjectSlot(field_address(byte_offset));
-}
-
-MaybeObjectSlot HeapObject::RawMaybeWeakField(int byte_offset) const {
-  return MaybeObjectSlot(field_address(byte_offset));
-}
-
-InstructionStreamSlot HeapObject::RawInstructionStreamField(
-    int byte_offset) const {
-  return InstructionStreamSlot(field_address(byte_offset));
-}
-
-ExternalPointerSlot HeapObject::RawExternalPointerField(int byte_offset) const {
-  return ExternalPointerSlot(field_address(byte_offset));
-}
-
-MapWord MapWord::FromMap(const Map map) {
-  DCHECK(map.is_null() || !MapWord::IsPacked(map.ptr()));
-#ifdef V8_MAP_PACKING
-  return MapWord(Pack(map.ptr()));
-#else
-  return MapWord(map.ptr());
-#endif
-}
-
-Map MapWord::ToMap() const {
-#ifdef V8_MAP_PACKING
-  return Map::unchecked_cast(Object(Unpack(value_)));
-#else
-  return Map::unchecked_cast(Object(value_));
-#endif
-}
-
-bool MapWord::IsForwardingAddress() const {
-#ifdef V8_EXTERNAL_CODE_SPACE
-  // When external code space is enabled forwarding pointers are encoded as
-  // Smi representing a diff from the source object address in kObjectAlignment
-  // chunks.
-  return HAS_SMI_TAG(value_);
-#else
-  return (value_ & kForwardingTagMask) == kForwardingTag;
-#endif  // V8_EXTERNAL_CODE_SPACE
-}
-
-MapWord MapWord::FromForwardingAddress(HeapObject map_word_host,
-                                       HeapObject object) {
-#ifdef V8_EXTERNAL_CODE_SPACE
-  // When external code space is enabled forwarding pointers are encoded as
-  // Smi representing a diff from the source object address in kObjectAlignment
-  // chunks.
-  intptr_t diff = static_cast<intptr_t>(object.ptr() - map_word_host.ptr());
-  DCHECK(IsAligned(diff, kObjectAlignment));
-  MapWord map_word(Smi::FromIntptr(diff / kObjectAlignment).ptr());
-  DCHECK(map_word.IsForwardingAddress());
-  return map_word;
-#else
-  return MapWord(object.ptr() - kHeapObjectTag);
-#endif  // V8_EXTERNAL_CODE_SPACE
-}
-
-HeapObject MapWord::ToForwardingAddress(HeapObject map_word_host) {
-  DCHECK(IsForwardingAddress());
-#ifdef V8_EXTERNAL_CODE_SPACE
-  // When external code space is enabled forwarding pointers are encoded as
-  // Smi representing a diff from the source object address in kObjectAlignment
-  // chunks.
-  intptr_t diff = static_cast<intptr_t>(Smi(value_).value()) * kObjectAlignment;
-  Address address = map_word_host.address() + diff;
-  return HeapObject::FromAddress(address);
-#else
-  return HeapObject::FromAddress(value_);
-#endif  // V8_EXTERNAL_CODE_SPACE
+  return handle;
 }
 
 #ifdef VERIFY_HEAP
 void HeapObject::VerifyObjectField(Isolate* isolate, int offset) {
-  VerifyPointer(isolate, TaggedField<Object>::load(isolate, *this, offset));
+  Object::VerifyPointer(isolate, TaggedField<Object>::load(this, offset));
   static_assert(!COMPRESS_POINTERS_BOOL || kTaggedSize == kInt32Size);
 }
 
 void HeapObject::VerifyMaybeObjectField(Isolate* isolate, int offset) {
-  MaybeObject::VerifyMaybeObjectPointer(
-      isolate, TaggedField<MaybeObject>::load(isolate, *this, offset));
+  Object::VerifyMaybeObjectPointer(
+      isolate, TaggedField<MaybeObject>::load(this, offset));
   static_assert(!COMPRESS_POINTERS_BOOL || kTaggedSize == kInt32Size);
 }
 
 void HeapObject::VerifySmiField(int offset) {
-  CHECK(TaggedField<Object>::load(*this, offset).IsSmi());
+  CHECK(IsSmi(TaggedField<Object>::load(this, offset)));
   static_assert(!COMPRESS_POINTERS_BOOL || kTaggedSize == kInt32Size);
 }
 
 #endif
 
-ReadOnlyRoots HeapObject::EarlyGetReadOnlyRoots() const {
-  return ReadOnlyHeap::EarlyGetReadOnlyRoots(*this);
-}
-
-ReadOnlyRoots HeapObject::GetReadOnlyRoots() const {
-  return ReadOnlyHeap::GetReadOnlyRoots(*this);
-}
-
-// TODO(v8:13788): Remove this cage-ful accessor.
-ReadOnlyRoots HeapObject::GetReadOnlyRoots(PtrComprCageBase cage_base) const {
-  return GetReadOnlyRoots();
-}
-
-Map HeapObject::map() const {
-  // This method is never used for objects located in code space
-  // (InstructionStream and free space fillers) and thus it is fine to use
-  // auto-computed cage base value.
-  DCHECK_IMPLIES(V8_EXTERNAL_CODE_SPACE_BOOL, !IsCodeSpaceObject(*this));
-  PtrComprCageBase cage_base = GetPtrComprCageBase(*this);
-  return HeapObject::map(cage_base);
-}
-Map HeapObject::map(PtrComprCageBase cage_base) const {
-  return map_word(cage_base, kRelaxedLoad).ToMap();
-}
-
-void HeapObject::set_map(Map value) {
-  set_map<EmitWriteBarrier::kYes>(value, kRelaxedStore,
-                                  VerificationMode::kPotentialLayoutChange);
-}
-
-void HeapObject::set_map(Map value, ReleaseStoreTag tag) {
-  set_map<EmitWriteBarrier::kYes>(value, kReleaseStore,
-                                  VerificationMode::kPotentialLayoutChange);
-}
-
-void HeapObject::set_map_safe_transition(Map value) {
-  set_map<EmitWriteBarrier::kYes>(value, kRelaxedStore,
-                                  VerificationMode::kSafeMapTransition);
-}
-
-void HeapObject::set_map_safe_transition(Map value, ReleaseStoreTag tag) {
-  set_map<EmitWriteBarrier::kYes>(value, kReleaseStore,
-                                  VerificationMode::kSafeMapTransition);
-}
-
-void HeapObject::set_map_safe_transition_no_write_barrier(Map value,
-                                                          RelaxedStoreTag tag) {
-  set_map<EmitWriteBarrier::kNo>(value, kRelaxedStore,
-                                 VerificationMode::kSafeMapTransition);
-}
-
-void HeapObject::set_map_safe_transition_no_write_barrier(Map value,
-                                                          ReleaseStoreTag tag) {
-  set_map<EmitWriteBarrier::kNo>(value, kReleaseStore,
-                                 VerificationMode::kSafeMapTransition);
-}
-
-// Unsafe accessor omitting write barrier.
-void HeapObject::set_map_no_write_barrier(Map value, RelaxedStoreTag tag) {
-  set_map<EmitWriteBarrier::kNo>(value, kRelaxedStore,
-                                 VerificationMode::kPotentialLayoutChange);
-}
-
-void HeapObject::set_map_no_write_barrier(Map value, ReleaseStoreTag tag) {
-  set_map<EmitWriteBarrier::kNo>(value, kReleaseStore,
-                                 VerificationMode::kPotentialLayoutChange);
-}
-
-template <HeapObject::EmitWriteBarrier emit_write_barrier, typename MemoryOrder>
-void HeapObject::set_map(Map value, MemoryOrder order, VerificationMode mode) {
-#if V8_ENABLE_WEBASSEMBLY
-  // In {WasmGraphBuilder::SetMap} and {WasmGraphBuilder::LoadMap}, we treat
-  // maps as immutable. Therefore we are not allowed to mutate them here.
-  DCHECK(!value.IsWasmStructMap() && !value.IsWasmArrayMap());
-#endif
-  // Object layout changes are currently not supported on background threads.
-  // This method might change object layout and therefore can't be used on
-  // background threads.
-  DCHECK_IMPLIES(mode != VerificationMode::kSafeMapTransition,
-                 !LocalHeap::Current());
-  if (v8_flags.verify_heap && !value.is_null()) {
-    Heap* heap = GetHeapFromWritableObject(*this);
-    if (mode == VerificationMode::kSafeMapTransition) {
-      HeapVerifier::VerifySafeMapTransition(heap, *this, value);
-    } else {
-      DCHECK_EQ(mode, VerificationMode::kPotentialLayoutChange);
-      HeapVerifier::VerifyObjectLayoutChange(heap, *this, value);
-    }
+// static
+bool JSArray::MayHaveReadOnlyLength(Tagged<Map> js_array_map) {
+  DCHECK(IsJSArrayMap(js_array_map));
+  if (V8_UNLIKELY(
+          js_array_map->instance_descriptors()->number_of_descriptors() == 0)) {
+    return true;
   }
-  set_map_word(value, order);
-  Heap::NotifyObjectLayoutChangeDone(*this);
-#ifndef V8_DISABLE_WRITE_BARRIERS
-  if (!value.is_null()) {
-    if (emit_write_barrier == EmitWriteBarrier::kYes) {
-      CombinedWriteBarrier(*this, map_slot(), value, UPDATE_WRITE_BARRIER);
-    } else {
-      DCHECK_EQ(emit_write_barrier, EmitWriteBarrier::kNo);
-      SLOW_DCHECK(!WriteBarrier::IsRequired(*this, value));
-    }
-  }
-#endif
+  DCHECK(!js_array_map->is_dictionary_map());
+
+  // Fast path: "length" is the first fast property of arrays with non
+  // dictionary properties. Since it's not configurable, it's guaranteed to be
+  // the first in the descriptor array.
+  InternalIndex first(0);
+  DCHECK(js_array_map->instance_descriptors()->GetKey(first) ==
+         GetReadOnlyRoots().length_string());
+  return V8_UNLIKELY(
+      js_array_map->instance_descriptors()->GetDetails(first).IsReadOnly());
 }
 
-void HeapObject::set_map_after_allocation(Map value, WriteBarrierMode mode) {
-  set_map_word(value, kRelaxedStore);
-#ifndef V8_DISABLE_WRITE_BARRIERS
-  if (mode != SKIP_WRITE_BARRIER) {
-    DCHECK(!value.is_null());
-    CombinedWriteBarrier(*this, map_slot(), value, mode);
-  } else {
-    SLOW_DCHECK(!WriteBarrier::IsRequired(*this, value));
-  }
-#endif
+bool JSArray::HasReadOnlyLength(DirectHandle<JSArray> array) {
+  Tagged<Map> map = array->map();
+
+  // If map guarantees that there can't be a read-only length, we are done.
+  if (!MayHaveReadOnlyLength(map)) return false;
+  return V8_UNLIKELY(HasReadOnlyLengthSlowPath(array));
 }
 
-DEF_ACQUIRE_GETTER(HeapObject, map, Map) {
-  return map_word(cage_base, kAcquireLoad).ToMap();
-}
-
-ObjectSlot HeapObject::map_slot() const {
-  return ObjectSlot(MapField::address(*this));
-}
-
-MapWord HeapObject::map_word(RelaxedLoadTag tag) const {
-  // This method is never used for objects located in code space
-  // (InstructionStream and free space fillers) and thus it is fine to use
-  // auto-computed cage base value.
-  DCHECK_IMPLIES(V8_EXTERNAL_CODE_SPACE_BOOL, !IsCodeSpaceObject(*this));
-  PtrComprCageBase cage_base = GetPtrComprCageBase(*this);
-  return HeapObject::map_word(cage_base, tag);
-}
-MapWord HeapObject::map_word(PtrComprCageBase cage_base,
-                             RelaxedLoadTag tag) const {
-  return MapField::Relaxed_Load_Map_Word(cage_base, *this);
-}
-
-void HeapObject::set_map_word(Map map, RelaxedStoreTag) {
-  MapField::Relaxed_Store_Map_Word(*this, MapWord::FromMap(map));
-}
-
-void HeapObject::set_map_word_forwarded(HeapObject target_object,
-                                        RelaxedStoreTag) {
-  MapField::Relaxed_Store_Map_Word(
-      *this, MapWord::FromForwardingAddress(*this, target_object));
-}
-
-MapWord HeapObject::map_word(AcquireLoadTag tag) const {
-  // This method is never used for objects located in code space
-  // (InstructionStream and free space fillers) and thus it is fine to use
-  // auto-computed cage base value.
-  DCHECK_IMPLIES(V8_EXTERNAL_CODE_SPACE_BOOL, !IsCodeSpaceObject(*this));
-  PtrComprCageBase cage_base = GetPtrComprCageBase(*this);
-  return HeapObject::map_word(cage_base, tag);
-}
-MapWord HeapObject::map_word(PtrComprCageBase cage_base,
-                             AcquireLoadTag tag) const {
-  return MapField::Acquire_Load_No_Unpack(cage_base, *this);
-}
-
-void HeapObject::set_map_word(Map map, ReleaseStoreTag) {
-  MapField::Release_Store_Map_Word(*this, MapWord::FromMap(map));
-}
-
-void HeapObject::set_map_word_forwarded(HeapObject target_object,
-                                        ReleaseStoreTag) {
-  MapField::Release_Store_Map_Word(
-      *this, MapWord::FromForwardingAddress(*this, target_object));
-}
-
-bool HeapObject::release_compare_and_swap_map_word_forwarded(
-    MapWord old_map_word, HeapObject new_target_object) {
-  Tagged_t result = MapField::Release_CompareAndSwap(
-      *this, old_map_word,
-      MapWord::FromForwardingAddress(*this, new_target_object));
-  return result == static_cast<Tagged_t>(old_map_word.ptr());
-}
-
-// TODO(v8:11880): consider dropping parameterless version.
-int HeapObject::Size() const {
-  DCHECK_IMPLIES(V8_EXTERNAL_CODE_SPACE_BOOL, !IsCodeSpaceObject(*this));
-  PtrComprCageBase cage_base = GetPtrComprCageBase(*this);
-  return HeapObject::Size(cage_base);
-}
-int HeapObject::Size(PtrComprCageBase cage_base) const {
-  return SizeFromMap(map(cage_base));
-}
 
 inline bool IsSpecialReceiverInstanceType(InstanceType instance_type) {
   return instance_type <= LAST_SPECIAL_RECEIVER_TYPE;
@@ -1021,10 +916,10 @@ inline bool IsSpecialReceiverInstanceType(InstanceType instance_type) {
 
 // This should be in objects/map-inl.h, but can't, because of a cyclic
 // dependency.
-bool Map::IsSpecialReceiverMap() const {
-  bool result = IsSpecialReceiverInstanceType(instance_type());
-  DCHECK_IMPLIES(!result,
-                 !has_named_interceptor() && !is_access_check_needed());
+bool IsSpecialReceiverMap(Tagged<Map> map) {
+  bool result = IsSpecialReceiverInstanceType(map->instance_type());
+  DCHECK_IMPLIES(
+      !result, !map->has_named_interceptor() && !map->is_access_check_needed());
   return result;
 }
 
@@ -1034,64 +929,56 @@ inline bool IsCustomElementsReceiverInstanceType(InstanceType instance_type) {
 
 // This should be in objects/map-inl.h, but can't, because of a cyclic
 // dependency.
-bool Map::IsCustomElementsReceiverMap() const {
-  return IsCustomElementsReceiverInstanceType(instance_type());
+bool IsCustomElementsReceiverMap(Tagged<Map> map) {
+  return IsCustomElementsReceiverInstanceType(map->instance_type());
 }
 
-bool Object::ToArrayLength(uint32_t* index) const {
-  return Object::ToUint32(index);
-}
-
-bool Object::ToArrayIndex(uint32_t* index) const {
-  return Object::ToUint32(index) && *index != kMaxUInt32;
-}
-
-bool Object::ToIntegerIndex(size_t* index) const {
-  if (IsSmi()) {
-    int num = Smi::ToInt(*this);
-    if (num < 0) return false;
-    *index = static_cast<size_t>(num);
-    return true;
-  }
-  if (IsHeapNumber()) {
-    double num = HeapNumber::cast(*this).value();
-    if (!(num >= 0)) return false;  // Negation to catch NaNs.
-    constexpr double max =
-        std::min(kMaxSafeInteger,
-                 // The maximum size_t is reserved as "invalid" sentinel.
-                 static_cast<double>(std::numeric_limits<size_t>::max() - 1));
-    if (num > max) return false;
-    size_t result = static_cast<size_t>(num);
-    if (num != result) return false;  // Conversion lost fractional precision.
-    *index = result;
-    return true;
-  }
-  return false;
-}
-
-WriteBarrierMode HeapObject::GetWriteBarrierMode(
+WriteBarrierModeScope HeapObject::GetWriteBarrierMode(
     const DisallowGarbageCollection& promise) {
-  return GetWriteBarrierModeForObject(*this, &promise);
+  return WriteBarrier::GetWriteBarrierModeForObject(this, promise);
 }
 
 // static
-AllocationAlignment HeapObject::RequiredAlignment(Map map) {
+AllocationAlignment HeapObject::RequiredAlignment(AllocationSpace space,
+                                                  Tagged<Map> map) {
+  return RequiredAlignment(InSharedSpace{IsAnyWritableSharedSpace(space)}, map);
+}
+
+// static
+AllocationAlignment HeapObject::RequiredAlignment(InSharedSpace in_shared_space,
+                                                  Tagged<Map> map) {
   // TODO(v8:4153): We should think about requiring double alignment
   // in general for ByteArray, since they are used as backing store for typed
   // arrays now.
   // TODO(ishell, v8:8875): Consider using aligned allocations for BigInt.
-  if (USE_ALLOCATION_ALIGNMENT_BOOL) {
-    int instance_type = map.instance_type();
+  if (USE_ALLOCATION_ALIGNMENT_HEAP_NUMBER_BOOL) {
+    int instance_type = map->instance_type();
+
+    static_assert(!USE_ALLOCATION_ALIGNMENT_HEAP_NUMBER_BOOL ||
+                  (OFFSET_OF_DATA_START(FixedDoubleArray) &
+                   kDoubleAlignmentMask) == kTaggedSize);
     if (instance_type == FIXED_DOUBLE_ARRAY_TYPE) return kDoubleAligned;
+
+    static_assert(!USE_ALLOCATION_ALIGNMENT_HEAP_NUMBER_BOOL ||
+                  (offsetof(HeapNumber, value_) & kDoubleAlignmentMask) ==
+                      kTaggedSize);
     if (instance_type == HEAP_NUMBER_TYPE) return kDoubleUnaligned;
   }
+#if V8_ENABLE_WEBASSEMBLY
+  if (in_shared_space && v8_flags.wasm_shared) [[unlikely]] {
+    int instance_type = map->instance_type();
+    if (instance_type == WASM_STRUCT_TYPE) {
+      // The map of a shared wasm struct needs to be in the shared space.
+      DCHECK(HeapLayout::InWritableSharedSpace(map));
+      return kDoubleAligned;
+    } else if (instance_type == WASM_ARRAY_TYPE) {
+      // The map of a shared wasm array needs to be in the shared space.
+      DCHECK(HeapLayout::InWritableSharedSpace(map));
+      return kDoubleUnaligned;
+    }
+  }
+#endif
   return kTaggedAligned;
-}
-
-bool HeapObject::CheckRequiredAlignment(PtrComprCageBase cage_base) const {
-  AllocationAlignment alignment = HeapObject::RequiredAlignment(map(cage_base));
-  CHECK_EQ(0, Heap::GetFillToAlign(address(), alignment));
-  return true;
 }
 
 Address HeapObject::GetFieldAddress(int field_offset) const {
@@ -1099,8 +986,8 @@ Address HeapObject::GetFieldAddress(int field_offset) const {
 }
 
 // static
-Maybe<bool> Object::GreaterThan(Isolate* isolate, Handle<Object> x,
-                                Handle<Object> y) {
+Maybe<bool> Object::GreaterThan(Isolate* isolate, DirectHandle<Object> x,
+                                DirectHandle<Object> y) {
   Maybe<ComparisonResult> result = Compare(isolate, x, y);
   if (result.IsJust()) {
     switch (result.FromJust()) {
@@ -1116,8 +1003,8 @@ Maybe<bool> Object::GreaterThan(Isolate* isolate, Handle<Object> x,
 }
 
 // static
-Maybe<bool> Object::GreaterThanOrEqual(Isolate* isolate, Handle<Object> x,
-                                       Handle<Object> y) {
+Maybe<bool> Object::GreaterThanOrEqual(Isolate* isolate, DirectHandle<Object> x,
+                                       DirectHandle<Object> y) {
   Maybe<ComparisonResult> result = Compare(isolate, x, y);
   if (result.IsJust()) {
     switch (result.FromJust()) {
@@ -1133,8 +1020,8 @@ Maybe<bool> Object::GreaterThanOrEqual(Isolate* isolate, Handle<Object> x,
 }
 
 // static
-Maybe<bool> Object::LessThan(Isolate* isolate, Handle<Object> x,
-                             Handle<Object> y) {
+Maybe<bool> Object::LessThan(Isolate* isolate, DirectHandle<Object> x,
+                             DirectHandle<Object> y) {
   Maybe<ComparisonResult> result = Compare(isolate, x, y);
   if (result.IsJust()) {
     switch (result.FromJust()) {
@@ -1150,8 +1037,8 @@ Maybe<bool> Object::LessThan(Isolate* isolate, Handle<Object> x,
 }
 
 // static
-Maybe<bool> Object::LessThanOrEqual(Isolate* isolate, Handle<Object> x,
-                                    Handle<Object> y) {
+Maybe<bool> Object::LessThanOrEqual(Isolate* isolate, DirectHandle<Object> x,
+                                    DirectHandle<Object> y) {
   Maybe<ComparisonResult> result = Compare(isolate, x, y);
   if (result.IsJust()) {
     switch (result.FromJust()) {
@@ -1166,159 +1053,100 @@ Maybe<bool> Object::LessThanOrEqual(Isolate* isolate, Handle<Object> x,
   return Nothing<bool>();
 }
 
-MaybeHandle<Object> Object::GetPropertyOrElement(Isolate* isolate,
-                                                 Handle<Object> object,
-                                                 Handle<Name> name) {
-  PropertyKey key(isolate, name);
-  LookupIterator it(isolate, object, key);
-  return GetProperty(&it);
-}
-
-MaybeHandle<Object> Object::SetPropertyOrElement(
-    Isolate* isolate, Handle<Object> object, Handle<Name> name,
-    Handle<Object> value, Maybe<ShouldThrow> should_throw,
-    StoreOrigin store_origin) {
-  PropertyKey key(isolate, name);
-  LookupIterator it(isolate, object, key);
-  MAYBE_RETURN_NULL(SetProperty(&it, value, store_origin, should_throw));
-  return value;
-}
-
-MaybeHandle<Object> Object::GetPropertyOrElement(Handle<Object> receiver,
-                                                 Handle<Name> name,
-                                                 Handle<JSReceiver> holder) {
-  Isolate* isolate = holder->GetIsolate();
-  PropertyKey key(isolate, name);
-  LookupIterator it(isolate, receiver, key, holder);
-  return GetProperty(&it);
-}
-
 // static
-Object Object::GetSimpleHash(Object object) {
+Tagged<Object> Object::GetSimpleHash(Tagged<Object> object) {
   DisallowGarbageCollection no_gc;
-  if (object.IsSmi()) {
-    uint32_t hash = ComputeUnseededHash(Smi::ToInt(object));
-    return Smi::FromInt(hash & Smi::kMaxValue);
+  if (IsSmi(object)) {
+    return Smi::FromInt(SmiHash32(static_cast<uint32_t>(Smi::ToInt(object))));
   }
-  auto instance_type = HeapObject::cast(object).map().instance_type();
+  auto instance_type = Cast<HeapObject>(object)->map()->instance_type();
   if (InstanceTypeChecker::IsHeapNumber(instance_type)) {
-    double num = HeapNumber::cast(object).value();
+    double num = Cast<HeapNumber>(object)->value();
     if (std::isnan(num)) return Smi::FromInt(Smi::kMaxValue);
-    // Use ComputeUnseededHash for all values in Signed32 range, including -0,
-    // which is considered equal to 0 because collections use SameValueZero.
+    // For values in Signed32 range, including -0 (which is considered equal
+    // to 0 because collections use SameValueZero), hash the integer form to
+    // match the Smi branch above.
     uint32_t hash;
     // Check range before conversion to avoid undefined behavior.
     if (num >= kMinInt && num <= kMaxInt && FastI2D(FastD2I(num)) == num) {
-      hash = ComputeUnseededHash(FastD2I(num));
+      hash = SmiHash32(static_cast<uint32_t>(FastD2I(num)));
     } else {
-      hash = ComputeLongHash(base::double_to_uint64(num));
+      hash = SmiHash64(base::double_to_uint64(num));
     }
-    return Smi::FromInt(hash & Smi::kMaxValue);
+    return Smi::FromInt(hash);
   } else if (InstanceTypeChecker::IsName(instance_type)) {
-    uint32_t hash = Name::cast(object).EnsureHash();
+    uint32_t hash = Cast<Name>(object)->EnsureHash();
     return Smi::FromInt(hash);
   } else if (InstanceTypeChecker::IsOddball(instance_type)) {
-    uint32_t hash = Oddball::cast(object).to_string().EnsureHash();
+    uint32_t hash = Cast<Oddball>(object)->to_string()->EnsureHash();
     return Smi::FromInt(hash);
   } else if (InstanceTypeChecker::IsBigInt(instance_type)) {
-    uint32_t hash = BigInt::cast(object).Hash();
+    uint32_t hash = Cast<BigInt>(object)->Hash();
     return Smi::FromInt(hash & Smi::kMaxValue);
   } else if (InstanceTypeChecker::IsSharedFunctionInfo(instance_type)) {
-    uint32_t hash = SharedFunctionInfo::cast(object).Hash();
+    uint32_t hash = Cast<SharedFunctionInfo>(object)->Hash();
     return Smi::FromInt(hash & Smi::kMaxValue);
   } else if (InstanceTypeChecker::IsScopeInfo(instance_type)) {
-    uint32_t hash = ScopeInfo::cast(object).Hash();
+    uint32_t hash = Cast<ScopeInfo>(object)->Hash();
     return Smi::FromInt(hash & Smi::kMaxValue);
   } else if (InstanceTypeChecker::IsScript(instance_type)) {
-    int id = Script::cast(object).id();
-    return Smi::FromInt(ComputeUnseededHash(id) & Smi::kMaxValue);
+    int id = Cast<Script>(object)->id();
+    return Smi::FromInt(SmiHash32(static_cast<uint32_t>(id)));
+  } else if (InstanceTypeChecker::IsTemplateInfo(instance_type)) {
+    uint32_t hash = Cast<TemplateInfo>(object)->GetHash();
+    DCHECK_EQ(hash, hash & kSmiHashMask);
+    return Smi::FromInt(hash);
   }
-  DCHECK(object.IsJSReceiver());
+
+  DCHECK_NE(instance_type, HOLE_TYPE);
+  DCHECK(IsJSReceiver(object));
   return object;
 }
 
-Object Object::GetHash() {
+// static
+Tagged<Object> Object::GetHash(Tagged<Object> obj) {
   DisallowGarbageCollection no_gc;
-  Object hash = GetSimpleHash(*this);
-  if (hash.IsSmi()) return hash;
+  Tagged<Object> hash = GetSimpleHash(obj);
+  if (IsSmi(hash)) return hash;
 
-  DCHECK(IsJSReceiver());
-  JSReceiver receiver = JSReceiver::cast(*this);
-  return receiver.GetIdentityHash();
-}
-
-bool Object::IsShared() const {
-  // This logic should be kept in sync with fast paths in
-  // CodeStubAssembler::SharedValueBarrier.
-
-  // Smis are trivially shared.
-  if (IsSmi()) return true;
-
-  HeapObject object = HeapObject::cast(*this);
-
-  // RO objects are shared when the RO space is shared.
-  if (IsReadOnlyHeapObject(object)) {
-    return ReadOnlyHeap::IsReadOnlySpaceShared();
-  }
-
-  // Check if this object is already shared.
-  InstanceType instance_type = object.map().instance_type();
-  if (InstanceTypeChecker::IsAlwaysSharedSpaceJSObject(instance_type)) {
-    DCHECK(object.InAnySharedSpace());
-    return true;
-  }
-  switch (instance_type) {
-    case SHARED_STRING_TYPE:
-    case SHARED_ONE_BYTE_STRING_TYPE:
-    case SHARED_EXTERNAL_STRING_TYPE:
-    case SHARED_EXTERNAL_ONE_BYTE_STRING_TYPE:
-    case SHARED_UNCACHED_EXTERNAL_STRING_TYPE:
-    case SHARED_UNCACHED_EXTERNAL_ONE_BYTE_STRING_TYPE:
-      DCHECK(object.InAnySharedSpace());
-      return true;
-    case INTERNALIZED_STRING_TYPE:
-    case ONE_BYTE_INTERNALIZED_STRING_TYPE:
-    case EXTERNAL_INTERNALIZED_STRING_TYPE:
-    case EXTERNAL_ONE_BYTE_INTERNALIZED_STRING_TYPE:
-    case UNCACHED_EXTERNAL_INTERNALIZED_STRING_TYPE:
-    case UNCACHED_EXTERNAL_ONE_BYTE_INTERNALIZED_STRING_TYPE:
-      if (v8_flags.shared_string_table) {
-        DCHECK(object.InAnySharedSpace());
-        return true;
-      }
-      return false;
-    case HEAP_NUMBER_TYPE:
-      return object.InWritableSharedSpace();
-    default:
-      return false;
-  }
+  // Make sure that we never cast internal objects to JSReceivers.
+  CHECK(IsJSReceiver(obj));
+  Tagged<JSReceiver> receiver = Cast<JSReceiver>(obj);
+  return receiver->GetIdentityHash();
 }
 
 // static
-MaybeHandle<Object> Object::Share(Isolate* isolate, Handle<Object> value,
-                                  ShouldThrow throw_if_cannot_be_shared) {
+template <typename T, template <typename> typename HandleType>
+  requires(std::is_convertible_v<HandleType<T>, DirectHandle<T>>)
+typename HandleType<Object>::MaybeType Object::Share(
+    Isolate* isolate, HandleType<T> value,
+    ShouldThrow throw_if_cannot_be_shared) {
   // Sharing values requires the RO space be shared.
-  DCHECK(ReadOnlyHeap::IsReadOnlySpaceShared());
-  if (value->IsShared()) return value;
-  return ShareSlow(isolate, Handle<HeapObject>::cast(value),
-                   throw_if_cannot_be_shared);
+  if (IsShared(*value)) return value;
+  return ShareSlow(isolate, Cast<HeapObject>(value), throw_if_cannot_be_shared);
 }
 
 // https://tc39.es/ecma262/#sec-canbeheldweakly
-bool Object::CanBeHeldWeakly() const {
-  if (IsJSReceiver()) {
+// static
+bool Object::CanBeHeldWeakly(Tagged<Object> obj) {
+  if (IsJSReceiver(obj)) {
     // TODO(v8:12547) Shared structs and arrays should only be able to point
     // to shared values in weak collections. For now, disallow them as weak
     // collection keys.
-    if (v8_flags.harmony_struct) {
-      return !IsJSSharedStruct() && !IsJSSharedArray();
+#if V8_ENABLE_WEBASSEMBLY
+    if (v8_flags.wasm_shared && (IsWasmStruct(obj) || IsWasmArray(obj)) &&
+        HeapLayout::InAnySharedSpace(Cast<HeapObject>(obj))) {
+      return false;
     }
-    return true;
+#endif
+    return (!v8_flags.harmony_struct ||
+            (!IsJSSharedStruct(obj) && !IsJSSharedArray(obj)));
   }
-  return IsSymbol() && !Symbol::cast(*this).is_in_public_symbol_table();
+  return IsSymbol(obj) && !Cast<Symbol>(obj)->is_in_public_symbol_table();
 }
 
-Handle<Object> ObjectHashTableShape::AsHandle(Handle<Object> key) {
+DirectHandle<Object> ObjectHashTableShapeBase::AsHandle(
+    DirectHandle<Object> key) {
   return key;
 }
 
@@ -1335,15 +1163,14 @@ Relocatable::~Relocatable() {
 
 // Predictably converts HeapObject or Address to uint32 by calculating
 // offset of the address in respective MemoryChunk.
-static inline uint32_t ObjectAddressForHashing(Address object) {
-  uint32_t value = static_cast<uint32_t>(object);
-  return value & kPageAlignmentMask;
+inline uint32_t ObjectAddressForHashing(Address object) {
+  return MemoryChunk::AddressToOffset(object);
 }
 
-static inline Handle<Object> MakeEntryPair(Isolate* isolate, size_t index,
-                                           Handle<Object> value) {
-  Handle<Object> key = isolate->factory()->SizeToString(index);
-  Handle<FixedArray> entry_storage = isolate->factory()->NewFixedArray(2);
+inline DirectHandle<Object> MakeEntryPair(Isolate* isolate, size_t index,
+                                          DirectHandle<Object> value) {
+  DirectHandle<Object> key = isolate->factory()->SizeToString(index);
+  DirectHandle<FixedArray> entry_storage = isolate->factory()->NewFixedArray(2);
   {
     entry_storage->set(0, *key, SKIP_WRITE_BARRIER);
     entry_storage->set(1, *value, SKIP_WRITE_BARRIER);
@@ -1352,20 +1179,16 @@ static inline Handle<Object> MakeEntryPair(Isolate* isolate, size_t index,
                                                     PACKED_ELEMENTS, 2);
 }
 
-static inline Handle<Object> MakeEntryPair(Isolate* isolate, Handle<Object> key,
-                                           Handle<Object> value) {
-  Handle<FixedArray> entry_storage = isolate->factory()->NewFixedArray(2);
+inline DirectHandle<Object> MakeEntryPair(Isolate* isolate,
+                                          DirectHandle<Object> key,
+                                          DirectHandle<Object> value) {
+  DirectHandle<FixedArray> entry_storage = isolate->factory()->NewFixedArray(2);
   {
     entry_storage->set(0, *key, SKIP_WRITE_BARRIER);
     entry_storage->set(1, *value, SKIP_WRITE_BARRIER);
   }
   return isolate->factory()->NewJSArrayWithElements(entry_storage,
                                                     PACKED_ELEMENTS, 2);
-}
-
-FreshlyAllocatedBigInt FreshlyAllocatedBigInt::cast(Object object) {
-  SLOW_DCHECK(object.IsBigInt());
-  return FreshlyAllocatedBigInt(object.ptr());
 }
 
 }  // namespace internal

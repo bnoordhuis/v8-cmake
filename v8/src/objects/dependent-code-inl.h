@@ -6,7 +6,9 @@
 #define V8_OBJECTS_DEPENDENT_CODE_INL_H_
 
 #include "src/objects/dependent-code.h"
-#include "src/objects/fixed-array-inl.h"
+// Include the non-inl header before the rest of the headers.
+
+#include "src/heap/heap-layout-inl.h"
 #include "src/objects/tagged.h"
 
 // Has to be the last include (doesn't have include guards):
@@ -14,9 +16,6 @@
 
 namespace v8 {
 namespace internal {
-
-OBJECT_CONSTRUCTORS_IMPL(DependentCode, WeakArrayList)
-CAST_ACCESSOR(DependentCode)
 
 // static
 template <typename ObjectT>
@@ -32,17 +31,20 @@ void DependentCode::DeoptimizeDependencyGroups(Isolate* isolate,
                                                Tagged<ObjectT> object,
                                                DependencyGroups groups) {
   // Shared objects are designed to never invalidate code.
-  DCHECK(!object->InSharedHeap() && !object->InReadOnlySpace());
-  object->dependent_code().DeoptimizeDependencyGroups(isolate, groups);
+  DCHECK(!HeapLayout::InAnySharedSpace(object) &&
+         !HeapLayout::InReadOnlySpace(object));
+  object->dependent_code()->DeoptimizeDependencyGroups(isolate, groups);
 }
 
 // static
 template <typename ObjectT>
-bool DependentCode::MarkCodeForDeoptimization(Isolate* isolate, ObjectT object,
+bool DependentCode::MarkCodeForDeoptimization(Isolate* isolate,
+                                              Tagged<ObjectT> object,
                                               DependencyGroups groups) {
   // Shared objects are designed to never invalidate code.
-  DCHECK(!object.InSharedHeap() && !object.InReadOnlySpace());
-  return object.dependent_code().MarkCodeForDeoptimization(isolate, groups);
+  DCHECK(!HeapLayout::InAnySharedSpace(object) &&
+         !HeapLayout::InReadOnlySpace(object));
+  return object->dependent_code()->MarkCodeForDeoptimization(isolate, groups);
 }
 
 }  // namespace internal

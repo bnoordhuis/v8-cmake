@@ -7,14 +7,15 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 
+#include "include/cppgc/persistent.h"
 #include "include/v8-array-buffer.h"
 #include "include/v8-inspector.h"
 #include "include/v8-local-handle.h"
 #include "include/v8-locker.h"
 #include "include/v8-script.h"
-#include "src/base/optional.h"
 
 namespace v8 {
 
@@ -25,6 +26,7 @@ class StartupData;
 
 namespace internal {
 
+class DevToolsSession;
 class FrontendChannelImpl;
 class TaskRunner;
 
@@ -65,9 +67,10 @@ class InspectorIsolateData : public v8_inspector::V8InspectorClient {
                       v8::ScriptCompiler::Source* source);
 
   // Working with V8Inspector api.
-  int ConnectSession(int context_group_id,
-                     const v8_inspector::StringView& state,
-                     std::unique_ptr<FrontendChannelImpl> channel);
+  std::optional<int> ConnectSession(
+      int context_group_id, const v8_inspector::StringView& state,
+      std::shared_ptr<v8_inspector::V8Inspector::Channel> channel,
+      bool is_fully_trusted, v8_inspector::V8EmbedderState embedder_state = {});
   std::vector<uint8_t> DisconnectSession(int session_id,
                                          TaskRunner* context_task_runner);
   void SendMessage(int session_id, const v8_inspector::StringView& message);
@@ -112,7 +115,7 @@ class InspectorIsolateData : public v8_inspector::V8InspectorClient {
  private:
   static v8::MaybeLocal<v8::Module> ModuleResolveCallback(
       v8::Local<v8::Context> context, v8::Local<v8::String> specifier,
-      v8::Local<v8::FixedArray> import_assertions,
+      v8::Local<v8::FixedArray> import_attributes,
       v8::Local<v8::Module> referrer);
   static void MessageHandler(v8::Local<v8::Message> message,
                              v8::Local<v8::Value> exception);
@@ -132,7 +135,7 @@ class InspectorIsolateData : public v8_inspector::V8InspectorClient {
   void quitMessageLoopOnPause() override;
   void installAdditionalCommandLineAPI(v8::Local<v8::Context>,
                                        v8::Local<v8::Object>) override;
-  void consoleAPIMessage(int contextGroupId,
+  void consoleAPIMessage(int contextGroupId, int contextId,
                          v8::Isolate::MessageErrorLevel level,
                          const v8_inspector::StringView& message,
                          const v8_inspector::StringView& url,
@@ -162,15 +165,12 @@ class InspectorIsolateData : public v8_inspector::V8InspectorClient {
   std::unique_ptr<v8::Isolate, IsolateDeleter> isolate_;
   // The locker_ field has to come after isolate_ because the locker has to
   // outlive the isolate.
-  base::Optional<v8::Locker> locker_;
+  std::optional<v8::Locker> locker_;
   std::unique_ptr<v8_inspector::V8Inspector> inspector_;
   int last_context_group_id_ = 0;
   std::map<int, std::vector<v8::Global<v8::Context>>> contexts_;
   std::map<std::vector<uint16_t>, v8::Global<v8::Module>> modules_;
-  int last_session_id_ = 0;
-  std::map<int, std::unique_ptr<v8_inspector::V8InspectorSession>> sessions_;
-  std::map<v8_inspector::V8InspectorSession*, int> context_group_by_session_;
-  std::set<int> session_ids_for_cleanup_;
+  std::map<int, cppgc::Persistent<DevToolsSession>> sessions_;
   v8::Global<v8::Value> memory_info_;
   bool current_time_set_ = false;
   double current_time_ = 0.0;
@@ -180,24 +180,6 @@ class InspectorIsolateData : public v8_inspector::V8InspectorClient {
   v8::Global<v8::Private> not_inspectable_private_;
   v8::Global<v8::String> resource_name_prefix_;
   v8::Global<v8::String> additional_console_api_;
-};
-
-// Stores all the channels.
-//
-// `InspectorIsolateData` is per isolate and a channel connects
-// the backend Isolate with the frontend Isolate. The backend registers and
-// sets up the isolate, but the frontend needs it to send responses and
-// notifications. This is why we use a separate "class" (just a static wrapper
-// around std::map).
-class ChannelHolder {
- public:
-  static void AddChannel(int session_id,
-                         std::unique_ptr<FrontendChannelImpl> channel);
-  static FrontendChannelImpl* GetChannel(int session_id);
-  static void RemoveChannel(int session_id);
-
- private:
-  static std::map<int, std::unique_ptr<FrontendChannelImpl>> channels_;
 };
 
 }  // namespace internal

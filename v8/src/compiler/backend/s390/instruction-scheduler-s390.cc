@@ -10,6 +10,23 @@ namespace compiler {
 
 bool InstructionScheduler::SchedulerSupported() { return true; }
 
+ResourceAllocation InstructionScheduler::GetResourceTable() {
+  constexpr std::array units = std::to_array<ResourceAllocation::TableEntry>({
+      {ArchInstResource::kFetch, 1},
+      {ArchInstResource::kIntSingle, 1},
+      {ArchInstResource::kIntMulti, 1},
+      {ArchInstResource::kFP, 1},
+      {ArchInstResource::kLoad, 1},
+      {ArchInstResource::kStore, 1},
+  });
+  return ResourceAllocation(units);
+}
+
+ArchInstResource InstructionScheduler::GetInstructionResource(
+    const Instruction* instr) {
+  return ArchInstResource::kIntSingle;
+}
+
 int InstructionScheduler::GetTargetInstructionFlags(
     const Instruction* instr) const {
   switch (instr->arch_opcode()) {
@@ -87,6 +104,7 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kS390_AbsDouble:
     case kS390_Cntlz32:
     case kS390_Cntlz64:
+    case kS390_Cnttz64:
     case kS390_Popcnt32:
     case kS390_Popcnt64:
     case kS390_Cmp32:
@@ -123,6 +141,7 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kS390_DoubleToFloat32:
     case kS390_DoubleExtractLowWord32:
     case kS390_DoubleExtractHighWord32:
+    case kS390_DoubleFromWord32Pair:
     case kS390_DoubleInsertLowWord32:
     case kS390_DoubleInsertHighWord32:
     case kS390_DoubleConstruct:
@@ -342,7 +361,11 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kS390_S128Not:
     case kS390_S128Select:
     case kS390_S128AndNot:
-      return kNoOpcodeFlags;
+      // register-register instructions may have memory operands folded in by
+      // the instruction selector. When they do, they read from memory and must
+      // not be reordered past stores by the scheduler.
+      return (instr->addressing_mode() == kMode_None) ? kNoOpcodeFlags
+                                                      : kIsLoadOperation;
 
     case kS390_LoadWordS8:
     case kS390_LoadWordU8:

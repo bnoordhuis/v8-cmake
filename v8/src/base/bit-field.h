@@ -7,10 +7,25 @@
 
 #include <stdint.h>
 
-#include "src/base/macros.h"
+#include <algorithm>
+#include <type_traits>
+#include <utility>
 
-namespace v8 {
-namespace base {
+#include "src/base/macros.h"
+#include "src/base/strong-alias.h"
+
+namespace v8::base {
+
+namespace bitfield_detail {
+template <typename T>
+static constexpr auto to_value(T value) {
+  if constexpr (is_strong_alias_v<T>) {
+    return value.value();
+  } else {
+    return value;
+  }
+}
+}  // namespace bitfield_detail
 
 // ----------------------------------------------------------------------------
 // BitField is a help template for encoding and decode bitfield with
@@ -22,13 +37,30 @@ namespace base {
 template <class T, int shift, int size, class U = uint32_t>
 class BitField final {
  public:
-  static_assert(std::is_unsigned<U>::value);
+  static constexpr auto to_value(T value) {
+    return bitfield_detail::to_value(value);
+  }
+  using TValue = decltype(to_value(std::declval<T>()));
+
+  static_assert(std::is_unsigned_v<U>);
   static_assert(shift < 8 * sizeof(U));  // Otherwise shifts by {shift} are UB.
   static_assert(size < 8 * sizeof(U));   // Otherwise shifts by {size} are UB.
   static_assert(shift + size <= 8 * sizeof(U));
   static_assert(size > 0);
 
+  static_assert(sizeof(TValue) == sizeof(T));
+
+  // Make sure we don't create bitfields that are too large for their value.
+  // Carve out an exception for 32-bit size_t, for uniformity between 32-bit
+  // and 64-bit code.
+  static_assert(size <= 8 * sizeof(T) ||
+                    (std::is_same_v<T, size_t> && sizeof(size_t) == 4),
+                "Bitfield is unnecessarily big!");
+  static_assert(!std::is_same_v<TValue, bool> || size == 1,
+                "Bitfield is unnecessarily big!");
+
   using FieldType = T;
+  using BaseType = U;
 
   // A type U mask of bit field.  To use all bits of a type U of x bits
   // in a bitfield without compiler warnings we have to compute 2^x
@@ -38,27 +70,35 @@ class BitField final {
   static constexpr U kMask = ((U{1} << kShift) << kSize) - (U{1} << kShift);
   static constexpr int kLastUsedBit = kShift + kSize - 1;
   static constexpr U kNumValues = U{1} << kSize;
-
-  // Value for the field with all bits set.
-  // If clang complains
-  // "constexpr variable 'kMax' must be initialized by a constant expression"
-  // on this line, then you're creating a BitField for an enum with more bits
-  // than needed for the enum values. Either reduce the BitField size,
-  // or give the enum an explicit underlying type.
-  static constexpr T kMax = static_cast<T>(kNumValues - 1);
+  static constexpr U kMax = kNumValues - 1;
 
   template <class T2, int size2>
   using Next = BitField<T2, kShift + kSize, size2, U>;
 
   // Tells whether the provided value fits into the bit field.
   static constexpr bool is_valid(T value) {
-    return (static_cast<U>(value) & ~static_cast<U>(kMax)) == 0;
+    return (static_cast<U>(to_value(value)) & ~kMax) == 0;
   }
 
   // Returns a type U with the bit field value encoded.
   static constexpr U encode(T value) {
-    DCHECK(is_valid(value));
-    return static_cast<U>(value) << kShift;
+    if constexpr (std::is_enum_v<TValue> || sizeof(TValue) * 8 <= kSize ||
+                  std::is_same_v<TValue, bool>) {
+      // For enums, we trust that they are within the valid range, since they
+      // are typed and we assume that the enum itself has a valid value. DCHECK
+      // just in case (e.g. in case valid enum values are outside the bitfield
+      // size).
+      //
+      // Similarly, if T fits exactly in the bitfield (either in bytes, or
+      // because bools can be stored as 1 bit), we trust that they are valid.
+      DCHECK(is_valid(value));
+    } else {
+      // For non-enums (in practice, integers), we don't trust that they are
+      // valid, since we pass them around without static value interval
+      // information.
+      CHECK(is_valid(value));
+    }
+    return static_cast<U>(to_value(value)) << kShift;
   }
 
   // Returns a type U with the bit field value updated.
@@ -70,6 +110,23 @@ class BitField final {
   static constexpr T decode(U value) {
     return static_cast<T>((value & kMask) >> kShift);
   }
+};
+
+// ----------------------------------------------------------------------------
+// BitFieldUnion can be used to combine two linear BitFields.
+// So far only the static mask is computed. Encoding and decoding tbd.
+// Can be used for example as a quick combined check:
+//   `if (BitFieldUnion<BFA, BFB>::kMask & bitfield) ...`
+
+template <typename A, typename B>
+class BitFieldUnion final {
+ public:
+  static_assert(std::is_same_v<typename A::BaseType, typename B::BaseType>);
+  static_assert((A::kMask & B::kMask) == 0);
+  static constexpr int kShift = std::min(A::kShift, B::kShift);
+  static constexpr int kMask = A::kMask | B::kMask;
+  static constexpr int kSize =
+      A::kSize + B::kSize + (std::max(A::kShift, B::kShift) - kShift);
 };
 
 template <class T, int shift, int size>
@@ -127,8 +184,15 @@ using BitField64 = BitField<T, shift, size, uint64_t>;
 template <class T, int kBitsPerItem, int kBitsPerWord, class U>
 class BitSetComputer {
  public:
+  static constexpr auto to_value(T value) {
+    return bitfield_detail::to_value(value);
+  }
+  using TValue = decltype(to_value(std::declval<T>()));
+
   static const int kItemsPerWord = kBitsPerWord / kBitsPerItem;
   static const int kMask = (1 << kBitsPerItem) - 1;
+
+  static_assert(sizeof(TValue) == sizeof(T));
 
   // The number of array elements required to embed T information for each item.
   static int word_count(int items) {
@@ -149,14 +213,14 @@ class BitSetComputer {
   // Return the encoding for a store of value for item in previous.
   static U encode(U previous, int item, T value) {
     int shift_value = shift(item);
-    int set_bits = (static_cast<int>(value) << shift_value);
+    TValue value_val = to_value(value);
+    int set_bits = (static_cast<int>(value_val) << shift_value);
     return (previous & ~(kMask << shift_value)) | set_bits;
   }
 
   static int shift(int item) { return (item % kItemsPerWord) * kBitsPerItem; }
 };
 
-}  // namespace base
-}  // namespace v8
+}  // namespace v8::base
 
 #endif  // V8_BASE_BIT_FIELD_H_

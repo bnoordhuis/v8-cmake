@@ -4,6 +4,8 @@
 
 #include "src/compiler/bytecode-analysis.h"
 
+#include <iomanip>
+
 #include "src/compiler/bytecode-liveness-map.h"
 #include "src/interpreter/bytecode-array-builder.h"
 #include "src/interpreter/bytecode-array-iterator.h"
@@ -51,7 +53,7 @@ class BytecodeAnalysisTest : public TestWithIsolateAndZone {
     for (auto liveness : expected_liveness) {
       std::stringstream ss;
       ss << std::setw(4) << iterator.current_offset() << " : ";
-      iterator.PrintTo(ss);
+      iterator.PrintCurrentBytecodeTo(ss);
 
       EXPECT_EQ(liveness.first,
                 ToString(*analysis.GetInLivenessFor(iterator.current_offset())))

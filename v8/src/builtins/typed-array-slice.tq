@@ -30,6 +30,8 @@ macro FastCopy(
     goto IfSlow;
   }
 
+  // Since the source typed array already exists, the byte size can't be too
+  // big, so the error case is unreachable.
   const countBytes: uintptr = destInfo.CalculateByteLength(count)
       otherwise unreachable;
   const startOffset: uintptr = destInfo.CalculateByteLength(k)
@@ -38,12 +40,14 @@ macro FastCopy(
 
   @if(DEBUG) {
     const srcLength =
-        LoadJSTypedArrayLengthAndCheckDetached(src) otherwise unreachable;
+        LoadJSTypedArrayLengthAndValidate(src, TypedArrayAccessMode::kRead)
+        otherwise unreachable;
     const srcByteLength = GetTypedArrayElementsInfo(src).CalculateByteLength(
         srcLength) otherwise unreachable;
 
     const destLength =
-        LoadJSTypedArrayLengthAndCheckDetached(dest) otherwise unreachable;
+        LoadJSTypedArrayLengthAndValidate(dest, TypedArrayAccessMode::kRead)
+        otherwise unreachable;
     const destByteLength = GetTypedArrayElementsInfo(dest).CalculateByteLength(
         destLength) otherwise unreachable;
 
@@ -59,8 +63,9 @@ macro FastCopy(
   }
 }
 
-macro SlowCopy(implicit context: Context)(
-    src: JSTypedArray, dest: JSTypedArray, k: uintptr, final: uintptr): void {
+macro SlowCopy(
+    implicit context: Context)(src: JSTypedArray, dest: JSTypedArray,
+    k: uintptr, final: uintptr): void {
   if (typed_array::IsBigInt64ElementsKind(src.elements_kind) !=
       typed_array::IsBigInt64ElementsKind(dest.elements_kind))
     deferred {
@@ -70,7 +75,7 @@ macro SlowCopy(implicit context: Context)(
   CallCCopyTypedArrayElementsSlice(src, dest, k, final);
 }
 
-// https://tc39.github.io/ecma262/#sec-%typedarray%.prototype.slice
+// https://tc39.es/ecma262/#sec-%typedarray%.prototype.slice
 transitioning javascript builtin TypedArrayPrototypeSlice(
     js-implicit context: NativeContext, receiver: JSAny)(...arguments): JSAny {
   // arguments[0] = start
@@ -79,8 +84,8 @@ transitioning javascript builtin TypedArrayPrototypeSlice(
   // 1. Let O be the this value.
   // 2. Perform ? ValidateTypedArray(O).
   // 3. Let len be O.[[ArrayLength]].
-  const len =
-      ValidateTypedArrayAndGetLength(context, receiver, kBuiltinNameSlice);
+  const len = ValidateTypedArrayAndGetLength(
+      context, receiver, kBuiltinNameSlice, TypedArrayAccessMode::kRead);
   const src: JSTypedArray = UnsafeCast<JSTypedArray>(receiver);
 
   // 4. Let relativeStart be ? ToInteger(start).
@@ -102,13 +107,14 @@ transitioning javascript builtin TypedArrayPrototypeSlice(
   let count: uintptr = Unsigned(IntPtrMax(Signed(final - k), 0));
 
   // 9. Let A be ? TypedArraySpeciesCreate(O, « count »).
-  const dest: JSTypedArray =
-      TypedArraySpeciesCreateByLength(kBuiltinNameSlice, src, count);
+  const dest: JSTypedArray = TypedArraySpeciesCreateByLength(
+      kBuiltinNameSlice, src, count, TypedArrayAccessMode::kWrite);
 
   if (count > 0) {
     try {
       const newLength =
-          LoadJSTypedArrayLengthAndCheckDetached(src) otherwise IfDetached;
+          LoadJSTypedArrayLengthAndValidate(src, TypedArrayAccessMode::kRead)
+          otherwise Fail;
       // If the backing buffer is a RAB, it's possible that the length has
       // decreased since the last time we loaded it.
       if (k >= newLength) {
@@ -120,8 +126,10 @@ transitioning javascript builtin TypedArrayPrototypeSlice(
       }
       FastCopy(%RawDownCast<AttachedJSTypedArray>(src), dest, k, count)
           otherwise IfSlow;
-    } label IfDetached deferred {
-      ThrowTypeError(MessageTemplate::kDetachedOperation, kBuiltinNameSlice);
+    } label Fail deferred {
+      ThrowTypeError(
+          MessageTemplate::kTypedArrayValidateErrorOperation,
+          kBuiltinNameSlice);
     } label IfSlow deferred {
       SlowCopy(src, dest, k, final);
     }

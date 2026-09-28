@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Flags: --no-liftoff --experimental-wasm-gc --allow-natives-syntax
+// Flags: --allow-natives-syntax
 
 d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
 
@@ -10,14 +10,16 @@ let builder = new WasmModuleBuilder();
 let i32_field = makeField(kWasmI32, true);
 builder.startRecGroup();
 let supertype = builder.addStruct([i32_field]);
-let sub1 = builder.addStruct([i32_field, i32_field], supertype);
-let sub2 = builder.addStruct([i32_field, makeField(kWasmF64, true)], supertype);
+let sub1 = builder.addStruct(
+    {fields: [i32_field, i32_field], supertype});
+let sub2 = builder.addStruct(
+    {fields: [i32_field, makeField(kWasmF64, true)], supertype});
 builder.endRecGroup();
 let sig = makeSig([wasmRefNullType(supertype)], [kWasmI32]);
 
 let callee = builder.addFunction("callee", sig).addBody([
   kExprLocalGet, 0,
-  kGCPrefix, kExprRefTestDeprecated, sub1,
+  kGCPrefix, kExprRefTest, sub1,
   kExprIf, kWasmVoid,
   kExprLocalGet, 0,
   kGCPrefix, kExprRefCast, sub1,

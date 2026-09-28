@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/heap/cppgc/platform.h"
+#include "src/heap/cppgc-internal/platform.h"
 
 #include "src/base/logging.h"
 #include "src/base/page-allocator.h"
@@ -20,7 +20,7 @@ namespace {
 
 constexpr uintptr_t kHeapNeedle = 0x14;
 
-[[noreturn]] void CustomHandler(const std::string&, const SourceLocation&,
+[[noreturn]] void CustomHandler(const std::string&, SourceLocation,
                                 HeapBase* heap) {
   if (heap == reinterpret_cast<HeapBase*>(kHeapNeedle)) {
     GRACEFUL_FATAL("cust0m h4ndl3r with matching heap");

@@ -19,13 +19,13 @@ class ConcurrentBaselineCompiler;
 
 class BaselineBatchCompiler {
  public:
-  static const int kInitialQueueSize = 32;
+  static const uint32_t kInitialQueueSize = 32;
 
   explicit BaselineBatchCompiler(Isolate* isolate);
   ~BaselineBatchCompiler();
   // Enqueues SharedFunctionInfo of |function| for compilation.
-  void EnqueueFunction(Handle<JSFunction> function);
-  void EnqueueSFI(SharedFunctionInfo shared);
+  void EnqueueFunction(DirectHandle<JSFunction> function);
+  void EnqueueSFI(Tagged<SharedFunctionInfo> shared);
 
   void set_enabled(bool enabled) { enabled_ = enabled; }
   bool is_enabled() { return enabled_; }
@@ -33,29 +33,31 @@ class BaselineBatchCompiler {
   void InstallBatch();
 
  private:
+  bool concurrent() const;
+
   // Ensure there is enough space in the compilation queue to enqueue another
   // function, growing the queue if necessary.
   void EnsureQueueCapacity();
 
   // Enqueues SharedFunctionInfo.
-  void Enqueue(Handle<SharedFunctionInfo> shared);
+  void Enqueue(DirectHandle<SharedFunctionInfo> shared);
 
   // Returns true if the current batch exceeds the threshold and should be
   // compiled.
-  bool ShouldCompileBatch(SharedFunctionInfo shared);
+  bool ShouldCompileBatch(Tagged<SharedFunctionInfo> shared);
 
   // Compiles the current batch.
-  void CompileBatch(Handle<JSFunction> function);
+  void CompileBatch(DirectHandle<JSFunction> function);
 
   // Compiles the current batch concurrently.
-  void CompileBatchConcurrent(SharedFunctionInfo shared);
+  void CompileBatchConcurrent(Tagged<SharedFunctionInfo> shared);
 
   // Resets the current batch.
   void ClearBatch();
 
   // Tries to compile |maybe_sfi|. Returns false if compilation was not possible
   // (e.g. bytecode was fushed, weak handle no longer valid, ...).
-  bool MaybeCompileFunction(MaybeObject maybe_sfi);
+  bool MaybeCompileFunction(Tagged<MaybeObject> maybe_sfi);
 
   Isolate* isolate_;
 
@@ -64,7 +66,7 @@ class BaselineBatchCompiler {
   Handle<WeakFixedArray> compilation_queue_;
 
   // Last index set in compilation_queue_;
-  int last_index_;
+  uint32_t last_index_;
 
   // Estimated insturction size of current batch.
   int estimated_instruction_size_;

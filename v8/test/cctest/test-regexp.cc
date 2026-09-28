@@ -26,6 +26,8 @@ const int kSubjectStringLength = arraysize(kOneByteSubjectString) - 1;
 static_assert(arraysize(kOneByteSubjectString) ==
               arraysize(kTwoByteSubjectString));
 
+namespace base = v8::base;
+
 class OneByteVectorResource : public String::ExternalOneByteStringResource {
  public:
   explicit OneByteVectorResource(base::Vector<const char> vector)
@@ -57,18 +59,33 @@ OneByteVectorResource one_byte_string_resource(
 UC16VectorResource two_byte_string_resource(base::Vector<const base::uc16>(
     &kTwoByteSubjectString[0], kSubjectStringLength));
 
+// A regexp variant is compiled either to native code (the single-tier or
+// tiered-up pipeline) or to bytecode (--regexp-interpret-all, or before
+// tier-up in the two-tier pipeline). The transition test only cares whether a
+// variant of the given encoding exists, so accept either form.
+bool HasCompiledLatin1Variant(i::Tagged<i::IrRegExpData> data) {
+  return data->has_latin1_code() || data->has_latin1_bytecode();
+}
+bool HasCompiledUc16Variant(i::Tagged<i::IrRegExpData> data) {
+  return data->has_uc16_code() || data->has_uc16_bytecode();
+}
+
 class InterruptTest {
  public:
   InterruptTest()
       : i_thread(this),
         env_(),
-        isolate_(env_->GetIsolate()),
+        isolate_(env_.isolate()),
         sem_(0),
         ran_test_body_(false),
         ran_to_completion_(false) {}
 
   void RunTest(InterruptCallback test_body_fn) {
     HandleScope handle_scope(isolate_);
+    Local<RegExp> re =
+        RegExp::New(env_.local(), v8_str("((a*)*)*b"), v8::RegExp::kNone)
+            .ToLocalChecked();
+    regexp_handle_.Reset(isolate_, re);
     i_thread.SetTestBody(test_body_fn);
     CHECK(i_thread.Start());
     TestBody();
@@ -84,18 +101,48 @@ class InterruptTest {
     auto instance = reinterpret_cast<InterruptTest*>(data);
     HandleScope scope(isolate);
     Local<String> string =
-        Local<String>::New(isolate, instance->one_byte_string_handle_);
+        Local<String>::New(isolate, instance->subject_string_handle_);
     CHECK(string->CanMakeExternal(String::Encoding::ONE_BYTE_ENCODING));
-    string->MakeExternal(&one_byte_string_resource);
+    string->MakeExternal(isolate, &one_byte_string_resource);
   }
 
   static void MakeSubjectTwoByteExternal(Isolate* isolate, void* data) {
     auto instance = reinterpret_cast<InterruptTest*>(data);
     HandleScope scope(isolate);
     Local<String> string =
-        Local<String>::New(isolate, instance->two_byte_string_handle_);
+        Local<String>::New(isolate, instance->subject_string_handle_);
     CHECK(string->CanMakeExternal(String::Encoding::TWO_BYTE_ENCODING));
-    string->MakeExternal(&two_byte_string_resource);
+    string->MakeExternal(isolate, &two_byte_string_resource);
+  }
+
+  static void TwoByteSubjectToOneByte(Isolate* isolate, void* data) {
+    auto instance = reinterpret_cast<InterruptTest*>(data);
+    HandleScope scope(isolate);
+    i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
+    Local<RegExp> re = instance->regexp_handle_.Get(isolate);
+    i::DirectHandle<i::JSRegExp> regexp = Utils::OpenDirectHandle(*re);
+    // We executed on a two-byte subject so far, so we expect only a two-byte
+    // variant to be present.
+    i::Tagged<i::IrRegExpData> re_data =
+        CheckedCast<i::IrRegExpData>(regexp->data(i_isolate));
+    CHECK(!HasCompiledLatin1Variant(re_data));
+    CHECK(HasCompiledUc16Variant(re_data));
+
+    // Transition the subject string to one-byte by internalizing it.
+    // It already contains only one-byte characters.
+    Local<String> string = instance->GetSubjectString();
+    CHECK(!string->IsOneByte());
+    CHECK(string->ContainsOnlyOneByte());
+    // Internalize the subject by using it as a computed property name in an
+    // object.
+    {
+      // This test is technically wrong for running JS in a C++ interrupt.
+      // However we know that the interuptee here is the regexp engine, which
+      // does not care.
+      Isolate::AllowJavascriptExecutionScope allow_script(isolate);
+      CompileRun("o = { [subject_string]: 'foo' }");
+    }
+    CHECK(string->IsOneByte());
   }
 
   static void IterateStack(Isolate* isolate, void* data) {
@@ -128,50 +175,64 @@ class InterruptTest {
     }
   }
 
- private:
-  static void SignalSemaphore(Isolate* isolate, void* data) {
-    reinterpret_cast<InterruptTest*>(data)->sem_.Signal();
-  }
-
-  void CreateTestStrings() {
-    i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate_);
-
+  void SetOneByteSubjectString() {
+    HandleScope handle_scope(isolate_);
+    i::Isolate* i_isolate = this->i_isolate();
     // The string must be in old space to support externalization.
-    i::Handle<i::String> i_one_byte_string =
+    i::DirectHandle<i::String> i_one_byte_string =
         i_isolate->factory()->NewStringFromAsciiChecked(
             &kOneByteSubjectString[0], i::AllocationType::kOld);
-    Local<String> one_byte_string = Utils::ToLocal(i_one_byte_string);
+    SetSubjectString(Utils::ToLocal(i_one_byte_string));
+  }
 
-    i::Handle<i::String> i_two_byte_string =
+  void SetTwoByteSubjectString() {
+    HandleScope handle_scope(isolate_);
+    i::Isolate* i_isolate = this->i_isolate();
+    // The string must be in old space to support externalization.
+    i::DirectHandle<i::String> i_two_byte_string =
         i_isolate->factory()
             ->NewStringFromTwoByte(
                 base::Vector<const base::uc16>(&kTwoByteSubjectString[0],
                                                kSubjectStringLength),
                 i::AllocationType::kOld)
             .ToHandleChecked();
-    Local<String> two_byte_string = Utils::ToLocal(i_two_byte_string);
+    SetSubjectString(Utils::ToLocal(i_two_byte_string));
+  }
 
+  void SetSubjectString(Local<String> subject) {
     env_->Global()
-        ->Set(env_.local(), v8_str("subject_string"), one_byte_string)
+        ->Set(env_.local(), v8_str("subject_string"), subject)
         .FromJust();
-    env_->Global()
-        ->Set(env_.local(), v8_str("I 8 some \xCF\x80"), two_byte_string)
-        .FromJust();
+    subject_string_handle_.Reset(env_.isolate(), subject);
+  }
 
-    one_byte_string_handle_.Reset(env_->GetIsolate(), one_byte_string);
-    two_byte_string_handle_.Reset(env_->GetIsolate(), two_byte_string);
+  Local<String> GetSubjectString() const {
+    return subject_string_handle_.Get(isolate_);
+  }
+
+  Local<RegExp> GetRegExp() const { return regexp_handle_.Get(isolate_); }
+
+  i::Isolate* i_isolate() const {
+    return reinterpret_cast<i::Isolate*>(isolate_);
+  }
+
+ private:
+  static void SignalSemaphore(Isolate* isolate, void* data) {
+    reinterpret_cast<InterruptTest*>(data)->sem_.Signal();
   }
 
   void TestBody() {
     CHECK(!ran_test_body_.load());
     CHECK(!ran_to_completion_.load());
 
-    CreateTestStrings();
+    DCHECK(!subject_string_handle_.IsEmpty());
 
-    TryCatch try_catch(env_->GetIsolate());
+    TryCatch try_catch(env_.isolate());
 
     isolate_->RequestInterrupt(&SignalSemaphore, this);
-    CompileRun("/((a*)*)*b/.exec(subject_string)");
+    MaybeLocal<Object> result = regexp_handle_.Get(isolate_)->Exec(
+        env_.local(), subject_string_handle_.Get(isolate_));
+    CHECK(result.IsEmpty());
 
     CHECK(try_catch.HasTerminated());
     CHECK(ran_test_body_.load());
@@ -223,8 +284,8 @@ class InterruptTest {
   Isolate* isolate_;
   base::Semaphore sem_;  // Coordinates between main and interrupt threads.
 
-  Persistent<String> one_byte_string_handle_;
-  Persistent<String> two_byte_string_handle_;
+  Persistent<String> subject_string_handle_;
+  Persistent<RegExp> regexp_handle_;
 
   std::atomic<bool> ran_test_body_;
   std::atomic<bool> ran_to_completion_;
@@ -243,21 +304,64 @@ TEST(InterruptAndInvokeMajorGC) {
   // Move all movable objects on GC.
   i::v8_flags.compact_on_every_full_gc = true;
   SetCommonV8FlagsForInterruptTests();
-  InterruptTest{}.RunTest(InterruptTest::InvokeMajorGC);
+  InterruptTest test{};
+  test.SetOneByteSubjectString();
+  test.RunTest(InterruptTest::InvokeMajorGC);
 }
 
 TEST(InterruptAndMakeSubjectOneByteExternal) {
   SetCommonV8FlagsForInterruptTests();
-  InterruptTest{}.RunTest(InterruptTest::MakeSubjectOneByteExternal);
+  InterruptTest test{};
+  test.SetOneByteSubjectString();
+  test.RunTest(InterruptTest::MakeSubjectOneByteExternal);
 }
 
 TEST(InterruptAndMakeSubjectTwoByteExternal) {
   SetCommonV8FlagsForInterruptTests();
-  InterruptTest{}.RunTest(InterruptTest::MakeSubjectTwoByteExternal);
+  InterruptTest test{};
+  test.SetTwoByteSubjectString();
+  test.RunTest(InterruptTest::MakeSubjectTwoByteExternal);
 }
 
 TEST(InterruptAndIterateStack) {
   i::v8_flags.regexp_tier_up = false;
   SetCommonV8FlagsForInterruptTests();
-  InterruptTest{}.RunTest(InterruptTest::IterateStack);
+  InterruptTest test{};
+  test.SetOneByteSubjectString();
+  test.RunTest(InterruptTest::IterateStack);
+}
+
+TEST(InterruptAndTransitionSubjectFromTwoByteToOneByte) {
+  SetCommonV8FlagsForInterruptTests();
+  InterruptTest test{};
+  i::Isolate* i_isolate = test.i_isolate();
+  i::HandleScope handle_scope(i_isolate);
+  // Internalize a one-byte copy of the two-byte string we are going to
+  // internalize during the interrupt. This ensures that the two-byte string
+  // transitions to a ThinString pointing to a one-byte string.
+  Local<String> internalized_string =
+      String::NewFromUtf8(
+          reinterpret_cast<Isolate*>(i_isolate), &kOneByteSubjectString[1],
+          v8::NewStringType::kInternalized, kSubjectStringLength - 1)
+          .ToLocalChecked();
+  CHECK(internalized_string->IsOneByte());
+
+  test.SetTwoByteSubjectString();
+  Local<String> string = test.GetSubjectString();
+  CHECK(!string->IsOneByte());
+  // Set the subject string as a substring of the original subject (containing
+  // only one-byte characters).
+  v8::Local<Value> value =
+      CompileRun("subject_string = subject_string.substring(1)");
+  test.SetSubjectString(value.As<String>());
+  CHECK(test.GetSubjectString()->ContainsOnlyOneByte());
+
+  test.RunTest(InterruptTest::TwoByteSubjectToOneByte);
+  // After the test, we expect that a one-byte variant has been installed
+  // during the interrupt.
+  i::DirectHandle<i::JSRegExp> regexp =
+      Utils::OpenDirectHandle(*test.GetRegExp());
+  i::Tagged<i::IrRegExpData> data =
+      CheckedCast<i::IrRegExpData>(regexp->data(i_isolate));
+  CHECK(HasCompiledLatin1Variant(data));
 }

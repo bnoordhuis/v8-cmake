@@ -32,13 +32,13 @@ TEST_F(FactoryCodeBuilderTest, Factory_CodeBuilder) {
   desc.unwinding_info = nullptr;
   desc.unwinding_info_size = 0;
   desc.origin = nullptr;
-  Handle<Code> code =
-      Factory::CodeBuilder(i_isolate(), desc, CodeKind::WASM_FUNCTION).Build();
+  DirectHandle<Code> code =
+      Factory::CodeBuilder(i_isolate(), desc, CodeKind::FOR_TESTING).Build();
 
   CHECK(
       i_isolate()->heap()->InSpace(code->instruction_stream(), CODE_LO_SPACE));
 #if VERIFY_HEAP
-  code->ObjectVerify(i_isolate());
+  Object::ObjectVerify(*code, i_isolate());
 #endif
 }
 
@@ -59,6 +59,9 @@ class FactoryCodeBuilderOOMTest : public TestWithIsolate {
  public:
   static void SetUpTestSuite() {
     v8_flags.max_old_space_size = kInstructionSize / MB / 2;  // In MB.
+    // Keep semi-space size small so that the heuristics don't think we have
+    // enough combined space for the allocation.
+    v8_flags.max_semi_space_size = 8;
   }
 
   void SetUp() override {
@@ -78,8 +81,8 @@ TEST_F(FactoryCodeBuilderOOMTest, Factory_CodeBuilder_BuildOOM) {
   desc.instr_size = kInstructionSize;
   desc.buffer = instructions.get();
 
-  const Handle<Code> code =
-      Factory::CodeBuilder(i_isolate(), desc, CodeKind::WASM_FUNCTION).Build();
+  const DirectHandle<Code> code =
+      Factory::CodeBuilder(i_isolate(), desc, CodeKind::FOR_TESTING).Build();
 
   CHECK(!code.is_null());
   CHECK(oom_triggered());
@@ -91,9 +94,8 @@ TEST_F(FactoryCodeBuilderOOMTest, Factory_CodeBuilder_TryBuildOOM) {
   desc.instr_size = kInstructionSize;
   desc.buffer = instructions.get();
 
-  const MaybeHandle<Code> code =
-      Factory::CodeBuilder(i_isolate(), desc, CodeKind::WASM_FUNCTION)
-          .TryBuild();
+  const MaybeDirectHandle<Code> code =
+      Factory::CodeBuilder(i_isolate(), desc, CodeKind::FOR_TESTING).TryBuild();
 
   CHECK(code.is_null());
   CHECK(!oom_triggered());

@@ -363,9 +363,12 @@ class BlocksData {
     this.blockBorders = new Set<number>();
     this.blockInstructionCountMap = new Map<number, number>();
     for (const block of blocks) {
+      if (!block) continue;
       this.blockInstructionCountMap.set(block.id, block.instructions.length);
-      const maxInstructionInBlock = block.instructions[block.instructions.length - 1].id;
-      this.blockBorders.add(maxInstructionInBlock);
+      if (block.instructions.length > 0) {
+        const maxInstructionInBlock = block.instructions[block.instructions.length - 1].id;
+        this.blockBorders.add(maxInstructionInBlock);
+      }
     }
   }
 
@@ -1744,7 +1747,7 @@ class DisplayResetter {
 
   public resetFlipped(): void {
     this.updateClassesOnContainer();
-    // Appending the HTMLElement removes it from it's current position.
+    // Appending the HTMLElement removes it from its current position.
     this.view.divs.wholeHeader.appendChild(this.isFlipped ? this.view.divs.registerHeaders
                                                           : this.view.divs.positionHeaders);
     this.view.divs.yAxis.appendChild(this.isFlipped ? this.view.divs.positionHeaders

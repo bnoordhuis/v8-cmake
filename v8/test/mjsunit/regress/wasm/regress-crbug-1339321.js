@@ -2,8 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Flags: --experimental-wasm-gc
-
 d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
 
 let builder = new WasmModuleBuilder();
@@ -34,13 +32,13 @@ builder.addFunction("crash", kSig_v_v).exportFunc().addBody([
   kExprRefNull, kAnyRefCode,
   kExprLoop, loop_type,
     kExprRefNull, kAnyRefCode,
-    kGCPrefix, kExprBrOnI31, 0,
+    kGCPrefix, kExprBrOnCast, 0b01, 0, kAnyRefCode, kI31RefCode,
     kExprDrop,
     kExprDrop,
   kExprEnd,  // loop
 ]);
 
-let array_type = builder.addArray(wasmRefNullType(kSig_i_i), true);
+let array_type = builder.addArray(wasmRefNullType(kSig_i_i));
 builder.addFunction("array", kSig_l_v).exportFunc()
   .addLocals(kWasmI64, 10)
   .addBody([

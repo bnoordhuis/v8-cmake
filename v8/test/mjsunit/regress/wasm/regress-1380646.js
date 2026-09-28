@@ -2,13 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Flags: --no-liftoff
-
 d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
 
 let builder = new WasmModuleBuilder();
 
-builder.addMemory(16, 17, false, false);
+builder.addMemory(16, 17);
 
 builder.addTag(kSig_v_f);
 

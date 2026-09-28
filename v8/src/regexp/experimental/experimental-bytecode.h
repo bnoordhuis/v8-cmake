@@ -5,8 +5,7 @@
 #ifndef V8_REGEXP_EXPERIMENTAL_EXPERIMENTAL_BYTECODE_H_
 #define V8_REGEXP_EXPERIMENTAL_EXPERIMENTAL_BYTECODE_H_
 
-#include <ios>
-
+#include "src/base/bit-field.h"
 #include "src/base/strings.h"
 #include "src/base/vector.h"
 #include "src/regexp/regexp-ast.h"
@@ -32,11 +31,17 @@
 // index which represents the current position within the input string.
 //
 // For the precise encoding of the instruction set, see the definition `struct
-// RegExpInstruction` below.  Currently we support the following instructions:
+// Instruction` below.  Currently we support the following instructions:
 // - CONSUME_RANGE: Check whether the codepoint of the current character is
 //   contained in a non-empty closed interval [min, max] specified in the
-//   instruction payload.  Abort this thread if false, otherwise advance the
-//   input position by 1 and continue with the next instruction.
+//   instruction payload.  If false, advance to the next CONSUME_RANGE in the
+//   current list, or abort this thread if this was the last range.  If true,
+//   advance to the next instruction after the current list of ranges.
+// - RANGE_COUNT: Check that the current character can be accepted by any of the
+//   next n CONSUME_RANGE instructions, where n is specified in the instruction
+//   payload.  Abort this thread if none of these ranges match.  Otherwise,
+//   advance the input position by 1 and continue with the next instruction
+//   after the n ranges.
 // - ACCEPT: Stop this thread and signify the end of a match at the current
 //   input position.
 // - FORK: If executed by a thread t, spawn a new thread t0 whose register
@@ -48,7 +53,7 @@
 // - JMP: Instead of incrementing the PC value after execution of this
 //   instruction by 1, set PC of this thread to the value specified in the
 //   instruction payload and continue there.
-// - SET_REGISTER_TO_CP: Set a register specified in the paylod to the current
+// - SET_REGISTER_TO_CP: Set a register specified in the payload to the current
 //   position (CP) within the input, then continue with the next instruction.
 // - CLEAR_REGISTER: Clear the register specified in the payload by resetting
 //   it to the initial value -1.
@@ -87,19 +92,32 @@
 
 namespace v8 {
 namespace internal {
+namespace regexp {
 
 // Bytecode format.
 // Currently very simple fixed-size: The opcode is encoded in the first 4
 // bytes, the payload takes another 4 bytes.
-struct RegExpInstruction {
+struct Instruction {
   enum Opcode : int32_t {
     ACCEPT,
     ASSERTION,
     CLEAR_REGISTER,
     CONSUME_RANGE,
+    RANGE_COUNT,
     FORK,
     JMP,
     SET_REGISTER_TO_CP,
+    SET_QUANTIFIER_TO_CLOCK,
+    FILTER_QUANTIFIER,
+    FILTER_GROUP,
+    FILTER_LOOKAROUND,
+    FILTER_CHILD,
+    BEGIN_LOOP,
+    END_LOOP,
+    START_LOOKAROUND,
+    END_LOOKAROUND,
+    WRITE_LOOKAROUND_TABLE,
+    READ_LOOKAROUND_TABLE,
   };
 
   struct Uc16Range {
@@ -107,78 +125,201 @@ struct RegExpInstruction {
     base::uc16 max;  // Inclusive.
   };
 
-  static RegExpInstruction ConsumeRange(base::uc16 min, base::uc16 max) {
-    RegExpInstruction result;
+  class LookaroundPayload {
+   public:
+    LookaroundPayload() = default;
+    LookaroundPayload(uint32_t lookaround_index, bool is_positive,
+                      Lookaround::Type type)
+        : payload_(Type::update(
+              IsPositive::update(LookaroundIndex::encode(lookaround_index),
+                                 is_positive),
+              type)) {}
+
+    uint32_t index() const { return LookaroundIndex::decode(payload_); }
+    bool is_positive() const { return IsPositive::decode(payload_); }
+    Lookaround::Type type() const { return Type::decode(payload_); }
+
+   private:
+    using IsPositive = base::BitField<bool, 0, 1>;
+    using Type = IsPositive::Next<Lookaround::Type, 1>;
+    using LookaroundIndex = Type::Next<uint32_t, 30>;
+
+    uint32_t payload_;
+  };
+
+  static Instruction ConsumeRange(base::uc16 min, base::uc16 max) {
+    Instruction result;
     result.opcode = CONSUME_RANGE;
     result.payload.consume_range = Uc16Range{min, max};
     return result;
   }
 
-  static RegExpInstruction ConsumeAnyChar() {
-    return ConsumeRange(0x0000, 0xFFFF);
-  }
+  static Instruction ConsumeAnyChar() { return ConsumeRange(0x0000, 0xFFFF); }
 
-  static RegExpInstruction Fail() {
+  static Instruction Fail() {
     // This is encoded as the empty CONSUME_RANGE of characters 0xFFFF <= c <=
     // 0x0000.
     return ConsumeRange(0xFFFF, 0x0000);
   }
 
-  static RegExpInstruction Fork(int32_t alt_index) {
-    RegExpInstruction result;
+  static Instruction RangeCount(int32_t num_ranges) {
+    Instruction result;
+    result.opcode = RANGE_COUNT;
+    result.payload.num_ranges = num_ranges;
+    return result;
+  }
+
+  static Instruction Fork(int32_t alt_index) {
+    Instruction result;
     result.opcode = FORK;
     result.payload.pc = alt_index;
     return result;
   }
 
-  static RegExpInstruction Jmp(int32_t alt_index) {
-    RegExpInstruction result;
+  static Instruction Jmp(int32_t alt_index) {
+    Instruction result;
     result.opcode = JMP;
     result.payload.pc = alt_index;
     return result;
   }
 
-  static RegExpInstruction Accept() {
-    RegExpInstruction result;
+  static Instruction Accept() {
+    Instruction result;
     result.opcode = ACCEPT;
     return result;
   }
 
-  static RegExpInstruction SetRegisterToCp(int32_t register_index) {
-    RegExpInstruction result;
+  static Instruction SetRegisterToCp(int32_t register_index) {
+    Instruction result;
     result.opcode = SET_REGISTER_TO_CP;
     result.payload.register_index = register_index;
     return result;
   }
 
-  static RegExpInstruction ClearRegister(int32_t register_index) {
-    RegExpInstruction result;
+  static Instruction Assertion(Assertion::Type t) {
+    Instruction result;
+    result.opcode = ASSERTION;
+    result.payload.assertion_type = t;
+    return result;
+  }
+
+  static Instruction ClearRegister(int32_t register_index) {
+    Instruction result;
     result.opcode = CLEAR_REGISTER;
     result.payload.register_index = register_index;
     return result;
   }
 
-  static RegExpInstruction Assertion(RegExpAssertion::Type t) {
-    RegExpInstruction result;
-    result.opcode = ASSERTION;
-    result.payload.assertion_type = t;
+  static Instruction SetQuantifierToClock(int32_t quantifier_id) {
+    Instruction result;
+    result.opcode = SET_QUANTIFIER_TO_CLOCK;
+    result.payload.quantifier_id = quantifier_id;
     return result;
+  }
+
+  static Instruction FilterQuantifier(int32_t quantifier_id) {
+    Instruction result;
+    result.opcode = FILTER_QUANTIFIER;
+    result.payload.quantifier_id = quantifier_id;
+    return result;
+  }
+
+  static Instruction FilterGroup(int32_t group_id) {
+    Instruction result;
+    result.opcode = FILTER_GROUP;
+    result.payload.group_id = group_id;
+    return result;
+  }
+
+  static Instruction FilterLookaround(int32_t lookaround_id) {
+    Instruction result;
+    result.opcode = FILTER_LOOKAROUND;
+    result.payload.lookaround_id = lookaround_id;
+    return result;
+  }
+
+  static Instruction FilterChild(int32_t pc) {
+    Instruction result;
+    result.opcode = FILTER_CHILD;
+    result.payload.pc = pc;
+    return result;
+  }
+
+  static Instruction BeginLoop() {
+    Instruction result;
+    result.opcode = BEGIN_LOOP;
+    return result;
+  }
+
+  static Instruction EndLoop() {
+    Instruction result;
+    result.opcode = END_LOOP;
+    return result;
+  }
+
+  static Instruction StartLookaround(int lookaround_index, bool is_positive,
+                                     Lookaround::Type type) {
+    Instruction result;
+    result.opcode = START_LOOKAROUND;
+    result.payload.lookaround =
+        LookaroundPayload(lookaround_index, is_positive, type);
+    return result;
+  }
+
+  static Instruction EndLookaround() {
+    Instruction result;
+    result.opcode = END_LOOKAROUND;
+    return result;
+  }
+
+  static Instruction WriteLookTable(int32_t index) {
+    Instruction result;
+    result.opcode = WRITE_LOOKAROUND_TABLE;
+    result.payload.lookaround_id = index;
+    return result;
+  }
+
+  static Instruction ReadLookTable(int32_t index, bool is_positive,
+                                   Lookaround::Type type) {
+    Instruction result;
+    result.opcode = READ_LOOKAROUND_TABLE;
+    result.payload.lookaround = LookaroundPayload(index, is_positive, type);
+    return result;
+  }
+
+  // Returns whether an instruction is `FILTER_GROUP`, `FILTER_QUANTIFIER` or
+  // `FILTER_CHILD`.
+  static bool IsFilter(const Instruction& instruction) {
+    return instruction.opcode == Instruction::Opcode::FILTER_GROUP ||
+           instruction.opcode == Instruction::Opcode::FILTER_QUANTIFIER ||
+           instruction.opcode == Instruction::Opcode::FILTER_CHILD;
   }
 
   Opcode opcode;
   union {
     // Payload of CONSUME_RANGE:
     Uc16Range consume_range;
-    // Payload of FORK and JMP, the next/forked program counter (pc):
+    // Payload of RANGE_COUNT
+    int32_t num_ranges;
+    // Payload of FORK, JMP and FILTER_CHILD, the next/forked program counter
+    // (pc):
     int32_t pc;
     // Payload of SET_REGISTER_TO_CP and CLEAR_REGISTER:
     int32_t register_index;
     // Payload of ASSERTION:
-    RegExpAssertion::Type assertion_type;
+    Assertion::Type assertion_type;
+    // Payload of SET_QUANTIFIER_TO_CLOCK and FILTER_QUANTIFIER:
+    int32_t quantifier_id;
+    // Payload of FILTER_GROUP:
+    int32_t group_id;
+    // Payload of WRITE_LOOKAROUND_TABLE and FILTER_LOOKAROUND:
+    int32_t lookaround_id;
+    // Payload of READ_LOOKAROUND_TABLE and START_LOOKAROUND:
+    LookaroundPayload lookaround;
   } payload;
   static_assert(sizeof(payload) == 4);
 };
-static_assert(sizeof(RegExpInstruction) == 8);
+static_assert(sizeof(Instruction) == 8);
 // TODO(mbid,v8:10765): This is rather wasteful.  We can fit the opcode in 2-3
 // bits, so the remaining 29/30 bits can be used as payload.  Problem: The
 // payload of CONSUME_RANGE consists of two 16-bit values `min` and `max`, so
@@ -201,10 +342,13 @@ static_assert(sizeof(RegExpInstruction) == 8);
 // and then still have almost 2^30 instructions left over for something like
 // zero-width assertions and captures.
 
-std::ostream& operator<<(std::ostream& os, const RegExpInstruction& inst);
+std::ostream& operator<<(std::ostream& os, const Instruction& inst);
 std::ostream& operator<<(std::ostream& os,
-                         base::Vector<const RegExpInstruction> insts);
+                         base::Vector<const Instruction> insts);
+std::ostream& operator<<(std::ostream& os,
+                         const Instruction::LookaroundPayload& inst);
 
+}  // namespace regexp
 }  // namespace internal
 }  // namespace v8
 

@@ -6,7 +6,7 @@
 #define V8_COMPILER_TYPE_CACHE_H_
 
 #include "src/compiler/globals.h"
-#include "src/compiler/types.h"
+#include "src/compiler/turbofan-types.h"
 #include "src/date/date.h"
 #include "src/objects/js-array-buffer.h"
 #include "src/objects/string.h"
@@ -42,6 +42,7 @@ class V8_EXPORT_PRIVATE TypeCache final {
       Type::Union(kDoubleRepresentableInt64, Type::MinusZero(), zone());
   Type const kDoubleRepresentableUint64 = CreateRange(
       std::numeric_limits<uint64_t>::min(), kMaxDoubleRepresentableUint64);
+  Type const kFloat16 = Type::Number();
   Type const kFloat32 = Type::Number();
   Type const kFloat64 = Type::Number();
   Type const kBigInt64 = Type::SignedBigInt64();
@@ -60,6 +61,7 @@ class V8_EXPORT_PRIVATE TypeCache final {
   Type const kTenOrUndefined =
       Type::Union(kSingletonTen, Type::Undefined(), zone());
   Type const kMinusOneOrZero = CreateRange(-1.0, 0.0);
+  Type const kMinusOneOrZeroOrOne = CreateRange(-1.0, 1.0);
   Type const kMinusOneToOneOrMinusZeroOrNaN = Type::Union(
       Type::Union(CreateRange(-1.0, 1.0), Type::MinusZero(), zone()),
       Type::NaN(), zone());
@@ -82,26 +84,31 @@ class V8_EXPORT_PRIVATE TypeCache final {
   Type const kPositiveIntegerOrMinusZeroOrNaN =
       Type::Union(kPositiveIntegerOrMinusZero, Type::NaN(), zone());
 
-  Type const kAdditiveSafeInteger =
-      CreateRange(-4503599627370495.0, 4503599627370495.0);
   Type const kSafeInteger = CreateRange(-kMaxSafeInteger, kMaxSafeInteger);
+  Type const kAdditiveSafeInteger =
+      CreateRange(kMinAdditiveSafeInteger, kMaxAdditiveSafeInteger);
+  Type const kAdditiveSafeIntegerFeedback = CreateRange(
+      kMinAdditiveSafeIntegerFeedback, kMaxAdditiveSafeIntegerFeedback);
   Type const kAdditiveSafeIntegerOrMinusZero =
       Type::Union(kAdditiveSafeInteger, Type::MinusZero(), zone());
   Type const kSafeIntegerOrMinusZero =
       Type::Union(kSafeInteger, Type::MinusZero(), zone());
   Type const kPositiveSafeInteger = CreateRange(0.0, kMaxSafeInteger);
 
-  // The FixedArray::length property always containts a smi in the range
+  // The FixedArray::length property always contains a uint32 in the range
   // [0, FixedArray::kMaxLength].
   Type const kFixedArrayLengthType = CreateRange(0.0, FixedArray::kMaxLength);
 
-  // The WeakFixedArray::length property always containts a smi in the range
-  // [0, WeakFixedArray::kMaxLength].
-  Type const kWeakFixedArrayLengthType =
-      CreateRange(0.0, WeakFixedArray::kMaxLength);
+  // The Context::length property always contains a smi in the range
+  // [0, FixedArray::kMaxLength].
+  Type const kContextLengthType = CreateRange(0.0, FixedArray::kMaxLength);
 
-  // The FixedDoubleArray::length property always containts a smi in the range
-  // [0, FixedDoubleArray::kMaxLength].
+  // The WeakFixedArray::length property always contains a uint32
+  Type const kWeakFixedArrayLengthType =
+      CreateRange(0.0, FixedArray::kMaxLength);
+
+  // The FixedDoubleArray::length property always contains a uint32 in the
+  // range [0, FixedDoubleArray::kMaxLength].
   Type const kFixedDoubleArrayLengthType =
       CreateRange(0.0, FixedDoubleArray::kMaxLength);
 
@@ -124,9 +131,9 @@ class V8_EXPORT_PRIVATE TypeCache final {
   Type const kJSArrayBufferViewByteOffsetType = kJSArrayBufferByteLengthType;
 
   // The JSTypedArray::length property always contains an untagged number in
-  // the range [0, JSTypedArray::kMaxLength].
+  // the range [0, JSTypedArray::kMaxByteLength].
   Type const kJSTypedArrayLengthType =
-      CreateRange(0.0, JSTypedArray::kMaxLength);
+      CreateRange(0.0, JSTypedArray::kMaxByteLength);
 
   // The String::length property always contains a smi in the range
   // [0, String::kMaxLength].
@@ -171,10 +178,22 @@ class V8_EXPORT_PRIVATE TypeCache final {
   Type const kJSDateWeekdayType =
       Type::Union(CreateRange(0, 6.0), Type::NaN(), zone());
 
-  // The JSDate::year property always contains a tagged number in the signed
-  // small range or NaN.
+  // The JSDate::year property always contains a tagged number in the range
+  // [-271821, 275760] or NaN.
   Type const kJSDateYearType =
-      Type::Union(Type::SignedSmall(), Type::NaN(), zone());
+      Type::Union(CreateRange(-271821, 275760), Type::NaN(), zone());
+
+  static_assert(JSDate::kYear == 0);
+  static_assert(JSDate::kMonth == 1);
+  static_assert(JSDate::kDay == 2);
+  static_assert(JSDate::kWeekday == 3);
+  static_assert(JSDate::kHour == 4);
+  static_assert(JSDate::kMinute == 5);
+  static_assert(JSDate::kSecond == 6);
+  static_assert(JSDate::kFirstUncachedField == 7);
+  Type const kJSDateFields[JSDate::kFirstUncachedField] = {
+      kJSDateYearType, kJSDateMonthType,  kJSDateDayType,   kJSDateWeekdayType,
+      kJSDateHourType, kJSDateMinuteType, kJSDateSecondType};
 
   // The valid number of arguments for JavaScript functions. We can never
   // materialize more than the max size of a fixed array, because we require a

@@ -2,15 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Flags: --experimental-wasm-gc
-
 d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
 
 (function TestArrayFillImmutable() {
   print(arguments.callee.name);
   let builder = new WasmModuleBuilder();
 
-  let array = builder.addArray(kWasmI32, false);
+  let array = builder.addArray(kWasmI32, {mutable: false});
 
   // Parameters: array, starting index, value, length.
   builder.addFunction(
@@ -22,7 +20,7 @@ d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
     .exportFunc();
 
   assertThrows(() => builder.instantiate(), WebAssembly.CompileError,
-               /immediate array type #0 is immutable/);
+               /Array type #0 is immutable/);
 })();
 
 (function TestArrayFill() {
@@ -30,8 +28,8 @@ d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
   let builder = new WasmModuleBuilder();
 
   let struct = builder.addStruct([makeField(kWasmI32, true)]);
-  let array = builder.addArray(wasmRefNullType(struct), true);
-  let array16 = builder.addArray(kWasmI16, true);
+  let array = builder.addArray(wasmRefNullType(struct));
+  let array16 = builder.addArray(kWasmI16);
 
   builder.addFunction(
       "make_array", makeSig([kWasmI32], [wasmRefType(array)]))
@@ -116,7 +114,7 @@ d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
   let builder = new WasmModuleBuilder();
 
   let struct = builder.addStruct([makeField(kWasmI32, true)]);
-  let array = builder.addArray(wasmRefType(struct), true);
+  let array = builder.addArray(wasmRefType(struct));
 
   builder.addFunction(
       "make_array", makeSig([wasmRefType(struct), kWasmI32],
@@ -152,12 +150,13 @@ d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
   print(arguments.callee.name);
   let builder = new WasmModuleBuilder();
 
-  let array = builder.addArray(kWasmI16, true);
+  let array = builder.addArray(kWasmI16);
 
-  builder.addMemory(10, 10, false);
+  builder.addMemory(10, 10);
 
   let passive = builder.addPassiveDataSegment([0, 1, 2, 3, 4, 5]);
-  let active = builder.addDataSegment(0, [6, 7, 8, 9]);
+  let active = builder.addActiveDataSegment(0, [kExprI32Const, 0],
+                                            [6, 7, 8, 9]);
 
   builder.addFunction(
       "make_array", makeSig([kWasmI32], [wasmRefType(array)]))
@@ -254,7 +253,7 @@ d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
   print(arguments.callee.name);
   let builder = new WasmModuleBuilder();
 
-  let array = builder.addArray(kWasmI64, true);
+  let array = builder.addArray(kWasmI64);
 
   let passive = builder.addPassiveDataSegment([0, 1, 2, 3, 4, 5]);
 
@@ -287,7 +286,7 @@ d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
   print(arguments.callee.name);
   let builder = new WasmModuleBuilder();
 
-  let array = builder.addArray(kWasmI16, false);
+  let array = builder.addArray(kWasmI16, {mutable: false});
 
   let passive = builder.addPassiveDataSegment([0, 1, 2, 3, 4, 5]);
 
@@ -307,7 +306,7 @@ d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
   let builder = new WasmModuleBuilder();
 
   let sig = builder.addType(kSig_i_i);
-  let array = builder.addArray(wasmRefNullType(sig), true);
+  let array = builder.addArray(wasmRefNullType(sig));
 
   let table = builder.addTable(wasmRefNullType(sig), 10, 10);
 
@@ -420,7 +419,7 @@ d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
   print(arguments.callee.name);
   let builder = new WasmModuleBuilder();
 
-  let array = builder.addArray(kWasmFuncRef, false);
+  let array = builder.addArray(kWasmFuncRef, {mutable: false});
 
   let elem1 = builder.addFunction("succ", kSig_i_i)
       .addBody([kExprLocalGet, 0, kExprI32Const, 1, kExprI32Add]);
@@ -439,4 +438,25 @@ d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
 
   assertThrows(() => builder.instantiate(), WebAssembly.CompileError,
                /array.init_elem can only be used with mutable arrays/);
+})();
+
+(function TestArrayCopyLargeI64Array() {
+  print(arguments.callee.name);
+  let builder = new WasmModuleBuilder();
+
+  let array = builder.addArray(kWasmI64);
+
+  builder.addFunction(
+      // initial value, length, index to check
+      "main", makeSig([kWasmI64, kWasmI32, kWasmI32], [kWasmI64]))
+    .addBody([kExprLocalGet, 0, kExprLocalGet, 1,
+              kGCPrefix, kExprArrayNew, array,
+              kExprLocalGet, 2, kGCPrefix, kExprArrayGet, array])
+    .exportFunc();
+
+  let instance = builder.instantiate();
+
+  assertEquals(1234n, instance.exports.main(1234n, 1000, 0));
+  assertEquals(-2345n, instance.exports.main(-2345n, 2000, 1000));
+  assertEquals(42n, instance.exports.main(42n, 2000, 1999));
 })();

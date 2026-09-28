@@ -11,15 +11,14 @@ namespace internal {
 using WeakArrayListTest = TestWithIsolate;
 
 TEST_F(WeakArrayListTest, Compact) {
-  Handle<WeakArrayList> list = isolate()->factory()->NewWeakArrayList(10);
-  EXPECT_EQ(list->length(), 0);
-  EXPECT_EQ(list->capacity(), 10);
+  DirectHandle<WeakArrayList> list = isolate()->factory()->NewWeakArrayList(10);
+  EXPECT_EQ(list->length().value(), 0u);
+  EXPECT_EQ(list->capacity().value(), 10u);
 
-  MaybeObject some_object =
-      MaybeObject::FromObject(*isolate()->factory()->empty_fixed_array());
-  MaybeObject weak_ref = MaybeObject::MakeWeak(some_object);
-  MaybeObject smi = MaybeObject::FromSmi(Smi::FromInt(0));
-  MaybeObject cleared_ref = HeapObjectReference::ClearedValue(isolate());
+  Tagged<FixedArray> some_object = *isolate()->factory()->empty_fixed_array();
+  Tagged<MaybeObject> weak_ref = MakeWeak(some_object);
+  Tagged<MaybeObject> smi = Smi::FromInt(0);
+  Tagged<MaybeObject> cleared_ref = kClearedWeakValue;
   list->Set(0, weak_ref);
   list->Set(1, smi);
   list->Set(2, cleared_ref);
@@ -27,20 +26,19 @@ TEST_F(WeakArrayListTest, Compact) {
   list->set_length(5);
 
   list->Compact(isolate());
-  EXPECT_EQ(list->length(), 3);
-  EXPECT_EQ(list->capacity(), 10);
+  EXPECT_EQ(list->length().value(), 3u);
+  EXPECT_EQ(list->capacity().value(), 10u);
 }
 
 TEST_F(WeakArrayListTest, OutOfPlaceCompact) {
-  Handle<WeakArrayList> list = isolate()->factory()->NewWeakArrayList(20);
-  EXPECT_EQ(list->length(), 0);
-  EXPECT_EQ(list->capacity(), 20);
+  DirectHandle<WeakArrayList> list = isolate()->factory()->NewWeakArrayList(20);
+  EXPECT_EQ(list->length().value(), 0u);
+  EXPECT_EQ(list->capacity().value(), 20u);
 
-  MaybeObject some_object =
-      MaybeObject::FromObject(*isolate()->factory()->empty_fixed_array());
-  MaybeObject weak_ref = MaybeObject::MakeWeak(some_object);
-  MaybeObject smi = MaybeObject::FromSmi(Smi::FromInt(0));
-  MaybeObject cleared_ref = HeapObjectReference::ClearedValue(isolate());
+  Tagged<FixedArray> some_object = *isolate()->factory()->empty_fixed_array();
+  Tagged<MaybeObject> weak_ref = MakeWeak(some_object);
+  Tagged<MaybeObject> smi = Smi::FromInt(0);
+  Tagged<MaybeObject> cleared_ref = kClearedWeakValue;
   list->Set(0, weak_ref);
   list->Set(1, smi);
   list->Set(2, cleared_ref);
@@ -48,11 +46,11 @@ TEST_F(WeakArrayListTest, OutOfPlaceCompact) {
   list->Set(4, cleared_ref);
   list->set_length(6);
 
-  Handle<WeakArrayList> compacted =
+  DirectHandle<WeakArrayList> compacted =
       isolate()->factory()->CompactWeakArrayList(list, 4);
-  EXPECT_EQ(list->length(), 6);
-  EXPECT_EQ(compacted->length(), 4);
-  EXPECT_EQ(compacted->capacity(), 4);
+  EXPECT_EQ(list->length().value(), 6u);
+  EXPECT_EQ(compacted->length().value(), 4u);
+  EXPECT_EQ(compacted->capacity().value(), 4u);
 }
 
 }  // namespace internal

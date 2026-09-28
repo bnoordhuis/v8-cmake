@@ -13,10 +13,10 @@ diff --git a/v8/third_party/inspector_protocol/code_generator.py b/v8/third_part
 index 4260dbe..50e439e 100755
 --- a/v8/third_party/inspector_protocol/code_generator.py
 +++ b/v8/third_party/inspector_protocol/code_generator.py
-@@ -80,7 +80,7 @@ def read_config():
-     config_file = arg_options.config
-     config_base = os.path.dirname(config_file)
-     config_values = arg_options.config_value
+@@ -87,7 +87,7 @@ def read_config():
+       raise Exception("--depfile requires --stamp and vice versa")
+     depfile = arg_options.depfile
+     stamp = arg_options.stamp
 -    inspector_protocol_dir = arg_options.inspector_protocol_dir.lstrip('/')
 +    inspector_protocol_dir = arg_options.inspector_protocol_dir
    except Exception:

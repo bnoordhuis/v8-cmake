@@ -66,7 +66,13 @@ class Driver(object):
     # Find specified device or a single attached device if none was specified.
     # In case none or multiple devices are attached, this raises an exception.
     self.device = device_utils.DeviceUtils.HealthyDevices(
-        retries=5, enable_usb_resets=True, device_arg=device)[0]
+        retries=5, enable_usb_resets=True, device_arg=device,
+        persistent_shell=False)[0]
+
+    # Retrieve device parameters.
+    product_prop = 'getprop ro.build.product'
+    self.device_type = self.device.adb.Shell(product_prop).rstrip('\n')
+    assert self.device_type, 'No device type found in android environment.'
 
     # This remembers what we have already pushed to the device.
     self.pushed = set()
@@ -103,6 +109,10 @@ class Driver(object):
     if not os.path.exists(file_on_host):
       if not skip_if_missing:
         logging.critical('Missing file on host: %s' % file_on_host)
+      return
+
+    if os.path.isdir(file_on_host):
+      self.push_files_rec(file_on_host, os.path.join(target_rel, file_name))
       return
 
     # Work-around for 'text file busy' errors. Push the files to a temporary
@@ -161,8 +171,14 @@ class Driver(object):
         return False
     return True
 
-  def run(self, target_dir, binary, args, rel_path, timeout, env=None,
-          logcat_file=False):
+  def run(self,
+          target_dir,
+          binary,
+          args,
+          rel_path,
+          timeout,
+          env=None,
+          logcat_file=None):
     """Execute a command on the device's shell.
 
     Args:

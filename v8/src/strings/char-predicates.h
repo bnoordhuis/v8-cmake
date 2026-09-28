@@ -25,13 +25,15 @@ inline constexpr bool IsOctalDigit(base::uc32 c);
 inline constexpr bool IsBinaryDigit(base::uc32 c);
 inline constexpr bool IsRegExpWord(base::uc32 c);
 
-inline constexpr bool IsAsciiLower(base::uc32 ch);
-inline constexpr bool IsAsciiUpper(base::uc32 ch);
+template <typename Char>
+inline constexpr bool IsAsciiLower(Char ch);
+template <typename Char>
+inline constexpr bool IsAsciiUpper(Char ch);
 
 inline constexpr base::uc32 ToAsciiUpper(base::uc32 ch);
 inline constexpr base::uc32 ToAsciiLower(base::uc32 ch);
 
-// ES#sec-names-and-keywords
+// https://tc39.es/ecma262/#sec-names-and-keywords
 // This includes '_', '$' and '\', and ID_Start according to
 // http://www.unicode.org/reports/tr31/, which consists of categories
 // 'Lu', 'Ll', 'Lt', 'Lm', 'Lo', 'Nl', but excluding properties
@@ -46,7 +48,7 @@ inline bool IsIdentifierStartSlow(base::uc32 c) {
 }
 #endif
 
-// ES#sec-names-and-keywords
+// https://tc39.es/ecma262/#sec-names-and-keywords
 // This includes \u200c and \u200d, and ID_Continue according to
 // http://www.unicode.org/reports/tr31/, which consists of ID_Start,
 // the categories 'Mn', 'Mc', 'Nd', 'Pc', but excluding properties
@@ -84,7 +86,8 @@ inline bool IsWhiteSpaceOrLineTerminatorSlow(base::uc32 c) {
   return IsWhiteSpaceSlow(c) || unibrow::IsLineTerminator(c);
 }
 
-inline bool IsLineTerminatorSequence(base::uc32 c, base::uc32 next);
+template <typename Char>
+inline bool IsLineTerminatorSequence(Char c, Char next);
 
 }  // namespace internal
 }  // namespace v8

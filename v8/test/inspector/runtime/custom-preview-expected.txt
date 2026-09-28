@@ -114,6 +114,26 @@ Dump custom previews..
         ]
     ]
 }
+{
+    bodyGetterId : <bodyGetterId>
+    header : [
+        [0] : span
+        [1] : {
+        }
+        [2] : Null body: 
+        [3] : nullBodyTest
+    ]
+}
+{
+    id : <messageId>
+    result : {
+        result : {
+            subtype : null
+            type : object
+            value : null
+        }
+    }
+}
 Change formatters order and dump again..
 {
     bodyGetterId : <bodyGetterId>
@@ -220,6 +240,26 @@ Change formatters order and dump again..
         ]
     ]
 }
+{
+    bodyGetterId : <bodyGetterId>
+    header : [
+        [0] : span
+        [1] : {
+        }
+        [2] : Null body: 
+        [3] : nullBodyTest
+    ]
+}
+{
+    id : <messageId>
+    result : {
+        result : {
+            subtype : null
+            type : object
+            value : null
+        }
+    }
+}
 Test Runtime.getProperties
 {
     bodyGetterId : <bodyGetterId>
@@ -256,20 +296,6 @@ Test Runtime.getProperties
     }
 }
 Try to break custom preview..
-{
-    method : Runtime.consoleAPICalled
-    params : {
-        args : [
-            [0] : {
-                type : string
-                value : Custom Formatter Failed: Uncaught 1
-            }
-        ]
-        executionContextId : <executionContextId>
-        timestamp : <timestamp>
-        type : error
-    }
-}
 {
     method : Runtime.consoleAPICalled
     params : {

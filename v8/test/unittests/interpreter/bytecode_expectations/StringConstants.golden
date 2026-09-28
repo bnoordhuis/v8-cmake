@@ -13,11 +13,11 @@ frame size: 0
 parameter count: 1
 bytecode array length: 3
 bytecodes: [
-  /*   34 S> */ B(LdaConstant), U8(0),
+  /*   34 S> */ B(LdaConstant), U8(0:"This is a string"),
   /*   60 S> */ B(Return),
 ]
 constant pool: [
-  ONE_BYTE_INTERNALIZED_STRING_TYPE ["This is a string"],
+  INTERNALIZED_ONE_BYTE_STRING_TYPE ["This is a string"],
 ]
 handlers: [
 ]
@@ -30,14 +30,14 @@ frame size: 1
 parameter count: 1
 bytecode array length: 6
 bytecodes: [
-  /*   42 S> */ B(LdaConstant), U8(0),
+  /*   42 S> */ B(LdaConstant), U8(0:"First string"),
                 B(Star0),
-  /*   58 S> */ B(LdaConstant), U8(1),
+  /*   58 S> */ B(LdaConstant), U8(1:"Second string"),
   /*   81 S> */ B(Return),
 ]
 constant pool: [
-  ONE_BYTE_INTERNALIZED_STRING_TYPE ["First string"],
-  ONE_BYTE_INTERNALIZED_STRING_TYPE ["Second string"],
+  INTERNALIZED_ONE_BYTE_STRING_TYPE ["First string"],
+  INTERNALIZED_ONE_BYTE_STRING_TYPE ["Second string"],
 ]
 handlers: [
 ]
@@ -50,13 +50,13 @@ frame size: 1
 parameter count: 1
 bytecode array length: 6
 bytecodes: [
-  /*   42 S> */ B(LdaConstant), U8(0),
+  /*   42 S> */ B(LdaConstant), U8(0:"Same string"),
                 B(Star0),
-  /*   57 S> */ B(LdaConstant), U8(0),
+  /*   57 S> */ B(LdaConstant), U8(0:"Same string"),
   /*   78 S> */ B(Return),
 ]
 constant pool: [
-  ONE_BYTE_INTERNALIZED_STRING_TYPE ["Same string"],
+  INTERNALIZED_ONE_BYTE_STRING_TYPE ["Same string"],
 ]
 handlers: [
 ]

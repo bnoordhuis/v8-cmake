@@ -6,21 +6,23 @@
 #define V8_COMPILER_RAW_MACHINE_ASSEMBLER_H_
 
 #include <initializer_list>
+#include <optional>
 #include <type_traits>
 
 #include "src/common/globals.h"
 #include "src/compiler/access-builder.h"
 #include "src/compiler/common-operator.h"
-#include "src/compiler/graph.h"
 #include "src/compiler/linkage.h"
 #include "src/compiler/machine-operator.h"
 #include "src/compiler/node-matchers.h"
 #include "src/compiler/node.h"
 #include "src/compiler/operator.h"
 #include "src/compiler/simplified-operator.h"
+#include "src/compiler/turbofan-graph.h"
 #include "src/compiler/write-barrier-kind.h"
 #include "src/execution/isolate.h"
 #include "src/heap/factory.h"
+#include "src/objects/string.h"
 
 namespace v8 {
 namespace internal {
@@ -45,10 +47,9 @@ class SourcePositionTable;
 class V8_EXPORT_PRIVATE RawMachineAssembler {
  public:
   RawMachineAssembler(
-      Isolate* isolate, Graph* graph, CallDescriptor* call_descriptor,
+      Isolate* isolate, TFGraph* graph, CallDescriptor* call_descriptor,
       MachineRepresentation word = MachineType::PointerRepresentation(),
-      MachineOperatorBuilder::Flags flags =
-          MachineOperatorBuilder::Flag::kNoFlags,
+      MachineOperatorBuilder::Flags flags = MachineOperatorBuilder::kNoFlags,
       MachineOperatorBuilder::AlignmentRequirements alignment_requirements =
           MachineOperatorBuilder::AlignmentRequirements::
               FullUnalignedAccessSupport());
@@ -58,7 +59,7 @@ class V8_EXPORT_PRIVATE RawMachineAssembler {
   RawMachineAssembler& operator=(const RawMachineAssembler&) = delete;
 
   Isolate* isolate() const { return isolate_; }
-  Graph* graph() const { return graph_; }
+  TFGraph* graph() const { return graph_; }
   Zone* zone() const { return graph()->zone(); }
   MachineOperatorBuilder* machine() { return &machine_; }
   CommonOperatorBuilder* common() { return &common_; }
@@ -72,7 +73,7 @@ class V8_EXPORT_PRIVATE RawMachineAssembler {
   // Finalizes the schedule and transforms it into a graph that's suitable for
   // it to be used for Turbofan optimization and re-scheduling. Note that this
   // RawMachineAssembler becomes invalid after export.
-  Graph* ExportForOptimization();
+  TFGraph* ExportForOptimization();
 
   // ===========================================================================
   // The following utility methods create new nodes with specific operators and
@@ -148,11 +149,11 @@ class V8_EXPORT_PRIVATE RawMachineAssembler {
   }
   bool IsMapOffsetConstant(Node* node) {
     Int64Matcher m(node);
-    if (m.Is(HeapObject::kMapOffset)) return true;
+    if (m.Is(offsetof(HeapObject, map_))) return true;
     // Test if `node` is a `Phi(Int64Constant(0))`
     if (node->opcode() == IrOpcode::kPhi) {
       for (Node* input : node->inputs()) {
-        if (!Int64Matcher(input).Is(HeapObject::kMapOffset)) return false;
+        if (!Int64Matcher(input).Is(offsetof(HeapObject, map_))) return false;
       }
       return true;
     }
@@ -160,10 +161,11 @@ class V8_EXPORT_PRIVATE RawMachineAssembler {
   }
   bool IsMapOffsetConstantMinusTag(Node* node) {
     Int64Matcher m(node);
-    return m.Is(HeapObject::kMapOffset - kHeapObjectTag);
+    return m.Is(static_cast<int>(offsetof(HeapObject, map_)) - kHeapObjectTag);
   }
   bool IsMapOffsetConstantMinusTag(int offset) {
-    return offset == HeapObject::kMapOffset - kHeapObjectTag;
+    return offset ==
+           static_cast<int>(offsetof(HeapObject, map_)) - kHeapObjectTag;
   }
   Node* LoadFromObject(MachineType type, Node* base, Node* offset) {
     DCHECK_IMPLIES(V8_MAP_PACKING_BOOL && IsMapOffsetConstantMinusTag(offset),
@@ -171,6 +173,20 @@ class V8_EXPORT_PRIVATE RawMachineAssembler {
     ObjectAccess access = {type, WriteBarrierKind::kNoWriteBarrier};
     Node* load = AddNode(simplified()->LoadFromObject(access), base, offset);
     return load;
+  }
+
+  Node* LoadProtectedPointerFromObject(Node* base, Node* offset) {
+#if V8_ENABLE_SANDBOX
+    static_assert(COMPRESS_POINTERS_BOOL);
+    Node* tagged = LoadFromObject(MachineType::Int32(), base, offset);
+    Node* trusted_cage_base =
+        LoadImmutable(MachineType::Pointer(), LoadRootRegister(),
+                      IntPtrConstant(IsolateData::trusted_cage_base_offset()));
+    return BitcastWordToTagged(
+        WordOr(trusted_cage_base, ChangeUint32ToUint64(tagged)));
+#else
+    return LoadFromObject(MachineType::AnyTagged(), base, offset);
+#endif  // V8_ENABLE_SANDBOX
   }
 
   Node* Store(MachineRepresentation rep, Node* base, Node* value,
@@ -192,12 +208,27 @@ class V8_EXPORT_PRIVATE RawMachineAssembler {
   void OptimizedStoreField(MachineRepresentation rep, Node* object, int offset,
                            Node* value, WriteBarrierKind write_barrier) {
     DCHECK(!IsMapOffsetConstantMinusTag(offset));
+    DCHECK_NE(rep, MachineRepresentation::kIndirectPointer);
     AddNode(simplified()->StoreField(
                 FieldAccess(BaseTaggedness::kTaggedBase, offset,
                             MaybeHandle<Name>(), OptionalMapRef(), Type::Any(),
                             MachineType::TypeForRepresentation(rep),
                             write_barrier, "OptimizedStoreField")),
             object, value);
+  }
+  void OptimizedStoreIndirectPointerField(Node* object, int offset,
+                                          IndirectPointerTag tag, Node* value,
+                                          WriteBarrierKind write_barrier) {
+    DCHECK(!IsMapOffsetConstantMinusTag(offset));
+    DCHECK(write_barrier == WriteBarrierKind::kNoWriteBarrier ||
+           write_barrier == WriteBarrierKind::kIndirectPointerWriteBarrier);
+    FieldAccess access(BaseTaggedness::kTaggedBase, offset, MaybeHandle<Name>(),
+                       OptionalMapRef(), Type::Any(),
+                       MachineType::IndirectPointer(), write_barrier,
+                       "OptimizedStoreIndirectPointerField",
+                       ConstFieldInfo::None(), false, kExternalPointerNullTag,
+                       tag, false, false);
+    AddNode(simplified()->StoreField(access), object, value);
   }
   void OptimizedStoreMap(Node* object, Node* value,
                          WriteBarrierKind write_barrier = kMapWriteBarrier) {
@@ -206,8 +237,7 @@ class V8_EXPORT_PRIVATE RawMachineAssembler {
   }
   Node* Retain(Node* value) { return AddNode(common()->Retain(), value); }
 
-  Node* OptimizedAllocate(Node* size, AllocationType allocation,
-                          AllowLargeObjects allow_large_objects);
+  Node* OptimizedAllocate(Node* size, AllocationType allocation);
 
   // Unaligned memory operations
   Node* UnalignedLoad(MachineType type, Node* base) {
@@ -768,7 +798,7 @@ class V8_EXPORT_PRIVATE RawMachineAssembler {
     return AddNode(machine()->BitcastTaggedToWordForTagAndSmiBits(), a);
   }
   Node* BitcastMaybeObjectToWord(Node* a) {
-      return AddNode(machine()->BitcastMaybeObjectToWord(), a);
+    return AddNode(machine()->BitcastMaybeObjectToWord(), a);
   }
   Node* BitcastWordToTagged(Node* a) {
     return AddNode(machine()->BitcastWordToTagged(), a);
@@ -781,6 +811,9 @@ class V8_EXPORT_PRIVATE RawMachineAssembler {
   }
   Node* ChangeFloat32ToFloat64(Node* a) {
     return AddNode(machine()->ChangeFloat32ToFloat64(), a);
+  }
+  Node* ChangeFloat16RawBitsToFloat64(Node* a) {
+    return AddNode(machine()->ChangeFloat16RawBitsToFloat64().placeholder(), a);
   }
   Node* ChangeInt32ToFloat64(Node* a) {
     return AddNode(machine()->ChangeInt32ToFloat64(), a);
@@ -812,6 +845,9 @@ class V8_EXPORT_PRIVATE RawMachineAssembler {
   Node* TruncateFloat32ToUint32(Node* a, TruncateKind kind) {
     return AddNode(machine()->TruncateFloat32ToUint32(kind), a);
   }
+  Node* TruncateFloat64ToInt64(Node* a, TruncateKind kind) {
+    return AddNode(machine()->TruncateFloat64ToInt64(kind), a);
+  }
   Node* TryTruncateFloat32ToInt64(Node* a) {
     return AddNode(machine()->TryTruncateFloat32ToInt64(), a);
   }
@@ -833,11 +869,22 @@ class V8_EXPORT_PRIVATE RawMachineAssembler {
   Node* ChangeInt32ToInt64(Node* a) {
     return AddNode(machine()->ChangeInt32ToInt64(), a);
   }
+  Node* ChangeInt32ToIntPtr(Node* a) {
+    if (kSystemPointerSize == 8) {
+      return ChangeInt32ToInt64(a);
+    } else {
+      return a;
+    }
+  }
   Node* ChangeUint32ToUint64(Node* a) {
     return AddNode(machine()->ChangeUint32ToUint64(), a);
   }
   Node* TruncateFloat64ToFloat32(Node* a) {
     return AddNode(machine()->TruncateFloat64ToFloat32(), a);
+  }
+  Node* TruncateFloat64ToFloat16RawBits(Node* a) {
+    return AddNode(machine()->TruncateFloat64ToFloat16RawBits().placeholder(),
+                   a);
   }
   Node* TruncateInt64ToInt32(Node* a) {
     return AddNode(machine()->TruncateInt64ToInt32(), a);
@@ -926,6 +973,20 @@ class V8_EXPORT_PRIVATE RawMachineAssembler {
     return AddNode(machine()->Float64SilenceNaN(), a);
   }
 
+  // Stack operations.
+  Node* LoadFramePointer() { return AddNode(machine()->LoadFramePointer()); }
+  Node* LoadParentFramePointer() {
+    return AddNode(machine()->LoadParentFramePointer());
+  }
+
+  // SIMD operations that are needed outside of Wasm (e.g. in swisstable).
+  Node* I8x16Splat(Node* a) { return AddNode(machine()->I8x16Splat(), a); }
+  Node* I8x16BitMask(Node* a) { return AddNode(machine()->I8x16BitMask(), a); }
+  Node* I8x16Eq(Node* a, Node* b) {
+    return AddNode(machine()->I8x16Eq(), a, b);
+  }
+
+#if V8_ENABLE_WEBASSEMBLY
   // SIMD operations.
   Node* S128Const(const uint8_t value[16]) {
     return AddNode(machine()->S128Const(value));
@@ -936,23 +997,17 @@ class V8_EXPORT_PRIVATE RawMachineAssembler {
   }
   Node* I32x4Splat(Node* a) { return AddNode(machine()->I32x4Splat(), a); }
   Node* I16x8Splat(Node* a) { return AddNode(machine()->I16x8Splat(), a); }
-  Node* I8x16Splat(Node* a) { return AddNode(machine()->I8x16Splat(), a); }
 
-  Node* I8x16BitMask(Node* a) { return AddNode(machine()->I8x16BitMask(), a); }
-
-  Node* I8x16Eq(Node* a, Node* b) {
-    return AddNode(machine()->I8x16Eq(), a, b);
+  Node* LoadStackPointer() { return AddNode(machine()->LoadStackPointer()); }
+  void SetStackPointer(Node* ptr) {
+    AddNode(machine()->SetStackPointer(), ptr);
   }
-
-  // Stack operations.
-  Node* LoadFramePointer() { return AddNode(machine()->LoadFramePointer()); }
-  Node* LoadParentFramePointer() {
-    return AddNode(machine()->LoadParentFramePointer());
-  }
+#endif
 
   // Parameters.
   Node* TargetParameter();
   Node* Parameter(size_t index);
+  Node* LoadRootRegister() { return AddNode(machine()->LoadRootRegister()); }
 
   // Pointer utilities.
   Node* LoadFromPointer(void* address, MachineType type, int32_t offset = 0) {
@@ -993,7 +1048,7 @@ class V8_EXPORT_PRIVATE RawMachineAssembler {
 
   // Call to a C function.
   template <class... CArgs>
-  Node* CallCFunction(Node* function, base::Optional<MachineType> return_type,
+  Node* CallCFunction(Node* function, std::optional<MachineType> return_type,
                       CArgs... cargs) {
     static_assert(
         std::conjunction_v<std::is_convertible<CArgs, CFunctionArg>...>,
@@ -1001,7 +1056,7 @@ class V8_EXPORT_PRIVATE RawMachineAssembler {
     return CallCFunction(function, return_type, {cargs...});
   }
 
-  Node* CallCFunction(Node* function, base::Optional<MachineType> return_type,
+  Node* CallCFunction(Node* function, std::optional<MachineType> return_type,
                       std::initializer_list<CFunctionArg> args);
 
   // Call to a C function without a function discriptor on AIX.
@@ -1044,7 +1099,8 @@ class V8_EXPORT_PRIVATE RawMachineAssembler {
   // Control flow.
   void Goto(RawMachineLabel* label);
   void Branch(Node* condition, RawMachineLabel* true_val,
-              RawMachineLabel* false_val);
+              RawMachineLabel* false_val,
+              BranchHint branch_hint = BranchHint::kNone);
   void Switch(Node* index, RawMachineLabel* default_label,
               const int32_t* case_values, RawMachineLabel** case_labels,
               size_t case_count);
@@ -1062,6 +1118,10 @@ class V8_EXPORT_PRIVATE RawMachineAssembler {
   void AbortCSADcheck(Node* message);
   void DebugBreak();
   void Unreachable();
+#ifdef V8_ENABLE_SANDBOX_HARDWARE_SUPPORT
+  void EnterSandbox();
+  void ExitSandbox();
+#endif  // V8_ENABLE_SANDBOX_HARDWARE_SUPPORT
   void Comment(const std::string& msg);
   void StaticAssert(Node* value, const char* source);
 
@@ -1111,6 +1171,33 @@ class V8_EXPORT_PRIVATE RawMachineAssembler {
   FileAndLine GetCurrentExternalSourcePosition() const;
   SourcePositionTable* source_positions() { return source_positions_; }
 
+  // The parameter count of the code, as specified by the call descriptor.
+  size_t parameter_count() const { return call_descriptor_->ParameterCount(); }
+
+  // Most of the time, the parameter count is static and known at
+  // code-generation time through the call descriptor. However, certain
+  // varargs JS  builtins can be used for different functions with different
+  // JS  parameter counts. In those (rare) cases, we need to obtain the actual
+  // parameter count of the function object through which the code is invoked
+  // to be able to determine the total argument count (including padding
+  // arguments), which is in turn required to pop all arguments from the stack
+  // in the function epilogue.
+  //
+  // If we're generating the code for one of these special builtins, this
+  // function will return a node containing the actual JS parameter count.
+  // Otherwise it will be nullptr.
+  //
+  // TODO(saelo): it would be a bit nicer if we could automatically determine
+  // that the dynamic parameter count is required (for example from the call
+  // descriptor) and then directly fetch it in the prologue and use it in the
+  // epilogue without the higher-level assemblers having to get involved. It's
+  // not clear if it's worth the effort though for the handful of builtins that
+  // work this way though.
+  Node* dynamic_js_parameter_count() { return dynamic_js_parameter_count_; }
+  void set_dynamic_js_parameter_count(Node* parameter_count) {
+    dynamic_js_parameter_count_ = parameter_count;
+  }
+
  private:
   Node* MakeNode(const Operator* op, int input_count, Node* const* inputs);
   BasicBlock* Use(RawMachineLabel* label);
@@ -1130,20 +1217,24 @@ class V8_EXPORT_PRIVATE RawMachineAssembler {
   void MarkControlDeferred(Node* control_input);
 
   Schedule* schedule() { return schedule_; }
-  size_t parameter_count() const { return call_descriptor_->ParameterCount(); }
 
-  static void OptimizeControlFlow(Schedule* schedule, Graph* graph,
+  static void OptimizeControlFlow(Schedule* schedule, TFGraph* graph,
                                   CommonOperatorBuilder* common);
 
   Isolate* isolate_;
 
-  Graph* graph_;
+  TFGraph* graph_;
   Schedule* schedule_;
   SourcePositionTable* source_positions_;
   MachineOperatorBuilder machine_;
   CommonOperatorBuilder common_;
   SimplifiedOperatorBuilder simplified_;
   CallDescriptor* call_descriptor_;
+  // See the dynamic_js_parameter_count() getter for an explanation of this
+  // field. If we're generating the code for a builtin that needs to obtain the
+  // parameter count at runtime, then this field will contain a node storing
+  // the actual parameter count. Otherwise it will be nullptr.
+  Node* dynamic_js_parameter_count_;
   Node* target_parameter_;
   NodeVector parameters_;
   BasicBlock* current_block_;

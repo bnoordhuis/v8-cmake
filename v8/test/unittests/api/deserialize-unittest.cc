@@ -10,6 +10,7 @@
 #include "include/v8-primitive.h"
 #include "include/v8-script.h"
 #include "src/codegen/compilation-cache.h"
+#include "src/common/synchronization-point-support.h"
 #include "test/unittests/heap/heap-utils.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
@@ -23,17 +24,18 @@ class DeserializeTest : public TestWithPlatform {
         : test_(test),
           isolate_wrapper_(kNoCounters),
           isolate_scope_(isolate_wrapper_.isolate()),
-          handle_scope_(isolate_wrapper_.isolate()),
-          context_(Context::New(isolate_wrapper_.isolate())),
-          context_scope_(context_) {
+          handle_scope_(isolate_wrapper_.isolate()) {
       CHECK_NULL(test->isolate_);
       CHECK(test->context_.IsEmpty());
       test->isolate_ = isolate_wrapper_.isolate();
-      test->context_ = context_;
+      Local<Context> context = Context::New(test->isolate_);
+      test->context_.Reset(test->isolate_, context);
+      context->Enter();
     }
     ~IsolateAndContextScope() {
+      test_->context_.Get(test_->isolate_)->Exit();
       test_->isolate_ = nullptr;
-      test_->context_ = {};
+      test_->context_.Reset();
     }
 
    private:
@@ -41,8 +43,6 @@ class DeserializeTest : public TestWithPlatform {
     v8::IsolateWrapper isolate_wrapper_;
     v8::Isolate::Scope isolate_scope_;
     v8::HandleScope handle_scope_;
-    v8::Local<v8::Context> context_;
-    v8::Context::Scope context_scope_;
   };
 
   Local<String> NewString(const char* val) {
@@ -59,11 +59,14 @@ class DeserializeTest : public TestWithPlatform {
   }
 
   Isolate* isolate() { return isolate_; }
-  v8::Local<v8::Context> context() { return context_.ToLocalChecked(); }
+  v8::Local<v8::Context> context() {
+    DCHECK(!context_.IsEmpty());
+    return context_.Get(isolate_);
+  }
 
  private:
   Isolate* isolate_ = nullptr;
-  v8::MaybeLocal<v8::Context> context_;
+  v8::Global<v8::Context> context_;
 };
 
 // Check that deserialization works.
@@ -238,19 +241,125 @@ TEST_F(DeserializeTest, OffThreadDeserializeRejectsDifferentSource) {
   }
 }
 
+class DeserializeStarterThread : public base::Thread {
+ public:
+  explicit DeserializeStarterThread(Isolate* isolate,
+                                    v8::ScriptCompiler::CachedData* cached_data)
+      : Thread(base::Thread::Options("DeserializeStarterThread")),
+        isolate_(isolate),
+        cached_data_(cached_data) {}
+
+  void Run() override {
+    DeserializeThread deserialize_thread(
+        ScriptCompiler::StartConsumingCodeCacheOnBackground(
+            isolate_, std::make_unique<ScriptCompiler::CachedData>(
+                          cached_data_->data, cached_data_->length,
+                          ScriptCompiler::CachedData::BufferNotOwned)));
+    CHECK(deserialize_thread.Start());
+    deserialize_thread.Join();
+    task_ = deserialize_thread.TakeTask();
+  }
+
+  std::unique_ptr<ScriptCompiler::ConsumeCodeCacheTask> TakeTask() {
+    return std::move(task_);
+  }
+
+ private:
+  Isolate* isolate_;
+  v8::ScriptCompiler::CachedData* cached_data_;
+  std::unique_ptr<ScriptCompiler::ConsumeCodeCacheTask> task_;
+};
+
+// Check that off-thread deserialization started from a background thread works.
+TEST_F(DeserializeTest, OffThreadDeserializeStartedFromBackgroundThread) {
+  std::unique_ptr<v8::ScriptCompiler::CachedData> cached_data;
+
+  {
+    IsolateAndContextScope scope(this);
+
+    Local<String> source_code = NewString("function foo() { return 42; }");
+    Local<Script> script =
+        Script::Compile(context(), source_code).ToLocalChecked();
+
+    CHECK(!script->Run(context()).IsEmpty());
+    CHECK_EQ(RunGlobalFunc("foo"), Integer::New(isolate(), 42));
+
+    cached_data.reset(
+        ScriptCompiler::CreateCodeCache(script->GetUnboundScript()));
+  }
+
+  {
+    IsolateAndContextScope scope(this);
+
+    DeserializeStarterThread deserialize_starter_thread(isolate(),
+                                                        cached_data.get());
+    CHECK(deserialize_starter_thread.Start());
+    {
+      // Check that code execution works wille the DeserializeStarterThread
+      // staring a ConsumeCodeCacheTask.
+      Local<String> other_source_code =
+          NewString("function bar() { return 21; }");
+      Local<Script> other_script =
+          Script::Compile(context(), other_source_code).ToLocalChecked();
+      CHECK(!other_script->Run(context()).IsEmpty());
+      CHECK_EQ(RunGlobalFunc("bar"), Integer::New(isolate(), 21));
+    }
+    deserialize_starter_thread.Join();
+
+    Local<String> source_code = NewString("function foo() { return 42; }");
+    ScriptCompiler::Source source(
+        source_code, cached_data.release(),
+        deserialize_starter_thread.TakeTask().release());
+    Local<Script> script =
+        ScriptCompiler::Compile(context(), &source,
+                                ScriptCompiler::kConsumeCodeCache)
+            .ToLocalChecked();
+
+    CHECK(!source.GetCachedData()->rejected);
+    CHECK(!script->Run(context()).IsEmpty());
+    CHECK_EQ(RunGlobalFunc("foo"), v8::Integer::New(isolate(), 42));
+  }
+}
+
+// This class is a dynamic wrapper for v8::ScriptOrigin, using v8::Global for
+// its fields, instead of v8::Local. Therefore, it can be used in tests such as
+// the ones below, which explicitly disable conservative stack scanning. In such
+// tests, using v8::ScriptOrigin in configurations where v8::Local is a direct
+// pointer (i.e., with v8_enable_direct_handle=true) would have been incorrect.
+// Without CSS, the GC could miss an object referenced by a v8::Local (if it was
+// not otherwise retained). Or, even if the object was retained, the GC could
+// move it without updating the v8::Local. In both cases, the v8::Local would
+// contain an invalid direct pointer after GC.
+class PersistentScriptOrigin {
+ public:
+  PersistentScriptOrigin(Isolate* isolate, Local<Value> resource_name)
+      : isolate_(isolate), resource_name_(isolate, resource_name) {}
+  ~PersistentScriptOrigin() { resource_name_.Reset(); }
+
+  ScriptOrigin AsScriptOrigin() const {
+    return ScriptOrigin(resource_name_.Get(isolate_));
+  }
+
+ private:
+  Isolate* isolate_;
+  Global<Value> resource_name_;
+};
+
 class MergeDeserializedCodeTest : public DeserializeTest {
  protected:
   // The source code used in these tests.
   static constexpr char kSourceCode[] = R"(
     // Looks like an IIFE but isn't, to get eagerly parsed:
-    var eager = (function () {
-      // Actual IIFE, also eagerly parsed:
-      return (function iife() {
-        return 42;
-      })();
-    });
-    // Lazily parsed:
-    var lazy = function () { return eager(); };
+    { let captured = 10;
+      var eager = (function () {
+        // Actual IIFE, also eagerly parsed:
+        return (function iife() {
+          return captured, 42;
+        })();
+      });
+      // Lazily parsed:
+      var lazy = function () { return eager(); };
+    }
   )";
 
   // Objects from the Script's object graph whose lifetimes and connectedness
@@ -293,63 +402,73 @@ class MergeDeserializedCodeTest : public DeserializeTest {
   };
 
   template <typename T>
-  static i::SharedFunctionInfo GetSharedFunctionInfo(
+  static i::Tagged<i::SharedFunctionInfo> GetSharedFunctionInfo(
       Local<T> function_or_script) {
-    i::Handle<i::JSFunction> i_function =
-        i::Handle<i::JSFunction>::cast(Utils::OpenHandle(*function_or_script));
+    i::DirectHandle<i::JSFunction> i_function =
+        i::Cast<i::JSFunction>(Utils::OpenDirectHandle(*function_or_script));
     return i_function->shared();
   }
 
-  static i::MaybeObject WeakOrSmi(i::Object obj) {
-    return obj.IsSmi()
-               ? i::MaybeObject::FromSmi(i::Smi::cast(obj))
-               : i::MaybeObject::MakeWeak(i::MaybeObject::FromObject(obj));
+  static i::Tagged<i::Object> ExtractSharedFunctionInfoData(
+      i::Tagged<i::SharedFunctionInfo> sfi, i::Isolate* i_isolate) {
+    auto data = sfi->GetTrustedData(i_isolate);
+    // BytecodeArrays live in trusted space and so cannot be referenced through
+    // tagged/compressed pointers from e.g. a FixedArray. Instead, we need to
+    // use their in-sandbox wrapper object for that purpose.
+    if (i::Tagged<i::BytecodeArray> bytes; TryCast(data, &bytes)) {
+      return bytes->wrapper();
+    }
+    return i::Cast<i::Object>(data);
   }
 
   void ValidateStandaloneGraphAndPopulateArray(
-      i::SharedFunctionInfo toplevel_sfi, i::WeakFixedArray array,
+      i::Tagged<i::SharedFunctionInfo> toplevel_sfi,
+      i::Tagged<i::WeakFixedArray> array, i::Isolate* i_isolate,
       bool lazy_should_be_compiled = false,
       bool eager_should_be_compiled = true) {
     i::DisallowGarbageCollection no_gc;
-    CHECK(toplevel_sfi.is_compiled());
-    array.Set(kToplevelSfi, WeakOrSmi(toplevel_sfi));
-    array.Set(kToplevelFunctionData,
-              WeakOrSmi(toplevel_sfi.function_data(kAcquireLoad)));
-    array.Set(kToplevelFeedbackMetadata,
-              WeakOrSmi(toplevel_sfi.feedback_metadata()));
-    i::Script script = i::Script::cast(toplevel_sfi.script());
-    array.Set(kScript, WeakOrSmi(script));
-    i::WeakFixedArray sfis = script.shared_function_infos();
-    CHECK_EQ(sfis.length(), 4);
-    CHECK_EQ(sfis.Get(0), WeakOrSmi(toplevel_sfi));
-    i::SharedFunctionInfo eager =
-        i::SharedFunctionInfo::cast(sfis.Get(1).GetHeapObjectAssumeWeak());
-    CHECK_EQ(eager.is_compiled(), eager_should_be_compiled);
-    array.Set(kEagerSfi, WeakOrSmi(eager));
+    CHECK(toplevel_sfi->is_compiled());
+    array->set(kToplevelSfi, MakeWeak(toplevel_sfi));
+    array->set(
+        kToplevelFunctionData,
+        MakeWeakOrSmi(ExtractSharedFunctionInfoData(toplevel_sfi, i_isolate)));
+    array->set(kToplevelFeedbackMetadata,
+               MakeWeak(toplevel_sfi->feedback_metadata()));
+    i::Tagged<i::Script> script = i::Cast<i::Script>(toplevel_sfi->script());
+    array->set(kScript, MakeWeak(script));
+    i::Tagged<i::WeakFixedArray> sfis = script->infos();
+    CHECK_EQ(sfis->length().value(), 4);
+    CHECK_EQ(sfis->get(0), MakeWeak(toplevel_sfi));
+    i::Tagged<i::SharedFunctionInfo> eager =
+        i::Cast<i::SharedFunctionInfo>(sfis->get(1).GetHeapObjectAssumeWeak());
+    CHECK_EQ(eager->is_compiled(), eager_should_be_compiled);
+    array->set(kEagerSfi, MakeWeak(eager));
     if (eager_should_be_compiled) {
-      array.Set(kEagerFunctionData,
-                WeakOrSmi(eager.function_data(kAcquireLoad)));
-      array.Set(kEagerFeedbackMetadata, WeakOrSmi(eager.feedback_metadata()));
-      i::SharedFunctionInfo iife =
-          i::SharedFunctionInfo::cast(sfis.Get(2).GetHeapObjectAssumeWeak());
-      CHECK(iife.is_compiled());
-      array.Set(kIifeSfi, WeakOrSmi(iife));
-      array.Set(kIifeFunctionData, WeakOrSmi(iife.function_data(kAcquireLoad)));
-      array.Set(kIifeFeedbackMetadata, WeakOrSmi(iife.feedback_metadata()));
+      array->set(
+          kEagerFunctionData,
+          MakeWeakOrSmi(ExtractSharedFunctionInfoData(eager, i_isolate)));
+      array->set(kEagerFeedbackMetadata, MakeWeak(eager->feedback_metadata()));
+      i::Tagged<i::SharedFunctionInfo> iife = i::Cast<i::SharedFunctionInfo>(
+          sfis->get(2).GetHeapObjectAssumeWeak());
+      CHECK(iife->is_compiled());
+      array->set(kIifeSfi, MakeWeak(iife));
+      array->set(kIifeFunctionData,
+                 MakeWeakOrSmi(ExtractSharedFunctionInfoData(iife, i_isolate)));
+      array->set(kIifeFeedbackMetadata, MakeWeak(iife->feedback_metadata()));
     }
-    i::SharedFunctionInfo lazy =
-        i::SharedFunctionInfo::cast(sfis.Get(3).GetHeapObjectAssumeWeak());
-    CHECK_EQ(lazy.is_compiled(), lazy_should_be_compiled);
-    array.Set(kLazySfi, WeakOrSmi(lazy));
+    i::Tagged<i::SharedFunctionInfo> lazy =
+        i::Cast<i::SharedFunctionInfo>(sfis->get(3).GetHeapObjectAssumeWeak());
+    CHECK_EQ(lazy->is_compiled(), lazy_should_be_compiled);
+    array->set(kLazySfi, MakeWeak(lazy));
   }
 
   void AgeBytecodeAndGC(ScriptObjectFlag sfis_to_age,
-                        i::Handle<i::WeakFixedArray> original_objects,
+                        i::IndirectHandle<i::WeakFixedArray> original_objects,
                         i::Isolate* i_isolate) {
     for (int index = 0; index < kScriptObjectsCount; ++index) {
       if ((sfis_to_age & (1 << index)) == (1 << index)) {
-        i::SharedFunctionInfo sfi = i::SharedFunctionInfo::cast(
-            original_objects->Get(index).GetHeapObjectAssumeWeak());
+        i::Tagged<i::SharedFunctionInfo> sfi = i::Cast<i::SharedFunctionInfo>(
+            original_objects->get(index).GetHeapObjectAssumeWeak());
         i::SharedFunctionInfo::EnsureOldForTesting(sfi);
       }
     }
@@ -373,19 +492,19 @@ class MergeDeserializedCodeTest : public DeserializeTest {
   };
 
   void RetainObjects(ScriptObjectFlag to_retain,
-                     i::WeakFixedArray original_objects,
-                     i::FixedArray retained_original_objects,
+                     i::Tagged<i::WeakFixedArray> original_objects,
+                     i::Tagged<i::FixedArray> retained_original_objects,
                      i::Isolate* i_isolate) {
     for (int index = 0; index < kScriptObjectsCount; ++index) {
       if ((to_retain & (1 << index)) == (1 << index)) {
-        i::MaybeObject maybe = original_objects.Get(index);
-        if (i::HeapObject heap_object;
+        i::Tagged<i::MaybeObject> maybe = original_objects->get(index);
+        if (i::Tagged<i::HeapObject> heap_object;
             maybe.GetHeapObjectIfWeak(&heap_object)) {
-          retained_original_objects.set(index, heap_object);
+          retained_original_objects->set(index, heap_object);
           continue;
         }
       }
-      retained_original_objects.set(
+      retained_original_objects->set(
           index, i::ReadOnlyRoots(i_isolate).undefined_value());
     }
   }
@@ -402,28 +521,27 @@ class MergeDeserializedCodeTest : public DeserializeTest {
     std::unique_ptr<v8::ScriptCompiler::CachedData> cached_data;
     IsolateAndContextScope scope(this);
     i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate());
-    i::DisableConservativeStackScanningScopeForTesting no_stack_scanning(
-        i_isolate->heap());
-    ScriptOrigin default_origin(isolate(), NewString(""));
+    PersistentScriptOrigin default_origin(isolate(), NewString(""));
 
-    i::Handle<i::WeakFixedArray> original_objects =
+    i::IndirectHandle<i::WeakFixedArray> original_objects =
         i_isolate->factory()->NewWeakFixedArray(kScriptObjectsCount);
-    i::Handle<i::FixedArray> retained_original_objects =
+    i::IndirectHandle<i::FixedArray> retained_original_objects =
         i_isolate->factory()->NewFixedArray(kScriptObjectsCount);
-    i::Handle<i::WeakFixedArray> new_objects =
+    i::IndirectHandle<i::WeakFixedArray> new_objects =
         i_isolate->factory()->NewWeakFixedArray(kScriptObjectsCount);
-    Local<Script> original_script;
+    Global<Script> original_script;
 
     // Compile the script for the first time, to both populate the Isolate
     // compilation cache and produce code cache data.
     {
-      v8::EscapableHandleScope handle_scope(isolate());
+      v8::HandleScope handle_scope(isolate());
+      ScriptOrigin origin = default_origin.AsScriptOrigin();
       Local<Script> script =
-          Script::Compile(context(), NewString(kSourceCode), &default_origin)
+          Script::Compile(context(), NewString(kSourceCode), &origin)
               .ToLocalChecked();
 
       ValidateStandaloneGraphAndPopulateArray(GetSharedFunctionInfo(script),
-                                              *original_objects);
+                                              *original_objects, i_isolate);
 
       RetainObjects(retained_before_background_merge, *original_objects,
                     *retained_original_objects, i_isolate);
@@ -433,7 +551,7 @@ class MergeDeserializedCodeTest : public DeserializeTest {
 
       if (run_code_after_background_merge) {
         // We must retain the v8::Script (a JSFunction) so we can run it later.
-        original_script = handle_scope.Escape(script);
+        original_script.Reset(isolate(), script);
         // It doesn't make any sense to configure a test case which says it
         // doesn't want to retain the toplevel SFI but does want to run the
         // script later.
@@ -441,7 +559,13 @@ class MergeDeserializedCodeTest : public DeserializeTest {
       }
     }
 
-    AgeBytecodeAndGC(aged_before_background_merge, original_objects, i_isolate);
+    {
+      // We need to invoke GC without stack, otherwise some objects may survive.
+      i::DisableConservativeStackScanningScopeForTesting no_css_scope(
+          i_isolate->heap());
+      AgeBytecodeAndGC(aged_before_background_merge, original_objects,
+                       i_isolate);
+    }
 
     DeserializeThread deserialize_thread(
         ScriptCompiler::StartConsumingCodeCache(
@@ -455,7 +579,7 @@ class MergeDeserializedCodeTest : public DeserializeTest {
         deserialize_thread.TakeTask();
 
     task->SourceTextAvailable(isolate(), NewString(kSourceCode),
-                              default_origin);
+                              default_origin.AsScriptOrigin());
 
     // If the top-level SFI was retained and not flushed, then no merge is
     // necessary because the results from the deserialization will be discarded.
@@ -475,45 +599,62 @@ class MergeDeserializedCodeTest : public DeserializeTest {
     }
 
     if (run_code_after_background_merge) {
-      CHECK(!original_script->Run(context()).IsEmpty());
+      Local<Script> script = original_script.Get(isolate());
+      CHECK(!script->Run(context()).IsEmpty());
       CHECK_EQ(RunGlobalFunc("lazy"), v8::Integer::New(isolate(), 42));
-      ValidateStandaloneGraphAndPopulateArray(
-          GetSharedFunctionInfo(original_script), *original_objects,
-          true /*lazy_should_be_compiled*/);
+      ValidateStandaloneGraphAndPopulateArray(GetSharedFunctionInfo(script),
+                                              *original_objects, i_isolate,
+                                              true /*lazy_should_be_compiled*/);
     }
 
     RetainObjects(retained_after_background_merge, *original_objects,
                   *retained_original_objects, i_isolate);
 
-    AgeBytecodeAndGC(aged_after_background_merge, original_objects, i_isolate);
+    {
+      // We need to invoke GC without stack, otherwise some objects may survive.
+      i::DisableConservativeStackScanningScopeForTesting no_css_scope(
+          i_isolate->heap());
+      AgeBytecodeAndGC(aged_after_background_merge, original_objects,
+                       i_isolate);
+    }
 
-    ScriptCompiler::Source source(NewString(kSourceCode), default_origin,
-                                  cached_data.release(), task.release());
-    Local<Script> script =
-        ScriptCompiler::Compile(context(), &source,
-                                ScriptCompiler::kConsumeCodeCache)
-            .ToLocalChecked();
+    Global<Script> new_script;
+    {
+      ScriptCompiler::Source source(NewString(kSourceCode),
+                                    default_origin.AsScriptOrigin(),
+                                    cached_data.release(), task.release());
+      Local<Script> script =
+          ScriptCompiler::Compile(context(), &source,
+                                  ScriptCompiler::kConsumeCodeCache)
+              .ToLocalChecked();
+      new_script.Reset(isolate(), script);
 
-    CHECK(!source.GetCachedData()->rejected);
-    ValidateStandaloneGraphAndPopulateArray(
-        GetSharedFunctionInfo(script), *new_objects, lazy_should_be_compiled,
-        eager_should_be_compiled);
+      CHECK(!source.GetCachedData()->rejected);
+      ValidateStandaloneGraphAndPopulateArray(
+          GetSharedFunctionInfo(script), *new_objects, i_isolate,
+          lazy_should_be_compiled, eager_should_be_compiled);
+    }
 
     // At this point, the original_objects array might still have pointers to
     // some old discarded content, such as UncompiledData from flushed
     // functions. GC again to clear it all out.
-    InvokeMajorGC(i_isolate);
+    {
+      // We need to invoke GC without stack, otherwise some objects may survive.
+      i::DisableConservativeStackScanningScopeForTesting no_css_scope(
+          i_isolate->heap());
+      InvokeMajorGC(i_isolate);
+    }
 
     // All tracked objects from the original Script should have been reused if
     // they're still alive.
     for (int index = 0; index < kScriptObjectsCount; ++index) {
-      if (original_objects->Get(index).IsWeak() &&
-          new_objects->Get(index).IsWeak()) {
-        CHECK_EQ(original_objects->Get(index), new_objects->Get(index));
+      if (original_objects->get(index).IsWeak() &&
+          new_objects->get(index).IsWeak()) {
+        CHECK_EQ(original_objects->get(index), new_objects->get(index));
       }
     }
 
-    CHECK(!script->Run(context()).IsEmpty());
+    CHECK(!new_script.Get(isolate())->Run(context()).IsEmpty());
     CHECK_EQ(RunGlobalFunc("lazy"), v8::Integer::New(isolate(), 42));
   }
 };
@@ -635,38 +776,41 @@ TEST_F(MergeDeserializedCodeTest, MergeWithNoFollowUpWork) {
   std::unique_ptr<v8::ScriptCompiler::CachedData> cached_data;
   IsolateAndContextScope scope(this);
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate());
-  i::DisableConservativeStackScanningScopeForTesting no_stack_scanning(
-      i_isolate->heap());
-
-  ScriptOrigin default_origin(isolate(), NewString(""));
+  PersistentScriptOrigin default_origin(isolate(), NewString(""));
 
   constexpr char kSourceCode[] = "function f() {}";
-  Local<Script> original_script;
+  Global<Script> original_script;
 
   // Compile the script for the first time, to both populate the Isolate
   // compilation cache and produce code cache data.
   {
-    v8::EscapableHandleScope handle_scope(isolate());
+    v8::HandleScope handle_scope(isolate());
+    ScriptOrigin origin = default_origin.AsScriptOrigin();
     Local<Script> script =
-        Script::Compile(context(), NewString(kSourceCode), &default_origin)
+        Script::Compile(context(), NewString(kSourceCode), &origin)
             .ToLocalChecked();
 
     cached_data.reset(
         ScriptCompiler::CreateCodeCache(script->GetUnboundScript()));
 
     // Retain the v8::Script (a JSFunction) so we can run it later.
-    original_script = handle_scope.Escape(script);
+    original_script.Reset(isolate(), script);
   }
 
   // Age the top-level bytecode so that the Isolate compilation cache will
   // contain only the Script.
   i::SharedFunctionInfo::EnsureOldForTesting(
-      GetSharedFunctionInfo(original_script));
-  InvokeMajorGC(i_isolate);
+      GetSharedFunctionInfo(original_script.Get(isolate())));
+  {
+    // We need to invoke GC without stack, otherwise some objects may survive.
+    i::DisableConservativeStackScanningScopeForTesting no_css_scope(
+        i_isolate->heap());
+    InvokeMajorGC(i_isolate);
 
-  // A second round of GC is necessary in case incremental marking had already
-  // started before the bytecode was aged.
-  InvokeMajorGC(i_isolate);
+    // A second round of GC is necessary in case incremental marking had already
+    // started before the bytecode was aged.
+    InvokeMajorGC(i_isolate);
+  }
 
   DeserializeThread deserialize_thread(ScriptCompiler::StartConsumingCodeCache(
       isolate(), std::make_unique<ScriptCompiler::CachedData>(
@@ -680,13 +824,14 @@ TEST_F(MergeDeserializedCodeTest, MergeWithNoFollowUpWork) {
 
   // At this point, the cached script's top-level SFI is not compiled, so a
   // background merge is recommended.
-  task->SourceTextAvailable(isolate(), NewString(kSourceCode), default_origin);
+  task->SourceTextAvailable(isolate(), NewString(kSourceCode),
+                            default_origin.AsScriptOrigin());
 
   CHECK(task->ShouldMergeWithExistingScript());
 
   // Run the original script, which will cause its top-level SFI to become
   // compiled again, and make the SFI for the nested function exist.
-  CHECK(!original_script->Run(context()).IsEmpty());
+  CHECK(!original_script.Get(isolate())->Run(context()).IsEmpty());
 
   // The background merge does nothing and requests no follow-up work on the
   // main thread because the original script has the same SFIs at the same level
@@ -697,7 +842,8 @@ TEST_F(MergeDeserializedCodeTest, MergeWithNoFollowUpWork) {
 
   // Complete compilation on the main thread. Even though no follow-up work is
   // required, this step should reuse the original script.
-  ScriptCompiler::Source source(NewString(kSourceCode), default_origin,
+  ScriptCompiler::Source source(NewString(kSourceCode),
+                                default_origin.AsScriptOrigin(),
                                 cached_data.release(), task.release());
   Local<Script> script =
       ScriptCompiler::Compile(context(), &source,
@@ -705,7 +851,7 @@ TEST_F(MergeDeserializedCodeTest, MergeWithNoFollowUpWork) {
           .ToLocalChecked();
 
   CHECK_EQ(GetSharedFunctionInfo(script),
-           GetSharedFunctionInfo(original_script));
+           GetSharedFunctionInfo(original_script.Get(isolate())));
 }
 
 TEST_F(MergeDeserializedCodeTest, MergeThatCompilesLazyFunction) {
@@ -714,9 +860,7 @@ TEST_F(MergeDeserializedCodeTest, MergeThatCompilesLazyFunction) {
   std::unique_ptr<v8::ScriptCompiler::CachedData> cached_data;
   IsolateAndContextScope scope(this);
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate());
-  i::DisableConservativeStackScanningScopeForTesting no_stack_scanning(
-      i_isolate->heap());
-  ScriptOrigin default_origin(isolate(), NewString(""));
+  PersistentScriptOrigin default_origin(isolate(), NewString(""));
 
   constexpr char kSourceCode[] =
       "var f = function () {var s = f.toString(); f = null; return s;};";
@@ -726,8 +870,9 @@ TEST_F(MergeDeserializedCodeTest, MergeThatCompilesLazyFunction) {
   // Compile the script for the first time to produce code cache data.
   {
     v8::HandleScope handle_scope(isolate());
+    ScriptOrigin origin = default_origin.AsScriptOrigin();
     Local<Script> script =
-        Script::Compile(context(), NewString(kSourceCode), &default_origin)
+        Script::Compile(context(), NewString(kSourceCode), &origin)
             .ToLocalChecked();
     CHECK(!script->Run(context()).IsEmpty());
 
@@ -746,8 +891,9 @@ TEST_F(MergeDeserializedCodeTest, MergeThatCompilesLazyFunction) {
   // Compile the script for the second time, but don't run the function 'f'.
   {
     v8::HandleScope handle_scope(isolate());
+    ScriptOrigin origin = default_origin.AsScriptOrigin();
     Local<Script> script =
-        Script::Compile(context(), NewString(kSourceCode), &default_origin)
+        Script::Compile(context(), NewString(kSourceCode), &origin)
             .ToLocalChecked();
     CHECK(!script->Run(context()).IsEmpty());
 
@@ -756,11 +902,16 @@ TEST_F(MergeDeserializedCodeTest, MergeThatCompilesLazyFunction) {
     i::SharedFunctionInfo::EnsureOldForTesting(GetSharedFunctionInfo(script));
   }
 
-  InvokeMajorGC(i_isolate);
+  {
+    // We need to invoke GC without stack, otherwise some objects may survive.
+    i::DisableConservativeStackScanningScopeForTesting no_css_scope(
+        i_isolate->heap());
+    InvokeMajorGC(i_isolate);
 
-  // A second round of GC is necessary in case incremental marking had already
-  // started before the bytecode was aged.
-  InvokeMajorGC(i_isolate);
+    // A second round of GC is necessary in case incremental marking had already
+    // started before the bytecode was aged.
+    InvokeMajorGC(i_isolate);
+  }
 
   DeserializeThread deserialize_thread(ScriptCompiler::StartConsumingCodeCache(
       isolate(), std::make_unique<ScriptCompiler::CachedData>(
@@ -775,7 +926,8 @@ TEST_F(MergeDeserializedCodeTest, MergeThatCompilesLazyFunction) {
   // At this point, the cached script's function 'f' is not compiled, but the
   // matching function in the deserialized graph is compiled, so a background
   // merge is recommended.
-  task->SourceTextAvailable(isolate(), NewString(kSourceCode), default_origin);
+  task->SourceTextAvailable(isolate(), NewString(kSourceCode),
+                            default_origin.AsScriptOrigin());
 
   CHECK(task->ShouldMergeWithExistingScript());
 
@@ -785,7 +937,8 @@ TEST_F(MergeDeserializedCodeTest, MergeThatCompilesLazyFunction) {
 
   // Complete compilation on the main thread. This step installs compiled data
   // for the function 'f'.
-  ScriptCompiler::Source source(NewString(kSourceCode), default_origin,
+  ScriptCompiler::Source source(NewString(kSourceCode),
+                                default_origin.AsScriptOrigin(),
                                 cached_data.release(), task.release());
   Local<Script> script =
       ScriptCompiler::Compile(context(), &source,
@@ -801,6 +954,291 @@ TEST_F(MergeDeserializedCodeTest, MergeThatCompilesLazyFunction) {
   CHECK(expected->StrictEquals(actual));
 }
 
+TEST_F(MergeDeserializedCodeTest,
+       MergeThatCompilesLazyFunctionWithOuterScopeInfo) {
+  i::v8_flags.merge_background_deserialized_script_with_compilation_cache =
+      true;
+  i::v8_flags.verify_code_merge = true;
+  std::unique_ptr<v8::ScriptCompiler::CachedData> cached_data;
+  IsolateAndContextScope scope(this);
+  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate());
+  PersistentScriptOrigin default_origin(isolate(), NewString(""));
+
+  constexpr char kSourceCode[] =
+      "var outer = function () {\n"
+      "  var x = 1;\n"
+      "  var g = function () { return x; };\n"
+      "  var f = function () { return 42; };\n"
+      "  return f;\n"
+      "};\n"
+      "var f = outer();";
+
+  // Compile the script for the first time to produce code cache data.
+  {
+    v8::HandleScope handle_scope(isolate());
+    ScriptOrigin origin = default_origin.AsScriptOrigin();
+    Local<Script> script =
+        Script::Compile(context(), NewString(kSourceCode), &origin)
+            .ToLocalChecked();
+    CHECK(!script->Run(context()).IsEmpty());
+
+    // Cause the inner function to become compiled before creating the code
+    // cache.
+    Local<Value> actual = RunGlobalFunc("f");
+    CHECK_EQ(42, actual->Int32Value(context()).FromJust());
+
+    cached_data.reset(
+        ScriptCompiler::CreateCodeCache(script->GetUnboundScript()));
+  }
+
+  i_isolate->compilation_cache()->Clear();
+
+  // Compile the script for the second time, but don't run the function 'f'.
+  {
+    v8::HandleScope handle_scope(isolate());
+    ScriptOrigin origin = default_origin.AsScriptOrigin();
+    Local<Script> script =
+        Script::Compile(context(), NewString(kSourceCode), &origin)
+            .ToLocalChecked();
+    CHECK(!script->Run(context()).IsEmpty());
+
+    // Age the top-level bytecode so that the Isolate compilation cache will
+    // contain only the Script.
+    i::SharedFunctionInfo::EnsureOldForTesting(GetSharedFunctionInfo(script));
+  }
+
+  {
+    // We need to invoke GC without stack, otherwise some objects may survive.
+    i::DisableConservativeStackScanningScopeForTesting no_css_scope(
+        i_isolate->heap());
+    InvokeMajorGC(i_isolate);
+    InvokeMajorGC(i_isolate);
+  }
+
+  DeserializeThread deserialize_thread(ScriptCompiler::StartConsumingCodeCache(
+      isolate(), std::make_unique<ScriptCompiler::CachedData>(
+                     cached_data->data, cached_data->length,
+                     ScriptCompiler::CachedData::BufferNotOwned)));
+  CHECK(deserialize_thread.Start());
+  deserialize_thread.Join();
+
+  std::unique_ptr<ScriptCompiler::ConsumeCodeCacheTask> task =
+      deserialize_thread.TakeTask();
+
+  task->SourceTextAvailable(isolate(), NewString(kSourceCode),
+                            default_origin.AsScriptOrigin());
+
+  CHECK(task->ShouldMergeWithExistingScript());
+
+  // Request block at sync point before background thread reads outer scope
+  // info.
+  i::SynchronizationPointSupport::Get()->RequestBlockAt(
+      "BeforeGetOuterScopeInfo", base::TimeDelta::FromSeconds(10));
+
+  MergeThread merge_thread(task.get());
+  CHECK(merge_thread.Start());
+
+  // Wait until background merge is paused at the sync point.
+  CHECK(i::SynchronizationPointSupport::Get()->WaitUntilBlocked(
+      "BeforeGetOuterScopeInfo", base::TimeDelta::FromSeconds(10)));
+
+  // While background merge is paused before reading outer scope info, trigger
+  // real lazy compilation of 'f' on the main thread.
+  {
+    Local<Value> actual = RunGlobalFunc("f");
+    CHECK_EQ(42, actual->Int32Value(context()).FromJust());
+  }
+
+  // Resume the background merge thread.
+  CHECK(
+      i::SynchronizationPointSupport::Get()->Resume("BeforeGetOuterScopeInfo"));
+  merge_thread.Join();
+
+  // Complete compilation on the main thread.
+  ScriptCompiler::Source source(NewString(kSourceCode),
+                                default_origin.AsScriptOrigin(),
+                                cached_data.release(), task.release());
+  Local<Script> script =
+      ScriptCompiler::Compile(context(), &source,
+                              ScriptCompiler::kConsumeCodeCache)
+          .ToLocalChecked();
+  CHECK(!script->Run(context()).IsEmpty());
+
+  Local<Value> actual = RunGlobalFunc("f");
+  CHECK_EQ(42, actual->Int32Value(context()).FromJust());
+}
+
+// POC: Relaxed-store publication of fresh SharedFunctionInfo into
+// Script::infos() read concurrently by BackgroundMergeTask without acquire.
+//
+// Writer (main thread): calling an uncompiled outer closure triggers lazy
+// compilation, which for every nested function literal calls
+// Compiler::GetSharedFunctionInfo -> NewSharedFunctionInfoForLiteral ->
+// SharedFunctionInfo::SetScript. SetScript publishes the freshly-allocated
+// SFI into the live cached Script's infos() WeakFixedArray with a relaxed
+// store (fixed-array-inl.h TaggedArrayBase::set -> Relaxed_Store).
+//
+// Reader (background thread): BackgroundMergeTask::BeginMergeInBackground
+// iterates the same infos() array and relaxed-loads each slot
+// (compiler.cc:2447), then immediately dereferences the loaded object
+// (HasBytecodeArray / scope_info / RecordScopeInfos at 2466-2504).
+//
+// There is no release fence between SFI field initialisation and the infos()
+// pointer store, and no acquire on the infos() load. TSAN reports this as a
+// data race; on ARM/ARM64 the background thread may observe the new pointer
+// before the SFI's field stores are visible.
+TEST_F(MergeDeserializedCodeTest,
+       DISABLED_ConcurrentLazyCompileDuringBackgroundMerge) {
+  i::v8_flags.merge_background_deserialized_script_with_compilation_cache =
+      true;
+  i::v8_flags.lazy_compile_dispatcher = false;
+
+  // Source layout (literal-id order):
+  //   [0]                toplevel
+  //   [1..kPadLiterals]  many padding closures, each with many nested
+  //                      literals -> the deserialised cache contains an SFI
+  //                      for every one of these slots, so the background
+  //                      merge does non-trivial work per slot and takes
+  //                      milliseconds to walk the array.
+  //   [tail..]           kNumQuick small closures with one nested literal
+  //                      each. Calling these on the main thread is fast and
+  //                      allocates fresh SFIs into the *high-index* infos()
+  //                      slots while the merge loop is still walking towards
+  //                      them.
+  constexpr int kNumPad = 60;
+  constexpr int kPadInner = 400;
+  constexpr int kNumQuick = 200;
+  std::string src = "var pad = [];\n";
+  for (int o = 0; o < kNumPad; ++o) {
+    src += "pad[" + std::to_string(o) + "] = function(){\n";
+    for (int j = 0; j < kPadInner; ++j) {
+      src += "  var g" + std::to_string(j) + " = function(){return " +
+             std::to_string(j) + ";};\n";
+    }
+    src += "};\n";
+  }
+  src += "var quick = [];\n";
+  for (int q = 0; q < kNumQuick; ++q) {
+    src += "quick[" + std::to_string(q) +
+           "] = function(){ let c=1; var i=function(){return c;}; };\n";
+  }
+
+  std::unique_ptr<v8::ScriptCompiler::CachedData> cached_data;
+  IsolateAndContextScope scope(this);
+  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate());
+  PersistentScriptOrigin default_origin(isolate(), NewString(""));
+
+  // 1) Compile, run the toplevel (creates JSFunctions for outers), call every
+  // outer so that *all* nested SFIs exist and get serialised into the code
+  // cache. A fully-populated cache makes the background merge do non-trivial
+  // work for every slot, lengthening the race window.
+  {
+    v8::HandleScope handle_scope(isolate());
+    ScriptOrigin origin = default_origin.AsScriptOrigin();
+    Local<Script> script =
+        Script::Compile(context(), NewString(src.c_str()), &origin)
+            .ToLocalChecked();
+    CHECK(!script->Run(context()).IsEmpty());
+    // Compile all padding + quick closures so the code cache is fully
+    // populated; this makes the deserialised new_script have an SFI in every
+    // slot, so the background merge does work for every iteration.
+    CHECK(!Script::Compile(
+               context(),
+               NewString("for (var p of pad) p(); for (var q of quick) q();"))
+               .ToLocalChecked()
+               ->Run(context())
+               .IsEmpty());
+    cached_data.reset(
+        ScriptCompiler::CreateCodeCache(script->GetUnboundScript()));
+
+    // Age every compiled SFI in the live cached Script's infos()
+    i::Tagged<i::Script> i_script =
+        i::Cast<i::Script>(GetSharedFunctionInfo(script)->script());
+    i::IndirectHandle<i::WeakFixedArray> old_infos(i_script->infos(),
+                                                   i_isolate);
+    // Age every compiled SFI so its bytecode is flushed on the next GC. This
+    // drops the only strong references to the nested SFIs (the outer constant
+    // pools), so after GC the nested infos() slots become cleared and
+    // subsequent lazy compilation will allocate *fresh* SFIs there.
+    for (uint32_t k = 0; k < old_infos->ulength().value(); ++k) {
+      i::Tagged<i::MaybeObject> mo = old_infos->get(k);
+      i::Tagged<i::HeapObject> ho;
+      if (mo.GetHeapObjectIfWeak(&ho) && i::Is<i::SharedFunctionInfo>(ho)) {
+        i::Tagged<i::SharedFunctionInfo> sfi =
+            i::Cast<i::SharedFunctionInfo>(ho);
+        if (sfi->is_compiled()) {
+          i::SharedFunctionInfo::EnsureOldForTesting(sfi);
+        }
+      }
+    }
+  }
+
+  {
+    i::DisableConservativeStackScanningScopeForTesting no_css(
+        i_isolate->heap());
+    InvokeMajorGC(i_isolate);
+    InvokeMajorGC(i_isolate);
+  }
+
+  // Pre-fetch the surviving quick JSFunctions so the lazy-compile loop below
+  // has minimal overhead between merge_thread.Start() and the first SetScript.
+  std::vector<v8::Global<v8::Function>> quick_funcs(kNumQuick);
+  {
+    v8::HandleScope handle_scope(isolate());
+    Local<Object> arr = context()
+                            ->Global()
+                            ->Get(context(), NewString("quick"))
+                            .ToLocalChecked()
+                            .As<Object>();
+    for (int q = 0; q < kNumQuick; ++q) {
+      Local<Value> f = arr->Get(context(), q).ToLocalChecked();
+      CHECK(f->IsFunction());
+      quick_funcs[q].Reset(isolate(), f.As<Function>());
+    }
+  }
+
+  // 2) Deserialise the (fully-populated) cache off-thread.
+  DeserializeThread deserialize_thread(ScriptCompiler::StartConsumingCodeCache(
+      isolate(), std::make_unique<ScriptCompiler::CachedData>(
+                     cached_data->data, cached_data->length,
+                     ScriptCompiler::CachedData::BufferNotOwned)));
+  CHECK(deserialize_thread.Start());
+  deserialize_thread.Join();
+  std::unique_ptr<ScriptCompiler::ConsumeCodeCacheTask> task =
+      deserialize_thread.TakeTask();
+  task->SourceTextAvailable(isolate(), NewString(src.c_str()),
+                            default_origin.AsScriptOrigin());
+  CHECK(task->ShouldMergeWithExistingScript());
+
+  // 3) RACE: start the background merge, then on the main thread immediately
+  // lazy-compile the small `quick` closures.
+  //
+  // Background: BeginMergeInBackground iterates all ~24k infos() slots,
+  // relaxed-loading each one (compiler.cc:2447) and dereferencing every weak
+  // entry (HasBytecodeArray / scope_info / SetScopeInfo / RecordScopeInfos at
+  // compiler.cc:2466-2504) without any acquire fence or lock.
+  //
+  // Main thread: each quick[q]() call lazy-compiles the closure body,
+  // creating a fresh nested SharedFunctionInfo (published into the live
+  // Script's infos() via SetScript -> WeakFixedArray::set -> Relaxed_Store)
+  // and installing a fresh ScopeInfo on the existing quick[q] SFI -- both
+  // mutate state reachable from old_script->infos() while the background
+  // merge is reading and writing the same fields with plain non-atomic
+  // accessors (e.g. TaggedField::load at tagged-field-inl.h:234).
+  MergeThread merge_thread(task.get());
+  CHECK(merge_thread.Start());
+  {
+    v8::HandleScope handle_scope(isolate());
+    for (int q = 0; q < kNumQuick; ++q) {
+      quick_funcs[q]
+          .Get(isolate())
+          ->Call(context(), Undefined(isolate()), 0, nullptr)
+          .ToLocalChecked();
+    }
+  }
+  merge_thread.Join();
+}
+
 TEST_F(MergeDeserializedCodeTest, MergeThatStartsButDoesNotFinish) {
   i::v8_flags.merge_background_deserialized_script_with_compilation_cache =
       true;
@@ -808,15 +1246,14 @@ TEST_F(MergeDeserializedCodeTest, MergeThatStartsButDoesNotFinish) {
   std::vector<std::unique_ptr<v8::ScriptCompiler::CachedData>> cached_data;
   IsolateAndContextScope scope(this);
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate());
-  ScriptOrigin default_origin(isolate(), NewString(""));
-  i::DisableConservativeStackScanningScopeForTesting no_stack_scanning(
-      i_isolate->heap());
+  PersistentScriptOrigin default_origin(isolate(), NewString(""));
 
   // Compile the script for the first time to produce code cache data.
   {
     v8::HandleScope handle_scope(isolate());
+    ScriptOrigin origin = default_origin.AsScriptOrigin();
     Local<Script> script =
-        Script::Compile(context(), NewString(kSourceCode), &default_origin)
+        Script::Compile(context(), NewString(kSourceCode), &origin)
             .ToLocalChecked();
     CHECK(!script->Run(context()).IsEmpty());
 
@@ -831,11 +1268,15 @@ TEST_F(MergeDeserializedCodeTest, MergeThatStartsButDoesNotFinish) {
     i::SharedFunctionInfo::EnsureOldForTesting(GetSharedFunctionInfo(script));
   }
 
-  InvokeMajorGC(i_isolate);
+  {  // We need to invoke GC without stack, otherwise some objects may survive.
+    i::DisableConservativeStackScanningScopeForTesting no_stack_scanning(
+        i_isolate->heap());
+    InvokeMajorGC(i_isolate);
 
-  // A second round of GC is necessary in case incremental marking had already
-  // started before the bytecode was aged.
-  InvokeMajorGC(i_isolate);
+    // A second round of GC is necessary in case incremental marking had already
+    // started before the bytecode was aged.
+    InvokeMajorGC(i_isolate);
+  }
 
   // Start several background deserializations.
   std::vector<std::unique_ptr<DeserializeThread>> deserialize_threads;
@@ -859,7 +1300,7 @@ TEST_F(MergeDeserializedCodeTest, MergeThatStartsButDoesNotFinish) {
   for (int i = 0; i < kSimultaneousScripts; ++i) {
     tasks.push_back(deserialize_threads[i]->TakeTask());
     tasks[i]->SourceTextAvailable(isolate(), NewString(kSourceCode),
-                                  default_origin);
+                                  default_origin.AsScriptOrigin());
     CHECK(tasks[i]->ShouldMergeWithExistingScript());
     merge_threads.push_back(std::make_unique<MergeThread>(tasks[i].get()));
   }
@@ -874,9 +1315,10 @@ TEST_F(MergeDeserializedCodeTest, MergeThatStartsButDoesNotFinish) {
   // actually finish its merge; the others will abandon their in-progress merges
   // and instead use the result from the first script since it will be in the
   // Isolate compilation cache.
-  i::Handle<i::SharedFunctionInfo> first_script_sfi;
+  i::IndirectHandle<i::SharedFunctionInfo> first_script_sfi;
   for (int i = 0; i < kSimultaneousScripts; ++i) {
-    ScriptCompiler::Source source(NewString(kSourceCode), default_origin,
+    ScriptCompiler::Source source(NewString(kSourceCode),
+                                  default_origin.AsScriptOrigin(),
                                   cached_data[i].release(), tasks[i].release());
     Local<Script> script =
         ScriptCompiler::Compile(context(), &source,

@@ -4,8 +4,9 @@
 
 #include "src/inspector/v8-serialization-duplicate-tracker.h"
 
+#include "include/v8-context.h"
+#include "include/v8-external.h"
 #include "src/base/logging.h"
-#include "v8-external.h"
 
 namespace v8_inspector {
 
@@ -50,7 +51,8 @@ void V8SerializationDuplicateTracker::SetKnownSerializedValue(
   m_v8ObjectToSerializedDictionary =
       m_v8ObjectToSerializedDictionary
           ->Set(m_context, v8Value,
-                v8::External::New(m_context->GetIsolate(), serializedValue))
+                v8::External::New(v8::Isolate::GetCurrent(), serializedValue,
+                                  v8::kDictionaryValueTag))
           .ToLocalChecked();
 }
 
@@ -65,12 +67,13 @@ V8SerializationDuplicateTracker::FindKnownSerializedValue(
   }
 
   return static_cast<protocol::DictionaryValue*>(
-      knownValue.As<v8::External>()->Value());
+      knownValue.As<v8::External>()->Value(v8::kDictionaryValueTag));
 }
 
 V8SerializationDuplicateTracker::V8SerializationDuplicateTracker(
     v8::Local<v8::Context> context)
     : m_context(context),
       m_counter(1),
-      m_v8ObjectToSerializedDictionary(v8::Map::New(context->GetIsolate())) {}
+      m_v8ObjectToSerializedDictionary(
+          v8::Map::New(v8::Isolate::GetCurrent())) {}
 }  // namespace v8_inspector

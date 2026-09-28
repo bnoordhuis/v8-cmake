@@ -2,14 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 //
-// Flags: --enable-testing-opcode-in-wasm --nowasm-tier-up
-// Flags: --wasm-tier-mask-for-testing=2
+// Flags: --enable-testing-opcode-in-wasm --wasm-tier-mask-for-testing=2
 
-load("test/mjsunit/wasm/wasm-module-builder.js");
+d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
 
 function InstanceMaker(offset) {
   var builder = new WasmModuleBuilder();
-  builder.addMemory(1, 1, false /* exported */);
+  builder.addMemory(1, 1);
 
   var sig_index = builder.addType(makeSig(
       [kWasmI32, kWasmI32, kWasmI32, kWasmI32, kWasmI32, kWasmI32, kWasmI32,

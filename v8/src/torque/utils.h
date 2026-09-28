@@ -6,6 +6,7 @@
 #define V8_TORQUE_UTILS_H_
 
 #include <algorithm>
+#include <optional>
 #include <ostream>
 #include <queue>
 #include <streambuf>
@@ -13,27 +14,23 @@
 #include <unordered_set>
 
 #include "src/base/contextual.h"
-#include "src/base/functional.h"
-#include "src/base/optional.h"
+#include "src/base/hashing.h"
 #include "src/torque/source-positions.h"
 
-namespace v8 {
-namespace internal {
-namespace torque {
+namespace v8::internal::torque {
 
 std::string StringLiteralUnquote(const std::string& s);
 std::string StringLiteralQuote(const std::string& s);
 
 // Decodes "file://" URIs into file paths which can then be used
 // with the standard stream API.
-V8_EXPORT_PRIVATE base::Optional<std::string> FileUriDecode(
-    const std::string& s);
+V8_EXPORT_PRIVATE std::optional<std::string> FileUriDecode(std::string_view s);
 
 struct TorqueMessage {
   enum class Kind { kError, kLint };
 
   std::string message;
-  base::Optional<SourcePosition> position;
+  std::optional<SourcePosition> position;
   Kind kind;
 };
 
@@ -75,7 +72,7 @@ class V8_EXPORT_PRIVATE MessageBuilder {
 struct TorqueAbortCompilation {};
 
 template <class... Args>
-static MessageBuilder Message(TorqueMessage::Kind kind, Args&&... args) {
+MessageBuilder Message(TorqueMessage::Kind kind, Args&&... args) {
   return MessageBuilder(ToString(std::forward<Args>(args)...), kind);
 }
 
@@ -88,10 +85,10 @@ MessageBuilder Lint(Args&&... args) {
   return Message(TorqueMessage::Kind::kLint, std::forward<Args>(args)...);
 }
 
-bool IsLowerCamelCase(const std::string& s);
-bool IsUpperCamelCase(const std::string& s);
+bool IsLowerCamelCase(std::string_view s);
+bool IsUpperCamelCase(std::string_view s);
 bool IsSnakeCase(const std::string& s);
-bool IsValidNamespaceConstName(const std::string& s);
+bool IsValidNamespaceConstName(std::string_view s);
 bool IsValidTypeName(const std::string& s);
 
 template <class... Args>
@@ -439,9 +436,9 @@ class ResidueClass {
 
   // If the modulus corresponds to the size of size_t, it represents a concrete
   // value.
-  base::Optional<size_t> SingleValue() const {
+  std::optional<size_t> SingleValue() const {
     if (modulus_log_2_ == kMaxModulusLog2) return value_;
-    return base::nullopt;
+    return std::nullopt;
   }
 
   friend ResidueClass operator+(const ResidueClass& a, const ResidueClass& b) {
@@ -535,8 +532,6 @@ std::vector<T> TransformVector(const std::vector<U>& v) {
   return TransformVector<T>(v, [](const U& x) -> T { return x; });
 }
 
-}  // namespace torque
-}  // namespace internal
-}  // namespace v8
+}  // namespace v8::internal::torque
 
 #endif  // V8_TORQUE_UTILS_H_

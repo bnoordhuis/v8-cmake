@@ -14,6 +14,10 @@ bool InstructionScheduler::SchedulerSupported() { return true; }
 int InstructionScheduler::GetTargetInstructionFlags(
     const Instruction* instr) const {
   switch (instr->arch_opcode()) {
+    case kRiscvEnableDebugTrace:
+    case kRiscvDisableDebugTrace:
+    case kRiscvAddOvfWord:
+    case kRiscvSubOvfWord:
 #if V8_TARGET_ARCH_RISCV64
     case kRiscvAdd32:
     case kRiscvBitcastDL:
@@ -26,9 +30,7 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kRiscvMulHigh64:
     case kRiscvMulHighU64:
     case kRiscvAdd64:
-    case kRiscvAddOvf64:
     case kRiscvClz64:
-    case kRiscvCtz64:
     case kRiscvDiv64:
     case kRiscvDivU64:
     case kRiscvZeroExtendWord:
@@ -37,13 +39,13 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kRiscvModU64:
     case kRiscvMul64:
     case kRiscvMulOvf64:
-    case kRiscvPopcnt64:
     case kRiscvRor64:
     case kRiscvSar64:
     case kRiscvShl64:
     case kRiscvShr64:
     case kRiscvSub64:
-    case kRiscvSubOvf64:
+    case kRiscvAdd128:
+    case kRiscvSub128:
     case kRiscvFloat64RoundDown:
     case kRiscvFloat64RoundTiesEven:
     case kRiscvFloat64RoundTruncate:
@@ -53,21 +55,29 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kRiscvTruncLS:
     case kRiscvTruncUlD:
     case kRiscvTruncUlS:
+    case kRiscvCmp32:
+    case kRiscvCmpZero32:
 #elif V8_TARGET_ARCH_RISCV32
     case kRiscvAdd32:
     case kRiscvAddPair:
     case kRiscvSubPair:
     case kRiscvMulPair:
-    case kRiscvAndPair:
-    case kRiscvOrPair:
-    case kRiscvXorPair:
     case kRiscvShlPair:
     case kRiscvShrPair:
     case kRiscvSarPair:
-    case kRiscvAddOvf:
-    case kRiscvSubOvf:
     case kRiscvSub32:
 #endif
+    case kRiscvSh1add:
+    case kRiscvSh2add:
+    case kRiscvSh3add:
+    case kRiscvClz:
+    case kRiscvCtz:
+    case kRiscvCpop:
+#if V8_TARGET_ARCH_RISCV64
+    case kRiscvCtzw:
+    case kRiscvCpopw:
+#endif
+    case kRiscvRev8:
     case kRiscvAbsD:
     case kRiscvAbsS:
     case kRiscvAddD:
@@ -85,7 +95,6 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kRiscvCmpZero:
     case kRiscvCmpD:
     case kRiscvCmpS:
-    case kRiscvCtz32:
     case kRiscvCvtDS:
     case kRiscvCvtDUw:
     case kRiscvCvtDW:
@@ -97,76 +106,60 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kRiscvDivD:
     case kRiscvDivS:
     case kRiscvDivU32:
+    case kRiscvVFEq:
+    case kRiscvVFNe:
+    case kRiscvVFLt:
+    case kRiscvVFLe:
+    case kRiscvVFMin:
+    case kRiscvVFMax:
+    case kRiscvVFCeil:
     case kRiscvF64x2Abs:
-    case kRiscvF64x2Neg:
     case kRiscvF64x2Sqrt:
-    case kRiscvF64x2Add:
-    case kRiscvF64x2Sub:
-    case kRiscvF64x2Mul:
-    case kRiscvF64x2Div:
-    case kRiscvF64x2Min:
-    case kRiscvF64x2Max:
-    case kRiscvF64x2Eq:
-    case kRiscvF64x2Ne:
-    case kRiscvF64x2Lt:
-    case kRiscvF64x2Le:
     case kRiscvF64x2Pmin:
     case kRiscvF64x2Pmax:
     case kRiscvF64x2ConvertLowI32x4S:
     case kRiscvF64x2ConvertLowI32x4U:
     case kRiscvF64x2PromoteLowF32x4:
-    case kRiscvF64x2Ceil:
-    case kRiscvF64x2Floor:
-    case kRiscvF64x2Trunc:
-    case kRiscvF64x2NearestInt:
-    case kRiscvI64x2Splat:
+    case kRiscvVFFloor:
+    case kRiscvVFTrunc:
+    case kRiscvVFNearestInt:
     case kRiscvI64x2SplatI32Pair:
     case kRiscvI64x2ExtractLane:
     case kRiscvI64x2ReplaceLane:
     case kRiscvI64x2ReplaceLaneI32Pair:
-    case kRiscvI64x2Add:
-    case kRiscvI64x2Sub:
-    case kRiscvI64x2Mul:
-    case kRiscvI64x2Neg:
-    case kRiscvI64x2Abs:
     case kRiscvI64x2Shl:
     case kRiscvI64x2ShrS:
     case kRiscvI64x2ShrU:
-    case kRiscvI64x2BitMask:
-    case kRiscvI64x2GtS:
-    case kRiscvI64x2GeS:
     case kRiscvF32x4Abs:
-    case kRiscvF32x4Add:
-    case kRiscvF32x4Eq:
     case kRiscvF32x4ExtractLane:
-    case kRiscvF32x4Lt:
-    case kRiscvF32x4Le:
-    case kRiscvF32x4Max:
-    case kRiscvF32x4Min:
-    case kRiscvF32x4Mul:
-    case kRiscvF32x4Div:
-    case kRiscvF32x4Ne:
-    case kRiscvF32x4Neg:
     case kRiscvF32x4Sqrt:
     case kRiscvF64x2Qfma:
     case kRiscvF64x2Qfms:
     case kRiscvF32x4Qfma:
     case kRiscvF32x4Qfms:
     case kRiscvF32x4ReplaceLane:
-    case kRiscvF32x4SConvertI32x4:
-    case kRiscvF32x4Splat:
-    case kRiscvF32x4Sub:
-    case kRiscvF32x4UConvertI32x4:
+    case kRiscvVFcvtFX:
+    case kRiscvVFcvtFXU:
     case kRiscvF32x4Pmin:
     case kRiscvF32x4Pmax:
     case kRiscvF32x4DemoteF64x2Zero:
-    case kRiscvF32x4Ceil:
-    case kRiscvF32x4Floor:
-    case kRiscvF32x4Trunc:
-    case kRiscvF32x4NearestInt:
-    case kRiscvI64x2Eq:
-    case kRiscvI64x2Ne:
-    case kRiscvF64x2Splat:
+
+    case kRiscvI32x4SConvertI16x8Low:
+    case kRiscvI32x4UConvertI16x8Low:
+    case kRiscvI16x8SConvertI8x16High:
+    case kRiscvI16x8SConvertI32x4:
+    case kRiscvI16x8UConvertI32x4:
+    case kRiscvI8x16SConvertI16x8:
+    case kRiscvI8x16UConvertI16x8:
+    case kRiscvI32x4SConvertI16x8High:
+    case kRiscvI32x4UConvertI16x8High:
+    case kRiscvI16x8SConvertI8x16Low:
+    case kRiscvI16x8UConvertI8x16High:
+    case kRiscvI16x8UConvertI8x16Low:
+    case kRiscvI16x8RoundingAverageU:
+    case kRiscvI32x4DotI16x8S:
+    case kRiscvI16x8DotI8x16I7x16S:
+    case kRiscvI32x4DotI8x16I7x16AddS:
     case kRiscvF64x2ExtractLane:
     case kRiscvF64x2ReplaceLane:
     case kRiscvFloat32Max:
@@ -175,6 +168,8 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kRiscvFloat32RoundTiesEven:
     case kRiscvFloat32RoundTruncate:
     case kRiscvFloat32RoundUp:
+    case kRiscvFloat64ToFloat16RawBits:
+    case kRiscvFloat16RawBitsToFloat64:
     case kRiscvFloat64ExtractLowWord32:
     case kRiscvFloat64ExtractHighWord32:
     case kRiscvFloat64InsertLowWord32:
@@ -188,108 +183,37 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kRiscvI64x2SConvertI32x4High:
     case kRiscvI64x2UConvertI32x4Low:
     case kRiscvI64x2UConvertI32x4High:
-    case kRiscvI16x8Add:
-    case kRiscvI16x8AddSatS:
-    case kRiscvI16x8AddSatU:
-    case kRiscvI16x8Eq:
+    case kRiscvExtAddPairwiseS:
+    case kRiscvExtAddPairwiseU:
+    case kRiscvExtMulLowS:
+    case kRiscvExtMulHighS:
+    case kRiscvExtMulLowU:
+    case kRiscvExtMulHighU:
     case kRiscvI16x8ExtractLaneU:
     case kRiscvI16x8ExtractLaneS:
-    case kRiscvI16x8GeS:
-    case kRiscvI16x8GeU:
-    case kRiscvI16x8GtS:
-    case kRiscvI16x8GtU:
-    case kRiscvI16x8MaxS:
-    case kRiscvI16x8MaxU:
-    case kRiscvI16x8MinS:
-    case kRiscvI16x8MinU:
-    case kRiscvI16x8Mul:
-    case kRiscvI16x8Ne:
-    case kRiscvI16x8Neg:
     case kRiscvI16x8ReplaceLane:
-    case kRiscvI8x16SConvertI16x8:
-    case kRiscvI16x8SConvertI32x4:
-    case kRiscvI16x8SConvertI8x16High:
-    case kRiscvI16x8SConvertI8x16Low:
     case kRiscvI16x8Shl:
     case kRiscvI16x8ShrS:
     case kRiscvI16x8ShrU:
     case kRiscvI32x4TruncSatF64x2SZero:
     case kRiscvI32x4TruncSatF64x2UZero:
-    case kRiscvI16x8Splat:
-    case kRiscvI16x8Sub:
-    case kRiscvI16x8SubSatS:
-    case kRiscvI16x8SubSatU:
-    case kRiscvI8x16UConvertI16x8:
-    case kRiscvI16x8UConvertI32x4:
-    case kRiscvI16x8UConvertI8x16High:
-    case kRiscvI16x8UConvertI8x16Low:
-    case kRiscvI16x8RoundingAverageU:
-    case kRiscvI16x8Q15MulRSatS:
-    case kRiscvI16x8Abs:
-    case kRiscvI16x8BitMask:
-    case kRiscvI32x4Add:
-    case kRiscvI32x4Eq:
     case kRiscvI32x4ExtractLane:
-    case kRiscvI32x4GeS:
-    case kRiscvI32x4GeU:
-    case kRiscvI32x4GtS:
-    case kRiscvI32x4GtU:
-    case kRiscvI32x4MaxS:
-    case kRiscvI32x4MaxU:
-    case kRiscvI32x4MinS:
-    case kRiscvI32x4MinU:
-    case kRiscvI32x4Mul:
-    case kRiscvI32x4Ne:
-    case kRiscvI32x4Neg:
     case kRiscvI32x4ReplaceLane:
-    case kRiscvI32x4SConvertF32x4:
-    case kRiscvI32x4SConvertI16x8High:
-    case kRiscvI32x4SConvertI16x8Low:
+    case kRiscvVFcvtXF:
     case kRiscvI32x4Shl:
     case kRiscvI32x4ShrS:
     case kRiscvI32x4ShrU:
-    case kRiscvI32x4Splat:
-    case kRiscvI32x4Sub:
-    case kRiscvI32x4UConvertF32x4:
-    case kRiscvI32x4UConvertI16x8High:
-    case kRiscvI32x4UConvertI16x8Low:
-    case kRiscvI32x4Abs:
-    case kRiscvI32x4BitMask:
-    case kRiscvI8x16Add:
-    case kRiscvI8x16AddSatS:
-    case kRiscvI8x16AddSatU:
-    case kRiscvI8x16Eq:
+    case kRiscvVFcvtXUF:
     case kRiscvI8x16ExtractLaneU:
     case kRiscvI8x16ExtractLaneS:
-    case kRiscvI8x16GeS:
-    case kRiscvI8x16GeU:
-    case kRiscvI8x16GtS:
-    case kRiscvI8x16GtU:
-    case kRiscvI8x16MaxS:
-    case kRiscvI8x16MaxU:
-    case kRiscvI8x16MinS:
-    case kRiscvI8x16MinU:
-    case kRiscvI8x16Ne:
-    case kRiscvI8x16Neg:
     case kRiscvI8x16ReplaceLane:
     case kRiscvI8x16Shl:
     case kRiscvI8x16ShrS:
     case kRiscvI8x16ShrU:
-    case kRiscvI8x16Splat:
-    case kRiscvI8x16Sub:
-    case kRiscvI8x16SubSatS:
-    case kRiscvI8x16SubSatU:
     case kRiscvI8x16RoundingAverageU:
-    case kRiscvI8x16Abs:
-    case kRiscvI8x16BitMask:
     case kRiscvI8x16Popcnt:
-    case kRiscvMaxD:
-    case kRiscvMaxS:
-    case kRiscvMinD:
-    case kRiscvMinS:
     case kRiscvMod32:
     case kRiscvModU32:
-    case kRiscvMov:
     case kRiscvMul32:
     case kRiscvMulD:
     case kRiscvMulHigh32:
@@ -297,65 +221,67 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kRiscvMulS:
     case kRiscvNegD:
     case kRiscvNegS:
-    case kRiscvNor:
-    case kRiscvNor32:
     case kRiscvOr:
     case kRiscvOr32:
-    case kRiscvPopcnt32:
     case kRiscvRor32:
     case kRiscvRoundWD:
     case kRiscvRoundWS:
-    case kRiscvS128And:
-    case kRiscvS128Or:
-    case kRiscvS128Not:
+    case kRiscvVnot:
     case kRiscvS128Select:
     case kRiscvS128AndNot:
-    case kRiscvS128Xor:
     case kRiscvS128Const:
     case kRiscvS128Zero:
     case kRiscvS128Load32Zero:
     case kRiscvS128Load64Zero:
     case kRiscvS128AllOnes:
-    case kRiscvS16x8InterleaveEven:
-    case kRiscvS16x8InterleaveOdd:
-    case kRiscvS16x8InterleaveLeft:
-    case kRiscvS16x8InterleaveRight:
-    case kRiscvS16x8PackEven:
-    case kRiscvS16x8PackOdd:
-    case kRiscvS16x2Reverse:
-    case kRiscvS16x4Reverse:
-    case kRiscvI8x16AllTrue:
-    case kRiscvI32x4AllTrue:
-    case kRiscvI16x8AllTrue:
     case kRiscvV128AnyTrue:
-    case kRiscvI64x2AllTrue:
-    case kRiscvS32x4InterleaveEven:
-    case kRiscvS32x4InterleaveOdd:
-    case kRiscvS32x4InterleaveLeft:
-    case kRiscvS32x4InterleaveRight:
-    case kRiscvS32x4PackEven:
-    case kRiscvS32x4PackOdd:
-    case kRiscvS32x4Shuffle:
-    case kRiscvS8x16Concat:
-    case kRiscvS8x16InterleaveEven:
-    case kRiscvS8x16InterleaveOdd:
-    case kRiscvS8x16InterleaveLeft:
-    case kRiscvS8x16InterleaveRight:
-    case kRiscvS8x16PackEven:
-    case kRiscvS8x16PackOdd:
-    case kRiscvS8x2Reverse:
-    case kRiscvS8x4Reverse:
-    case kRiscvS8x8Reverse:
     case kRiscvI8x16Shuffle:
-    case kRiscvVwmul:
-    case kRiscvVwmulu:
-    case kRiscvVmvSx:
-    case kRiscvVcompress:
+    case kRiscvVmv:
+    case kRiscvVandVv:
+    case kRiscvVorVv:
+    case kRiscvVxorVv:
+    case kRiscvBitMask:
+    case kRiscvVfmvVf:
     case kRiscvVaddVv:
-    case kRiscvVwadd:
-    case kRiscvVwaddu:
+    case kRiscvVsubVv:
+    case kRiscvVnegVv:
+    case kRiscvVfnegVv:
+    case kRiscvVmaxuVv:
+    case kRiscvVmax:
+    case kRiscvVminsVv:
+    case kRiscvVminuVv:
+    case kRiscvVmulVv:
+    case kRiscvVsmulVv:
+    case kRiscvVgtsVv:
+    case kRiscvVgesVv:
+    case kRiscvVgeuVv:
+    case kRiscvVgtuVv:
+    case kRiscvVeqVv:
+    case kRiscvVneVv:
+    case kRiscvVAbs:
+    case kRiscvVaddSatUVv:
+    case kRiscvVaddSatSVv:
+    case kRiscvVsubSatUVv:
+    case kRiscvVsubSatSVv:
     case kRiscvVrgather:
-    case kRiscvVslidedown:
+    case kRiscvVAllTrue:
+    case kRiscvVfaddVv:
+    case kRiscvVfsubVv:
+    case kRiscvVfmulVv:
+    case kRiscvVfdivVv:
+    case kRiscvF16x8Splat:
+    case kRiscvF16x8ExtractLane:
+    case kRiscvF16x8ReplaceLane:
+    case kRiscvF16x8Abs:
+    case kRiscvF16x8Sqrt:
+    case kRiscvF16x8Pmin:
+    case kRiscvF16x8Pmax:
+    case kRiscvF16x8DemoteF32x4Zero:
+    case kRiscvF16x8DemoteF64x2Zero:
+    case kRiscvF32x4PromoteLowF16x8:
+    case kRiscvF16x8Qfma:
+    case kRiscvF16x8Qfms:
+
     case kRiscvSar32:
     case kRiscvSignExtendByte:
     case kRiscvSignExtendShort:
@@ -377,13 +303,14 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kRiscvTst64:
     case kRiscvLd:
     case kRiscvLwu:
-    case kRiscvUlwu:
     case kRiscvWord64AtomicLoadUint64:
     case kRiscvLoadDecompressTaggedSigned:
     case kRiscvLoadDecompressTagged:
+    case kRiscvLoadDecodeSandboxedPointer:
     case kRiscvAtomicLoadDecompressTaggedSigned:
     case kRiscvAtomicLoadDecompressTagged:
     case kRiscvAtomicStoreCompressTagged:
+    case kRiscvLoadDecompressTrapping:
 #elif V8_TARGET_ARCH_RISCV32
     case kRiscvWord32AtomicPairLoad:
 #endif
@@ -394,14 +321,9 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kRiscvLhu:
     case kRiscvLw:
     case kRiscvLoadFloat:
+    case kRiscvLoadHalf:
     case kRiscvRvvLd:
     case kRiscvPeek:
-    case kRiscvUld:
-    case kRiscvULoadDouble:
-    case kRiscvUlh:
-    case kRiscvUlhu:
-    case kRiscvUlw:
-    case kRiscvULoadFloat:
     case kRiscvS128LoadSplat:
     case kRiscvS128Load64ExtendU:
     case kRiscvS128Load64ExtendS:
@@ -410,7 +332,6 @@ int InstructionScheduler::GetTargetInstructionFlags(
 
 #if V8_TARGET_ARCH_RISCV64
     case kRiscvSd:
-    case kRiscvUsd:
     case kRiscvWord64AtomicStoreWord64:
     case kRiscvWord64AtomicAddUint64:
     case kRiscvWord64AtomicSubUint64:
@@ -420,6 +341,8 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kRiscvWord64AtomicExchangeUint64:
     case kRiscvWord64AtomicCompareExchangeUint64:
     case kRiscvStoreCompressTagged:
+    case kRiscvStoreEncodeSandboxedPointer:
+    case kRiscvStoreIndirectPointer:
 #elif V8_TARGET_ARCH_RISCV32
     case kRiscvWord32AtomicPairStore:
     case kRiscvWord32AtomicPairAdd:
@@ -431,9 +354,7 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kRiscvWord32AtomicPairCompareExchange:
 #endif
     case kRiscvModD:
-    case kRiscvModS:
     case kRiscvRvvSt:
-    case kRiscvPush:
     case kRiscvSb:
     case kRiscvStoreDouble:
     case kRiscvSh:
@@ -441,10 +362,7 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kRiscvStoreToStackSlot:
     case kRiscvSw:
     case kRiscvStoreFloat:
-    case kRiscvUStoreDouble:
-    case kRiscvUsh:
-    case kRiscvUsw:
-    case kRiscvUStoreFloat:
+    case kRiscvStoreHalf:
     case kRiscvSync:
     case kRiscvS128StoreLane:
       return kHasSideEffect;
@@ -460,26 +378,30 @@ int InstructionScheduler::GetTargetInstructionFlags(
 }
 
 enum Latency {
+  ADD = 1,
+
   BRANCH = 4,  // Estimated max.
   RINT_S = 4,  // Estimated.
   RINT_D = 4,  // Estimated.
 
   // TODO(RISCV): remove MULT instructions (MIPS legacy).
-  MULT = 4,
-  MULTU = 4,
-  DMULT = 4,
+  MUL = 4,
+  MULW = 4,
+  MULH = 4,
+  MULHS = 4,
+  MULHU = 4,
 
-  MUL32 = 7,
+  DIVW = 50,  // Min:11 Max:50
+  DIV = 50,
+  DIVU = 50,
+  DIVUW = 50,
 
-  DIV32 = 50,  // Min:11 Max:50
-  DIV64 = 50,
-  DIVU32 = 50,
-  DIVU64 = 50,
-
-  ABS_S = 4,
-  ABS_D = 4,
-  NEG_S = 4,
-  NEG_D = 4,
+  FSGNJ_S = 4,
+  FSGNJ_D = 4,
+  ABS_S = FSGNJ_S,
+  ABS_D = FSGNJ_S,
+  NEG_S = FSGNJ_S,
+  NEG_D = FSGNJ_S,
   ADD_S = 4,
   ADD_D = 4,
   SUB_S = 4,
@@ -583,18 +505,30 @@ enum Latency {
   STORE_DOUBLE = 1,
 };
 
-int Add64Latency(bool is_operand_register = true) {
-  if (is_operand_register) {
-    return 1;
-  } else {
-    return 2;  // Estimated max.
+inline int LoadConstantLatency() {
+  return 1;
+  // #if V8_TARGET_ARCH_RISCV32
+  //   return 2; //lui+aii Estimated max.
+  // #elif V8_TARGET_ARCH_RISCV64
+  //   return 4;
+  // #endif
+}
+
+inline int Add64Latency(bool is_operand_register = true) {
+  int latency = Latency::ADD;
+  if (!is_operand_register) {
+    latency += LoadConstantLatency();
   }
+  return latency;
 }
 
 int Sub64Latency(bool is_operand_register = true) {
   return Add64Latency(is_operand_register);
 }
 
+int ShiftLatency(bool is_operand_register = true) {
+  return Add64Latency(is_operand_register);
+}
 int AndLatency(bool is_operand_register = true) {
   return Add64Latency(is_operand_register);
 }
@@ -607,7 +541,7 @@ int NorLatency(bool is_operand_register = true) {
   if (is_operand_register) {
     return 1;
   } else {
-    return 2;  // Estimated max.
+    return 1 + LoadConstantLatency();  // Estimated max.
   }
 }
 
@@ -617,104 +551,106 @@ int XorLatency(bool is_operand_register = true) {
 
 int Mul32Latency(bool is_operand_register = true) {
   if (is_operand_register) {
-    return Latency::MUL32;
+    return Latency::MULW;
   } else {
-    return Latency::MUL32 + 1;
+    return Latency::MULW + 1;
   }
 }
 
 int Mul64Latency(bool is_operand_register = true) {
-  int latency = Latency::DMULT + Latency::MOVF_LOW;
+  int latency = Latency::MUL;
   if (!is_operand_register) {
-    latency += 1;
+    latency += LoadConstantLatency();
   }
   return latency;
 }
 
 int Mulh32Latency(bool is_operand_register = true) {
-  int latency = Latency::MULT + Latency::MOVF_HIGH;
+  int latency = Latency::MULH + ShiftLatency(true);
   if (!is_operand_register) {
-    latency += 1;
+    latency += LoadConstantLatency();
   }
   return latency;
 }
 
 int Mulhu32Latency(bool is_operand_register = true) {
-  int latency = Latency::MULTU + Latency::MOVF_HIGH;
+  int latency = Latency::MULHU + ShiftLatency(true) * 2;
   if (!is_operand_register) {
+    latency += LoadConstantLatency();
+  } else {
     latency += 1;
   }
   return latency;
 }
 
 int Mulh64Latency(bool is_operand_register = true) {
-  int latency = Latency::DMULT + Latency::MOVF_HIGH;
+  int latency = Latency::MULH;
   if (!is_operand_register) {
-    latency += 1;
+    latency += LoadConstantLatency();
   }
   return latency;
 }
 
 int Div32Latency(bool is_operand_register = true) {
   if (is_operand_register) {
-    return Latency::DIV32;
+    return Latency::DIVW;
   } else {
-    return Latency::DIV32 + 1;
+    return Latency::DIVW + 1;
   }
 }
 
 int Divu32Latency(bool is_operand_register = true) {
   if (is_operand_register) {
-    return Latency::DIVU32;
+    return Latency::DIVUW;
   } else {
-    return Latency::DIVU32 + 1;
+    return Latency::DIVUW + LoadConstantLatency();
   }
 }
 
 int Div64Latency(bool is_operand_register = true) {
-  int latency = Latency::DIV64 + Latency::MOVF_LOW;
+  int latency = Latency::DIV;
   if (!is_operand_register) {
-    latency += 1;
+    latency += LoadConstantLatency();
   }
   return latency;
 }
 
 int Divu64Latency(bool is_operand_register = true) {
-  int latency = Latency::DIVU64 + Latency::MOVF_LOW;
+  int latency = Latency::DIVU;
   if (!is_operand_register) {
-    latency += 1;
+    latency += LoadConstantLatency();
   }
   return latency;
 }
 
 int Mod32Latency(bool is_operand_register = true) {
-  int latency = Latency::DIV32 + Latency::MOVF_HIGH;
+  int latency = Latency::DIVW;
   if (!is_operand_register) {
-    latency += 1;
+    latency += LoadConstantLatency();
   }
   return latency;
 }
 
 int Modu32Latency(bool is_operand_register = true) {
-  int latency = Latency::DIVU32 + Latency::MOVF_HIGH;
+  int latency = Latency::DIVUW;
   if (!is_operand_register) {
-    latency += 1;
+    latency += LoadConstantLatency();
   }
   return latency;
 }
 
 int Mod64Latency(bool is_operand_register = true) {
-  int latency = Latency::DIV64 + Latency::MOVF_HIGH;
+  int latency = Latency::DIV;
   if (!is_operand_register) {
-    latency += 1;
+    latency += LoadConstantLatency();
   }
   return latency;
 }
 
 int Modu64Latency(bool is_operand_register = true) {
-  int latency = Latency::DIV64 + Latency::MOVF_HIGH;
+  int latency = Latency::DIV;
   if (!is_operand_register) {
-    latency += 1;
+    latency += LoadConstantLatency();
   }
   return latency;
 }
@@ -763,38 +699,6 @@ int AdjustBaseAndOffsetLatency() {
 
 int AlignedMemoryLatency() { return AdjustBaseAndOffsetLatency() + 1; }
 
-int UlhuLatency() {
-  return AdjustBaseAndOffsetLatency() + 2 * AlignedMemoryLatency() + 2;
-}
-
-int UlwLatency() {
-  // Estimated max.
-  return AdjustBaseAndOffsetLatency() + 3;
-}
-
-int UlwuLatency() { return UlwLatency() + 1; }
-
-int UldLatency() {
-  // Estimated max.
-  return AdjustBaseAndOffsetLatency() + 3;
-}
-
-int ULoadFloatLatency() { return UlwLatency() + Latency::MOVT_FREG; }
-
-int ULoadDoubleLatency() { return UldLatency() + Latency::MOVT_DREG; }
-
-int UshLatency() {
-  // Estimated max.
-  return AdjustBaseAndOffsetLatency() + 2 + 2 * AlignedMemoryLatency();
-}
-
-int UswLatency() { return AdjustBaseAndOffsetLatency() + 2; }
-
-int UsdLatency() { return AdjustBaseAndOffsetLatency() + 2; }
-
-int UStoreFloatLatency() { return Latency::MOVF_FREG + UswLatency(); }
-
-int UStoreDoubleLatency() { return Latency::MOVF_HIGH_DREG + UsdLatency(); }
 
 int LoadFloatLatency() {
   return AdjustBaseAndOffsetLatency() + Latency::LOAD_FLOAT;
@@ -959,30 +863,11 @@ int MulOverflow64Latency() {
 }
 
 // TODO(RISCV): This is incorrect for RISC-V.
-int Clz64Latency() { return 1; }
-
-int Ctz32Latency() {
-  return Add64Latency(false) + XorLatency() + AndLatency() + Clz64Latency() +
-         1 + Sub64Latency();
+int Clz64Latency() {
+  if (CpuFeatures::IsSupported(ZBB)) return 1;
+  return 12;
 }
 
-int Ctz64Latency() {
-  return Add64Latency(false) + XorLatency() + AndLatency() + 1 + Sub64Latency();
-}
-
-int Popcnt32Latency() {
-  return 2 + AndLatency() + Sub64Latency() + 1 + AndLatency() + 1 +
-         AndLatency() + Add64Latency() + 1 + Add64Latency() + 1 + AndLatency() +
-         1 + Mul32Latency() + 1;
-}
-
-#if V8_TARGET_ARCH_RISCV64
-int Popcnt64Latency() {
-  return 2 + AndLatency() + Sub64Latency() + 1 + AndLatency() + 1 +
-         AndLatency() + Add64Latency() + 1 + Add64Latency() + 1 + AndLatency() +
-         1 + Mul64Latency() + 1;
-}
-#endif
 int CompareFLatency() { return Latency::C_cond_S; }
 
 int CompareF32Latency() { return CompareFLatency(); }
@@ -1171,7 +1056,6 @@ int InstructionScheduler::GetInstructionLatency(const Instruction* instr) {
       return 1;
     case kArchComment:
     case kArchNop:
-    case kArchThrowTerminator:
     case kArchDeoptimize:
       return 0;
     case kArchRet:
@@ -1213,17 +1097,20 @@ int InstructionScheduler::GetInstructionLatency(const Instruction* instr) {
     case kIeee754Float64Tanh:
       return PrepareCallCFunctionLatency() + MovToFloatParametersLatency() +
              CallCFunctionLatency() + MovFromFloatResultLatency();
+    case kRiscvAddOvfWord:
+      return AddOverflow64Latency();
+    case kRiscvSubOvfWord:
+      return SubOverflow64Latency();
 #if V8_TARGET_ARCH_RISCV64
     case kRiscvAdd32:
     case kRiscvAdd64:
       return Add64Latency(instr->InputAt(1)->IsRegister());
-    case kRiscvAddOvf64:
-      return AddOverflow64Latency();
     case kRiscvSub32:
     case kRiscvSub64:
       return Sub64Latency(instr->InputAt(1)->IsRegister());
-    case kRiscvSubOvf64:
-      return SubOverflow64Latency();
+    case kRiscvAdd128:
+    case kRiscvSub128:
+      return Add64Latency(instr->InputAt(1)->IsRegister()) * 4;
     case kRiscvMulHigh64:
       return Mulh64Latency();
     case kRiscvMul64:
@@ -1245,12 +1132,8 @@ int InstructionScheduler::GetInstructionLatency(const Instruction* instr) {
 #elif V8_TARGET_ARCH_RISCV32
     case kRiscvAdd32:
       return Add64Latency(instr->InputAt(1)->IsRegister());
-    case kRiscvAddOvf:
-      return AddOverflow64Latency();
     case kRiscvSub32:
       return Sub64Latency(instr->InputAt(1)->IsRegister());
-    case kRiscvSubOvf:
-      return SubOverflow64Latency();
 #endif
     case kRiscvMul32:
       return Mul32Latency();
@@ -1294,17 +1177,6 @@ int InstructionScheduler::GetInstructionLatency(const Instruction* instr) {
         return latency + 1;
       }
     }
-    case kRiscvNor:
-      return NorLatency(instr->InputAt(1)->IsRegister());
-    case kRiscvNor32: {
-      bool is_operand_register = instr->InputAt(1)->IsRegister();
-      int latency = NorLatency(is_operand_register);
-      if (is_operand_register) {
-        return latency + 2;
-      } else {
-        return latency + 1;
-      }
-    }
     case kRiscvXor:
       return XorLatency(instr->InputAt(1)->IsRegister());
     case kRiscvXor32: {
@@ -1316,21 +1188,15 @@ int InstructionScheduler::GetInstructionLatency(const Instruction* instr) {
         return latency + 1;
       }
     }
+    case kRiscvSh1add:
+    case kRiscvSh2add:
+    case kRiscvSh3add:
+      return 1;
     case kRiscvClz32:
 #if V8_TARGET_ARCH_RISCV64
     case kRiscvClz64:
 #endif
       return Clz64Latency();
-#if V8_TARGET_ARCH_RISCV64
-    case kRiscvCtz64:
-      return Ctz64Latency();
-    case kRiscvPopcnt64:
-      return Popcnt64Latency();
-#endif
-    case kRiscvCtz32:
-      return Ctz32Latency();
-    case kRiscvPopcnt32:
-      return Popcnt32Latency();
     case kRiscvShl32:
       return 1;
     case kRiscvShr32:
@@ -1351,8 +1217,6 @@ int InstructionScheduler::GetInstructionLatency(const Instruction* instr) {
       return AndLatency(instr->InputAt(0)->IsRegister());
     case kRiscvRor32:
       return 1;
-    case kRiscvMov:
-      return 1;
     case kRiscvCmpS:
       return MoveLatency() + CompareF32Latency();
     case kRiscvAddS:
@@ -1363,19 +1227,12 @@ int InstructionScheduler::GetInstructionLatency(const Instruction* instr) {
       return Latency::MUL_S;
     case kRiscvDivS:
       return Latency::DIV_S;
-    case kRiscvModS:
-      return PrepareCallCFunctionLatency() + MovToFloatParametersLatency() +
-             CallCFunctionLatency() + MovFromFloatResultLatency();
     case kRiscvAbsS:
       return Latency::ABS_S;
     case kRiscvNegS:
       return NegdLatency();
     case kRiscvSqrtS:
       return Latency::SQRT_S;
-    case kRiscvMaxS:
-      return Latency::MAX_S;
-    case kRiscvMinS:
-      return Latency::MIN_S;
     case kRiscvCmpD:
       return MoveLatency() + CompareF64Latency();
     case kRiscvAddD:
@@ -1395,10 +1252,6 @@ int InstructionScheduler::GetInstructionLatency(const Instruction* instr) {
       return NegdLatency();
     case kRiscvSqrtD:
       return Latency::SQRT_D;
-    case kRiscvMaxD:
-      return Latency::MAX_D;
-    case kRiscvMinD:
-      return Latency::MIN_D;
 #if V8_TARGET_ARCH_RISCV64
     case kRiscvFloat64RoundDown:
     case kRiscvFloat64RoundTruncate:
@@ -1410,6 +1263,8 @@ int InstructionScheduler::GetInstructionLatency(const Instruction* instr) {
     case kRiscvFloat32RoundTruncate:
     case kRiscvFloat32RoundUp:
     case kRiscvFloat32RoundTiesEven:
+    case kRiscvFloat64ToFloat16RawBits:
+    case kRiscvFloat16RawBitsToFloat64:
       return Float32RoundLatency();
     case kRiscvFloat32Max:
       return Float32MaxLatency();
@@ -1512,50 +1367,16 @@ int InstructionScheduler::GetInstructionLatency(const Instruction* instr) {
     case kRiscvSh:
     case kRiscvSw:
       return AlignedMemoryLatency();
+    case kRiscvLoadHalf:
     case kRiscvLoadFloat:
-      return ULoadFloatLatency();
+      return LoadFloatLatency();
     case kRiscvLoadDouble:
       return LoadDoubleLatency();
+    case kRiscvStoreHalf:
     case kRiscvStoreFloat:
       return StoreFloatLatency();
     case kRiscvStoreDouble:
       return StoreDoubleLatency();
-    case kRiscvUlhu:
-    case kRiscvUlh:
-      return UlhuLatency();
-#if V8_TARGET_ARCH_RISCV64
-    case kRiscvUlwu:
-      return UlwuLatency();
-    case kRiscvUld:
-      return UldLatency();
-    case kRiscvUsd:
-      return UsdLatency();
-    case kRiscvByteSwap64:
-      return ByteSwapSignedLatency();
-#endif
-    case kRiscvUlw:
-      return UlwLatency();
-    case kRiscvULoadFloat:
-      return ULoadFloatLatency();
-    case kRiscvULoadDouble:
-      return ULoadDoubleLatency();
-    case kRiscvUsh:
-      return UshLatency();
-    case kRiscvUsw:
-      return UswLatency();
-    case kRiscvUStoreFloat:
-      return UStoreFloatLatency();
-    case kRiscvUStoreDouble:
-      return UStoreDoubleLatency();
-    case kRiscvPush: {
-      int latency = 0;
-      if (instr->InputAt(0)->IsFPRegister()) {
-        latency = StoreDoubleLatency() + Sub64Latency(false);
-      } else {
-        latency = PushLatency();
-      }
-      return latency;
-    }
     case kRiscvPeek: {
       int latency = 0;
       if (instr->OutputAt(0)->IsFPRegister()) {
@@ -1590,8 +1411,6 @@ int InstructionScheduler::GetInstructionLatency(const Instruction* instr) {
       }
       return latency;
     }
-    case kRiscvByteSwap32:
-      return ByteSwapSignedLatency();
     case kAtomicLoadInt8:
     case kAtomicLoadUint8:
     case kAtomicLoadInt16:
@@ -1625,9 +1444,370 @@ int InstructionScheduler::GetInstructionLatency(const Instruction* instr) {
              BranchShortLatency() + 1;
     case kRiscvAssertEqual:
       return AssertLatency();
+#ifdef V8_TARGET_ARCH_RISCV64
+    case kRiscvLoadDecompressTrapping:
+      return 11;
+#endif
     default:
       return 1;
   }
+}
+
+ResourceAllocation InstructionScheduler::GetResourceTable() {
+  constexpr std::array units = std::to_array<ResourceAllocation::TableEntry>({
+      {ArchInstResource::kFetch, 1},
+      {ArchInstResource::kIntSingle, 1},
+      {ArchInstResource::kIntMulti, 1},
+      {ArchInstResource::kFP, 1},
+      {ArchInstResource::kLoad, 1},
+      {ArchInstResource::kStore, 1},
+  });
+  return ResourceAllocation(units);
+}
+
+ArchInstResource InstructionScheduler::GetInstructionResource(
+    const Instruction* instr) {
+  switch (instr->arch_opcode()) {
+    case kRiscvLb:
+    case kRiscvLbu:
+    case kRiscvLh:
+    case kRiscvLhu:
+    case kRiscvLw:
+    case kRiscvLoadFloat:
+    case kRiscvLoadDouble:
+    case kRiscvLoadHalf:
+    case kRiscvPeek:
+#ifdef V8_ENABLE_SIMD128
+    case kRiscvRvvLd:
+    case kRiscvS128LoadSplat:
+    case kRiscvS128Load64ExtendS:
+    case kRiscvS128Load64ExtendU:
+    case kRiscvS128Load64Zero:
+    case kRiscvS128Load32Zero:
+    case kRiscvS128LoadLane:
+#endif
+    case kRiscvLd:
+    case kRiscvLwu:
+    case kRiscvWord64AtomicLoadUint64:
+    case kRiscvLoadDecompressTaggedSigned:
+    case kRiscvLoadDecompressTagged:
+    case kRiscvLoadDecodeSandboxedPointer:
+    case kRiscvAtomicLoadDecompressTaggedSigned:
+    case kRiscvAtomicLoadDecompressTagged:
+    case kRiscvLoadDecompressTrapping:
+      return ArchInstResource::kLoad;
+
+    case kRiscvSb:
+    case kRiscvSh:
+    case kRiscvSw:
+    case kRiscvStoreFloat:
+    case kRiscvStoreDouble:
+    case kRiscvStoreHalf:
+#ifdef V8_ENABLE_SIMD128
+    case kRiscvRvvSt:
+    case kRiscvS128StoreLane:
+#endif
+    case kRiscvStackClaim:
+    case kRiscvStoreToStackSlot:
+    case kRiscvSync:
+    case kRiscvSd:
+    case kRiscvStoreCompressTagged:
+    case kRiscvAtomicStoreCompressTagged:
+    case kRiscvStoreEncodeSandboxedPointer:
+    case kRiscvStoreIndirectPointer:
+    case kRiscvWord64AtomicStoreWord64:
+    case kRiscvWord64AtomicAddUint64:
+    case kRiscvWord64AtomicSubUint64:
+    case kRiscvWord64AtomicAndUint64:
+    case kRiscvWord64AtomicOrUint64:
+    case kRiscvWord64AtomicXorUint64:
+    case kRiscvWord64AtomicExchangeUint64:
+    case kRiscvWord64AtomicCompareExchangeUint64:
+      return ArchInstResource::kStore;
+
+    case kRiscvAddS:
+    case kRiscvSubS:
+    case kRiscvMulS:
+    case kRiscvDivS:
+    case kRiscvAbsS:
+    case kRiscvNegS:
+    case kRiscvSqrtS:
+    case kRiscvCmpS:
+    case kRiscvAddD:
+    case kRiscvSubD:
+    case kRiscvMulD:
+    case kRiscvDivD:
+    case kRiscvModD:
+    case kRiscvAbsD:
+    case kRiscvNegD:
+    case kRiscvSqrtD:
+    case kRiscvCmpD:
+    case kRiscvFloat32RoundDown:
+    case kRiscvFloat32RoundTruncate:
+    case kRiscvFloat32RoundUp:
+    case kRiscvFloat32RoundTiesEven:
+    case kRiscvFloat32Max:
+    case kRiscvFloat32Min:
+    case kRiscvFloat64Max:
+    case kRiscvFloat64Min:
+    case kRiscvFloat64SilenceNaN:
+    case kRiscvCvtSD:
+    case kRiscvCvtDS:
+    case kRiscvCvtDW:
+    case kRiscvCvtSW:
+    case kRiscvCvtSUw:
+    case kRiscvCvtDUw:
+    case kRiscvTruncWD:
+    case kRiscvRoundWD:
+    case kRiscvFloorWD:
+    case kRiscvCeilWD:
+    case kRiscvTruncWS:
+    case kRiscvRoundWS:
+    case kRiscvFloorWS:
+    case kRiscvCeilWS:
+    case kRiscvTruncUwD:
+    case kRiscvTruncUwS:
+    case kRiscvBitcastInt32ToFloat32:
+    case kRiscvBitcastFloat32ToInt32:
+    case kRiscvFloat64ExtractLowWord32:
+    case kRiscvFloat64ExtractHighWord32:
+    case kRiscvFloat64InsertLowWord32:
+    case kRiscvFloat64InsertHighWord32:
+    case kRiscvFloat64RoundDown:
+    case kRiscvFloat64RoundTruncate:
+    case kRiscvFloat64RoundUp:
+    case kRiscvFloat64RoundTiesEven:
+    case kRiscvFloat64ToFloat16RawBits:
+    case kRiscvFloat16RawBitsToFloat64:
+    case kRiscvCvtSL:
+    case kRiscvCvtDL:
+    case kRiscvCvtSUl:
+    case kRiscvCvtDUl:
+    case kRiscvTruncLS:
+    case kRiscvTruncLD:
+    case kRiscvTruncUlS:
+    case kRiscvTruncUlD:
+    case kRiscvBitcastDL:
+    case kRiscvBitcastLD:
+#ifdef V8_ENABLE_SIMD128
+    case kRiscvF64x2Abs:
+    case kRiscvF64x2Sqrt:
+    case kRiscvF64x2Pmin:
+    case kRiscvF64x2Pmax:
+    case kRiscvF64x2ConvertLowI32x4S:
+    case kRiscvF64x2ConvertLowI32x4U:
+    case kRiscvF64x2PromoteLowF32x4:
+    case kRiscvF64x2ExtractLane:
+    case kRiscvF64x2ReplaceLane:
+    case kRiscvF64x2Qfma:
+    case kRiscvF64x2Qfms:
+    case kRiscvF32x4Abs:
+    case kRiscvF32x4Sqrt:
+    case kRiscvF32x4ExtractLane:
+    case kRiscvF32x4ReplaceLane:
+    case kRiscvVFcvtFX:
+    case kRiscvVFcvtFXU:
+    case kRiscvF32x4Pmin:
+    case kRiscvF32x4Pmax:
+    case kRiscvF32x4DemoteF64x2Zero:
+    case kRiscvF32x4Qfma:
+    case kRiscvF32x4Qfms:
+    case kRiscvVFEq:
+    case kRiscvVFNe:
+    case kRiscvVFLt:
+    case kRiscvVFLe:
+    case kRiscvVFMin:
+    case kRiscvVFMax:
+    case kRiscvVFCeil:
+    case kRiscvVFFloor:
+    case kRiscvVFTrunc:
+    case kRiscvVFNearestInt:
+    case kRiscvVfaddVv:
+    case kRiscvVfsubVv:
+    case kRiscvVfmulVv:
+    case kRiscvVfdivVv:
+    case kRiscvF16x8Splat:
+    case kRiscvF16x8ExtractLane:
+    case kRiscvF16x8ReplaceLane:
+    case kRiscvF16x8Abs:
+    case kRiscvF16x8Sqrt:
+    case kRiscvF16x8Pmin:
+    case kRiscvF16x8Pmax:
+    case kRiscvF16x8DemoteF32x4Zero:
+    case kRiscvF16x8DemoteF64x2Zero:
+    case kRiscvF32x4PromoteLowF16x8:
+    case kRiscvF16x8Qfma:
+    case kRiscvF16x8Qfms:
+    case kRiscvVFcvtXF:
+    case kRiscvVFcvtXUF:
+    case kRiscvI32x4TruncSatF64x2SZero:
+    case kRiscvI32x4TruncSatF64x2UZero:
+#endif
+      return ArchInstResource::kFP;
+
+    case kRiscvMul64:
+    case kRiscvMulOvf64:
+    case kRiscvMulHigh64:
+    case kRiscvMulHighU64:
+    case kRiscvDiv64:
+    case kRiscvDivU64:
+    case kRiscvMod64:
+    case kRiscvModU64:
+    case kRiscvAdd128:
+    case kRiscvSub128:
+    case kRiscvMul32:
+    case kRiscvMulOvf32:
+    case kRiscvMulHigh32:
+    case kRiscvMulHighU32:
+    case kRiscvDiv32:
+    case kRiscvDivU32:
+    case kRiscvMod32:
+    case kRiscvModU32:
+      return ArchInstResource::kIntMulti;
+
+    case kRiscvAnd:
+    case kRiscvAnd32:
+    case kRiscvOr:
+    case kRiscvOr32:
+    case kRiscvXor:
+    case kRiscvXor32:
+    case kRiscvShl32:
+    case kRiscvShr32:
+    case kRiscvSar32:
+    case kRiscvRor32:
+    case kRiscvClz32:
+    case kRiscvTst32:
+    case kRiscvCmp:
+    case kRiscvCmpZero:
+    case kRiscvSh1add:
+    case kRiscvSh2add:
+    case kRiscvSh3add:
+    case kRiscvClz:
+    case kRiscvCtz:
+    case kRiscvCpop:
+    case kRiscvRev8:
+    case kRiscvByteSwap32:
+    case kRiscvSignExtendByte:
+    case kRiscvSignExtendShort:
+#ifdef V8_ENABLE_SIMD128
+    case kRiscvS128AndNot:
+    case kRiscvS128Const:
+    case kRiscvS128Zero:
+    case kRiscvS128AllOnes:
+    case kRiscvS128Select:
+    case kRiscvI8x16Shuffle:
+    case kRiscvVnot:
+    case kRiscvVmv:
+    case kRiscvVandVv:
+    case kRiscvVorVv:
+    case kRiscvVxorVv:
+    case kRiscvVaddVv:
+    case kRiscvVsubVv:
+    case kRiscvVnegVv:
+    case kRiscvVfnegVv:
+    case kRiscvVmax:
+    case kRiscvVmaxuVv:
+    case kRiscvVminsVv:
+    case kRiscvVminuVv:
+    case kRiscvVmulVv:
+    case kRiscvVsmulVv:
+    case kRiscvVgtsVv:
+    case kRiscvVgesVv:
+    case kRiscvVgeuVv:
+    case kRiscvVgtuVv:
+    case kRiscvVeqVv:
+    case kRiscvVneVv:
+    case kRiscvVaddSatSVv:
+    case kRiscvVaddSatUVv:
+    case kRiscvVsubSatSVv:
+    case kRiscvVsubSatUVv:
+    case kRiscvVAbs:
+    case kRiscvVrgather:
+    case kRiscvVAllTrue:
+    case kRiscvV128AnyTrue:
+    case kRiscvBitMask:
+    case kRiscvVfmvVf:
+    case kRiscvI32x4ExtractLane:
+    case kRiscvI32x4ReplaceLane:
+    case kRiscvI32x4Shl:
+    case kRiscvI32x4ShrS:
+    case kRiscvI32x4ShrU:
+    case kRiscvI32x4SConvertI16x8Low:
+    case kRiscvI32x4UConvertI16x8Low:
+    case kRiscvI32x4SConvertI16x8High:
+    case kRiscvI32x4UConvertI16x8High:
+    case kRiscvI32x4DotI16x8S:
+    case kRiscvI16x8DotI8x16I7x16S:
+    case kRiscvI32x4DotI8x16I7x16AddS:
+    case kRiscvI16x8ExtractLaneU:
+    case kRiscvI16x8ExtractLaneS:
+    case kRiscvI16x8ReplaceLane:
+    case kRiscvI16x8Shl:
+    case kRiscvI16x8ShrS:
+    case kRiscvI16x8ShrU:
+    case kRiscvI16x8SConvertI32x4:
+    case kRiscvI16x8UConvertI32x4:
+    case kRiscvI16x8SConvertI8x16Low:
+    case kRiscvI16x8UConvertI8x16Low:
+    case kRiscvI16x8UConvertI8x16High:
+    case kRiscvI16x8SConvertI8x16High:
+    case kRiscvI16x8RoundingAverageU:
+    case kRiscvI8x16ExtractLaneU:
+    case kRiscvI8x16ExtractLaneS:
+    case kRiscvI8x16ReplaceLane:
+    case kRiscvI8x16Shl:
+    case kRiscvI8x16ShrS:
+    case kRiscvI8x16ShrU:
+    case kRiscvI8x16RoundingAverageU:
+    case kRiscvI8x16SConvertI16x8:
+    case kRiscvI8x16UConvertI16x8:
+    case kRiscvI8x16Popcnt:
+    case kRiscvExtAddPairwiseS:
+    case kRiscvExtAddPairwiseU:
+    case kRiscvExtMulLowS:
+    case kRiscvExtMulHighS:
+    case kRiscvExtMulLowU:
+    case kRiscvExtMulHighU:
+    case kRiscvI64x2SplatI32Pair:
+    case kRiscvI64x2ExtractLane:
+    case kRiscvI64x2ReplaceLane:
+    case kRiscvI64x2ReplaceLaneI32Pair:
+    case kRiscvI64x2Shl:
+    case kRiscvI64x2ShrS:
+    case kRiscvI64x2ShrU:
+    case kRiscvI64x2SConvertI32x4Low:
+    case kRiscvI64x2SConvertI32x4High:
+    case kRiscvI64x2UConvertI32x4Low:
+    case kRiscvI64x2UConvertI32x4High:
+#endif
+    case kRiscvAdd64:
+    case kRiscvSub64:
+    case kRiscvShl64:
+    case kRiscvShr64:
+    case kRiscvSar64:
+    case kRiscvRor64:
+    case kRiscvClz64:
+    case kRiscvZeroExtendWord:
+    case kRiscvSignExtendWord:
+    case kRiscvTst64:
+    case kRiscvByteSwap64:
+    case kRiscvCtzw:
+    case kRiscvCpopw:
+    case kRiscvCmp32:
+    case kRiscvCmpZero32:
+    case kRiscvAdd32:
+    case kRiscvSub32:
+    case kRiscvAddOvfWord:
+    case kRiscvSubOvfWord:
+    case kRiscvEnableDebugTrace:
+    case kRiscvDisableDebugTrace:
+    case kRiscvAssertEqual:
+#define CASE(Name) case k##Name:
+      COMMON_ARCH_OPCODE_LIST(CASE)
+#undef CASE
+      return ArchInstResource::kIntSingle;
+  }
+  UNREACHABLE();
 }
 
 }  // namespace compiler

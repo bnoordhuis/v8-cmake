@@ -5,30 +5,59 @@
 #ifndef V8_OBJECTS_CALL_SITE_INFO_H_
 #define V8_OBJECTS_CALL_SITE_INFO_H_
 
+#include <optional>
+
+#include "src/base/bit-field.h"
+#include "src/objects/objects-body-descriptors.h"
 #include "src/objects/struct.h"
-#include "torque-generated/bit-fields.h"
+#include "src/objects/trusted-pointer.h"
 
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
 
-namespace v8 {
-namespace internal {
+namespace v8::internal {
 
 class MessageLocation;
 class WasmInstanceObject;
 class StructBodyDescriptor;
 
-#include "torque-generated/src/objects/call-site-info-tq.inc"
-
-class CallSiteInfo : public TorqueGeneratedCallSiteInfo<CallSiteInfo, Struct> {
+V8_OBJECT class CallSiteInfo : public Struct {
  public:
-  NEVER_READ_ONLY_SPACE
-  DEFINE_TORQUE_GENERATED_CALL_SITE_INFO_FLAGS()
+  using IsWasmBit = base::BitField<bool, 0, 1, uint32_t>;
+  using IsStrictBit = IsWasmBit::Next<bool, 1>;
+  using IsConstructorBit = IsStrictBit::Next<bool, 1>;
+  using IsAsyncBit = IsConstructorBit::Next<bool, 1>;
+  using IsBuiltinBit = IsAsyncBit::Next<bool, 1>;
+  using IsSourcePositionComputedBit = IsBuiltinBit::Next<bool, 1>;
+  using IsDeferredBaselineFrameBit = IsSourcePositionComputedBit::Next<bool, 1>;
+#if V8_ENABLE_DRUMBRAKE
+  using IsWasmInterpretedFrameBit = IsDeferredBaselineFrameBit::Next<bool, 1>;
+#endif
+  enum Flag : uint32_t {
+    kNone = 0,
+    kIsWasm = IsWasmBit::kMask,
+    kIsStrict = IsStrictBit::kMask,
+    kIsConstructor = IsConstructorBit::kMask,
+    kIsAsync = IsAsyncBit::kMask,
+    kIsBuiltin = IsBuiltinBit::kMask,
+    kIsSourcePositionComputed = IsSourcePositionComputedBit::kMask,
+    kIsDeferredBaselineFrame = IsDeferredBaselineFrameBit::kMask,
+#if V8_ENABLE_DRUMBRAKE
+    kIsWasmInterpretedFrame = IsWasmInterpretedFrameBit::kMask,
+#endif
+  };
+  using Flags = base::Flags<Flag>;
+#if V8_ENABLE_DRUMBRAKE
+  static constexpr int kFlagCount = 8;
+#else
+  static constexpr int kFlagCount = 7;
+#endif
 
 #if V8_ENABLE_WEBASSEMBLY
   inline bool IsWasm() const;
-  inline bool IsAsmJsWasm() const;
-  inline bool IsAsmJsAtNumberConversion() const;
+#if V8_ENABLE_DRUMBRAKE
+  inline bool IsWasmInterpretedFrame() const;
+#endif  // V8_ENABLE_DRUMBRAKE
   inline bool IsBuiltin() const;
 #endif  // V8_ENABLE_WEBASSEMBLY
 
@@ -45,76 +74,136 @@ class CallSiteInfo : public TorqueGeneratedCallSiteInfo<CallSiteInfo, Struct> {
   bool IsPromiseAny() const;
   bool IsNative() const;
 
-  DECL_ACCESSORS(code_object, HeapObject)
+  inline Tagged<HeapObject> code_object(IsolateForSandbox isolate) const;
+  inline void set_code_object(
+      Tagged<Union<Code, BytecodeArray, Undefined>> code,
+      WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+
+  inline Tagged<JSAny> receiver_or_instance() const;
+  inline void set_receiver_or_instance(
+      Tagged<JSAny> value, WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+
+  inline Tagged<Union<JSFunction, Smi>> function() const;
+  inline void set_function(Tagged<Union<JSFunction, Smi>> value,
+                           WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+
+  inline int code_offset_or_source_position() const;
+  inline void set_code_offset_or_source_position(
+      int value, WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+
+  inline int flags() const;
+  inline void set_flags(int value);
 
   // Dispatched behavior.
   DECL_VERIFIER(CallSiteInfo)
+  DECL_PRINTER(CallSiteInfo)
 
   // Used to signal that the requested field is unknown.
   static constexpr int kUnknown = kNoSourcePosition;
 
-  V8_EXPORT_PRIVATE static int GetLineNumber(Handle<CallSiteInfo> info);
-  V8_EXPORT_PRIVATE static int GetColumnNumber(Handle<CallSiteInfo> info);
+  // For delayed CallSiteInfo creation (storing the raw data for several
+  // CallSiteInfos in a FixedArray).
+  enum Fields { kCode = 0, kReceiver, kFunction, kOffset, kFlags, kCount };
 
-  static int GetEnclosingLineNumber(Handle<CallSiteInfo> info);
-  static int GetEnclosingColumnNumber(Handle<CallSiteInfo> info);
+  // Deferred flags: defined in the Torque bitfield, but only meaningful in
+  // raw capture arrays.  Stripped before creating actual CallSiteInfo objects.
+  static constexpr int kDeferredFlagsMask = kIsDeferredBaselineFrame;
+
+  static DirectHandle<CallSiteInfo> ConstructFromRawData(
+      Isolate* isolate, DirectHandle<FixedArray> frames, int index);
+
+  // Expand a raw stack-capture array that may contain deferred entries
+  // (optimized/baseline frames that were not Summarize'd at capture time)
+  // into a fully-resolved raw array where every entry corresponds to one
+  // logical JS frame.  Non-deferred entries are copied as-is.
+  static Handle<FixedArray> ExpandDeferredFrames(Isolate* isolate,
+                                                 Handle<FixedArray> raw_data);
+
+  V8_EXPORT_PRIVATE static int GetLineNumber(DirectHandle<CallSiteInfo> info);
+  V8_EXPORT_PRIVATE static int GetColumnNumber(DirectHandle<CallSiteInfo> info);
+
+  static int GetEnclosingLineNumber(DirectHandle<CallSiteInfo> info);
+  static int GetEnclosingColumnNumber(DirectHandle<CallSiteInfo> info);
 
   // Returns the script ID if one is attached,
   // Message::kNoScriptIdInfo otherwise.
-  static MaybeHandle<Script> GetScript(Isolate* isolate,
-                                       Handle<CallSiteInfo> info);
+  static MaybeDirectHandle<Script> GetScript(Isolate* isolate,
+                                             DirectHandle<CallSiteInfo> info);
   int GetScriptId() const;
-  Object GetScriptName() const;
-  Object GetScriptNameOrSourceURL() const;
-  Object GetScriptSource() const;
-  Object GetScriptSourceMappingURL() const;
+  Tagged<Object> GetScriptName() const;
+  Tagged<Object> GetScriptNameOrSourceURL() const;
+  Tagged<Object> GetScriptSource() const;
+  Tagged<Object> GetScriptSourceMappingURL() const;
 
-  static Handle<PrimitiveHeapObject> GetEvalOrigin(Handle<CallSiteInfo> info);
-  V8_EXPORT_PRIVATE static Handle<PrimitiveHeapObject> GetFunctionName(
-      Handle<CallSiteInfo> info);
-  static Handle<String> GetFunctionDebugName(Handle<CallSiteInfo> info);
-  static Handle<Object> GetMethodName(Handle<CallSiteInfo> info);
-  static Handle<String> GetScriptHash(Handle<CallSiteInfo> info);
-  static Handle<Object> GetTypeName(Handle<CallSiteInfo> info);
+  static Handle<PrimitiveHeapObject> GetEvalOrigin(
+      DirectHandle<CallSiteInfo> info);
+  V8_EXPORT_PRIVATE static DirectHandle<PrimitiveHeapObject> GetFunctionName(
+      DirectHandle<CallSiteInfo> info);
+  static DirectHandle<String> GetFunctionDebugName(
+      DirectHandle<CallSiteInfo> info);
+  static DirectHandle<Object> GetMethodName(DirectHandle<CallSiteInfo> info);
+  static DirectHandle<String> GetScriptHash(DirectHandle<CallSiteInfo> info);
+  static DirectHandle<Object> GetTypeName(DirectHandle<CallSiteInfo> info);
 
 #if V8_ENABLE_WEBASSEMBLY
-  // These methods are only valid for Wasm and asm.js Wasm frames.
+  // These methods are only valid for Wasm frames.
   uint32_t GetWasmFunctionIndex() const;
-  WasmInstanceObject GetWasmInstance() const;
-  static Handle<Object> GetWasmModuleName(Handle<CallSiteInfo> info);
+  Tagged<WasmInstanceObject> GetWasmInstance() const;
+  static DirectHandle<Object> GetWasmModuleName(
+      DirectHandle<CallSiteInfo> info);
 #endif  // V8_ENABLE_WEBASSEMBLY
 
-  // Returns the 0-based source position, which is the offset into the
-  // Script in case of JavaScript and Asm.js, and the wire byte offset
-  // in the module in case of actual Wasm. In case of async promise
-  // combinator frames, this returns the index of the promise.
-  static int GetSourcePosition(Handle<CallSiteInfo> info);
+  // Returns the 0-based source position, which is the offset into the Script in
+  // case of JavaScript, and the wire byte offset in the module in case of Wasm.
+  // In case of async promise combinator frames, this returns the index of the
+  // promise.
+  static int GetSourcePosition(DirectHandle<CallSiteInfo> info);
 
   // Attempts to fill the |location| based on the |info|, and avoids
   // triggering source position table building for JavaScript frames.
-  static bool ComputeLocation(Handle<CallSiteInfo> info,
+  static bool ComputeLocation(DirectHandle<CallSiteInfo> info,
                               MessageLocation* location);
 
-  using BodyDescriptor = StructBodyDescriptor;
-
  private:
-  static int ComputeSourcePosition(Handle<CallSiteInfo> info, int offset);
+  static int ComputeSourcePosition(DirectHandle<CallSiteInfo> info, int offset);
 
-  base::Optional<Script> GetScript() const;
-  SharedFunctionInfo GetSharedFunctionInfo() const;
+  std::optional<Tagged<Script>> GetScript() const;
+  Tagged<SharedFunctionInfo> GetSharedFunctionInfo() const;
 
-  TQ_OBJECT_CONSTRUCTORS(CallSiteInfo)
+  friend class Factory;
+  friend class TorqueGeneratedCallSiteInfoAsserts;
+  friend struct ObjectTraits<CallSiteInfo>;
+
+  static constexpr IndirectPointerTagRange kCodeObjectTagRange =
+      IndirectPointerTagRange(kBytecodeArrayIndirectPointerTag,
+                              kCodeIndirectPointerTag);
+  static_assert(kCodeObjectTagRange.Size() == 2);
+
+  TrustedPointerMember<Union<Code, BytecodeArray>, kCodeObjectTagRange>
+      code_object_;
+  TaggedMember<JSAny> receiver_or_instance_;
+  TaggedMember<Union<JSFunction, Smi>> function_;
+  TaggedMember<Smi> code_offset_or_source_position_;
+  TaggedMember<Smi> flags_;
+} V8_OBJECT_END;
+
+template <>
+struct ObjectTraits<CallSiteInfo> {
+  using BodyDescriptor = StackedBodyDescriptor<
+      FixedBodyDescriptor<offsetof(CallSiteInfo, receiver_or_instance_),
+                          sizeof(CallSiteInfo), sizeof(CallSiteInfo)>,
+      WithStrongTrustedPointer<offsetof(CallSiteInfo, code_object_),
+                               CallSiteInfo::kCodeObjectTagRange>>;
 };
 
 class IncrementalStringBuilder;
-void SerializeCallSiteInfo(Isolate* isolate, Handle<CallSiteInfo> frame,
+void SerializeCallSiteInfo(Isolate* isolate, DirectHandle<CallSiteInfo> frame,
                            IncrementalStringBuilder* builder);
 V8_EXPORT_PRIVATE
-MaybeHandle<String> SerializeCallSiteInfo(Isolate* isolate,
-                                          Handle<CallSiteInfo> frame);
+MaybeDirectHandle<String> SerializeCallSiteInfo(
+    Isolate* isolate, DirectHandle<CallSiteInfo> frame);
 
-}  // namespace internal
-}  // namespace v8
+}  // namespace v8::internal
 
 #include "src/objects/object-macros-undef.h"
 

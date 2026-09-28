@@ -4,20 +4,26 @@
 
 #include "src/profiler/heap-profiler.h"
 
+#include <fstream>
+#include <optional>
+#include <utility>
+
 #include "include/v8-profiler.h"
 #include "src/api/api-inl.h"
-#include "src/base/optional.h"
+#include "src/base/platform/platform.h"
 #include "src/debug/debug.h"
 #include "src/heap/combined-heap.h"
 #include "src/heap/heap-inl.h"
+#include "src/heap/heap-layout-inl.h"
 #include "src/heap/heap.h"
+#include "src/objects/cpp-heap-object-wrapper-inl.h"
 #include "src/objects/js-array-buffer-inl.h"
 #include "src/profiler/allocation-tracker.h"
-#include "src/profiler/heap-snapshot-generator-inl.h"
+#include "src/profiler/heap-snapshot-generator.h"
 #include "src/profiler/sampling-heap-profiler.h"
+#include "src/utils/output-stream.h"
 
-namespace v8 {
-namespace internal {
+namespace v8::internal {
 
 HeapProfiler::HeapProfiler(Heap* heap)
     : ids_(new HeapObjectsMap(heap)),
@@ -47,6 +53,34 @@ void HeapProfiler::RemoveSnapshot(HeapSnapshot* snapshot) {
                    }));
 }
 
+std::vector<v8::Local<v8::Value>> HeapProfiler::GetDetachedJSWrapperObjects() {
+  heap()->CollectAllAvailableGarbage(GarbageCollectionReason::kHeapProfiler);
+
+  std::vector<v8::Local<v8::Value>> js_objects_found;
+  HeapObjectIterator iterator(heap());
+  for (Tagged<HeapObject> obj = iterator.Next(); !obj.is_null();
+       obj = iterator.Next()) {
+    if (TrustedHeapLayout::InCodeSpace(obj)) continue;
+    if (!IsJSApiWrapperObject(obj)) continue;
+    // Ensure object is wrappable, otherwise GetDetachedness() can crash
+    CppHeapObjectWrapper wrapper = CppHeapObjectWrapper(Cast<JSObject>(obj));
+    if (!wrapper.GetCppHeapWrappable(isolate(), kAnyCppHeapPointer)) continue;
+
+    v8::Local<v8::Value> data(
+        Utils::ToLocal(direct_handle(Cast<JSObject>(obj), isolate())));
+    v8::EmbedderGraph::Node::Detachedness detachedness =
+        GetDetachedness(data, 0);
+
+    if (detachedness != v8::EmbedderGraph::Node::Detachedness::kDetached) {
+      continue;
+    }
+
+    js_objects_found.push_back(data);
+  }
+
+  return js_objects_found;
+}
+
 void HeapProfiler::AddBuildEmbedderGraphCallback(
     v8::HeapProfiler::BuildEmbedderGraphCallback callback, void* data) {
   build_embedder_graph_callbacks_.push_back({callback, data});
@@ -57,8 +91,9 @@ void HeapProfiler::RemoveBuildEmbedderGraphCallback(
   auto it = std::find(build_embedder_graph_callbacks_.begin(),
                       build_embedder_graph_callbacks_.end(),
                       std::make_pair(callback, data));
-  if (it != build_embedder_graph_callbacks_.end())
+  if (it != build_embedder_graph_callbacks_.end()) {
     build_embedder_graph_callbacks_.erase(it);
+  }
 }
 
 void HeapProfiler::BuildEmbedderGraph(Isolate* isolate,
@@ -81,18 +116,27 @@ v8::EmbedderGraph::Node::Detachedness HeapProfiler::GetDetachedness(
       get_detachedness_callback_.second);
 }
 
+const char* HeapProfiler::CopyNameForHeapSnapshot(const char* name) {
+  CHECK(is_taking_snapshot_);
+  return names_->GetCopy(name);
+}
+
 HeapSnapshot* HeapProfiler::TakeSnapshot(
     const v8::HeapProfiler::HeapSnapshotOptions options) {
   is_taking_snapshot_ = true;
-  HeapSnapshot* result =
-      new HeapSnapshot(this, options.snapshot_mode, options.numerics_mode);
-  {
-    base::Optional<CppClassNamesAsHeapObjectNameScope> use_cpp_class_name;
-    if (result->expose_internals() && heap()->cpp_heap())
+  HeapSnapshot* result = new HeapSnapshot(this);
+
+  // We need a stack marker here to allow deterministic passes over the stack.
+  // The garbage collection and the filling of references in GenerateSnapshot
+  // should scan the same part of the stack.
+  heap()->stack().SetMarkerIfNeededAndCallback([this, &options, &result]() {
+    std::optional<CppClassNamesAsHeapObjectNameScope> use_cpp_class_name;
+    if (heap()->cpp_heap()) {
       use_cpp_class_name.emplace(heap()->cpp_heap());
+    }
 
     HeapSnapshotGenerator generator(result, options.control,
-                                    options.global_object_name_resolver, heap(),
+                                    options.context_name_resolver, heap(),
                                     options.stack_state);
     if (!generator.GenerateSnapshot()) {
       delete result;
@@ -100,7 +144,7 @@ HeapSnapshot* HeapProfiler::TakeSnapshot(
     } else {
       snapshots_.emplace_back(result);
     }
-  }
+  });
   ids_->RemoveDeadEntries();
   if (native_move_listener_) {
     native_move_listener_->StartListening();
@@ -109,38 +153,96 @@ HeapSnapshot* HeapProfiler::TakeSnapshot(
   heap()->isolate()->UpdateLogObjectRelocation();
   is_taking_snapshot_ = false;
 
-  heap()->isolate()->debug()->feature_tracker()->Track(
-      DebugFeatureTracker::kHeapSnapshot);
-
   return result;
+}
+
+// Precondition: only call this if you have just completed a full GC cycle.
+void HeapProfiler::WriteSnapshotToDiskAfterGC(
+    const v8::HeapProfiler::HeapSnapshotOptions options) {
+  // We need to set a stack marker for the stack walk performed by the
+  // snapshot generator to work.
+  heap()->stack().SetMarkerIfNeededAndCallback([this, options]() {
+    int64_t time = V8::GetCurrentPlatform()->CurrentClockTimeMilliseconds();
+    int pid = base::OS::GetCurrentProcessId();
+    std::string filename = "v8-heap-" + std::to_string(time) + "-" +
+                           std::to_string(pid) + ".heapsnapshot";
+    if (v8_flags.heap_snapshot_path.value()) {
+      filename = v8_flags.heap_snapshot_path.value();
+    }
+    v8::HeapProfiler::HeapSnapshotOptions otions;
+    std::unique_ptr<HeapSnapshot> result(new HeapSnapshot(this));
+    HeapSnapshotGenerator generator(result.get(), options.control,
+                                    options.context_name_resolver, heap(),
+                                    options.stack_state);
+    if (!generator.GenerateSnapshotAfterGC()) return;
+    i::FileOutputStream stream(filename.c_str());
+    if (stream.IsOpen()) {
+      HeapSnapshotJSONSerializer serializer(result.get());
+      serializer.Serialize(&stream);
+      PrintF("Wrote heap snapshot to %s.\n", filename.c_str());
+    } else {
+      PrintF("Failed to open heap snapshot file '%s' for writing.\n",
+             filename.c_str());
+    }
+  });
+
+  ids_->RemoveDeadEntries();
+}
+
+// static
+v8::HeapProfiler::HeapSnapshotOptions
+HeapProfiler::GetDefaultHeapSnapshotOptionsForTestingUsage() {
+  // Since this API is intended for V8 devs, we do not treat globals as
+  // roots here on purpose.
+  v8::HeapProfiler::HeapSnapshotOptions options;
+  options.numerics_mode = v8::HeapProfiler::NumericsMode::kExposeNumericValues;
+  options.snapshot_mode = v8::HeapProfiler::HeapSnapshotMode::kExposeInternals;
+  return options;
+}
+
+void HeapProfiler::TakeSnapshotToFile(
+    const v8::HeapProfiler::HeapSnapshotOptions options, std::string filename) {
+  HeapSnapshot* snapshot = TakeSnapshot(options);
+  if (!snapshot) return;
+  FileOutputStream stream(filename.c_str());
+  if (stream.IsOpen()) {
+    HeapSnapshotJSONSerializer serializer(snapshot);
+    serializer.Serialize(&stream);
+  } else {
+    RemoveSnapshot(snapshot);
+  }
+}
+
+std::string HeapProfiler::TakeSnapshotToString(
+    const v8::HeapProfiler::HeapSnapshotOptions options) {
+  HeapSnapshot* snapshot = TakeSnapshot(options);
+  StringOutputStream stream;
+  HeapSnapshotJSONSerializer serializer(snapshot);
+  serializer.Serialize(&stream);
+  return stream.str();
 }
 
 bool HeapProfiler::StartSamplingHeapProfiler(
     uint64_t sample_interval, int stack_depth,
     v8::HeapProfiler::SamplingFlags flags) {
-  if (sampling_heap_profiler_.get()) {
-    return false;
-  }
+  if (sampling_heap_profiler_) return false;
   sampling_heap_profiler_.reset(new SamplingHeapProfiler(
       heap(), names_.get(), sample_interval, stack_depth, flags));
   return true;
 }
-
 
 void HeapProfiler::StopSamplingHeapProfiler() {
   sampling_heap_profiler_.reset();
   MaybeClearStringsStorage();
 }
 
-
 v8::AllocationProfile* HeapProfiler::GetAllocationProfile() {
-  if (sampling_heap_profiler_.get()) {
+  if (sampling_heap_profiler_) {
     return sampling_heap_profiler_->GetAllocationProfile();
   } else {
     return nullptr;
   }
 }
-
 
 void HeapProfiler::StartHeapObjectsTracking(bool track_allocations) {
   ids_->UpdateHeapObjectsMap();
@@ -153,8 +255,6 @@ void HeapProfiler::StartHeapObjectsTracking(bool track_allocations) {
   if (track_allocations) {
     allocation_tracker_.reset(new AllocationTracker(ids_.get(), names_.get()));
     heap()->AddHeapObjectAllocationTracker(this);
-    heap()->isolate()->debug()->feature_tracker()->Track(
-        DebugFeatureTracker::kAllocationTracking);
   }
 }
 
@@ -182,10 +282,9 @@ HeapSnapshot* HeapProfiler::GetSnapshot(int index) {
   return snapshots_.at(index).get();
 }
 
-SnapshotObjectId HeapProfiler::GetSnapshotObjectId(Handle<Object> obj) {
-  if (!obj->IsHeapObject())
-    return v8::HeapProfiler::kUnknownObjectId;
-  return ids_->FindEntry(HeapObject::cast(*obj).address());
+SnapshotObjectId HeapProfiler::GetSnapshotObjectId(DirectHandle<Object> obj) {
+  if (!IsHeapObject(*obj)) return v8::HeapProfiler::kUnknownObjectId;
+  return ids_->FindEntry(Cast<HeapObject>(*obj).address());
 }
 
 SnapshotObjectId HeapProfiler::GetSnapshotObjectId(NativeObject obj) {
@@ -220,29 +319,22 @@ void HeapProfiler::AllocationEvent(Address addr, int size) {
   }
 }
 
-
 void HeapProfiler::UpdateObjectSizeEvent(Address addr, int size) {
   ids_->UpdateObjectSize(addr, size);
 }
 
-Handle<HeapObject> HeapProfiler::FindHeapObjectById(SnapshotObjectId id) {
-  HeapObject object;
+DirectHandle<HeapObject> HeapProfiler::FindHeapObjectById(SnapshotObjectId id) {
   CombinedHeapObjectIterator iterator(heap(),
                                       HeapObjectIterator::kFilterUnreachable);
-  // Make sure that object with the given id is still reachable.
-  for (HeapObject obj = iterator.Next(); !obj.is_null();
+  // Make sure that the object with the given id is still reachable.
+  for (Tagged<HeapObject> obj = iterator.Next(); !obj.is_null();
        obj = iterator.Next()) {
     if (ids_->FindEntry(obj.address()) == id) {
-      DCHECK(object.is_null());
-      object = obj;
-      // Can't break -- kFilterUnreachable requires full heap traversal.
+      return DirectHandle<HeapObject>(obj, isolate());
     }
   }
-
-  return !object.is_null() ? Handle<HeapObject>(object, isolate())
-                           : Handle<HeapObject>();
+  return DirectHandle<HeapObject>();
 }
-
 
 void HeapProfiler::ClearHeapObjectMap() {
   ids_.reset(new HeapObjectsMap(heap()));
@@ -255,54 +347,56 @@ void HeapProfiler::ClearHeapObjectMap() {
   }
 }
 
-
 Heap* HeapProfiler::heap() const { return ids_->heap(); }
 
 Isolate* HeapProfiler::isolate() const { return heap()->isolate(); }
 
-void HeapProfiler::QueryObjects(Handle<Context> context,
-                                debug::QueryObjectPredicate* predicate,
+void HeapProfiler::QueryObjects(DirectHandle<Context> context,
+                                v8::QueryObjectPredicate* predicate,
                                 std::vector<v8::Global<v8::Object>>* objects) {
-  {
-    HandleScope handle_scope(isolate());
-    std::vector<Handle<JSTypedArray>> on_heap_typed_arrays;
-    CombinedHeapObjectIterator heap_iterator(
-        heap(), HeapObjectIterator::kFilterUnreachable);
-    for (HeapObject heap_obj = heap_iterator.Next(); !heap_obj.is_null();
-         heap_obj = heap_iterator.Next()) {
-      if (heap_obj.IsFeedbackVector()) {
-        FeedbackVector::cast(heap_obj).ClearSlots(isolate());
-      } else if (heap_obj.IsJSTypedArray() &&
-                 JSTypedArray::cast(heap_obj).is_on_heap()) {
-        // Cannot call typed_array->GetBuffer() here directly because it may
-        // trigger GC. Defer that call by collecting the object in a vector.
-        on_heap_typed_arrays.push_back(
-            handle(JSTypedArray::cast(heap_obj), isolate()));
+  // We need a stack marker here to allow deterministic passes over the stack.
+  // The garbage collection and the two object heap iterators should scan the
+  // same part of the stack.
+  heap()->stack().SetMarkerIfNeededAndCallback([this, predicate, objects]() {
+    {
+      HandleScope handle_scope(isolate());
+      std::vector<Handle<JSTypedArray>> on_heap_typed_arrays;
+      CombinedHeapObjectIterator heap_iterator(
+          heap(), HeapObjectIterator::kFilterUnreachable);
+      for (Tagged<HeapObject> heap_obj = heap_iterator.Next();
+           !heap_obj.is_null(); heap_obj = heap_iterator.Next()) {
+        if (IsInaccessible(heap_obj)) continue;
+        if (IsFeedbackVector(heap_obj)) {
+          Cast<FeedbackVector>(heap_obj)->ClearSlots(isolate());
+        } else if (IsJSTypedArray(heap_obj) &&
+                   Cast<JSTypedArray>(heap_obj)->is_on_heap()) {
+          // Cannot call typed_array->GetBuffer() here directly because it may
+          // trigger GC. Defer that call by collecting the object in a vector.
+          on_heap_typed_arrays.push_back(
+              handle(Cast<JSTypedArray>(heap_obj), isolate()));
+        }
+      }
+      for (auto& typed_array : on_heap_typed_arrays) {
+        // Convert the on-heap typed array into off-heap typed array, so that
+        // its ArrayBuffer becomes valid and can be returned in the result.
+        typed_array->GetBuffer(isolate());
       }
     }
-    for (auto& typed_array : on_heap_typed_arrays) {
-      // Convert the on-heap typed array into off-heap typed array, so that
-      // its ArrayBuffer becomes valid and can be returned in the result.
-      typed_array->GetBuffer();
+    // We should return accurate information about live objects, so we need to
+    // collect all garbage first.
+    heap()->CollectAllAvailableGarbage(GarbageCollectionReason::kHeapProfiler);
+    CombinedHeapObjectIterator heap_iterator(
+        heap(), HeapObjectIterator::kFilterUnreachable);
+    for (Tagged<HeapObject> heap_obj = heap_iterator.Next();
+         !heap_obj.is_null(); heap_obj = heap_iterator.Next()) {
+      if (IsInaccessible(heap_obj)) continue;
+      if (!IsJSObject(heap_obj) || IsJSExternalObject(heap_obj)) continue;
+      v8::Local<v8::Object> v8_obj(
+          Utils::ToLocal(direct_handle(Cast<JSObject>(heap_obj), isolate())));
+      if (!predicate->Filter(v8_obj)) continue;
+      objects->emplace_back(reinterpret_cast<v8::Isolate*>(isolate()), v8_obj);
     }
-  }
-  // We should return accurate information about live objects, so we need to
-  // collect all garbage first.
-  heap()->CollectAllAvailableGarbage(GarbageCollectionReason::kHeapProfiler);
-  CombinedHeapObjectIterator heap_iterator(
-      heap(), HeapObjectIterator::kFilterUnreachable);
-  PtrComprCageBase cage_base(isolate());
-  for (HeapObject heap_obj = heap_iterator.Next(); !heap_obj.is_null();
-       heap_obj = heap_iterator.Next()) {
-    if (!heap_obj.IsJSObject(cage_base) ||
-        heap_obj.IsJSExternalObject(cage_base))
-      continue;
-    v8::Local<v8::Object> v8_obj(
-        Utils::ToLocal(handle(JSObject::cast(heap_obj), isolate())));
-    if (!predicate->Filter(v8_obj)) continue;
-    objects->emplace_back(reinterpret_cast<v8::Isolate*>(isolate()), v8_obj);
-  }
+  });
 }
 
-}  // namespace internal
-}  // namespace v8
+}  // namespace v8::internal

@@ -37,11 +37,14 @@ static const char* const JSOBJECT_TYPE_STRING = "JSObject";
 static const char* const SMI_TYPE_STRING = "Smi";
 static const char* const TAGGED_TYPE_STRING = "Tagged";
 static const char* const STRONG_TAGGED_TYPE_STRING = "StrongTagged";
-static const char* const UNINITIALIZED_TYPE_STRING = "Uninitialized";
 static const char* const UNINITIALIZED_HEAP_OBJECT_TYPE_STRING =
     "UninitializedHeapObject";
 static const char* const RAWPTR_TYPE_STRING = "RawPtr";
 static const char* const EXTERNALPTR_TYPE_STRING = "ExternalPointer";
+static const char* const CPPHEAPPTR_TYPE_STRING = "CppHeapPointer";
+static const char* const TRUSTEDPTR_TYPE_STRING = "TrustedPointer";
+static const char* const PROTECTEDPTR_TYPE_STRING = "ProtectedPointer";
+static const char* const DISPATCH_HANDLE_TYPE_STRING = "DispatchHandle";
 static const char* const CONST_STRING_TYPE_STRING = "constexpr string";
 static const char* const STRING_TYPE_STRING = "String";
 static const char* const NUMBER_TYPE_STRING = "Number";
@@ -61,9 +64,11 @@ static const char* const UINT8_TYPE_STRING = "uint8";
 static const char* const BINT_TYPE_STRING = "bint";
 static const char* const CHAR8_TYPE_STRING = "char8";
 static const char* const CHAR16_TYPE_STRING = "char16";
+static const char* const FLOAT16_RAW_BITS_TYPE_STRING = "float16_raw_bits";
 static const char* const FLOAT32_TYPE_STRING = "float32";
 static const char* const FLOAT64_TYPE_STRING = "float64";
-static const char* const FLOAT64_OR_HOLE_TYPE_STRING = "float64_or_hole";
+static const char* const FLOAT64_OR_UNDEFINED_OR_HOLE_TYPE_STRING =
+    "float64_or_undefined_or_hole";
 static const char* const CONST_INT31_TYPE_STRING = "constexpr int31";
 static const char* const CONST_INT32_TYPE_STRING = "constexpr int32";
 static const char* const CONST_FLOAT64_TYPE_STRING = "constexpr float64";
@@ -90,6 +95,8 @@ static const char* const ANNOTATION_HAS_SAME_INSTANCE_TYPE_AS_PARENT =
     "@hasSameInstanceTypeAsParent";
 static const char* const ANNOTATION_DO_NOT_GENERATE_CPP_CLASS =
     "@doNotGenerateCppClass";
+static const char* const ANNOTATION_DO_NOT_GENERATE_INSTANCE_TYPE_CHECK =
+    "@doNotGenerateInstanceTypeCheck";
 static const char* const ANNOTATION_CUSTOM_MAP = "@customMap";
 static const char* const ANNOTATION_CUSTOM_CPP_CLASS = "@customCppClass";
 static const char* const ANNOTATION_HIGHEST_INSTANCE_TYPE_WITHIN_PARENT =
@@ -102,19 +109,20 @@ static const char* const ANNOTATION_INSTANCE_TYPE_VALUE =
     "@apiExposedInstanceTypeValue";
 static const char* const ANNOTATION_IF = "@if";
 static const char* const ANNOTATION_IFNOT = "@ifnot";
-static const char* const ANNOTATION_GENERATE_BODY_DESCRIPTOR =
-    "@generateBodyDescriptor";
-static const char* const ANNOTATION_GENERATE_UNIQUE_MAP = "@generateUniqueMap";
-static const char* const ANNOTATION_GENERATE_FACTORY_FUNCTION =
-    "@generateFactoryFunction";
 static const char* const ANNOTATION_EXPORT = "@export";
 static const char* const ANNOTATION_DO_NOT_GENERATE_CAST = "@doNotGenerateCast";
 static const char* const ANNOTATION_USE_PARENT_TYPE_CHECKER =
     "@useParentTypeChecker";
-static const char* const ANNOTATION_CPP_OBJECT_DEFINITION =
-    "@cppObjectDefinition";
+static const char* const ANNOTATION_CPP_OBJECT_LAYOUT_DEFINITION =
+    "@cppObjectLayoutDefinition";
+// The C++ scope where the hand-written counterpart of a `bitfield struct`'s
+// `base::BitField<...>` typedefs lives, e.g. "JSPromise" or "Map::Bits1".
+// When present, Torque emits drift-detection static_asserts into the per-file
+// <name>-tq.cc.
+static const char* const ANNOTATION_CPP_SCOPE = "@cppScope";
+static const char* const ANNOTATION_SAME_ENUM_VALUE_AS = "@sameEnumValueAs";
 // Generate C++ accessors with relaxed store semantics.
-// Weak<T> and MaybeObject fields always use relaxed store.
+// Weak<T> and Tagged<MaybeObject> fields always use relaxed store.
 static const char* const ANNOTATION_CPP_RELAXED_STORE = "@cppRelaxedStore";
 // Generate C++ accessors with relaxed load semantics.
 static const char* const ANNOTATION_CPP_RELAXED_LOAD = "@cppRelaxedLoad";
@@ -124,11 +132,16 @@ static const char* const ANNOTATION_CPP_RELEASE_STORE = "@cppReleaseStore";
 static const char* const ANNOTATION_CPP_ACQUIRE_LOAD = "@cppAcquireLoad";
 // Generate BodyDescriptor using IterateCustomWeakPointers.
 static const char* const ANNOTATION_CUSTOM_WEAK_MARKING = "@customWeakMarking";
-// Do not generate a interface descriptor for this builtin.
+// Do not generate an interface descriptor for this builtin.
 static const char* const ANNOTATION_CUSTOM_INTERFACE_DESCRIPTOR =
     "@customInterfaceDescriptor";
+// Automatically generates a call to IncrementUseCounter at the start of a
+// builtin.
+static const char* const ANNOTATION_INCREMENT_USE_COUNTER =
+    "@incrementUseCounter";
+static const char* const ANNOTATION_SUPPORTS_TSA = "@supportsTSA";
 
-inline bool IsConstexprName(const std::string& name) {
+inline bool IsConstexprName(std::string_view name) {
   return name.substr(0, std::strlen(CONSTEXPR_TYPE_PREFIX)) ==
          CONSTEXPR_TYPE_PREFIX;
 }
@@ -162,12 +175,10 @@ enum class ClassFlag {
   kHighestInstanceTypeWithinParent = 1 << 6,
   kLowestInstanceTypeWithinParent = 1 << 7,
   kUndefinedLayout = 1 << 8,
-  kGenerateBodyDescriptor = 1 << 9,
-  kExport = 1 << 10,
-  kDoNotGenerateCast = 1 << 11,
-  kGenerateUniqueMap = 1 << 12,
-  kGenerateFactoryFunction = 1 << 13,
-  kCppObjectDefinition = 1 << 14,
+  kExport = 1 << 9,
+  kDoNotGenerateCast = 1 << 10,
+  kDoNotGenerateInstanceTypeCheck = 1 << 11,
+  kCppObjectLayoutDefinition = 1 << 12,
 };
 using ClassFlags = base::Flags<ClassFlag>;
 

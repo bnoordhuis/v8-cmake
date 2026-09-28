@@ -4,6 +4,8 @@
 
 #include "src/torque/type-visitor.h"
 
+#include <optional>
+
 #include "src/common/globals.h"
 #include "src/torque/declarable.h"
 #include "src/torque/global-context.h"
@@ -12,9 +14,7 @@
 #include "src/torque/type-inference.h"
 #include "src/torque/type-oracle.h"
 
-namespace v8 {
-namespace internal {
-namespace torque {
+namespace v8::internal::torque {
 
 const Type* TypeVisitor::ComputeType(TypeDeclaration* decl,
                                      MaybeSpecializationKey specialized_from,
@@ -59,21 +59,15 @@ const Type* TypeVisitor::ComputeType(TypeAliasDeclaration* decl,
 }
 
 namespace {
-std::string ComputeGeneratesType(base::Optional<std::string> opt_gen,
-                                 bool enforce_tnode_type) {
+std::string ComputeGeneratesType(std::optional<std::string> opt_gen) {
   if (!opt_gen) return "";
-  const std::string& generates = *opt_gen;
-  if (enforce_tnode_type) {
-    return UnwrapTNodeTypeName(generates);
-  }
-  return generates;
+  return *opt_gen;
 }
 }  // namespace
 
 const AbstractType* TypeVisitor::ComputeType(
     AbstractTypeDeclaration* decl, MaybeSpecializationKey specialized_from) {
-  std::string generates =
-      ComputeGeneratesType(decl->generates, !decl->IsConstexpr());
+  std::string generates = ComputeGeneratesType(decl->generates);
 
   const Type* parent_type = nullptr;
   if (decl->extends) {
@@ -206,12 +200,12 @@ const StructType* TypeVisitor::ComputeType(
     }
     Field f{field.name_and_type.name->pos,
             struct_type,
-            base::nullopt,
+            std::nullopt,
             {field.name_and_type.name->value, field_type},
             offset.SingleValue(),
             false,
             field.const_qualified,
-            FieldSynchronization::kNone,
+            false,
             FieldSynchronization::kNone};
     auto optional_size = SizeOf(f.name_and_type.type);
     struct_type->RegisterField(f);
@@ -281,34 +275,13 @@ const ClassType* TypeVisitor::ComputeType(
             " because superclass is neither @export or extern");
     }
   }
-  if ((flags & ClassFlag::kGenerateBodyDescriptor ||
-       flags & ClassFlag::kExport) &&
-      flags & ClassFlag::kUndefinedLayout) {
+  if ((flags & ClassFlag::kExport) && flags & ClassFlag::kUndefinedLayout) {
     Error("Class \"", decl->name->value,
           "\" requires a layout but doesn't have one");
   }
-  if (flags & ClassFlag::kGenerateUniqueMap) {
-    if (!(flags & ClassFlag::kExtern)) {
-      Error("No need to specify ", ANNOTATION_GENERATE_UNIQUE_MAP,
-            ", non-extern classes always have a unique map.");
-    }
-    if (flags & ClassFlag::kAbstract) {
-      Error(ANNOTATION_ABSTRACT, " and ", ANNOTATION_GENERATE_UNIQUE_MAP,
-            " shouldn't be used together, because abstract classes are never "
-            "instantiated.");
-    }
-  }
-  if ((flags & ClassFlag::kGenerateFactoryFunction) &&
-      (flags & ClassFlag::kAbstract)) {
-    Error(ANNOTATION_ABSTRACT, " and ", ANNOTATION_GENERATE_FACTORY_FUNCTION,
-          " shouldn't be used together, because abstract classes are never "
-          "instantiated.");
-  }
   if (flags & ClassFlag::kExtern) {
     if (decl->generates) {
-      bool enforce_tnode_type = true;
-      std::string explicit_generates =
-          ComputeGeneratesType(decl->generates, enforce_tnode_type);
+      std::string explicit_generates = ComputeGeneratesType(decl->generates);
       if (explicit_generates == generates) {
         Lint("Unnecessary 'generates' clause for class ", decl->name->value);
       }
@@ -374,23 +347,22 @@ const Type* TypeVisitor::ComputeType(TypeExpression* type_expression) {
       LanguageServerData::AddDefinition(type_expression->pos, pos);
     }
     return type;
-
-  } else if (auto* union_type =
-                 UnionTypeExpression::DynamicCast(type_expression)) {
+  }
+  if (auto* union_type = UnionTypeExpression::DynamicCast(type_expression)) {
     return TypeOracle::GetUnionType(ComputeType(union_type->a),
                                     ComputeType(union_type->b));
-  } else if (auto* function_type_exp =
-                 FunctionTypeExpression::DynamicCast(type_expression)) {
+  }
+  if (auto* function_type_exp =
+          FunctionTypeExpression::DynamicCast(type_expression)) {
     TypeVector argument_types;
     for (TypeExpression* type_exp : function_type_exp->parameters) {
       argument_types.push_back(ComputeType(type_exp));
     }
     return TypeOracle::GetBuiltinPointerType(
-        argument_types, ComputeType(function_type_exp->return_type));
-  } else {
-    auto* precomputed = PrecomputedTypeExpression::cast(type_expression);
-    return precomputed->type;
+        std::move(argument_types), ComputeType(function_type_exp->return_type));
   }
+  auto* precomputed = PrecomputedTypeExpression::cast(type_expression);
+  return precomputed->type;
 }
 
 Signature TypeVisitor::MakeSignature(const CallableDeclaration* declaration) {
@@ -399,9 +371,10 @@ Signature TypeVisitor::MakeSignature(const CallableDeclaration* declaration) {
     LabelDeclaration def = {label.name, ComputeTypeVector(label.types)};
     definition_vector.push_back(def);
   }
-  base::Optional<std::string> arguments_variable;
-  if (declaration->parameters.has_varargs)
+  std::optional<std::string> arguments_variable;
+  if (declaration->parameters.has_varargs) {
     arguments_variable = declaration->parameters.arguments_variable;
+  }
   Signature result{declaration->parameters.names,
                    arguments_variable,
                    {ComputeTypeVector(declaration->parameters.types),
@@ -439,7 +412,22 @@ void TypeVisitor::VisitClassFieldsAndMethods(
         ReportError("in-object properties cannot use @customWeakMarking");
       }
     }
-    base::Optional<ClassFieldIndexInfo> array_length = field_expression.index;
+    std::optional<ClassFieldIndexInfo> array_length = field_expression.index;
+    bool index_is_constant = false;
+    if (array_length) {
+      if (IntegerLiteralExpression::DynamicCast(array_length->expr)) {
+        index_is_constant = true;
+      } else if (auto identifier =
+                     IdentifierExpression::DynamicCast(array_length->expr)) {
+        QualifiedName qualified_name{identifier->namespace_qualification,
+                                     identifier->name->value};
+        auto values = Declarations::TryLookup<Value>(qualified_name);
+        if (values.size() == 1 && (values[0]->IsNamespaceConstant() ||
+                                   values[0]->IsExternConstant())) {
+          index_is_constant = true;
+        }
+      }
+    }
     const Field& field = class_type->RegisterField(
         {field_expression.name_and_type.name->pos,
          class_type,
@@ -448,8 +436,8 @@ void TypeVisitor::VisitClassFieldsAndMethods(
          class_offset.SingleValue(),
          field_expression.custom_weak_marking,
          field_expression.const_qualified,
-         field_expression.read_synchronization,
-         field_expression.write_synchronization});
+         index_is_constant,
+         field_expression.synchronization});
     ResidueClass field_size = std::get<0>(field.GetFieldSizeInformation());
     if (field.index) {
       // Validate that a value at any index in a packed array is aligned
@@ -502,7 +490,7 @@ const Type* TypeVisitor::ComputeTypeForStructExpression(
 
   QualifiedName qualified_name{basic->namespace_qualification,
                                basic->name->value};
-  base::Optional<GenericType*> maybe_generic_type =
+  std::optional<GenericType*> maybe_generic_type =
       Declarations::TryLookupGenericType(qualified_name);
 
   StructDeclaration* decl =
@@ -534,7 +522,7 @@ const Type* TypeVisitor::ComputeTypeForStructExpression(
   TypeArgumentInference inference(
       generic_type->generic_parameters(), explicit_type_arguments,
       term_parameters,
-      TransformVector<base::Optional<const Type*>>(term_argument_types));
+      TransformVector<std::optional<const Type*>>(term_argument_types));
 
   if (inference.HasFailed()) {
     ReportError("failed to infer type arguments for struct ", basic->name,
@@ -548,6 +536,4 @@ const Type* TypeVisitor::ComputeTypeForStructExpression(
       TypeOracle::GetGenericTypeInstance(generic_type, inference.GetResult()));
 }
 
-}  // namespace torque
-}  // namespace internal
-}  // namespace v8
+}  // namespace v8::internal::torque

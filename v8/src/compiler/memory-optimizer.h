@@ -20,7 +20,7 @@ class V8_EXPORT_PRIVATE WasmAddressReassociation final {
  public:
   WasmAddressReassociation(JSGraph* jsgraph, Zone* zone) {}
   void Optimize() {}
-  void VisitProtectedMemOp(Node* node, uint32_t effect_chain) {}
+  void VisitTrappingMemOp(Node* node, uint32_t effect_chain) {}
 };
 
 }  // namespace compiler
@@ -36,7 +36,7 @@ class TickCounter;
 namespace compiler {
 
 class JSGraph;
-class Graph;
+class TFGraph;
 
 // NodeIds are identifying numbers for nodes that can be used to index auxiliary
 // out-of-line data associated with each node.
@@ -50,7 +50,8 @@ class MemoryOptimizer final {
  public:
   MemoryOptimizer(JSHeapBroker* broker, JSGraph* jsgraph, Zone* zone,
                   MemoryLowering::AllocationFolding allocation_folding,
-                  const char* function_debug_name, TickCounter* tick_counter);
+                  const char* function_debug_name, TickCounter* tick_counter,
+                  bool is_wasm);
   ~MemoryOptimizer() = default;
 
   void Optimize();
@@ -77,8 +78,8 @@ class MemoryOptimizer final {
   void VisitLoadFromObject(Node*, AllocationState const*, NodeId);
   void VisitLoadElement(Node*, AllocationState const*, NodeId);
   void VisitLoadField(Node*, AllocationState const*, NodeId);
-  void VisitProtectedLoad(Node*, AllocationState const*, NodeId);
-  void VisitProtectedStore(Node*, AllocationState const*, NodeId);
+  void VisitTrappingLoad(Node*, AllocationState const*, NodeId);
+  void VisitTrappingStore(Node*, AllocationState const*, NodeId);
   void VisitStoreToObject(Node*, AllocationState const*, NodeId);
   void VisitStoreElement(Node*, AllocationState const*, NodeId);
   void VisitStoreField(Node*, AllocationState const*, NodeId);
@@ -103,7 +104,7 @@ class MemoryOptimizer final {
   WasmAddressReassociation* wasm_address_reassociation() {
     return &wasm_address_reassociation_;
   }
-  Graph* graph() const;
+  TFGraph* graph() const;
   JSGraph* jsgraph() const { return jsgraph_; }
   Zone* zone() const { return zone_; }
 

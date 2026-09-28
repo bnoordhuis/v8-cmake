@@ -14,49 +14,20 @@ const path = require('path');
 
 const program = require('commander');
 
-const corpus = require('./corpus.js');
 const differentialScriptMutator = require('./differential_script_mutator.js');
 const random = require('./random.js');
+const runner = require('./runner.js');
 const scriptMutator = require('./script_mutator.js');
 const sourceHelpers = require('./source_helpers.js');
 
-// Maximum number of test inputs to use for one fuzz test.
-const MAX_TEST_INPUTS_PER_TEST = 10;
 
 // Base implementations for default or differential fuzzing.
 const SCRIPT_MUTATORS = {
   default: scriptMutator.ScriptMutator,
   foozzie: differentialScriptMutator.DifferentialScriptMutator,
+  foozzie_fuzzilli: differentialScriptMutator.FuzzilliDifferentialScriptMutator,
+  wasm: scriptMutator.WasmScriptMutator,
 };
-
-function getRandomInputs(primaryCorpus, secondaryCorpora, count) {
-  count = random.randInt(2, count);
-
-  // Choose 40%-80% of inputs from primary corpus.
-  const primaryCount = Math.floor(random.uniform(0.4, 0.8) * count);
-  count -= primaryCount;
-
-  let inputs = primaryCorpus.getRandomTestcases(primaryCount);
-
-  // Split remainder equally between the secondary corpora.
-  const secondaryCount = Math.floor(count / secondaryCorpora.length);
-
-  for (let i = 0; i < secondaryCorpora.length; i++) {
-    let currentCount = secondaryCount;
-    if (i == secondaryCorpora.length - 1) {
-      // Last one takes the remainder.
-      currentCount = count;
-    }
-
-    count -= currentCount;
-    if (currentCount) {
-      inputs = inputs.concat(
-          secondaryCorpora[i].getRandomTestcases(currentCount));
-    }
-  }
-
-  return random.shuffle(inputs);
-}
 
 function collect(value, total) {
   total.push(value);
@@ -70,67 +41,6 @@ function overrideSettings(settings, settingOverrides) {
   }
 }
 
-function* randomInputGen(engine) {
-  const inputDir = path.resolve(program.input_dir);
-
-  const v8Corpus = new corpus.Corpus(inputDir, 'v8');
-  const chakraCorpus = new corpus.Corpus(inputDir, 'chakra');
-  const spiderMonkeyCorpus = new corpus.Corpus(inputDir, 'spidermonkey');
-  const jscCorpus = new corpus.Corpus(inputDir, 'WebKit/JSTests');
-  const crashTestsCorpus = new corpus.Corpus(inputDir, 'CrashTests');
-
-  for (let i = 0; i < program.no_of_files; i++) {
-    let inputs;
-    if (engine === 'V8') {
-      inputs = getRandomInputs(
-          v8Corpus,
-          random.shuffle([chakraCorpus, spiderMonkeyCorpus, jscCorpus,
-                          crashTestsCorpus, v8Corpus]),
-          MAX_TEST_INPUTS_PER_TEST);
-    } else if (engine == 'chakra') {
-      inputs = getRandomInputs(
-          chakraCorpus,
-          random.shuffle([v8Corpus, spiderMonkeyCorpus, jscCorpus,
-                          crashTestsCorpus]),
-          MAX_TEST_INPUTS_PER_TEST);
-    } else if (engine == 'spidermonkey') {
-      inputs = getRandomInputs(
-          spiderMonkeyCorpus,
-          random.shuffle([v8Corpus, chakraCorpus, jscCorpus,
-                          crashTestsCorpus]),
-          MAX_TEST_INPUTS_PER_TEST);
-    } else {
-      inputs = getRandomInputs(
-          jscCorpus,
-          random.shuffle([chakraCorpus, spiderMonkeyCorpus, v8Corpus,
-                          crashTestsCorpus]),
-          MAX_TEST_INPUTS_PER_TEST);
-    }
-
-    if (inputs.length > 0) {
-      yield inputs;
-    }
-  }
-}
-
-function* corpusInputGen() {
-  const inputCorpus = new corpus.Corpus(
-      path.resolve(program.input_dir),
-      program.mutate_corpus,
-      program.extra_strict);
-  for (const input of inputCorpus.getAllTestcases()) {
-    yield [input];
-  }
-}
-
-function* enumerate(iterable) {
-  let i = 0;
-  for (const value of iterable) {
-    yield [i, value];
-    i++;
-  }
-}
-
 function main() {
   Error.stackTraceLimit = Infinity;
 
@@ -138,7 +48,8 @@ function main() {
     .version('0.0.1')
     .option('-i, --input_dir <path>', 'Input directory.')
     .option('-o, --output_dir <path>', 'Output directory.')
-    .option('-n, --no_of_files <n>', 'Output directory.', parseInt)
+    .option('-n, --no_of_files <n>', 'Number of testcases to generate.',
+      parseInt)
     .option('-c, --mutate_corpus <name>', 'Mutate single files in a corpus.')
     .option('-e, --extra_strict', 'Additionally parse files in strict mode.')
     .option('-m, --mutate <path>', 'Mutate a file and output results.')
@@ -158,6 +69,9 @@ function main() {
     overrideSettings(settings, program.setting);
   }
 
+  settings.input_dir = program.input_dir;
+  settings.no_of_files = program.no_of_files;
+
   let app_name = process.env.APP_NAME;
   if (app_name && app_name.endsWith('.exe')) {
     app_name = app_name.substr(0, app_name.length - 4);
@@ -168,7 +82,14 @@ function main() {
       app_name === 'v8_foozzie.py') {
     // V8 supports running the raw d8 executable, the inspector fuzzer or
     // the differential fuzzing harness 'foozzie'.
-    settings.engine = 'V8';
+    settings.engine = 'v8';
+
+    // Infer settings from V8's GN config.
+    const buildConfig = scriptMutator.loadJSONFromBuild(
+        'v8_build_config.json');
+    settings.is_sandbox_fuzzing = buildConfig.memory_corruption_api;
+    settings.is_x64_linux =
+        buildConfig.arch === 'x64' && buildConfig.is_linux;
   } else if (app_name === 'ch') {
     settings.engine = 'chakra';
   } else if (app_name === 'js') {
@@ -182,28 +103,33 @@ function main() {
 
   const mode = process.env.FUZZ_MODE || 'default';
   assert(mode in SCRIPT_MUTATORS, `Unknown mode ${mode}`);
+
+  // Switch for differential fuzzing.
+  settings.diff_fuzz = mode.startsWith('foozzie');
+
   const mutator = new SCRIPT_MUTATORS[mode](settings);
 
   if (program.mutate) {
     const absPath = path.resolve(program.mutate);
     const baseDir = path.dirname(absPath);
     const fileName = path.basename(absPath);
+    const corpus = new sourceHelpers.BaseCorpus(baseDir);
     const input = sourceHelpers.loadSource(
-        baseDir, fileName, program.extra_strict);
+        corpus, fileName, program.extra_strict);
     const mutated = mutator.mutateMultiple([input]);
     console.log(mutated.code);
     return;
   }
 
-  let inputGen;
-
+  let testRunner;
   if (program.mutate_corpus) {
-    inputGen = corpusInputGen();
+    testRunner = new runner.SingleCorpusRunner(
+        program.input_dir, program.mutate_corpus, program.extra_strict);
   } else {
-    inputGen = randomInputGen(settings.engine);
+    testRunner = mutator.createRunner();
   }
 
-  for (const [i, inputs] of enumerate(inputGen)) {
+  for (const [i, inputs] of testRunner.enumerateInputs()) {
     const outputPath = path.join(program.output_dir, 'fuzz-' + i + '.js');
 
     const start = Date.now();
@@ -213,7 +139,7 @@ function main() {
       const mutated = mutator.mutateMultiple(inputs);
       fs.writeFileSync(outputPath, mutated.code);
 
-      if (settings.engine === 'V8' && mutated.flags && mutated.flags.length > 0) {
+      if (settings.engine === 'v8' && mutated.flags && mutated.flags.length > 0) {
         const flagsPath = path.join(program.output_dir, 'flags-' + i + '.js');
         fs.writeFileSync(flagsPath, mutated.flags.join(' '));
       }

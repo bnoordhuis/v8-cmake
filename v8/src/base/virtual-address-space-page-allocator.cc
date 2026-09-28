@@ -4,8 +4,33 @@
 
 #include "src/base/virtual-address-space-page-allocator.h"
 
+#include "src/base/logging.h"
+
 namespace v8 {
 namespace base {
+
+namespace {
+
+PagePermissions ConvertPageAllocatorPermission(
+    v8::PageAllocator::Permission permission) {
+  switch (permission) {
+    case v8::PageAllocator::kNoAccess:
+      return PagePermissions::kNoAccess;
+    case v8::PageAllocator::kRead:
+      return PagePermissions::kRead;
+    case v8::PageAllocator::kReadWrite:
+      return PagePermissions::kReadWrite;
+    case v8::PageAllocator::kReadWriteExecute:
+      return PagePermissions::kReadWriteExecute;
+    case v8::PageAllocator::kReadExecute:
+      return PagePermissions::kReadExecute;
+    case v8::PageAllocator::kNoAccessWillJitLater:
+      UNREACHABLE();
+  }
+  UNREACHABLE();
+}
+
+}  // namespace
 
 VirtualAddressSpacePageAllocator::VirtualAddressSpacePageAllocator(
     v8::VirtualAddressSpace* vas)
@@ -16,7 +41,7 @@ void* VirtualAddressSpacePageAllocator::AllocatePages(
     PageAllocator::Permission access) {
   return reinterpret_cast<void*>(
       vas_->AllocatePages(reinterpret_cast<Address>(hint), size, alignment,
-                          static_cast<PagePermissions>(access)));
+                          ConvertPageAllocatorPermission(access)));
 }
 
 bool VirtualAddressSpacePageAllocator::FreePages(void* ptr, size_t size) {
@@ -54,13 +79,13 @@ bool VirtualAddressSpacePageAllocator::ReleasePages(void* ptr, size_t size,
 bool VirtualAddressSpacePageAllocator::SetPermissions(
     void* address, size_t size, PageAllocator::Permission access) {
   return vas_->SetPagePermissions(reinterpret_cast<Address>(address), size,
-                                  static_cast<PagePermissions>(access));
+                                  ConvertPageAllocatorPermission(access));
 }
 
 bool VirtualAddressSpacePageAllocator::RecommitPages(
     void* address, size_t size, PageAllocator::Permission access) {
   return vas_->RecommitPages(reinterpret_cast<Address>(address), size,
-                             static_cast<PagePermissions>(access));
+                             ConvertPageAllocatorPermission(access));
 }
 
 bool VirtualAddressSpacePageAllocator::DiscardSystemPages(void* address,
@@ -71,6 +96,10 @@ bool VirtualAddressSpacePageAllocator::DiscardSystemPages(void* address,
 bool VirtualAddressSpacePageAllocator::DecommitPages(void* address,
                                                      size_t size) {
   return vas_->DecommitPages(reinterpret_cast<Address>(address), size);
+}
+
+bool VirtualAddressSpacePageAllocator::SealPages(void* address, size_t size) {
+  return false;
 }
 
 }  // namespace base

@@ -3,14 +3,10 @@
 # found in the LICENSE file.
 
 from collections import namedtuple
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from threading import Thread
-from typing import Any
+from pyfakefs import fake_filesystem_unittest
 
 import json
 import os
-import requests
-import socket
 import sys
 import unittest
 
@@ -20,46 +16,11 @@ TOOLS_PATH = os.path.dirname(
 sys.path.append(TOOLS_PATH)
 
 # Standard library imports...
-from testrunner.testproc.resultdb import ResultDBIndicator
+from testrunner.testproc.resultdb import ResultDBIndicator, write_artifact
+from testrunner.testproc.resultdb_server_mock import RDBMockServer
+
 from testrunner.local.command import BaseCommand
 from testrunner.objects.output import Output
-
-
-class RDBRequestHandler(BaseHTTPRequestHandler):
-
-  def do_POST(self):
-    content_length = int(self.headers['Content-Length'])
-    post_data = self.rfile.read(content_length)
-    self.server.register_post_data(post_data)
-    self.send_response(requests.codes.ok)
-    self.end_headers()
-    return
-
-
-def get_free_port():
-  s = socket.socket(socket.AF_INET, type=socket.SOCK_STREAM)
-  s.bind(('localhost', 0))
-  _, port = s.getsockname()
-  s.close()
-  return port
-
-
-class RDBMockServer(HTTPServer):
-
-  def __init__(self) -> None:
-    self.port = get_free_port()
-    super().__init__(('localhost', self.port), RDBRequestHandler)
-    self.thread = Thread(target=self.serve_forever)
-    self.thread.daemon = True
-    self.thread.start()
-    self.post_data = []
-
-  def register_post_data(self, data):
-    self.post_data.append(data)
-
-  @property
-  def address(self):
-    return f'localhost:{self.port}'
 
 
 def mock_test262(is_fail, rdb_test_id):
@@ -77,12 +38,15 @@ def mock_test262(is_fail, rdb_test_id):
               skip_if_expected)
 
 
-def mock_result(is_fail):
+def mock_result(is_fail, duration=0):
   Result = namedtuple('Result', ['has_unexpected_output', 'output', 'cmd'])
-  return Result(is_fail, Output(), BaseCommand('echo'))
+  return Result(
+      is_fail,
+      Output(start_time=100.0, end_time=100.0 + duration),
+      BaseCommand('echo'))
 
 
-class TestSequenceProc(unittest.TestCase):
+class TestResultDBIndicator(unittest.TestCase):
 
   def test_send(self):
 
@@ -109,15 +73,32 @@ class TestSequenceProc(unittest.TestCase):
     assert_sent_count(2)
 
     self.rdb.send_result(
-        mock_test262(False, 'expected2pass-pass]'), mock_result(False), 0)
+        mock_test262(False, 'expected2pass-pass'), mock_result(False), 0)
     assert_sent_count(2)
+
+    self.rdb.send_result(
+        mock_test262(True, 'fast'), mock_result(True, duration=0.00001), 0)
+    assert_sent_count(3)
 
     def assert_testid_at_index(testid, idx):
       data = json.loads(server.post_data[idx])
       self.assertEqual(data['testResults'][0]['testId'], testid)
 
+    def assert_duration_at_index(duration_str, idx):
+      data = json.loads(server.post_data[idx])
+      self.assertEqual(data['testResults'][0]['duration'], duration_str)
+
     assert_testid_at_index('expected2fail-pass', 0)
     assert_testid_at_index('expected2pass-fail', 1)
+    assert_duration_at_index('0.000010s', 2)
+
+
+class TestFileOutput(fake_filesystem_unittest.TestCase):
+  def test_write_artifact_encoded(self):
+    """Test that characters mapping to utf-8 encoding work."""
+    self.setUpPyfakefs(allow_root_user=True)
+    with open(write_artifact('\u0394')['filePath']) as f:
+      self.assertEqual('\u0394', f.read())
 
 
 if __name__ == '__main__':

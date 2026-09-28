@@ -2,13 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Flags: --experimental-wasm-gc
-
 d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
 
 var builder = new WasmModuleBuilder();
 
-let array_index = builder.addArray(kWasmI64, true);
+let array_index = builder.addArray(kWasmI64);
 let sig_index = builder.addType(kSig_v_v);
 
 let main = builder.addFunction("main", kSig_v_i);

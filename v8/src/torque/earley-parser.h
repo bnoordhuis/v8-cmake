@@ -7,16 +7,15 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <vector>
 
+#include "absl/container/node_hash_set.h"
 #include "src/base/contextual.h"
-#include "src/base/optional.h"
 #include "src/torque/source-positions.h"
 #include "src/torque/utils.h"
 
-namespace v8 {
-namespace internal {
-namespace torque {
+namespace v8::internal::torque {
 
 class Symbol;
 class Item;
@@ -193,17 +192,17 @@ struct LexerResult {
 };
 
 using Action =
-    base::Optional<ParseResult> (*)(ParseResultIterator* child_results);
+    std::optional<ParseResult> (*)(ParseResultIterator* child_results);
 
-inline base::Optional<ParseResult> DefaultAction(
+inline std::optional<ParseResult> DefaultAction(
     ParseResultIterator* child_results) {
-  if (!child_results->HasNext()) return base::nullopt;
+  if (!child_results->HasNext()) return std::nullopt;
   return child_results->Next();
 }
 
 template <class T, Action action>
 inline Action AsSingletonVector() {
-  return [](ParseResultIterator* child_results) -> base::Optional<ParseResult> {
+  return [](ParseResultIterator* child_results) -> std::optional<ParseResult> {
     auto result = action(child_results);
     if (!result) return result;
     return ParseResult{std::vector<T>{(*result).Cast<T>()}};
@@ -229,7 +228,7 @@ class Rule final {
     left_hand_side_ = left_hand_side;
   }
 
-  V8_EXPORT_PRIVATE base::Optional<ParseResult> RunAction(
+  V8_EXPORT_PRIVATE std::optional<ParseResult> RunAction(
       const Item* completed_item, const LexerResult& tokens) const;
 
  private:
@@ -265,7 +264,7 @@ class Symbol {
     rules_.back()->SetLeftHandSide(this);
   }
 
-  V8_EXPORT_PRIVATE base::Optional<ParseResult> RunAction(
+  V8_EXPORT_PRIVATE std::optional<ParseResult> RunAction(
       const Item* item, const LexerResult& tokens);
 
  private:
@@ -361,8 +360,8 @@ class Item {
   const Item* child_ = nullptr;
 };
 
-inline base::Optional<ParseResult> Symbol::RunAction(
-    const Item* item, const LexerResult& tokens) {
+inline std::optional<ParseResult> Symbol::RunAction(const Item* item,
+                                                    const LexerResult& tokens) {
   DCHECK(item->IsComplete());
   DCHECK_EQ(item->left(), this);
   return item->rule()->RunAction(item, tokens);
@@ -370,11 +369,11 @@ inline base::Optional<ParseResult> Symbol::RunAction(
 
 V8_EXPORT_PRIVATE const Item* RunEarleyAlgorithm(
     Symbol* start, const LexerResult& tokens,
-    std::unordered_set<Item, base::hash<Item>>* processed);
+    absl::node_hash_set<Item, base::hash<Item>>* processed);
 
-inline base::Optional<ParseResult> ParseTokens(Symbol* start,
-                                               const LexerResult& tokens) {
-  std::unordered_set<Item, base::hash<Item>> table;
+inline std::optional<ParseResult> ParseTokens(Symbol* start,
+                                              const LexerResult& tokens) {
+  absl::node_hash_set<Item, base::hash<Item>> table;
   const Item* final_item = RunEarleyAlgorithm(start, tokens, &table);
   return start->RunAction(final_item, tokens);
 }
@@ -421,7 +420,7 @@ class Grammar {
 
   explicit Grammar(Symbol* start) : start_(start) {}
 
-  base::Optional<ParseResult> Parse(const std::string& input) {
+  std::optional<ParseResult> Parse(const std::string& input) {
     LexerResult tokens = lexer().RunLexer(input);
     return ParseTokens(start_, tokens);
   }
@@ -451,7 +450,7 @@ class Grammar {
 
   // The action MatchInput() produces the input matched by the rule as
   // result.
-  static base::Optional<ParseResult> YieldMatchedInput(
+  static std::optional<ParseResult> YieldMatchedInput(
       ParseResultIterator* child_results) {
     return ParseResult{child_results->matched_input().ToString()};
   }
@@ -463,21 +462,21 @@ class Grammar {
   }
 
   template <class T, T value>
-  static base::Optional<ParseResult> YieldIntegralConstant(
+  static std::optional<ParseResult> YieldIntegralConstant(
       ParseResultIterator* child_results) {
     return ParseResult{value};
   }
 
   template <class T>
-  static base::Optional<ParseResult> YieldDefaultValue(
+  static std::optional<ParseResult> YieldDefaultValue(
       ParseResultIterator* child_results) {
     return ParseResult{T{}};
   }
 
   template <class From, class To>
-  static base::Optional<ParseResult> CastParseResult(
+  static std::optional<ParseResult> CastParseResult(
       ParseResultIterator* child_results) {
-    To result = std::move(child_results->NextAs<From>());
+    To result = child_results->NextAs<From>();
     return ParseResult{std::move(result)};
   }
 
@@ -490,7 +489,7 @@ class Grammar {
   }
 
   template <class T>
-  static base::Optional<ParseResult> MakeSingletonVector(
+  static std::optional<ParseResult> MakeSingletonVector(
       ParseResultIterator* child_results) {
     T x = child_results->NextAs<T>();
     std::vector<T> result;
@@ -499,7 +498,7 @@ class Grammar {
   }
 
   template <class T>
-  static base::Optional<ParseResult> MakeExtendedVector(
+  static std::optional<ParseResult> MakeExtendedVector(
       ParseResultIterator* child_results) {
     std::vector<T> l = child_results->NextAs<std::vector<T>>();
     T x = child_results->NextAs<T>();
@@ -510,8 +509,7 @@ class Grammar {
   // For example, NonemptyList(Token("A"), Token(",")) parses any of
   // A or A,A or A,A,A and so on.
   template <class T>
-  Symbol* NonemptyList(Symbol* element,
-                       base::Optional<Symbol*> separator = {}) {
+  Symbol* NonemptyList(Symbol* element, std::optional<Symbol*> separator = {}) {
     Symbol* list = NewSymbol();
     *list = {Rule({element}, MakeSingletonVector<T>),
              separator
@@ -521,13 +519,13 @@ class Grammar {
   }
 
   template <class T>
-  Symbol* List(Symbol* element, base::Optional<Symbol*> separator = {}) {
+  Symbol* List(Symbol* element, std::optional<Symbol*> separator = {}) {
     return TryOrDefault<std::vector<T>>(NonemptyList<T>(element, separator));
   }
 
   template <class T>
   Symbol* Optional(Symbol* x) {
-    return TryOrDefault<base::Optional<T>, T>(x);
+    return TryOrDefault<std::optional<T>, T>(x);
   }
 
   Symbol* CheckIf(Symbol* x) {
@@ -543,8 +541,6 @@ class Grammar {
   Symbol* start_;
 };
 
-}  // namespace torque
-}  // namespace internal
-}  // namespace v8
+}  // namespace v8::internal::torque
 
 #endif  // V8_TORQUE_EARLEY_PARSER_H_

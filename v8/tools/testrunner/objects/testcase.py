@@ -26,18 +26,17 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 import copy
-import os
 import re
 import shlex
 
+from pathlib import Path
+
 from testrunner.outproc import base as outproc
-from testrunner.local import command
 from testrunner.local import statusfile
-from testrunner.local import utils
-from testrunner.local.variants import ALL_VARIANT_FLAGS
 from testrunner.local.variants import INCOMPATIBLE_FLAGS_PER_VARIANT
 from testrunner.local.variants import INCOMPATIBLE_FLAGS_PER_BUILD_VARIABLE
 from testrunner.local.variants import INCOMPATIBLE_FLAGS_PER_EXTRA_FLAG
+from testrunner.local.variants import negate_flag
 
 
 FLAGS_PATTERN = re.compile(r"//\s+Flags:(.*)")
@@ -60,9 +59,26 @@ MODULE_FROM_RESOURCES_PATTERN = re.compile(
 # Pattern to detect files to push on Android for statements like:
 # import "path/to/file.js"
 # import("module.mjs").catch()...
+# Require the matched path in one line. Note this might include some
+# false matches, which is safe, since files are tested for existence.
 MODULE_IMPORT_RESOURCES_PATTERN = re.compile(
-    r"import\s*\(?['\"]([^'\"]+)['\"]",
-    re.MULTILINE | re.DOTALL)
+    r"import\s*\(?['\"]([^'\"\n]+)['\"]",
+    re.MULTILINE)
+# Pattern to detect files to push on Android for statements like:
+# import source x from "path/to/file.js"
+# import.source("module.mjs").catch()...
+# Require the matched path in one line. Note this might include some
+# false matches, which is safe, since files are tested for existence.
+MODULE_IMPORT_SOURCE_RESOURCES_PATTERN = re.compile(
+    r"import\s*\.?\s*source\s*\(?['\"]([^'\"\n]+)['\"]",
+    re.MULTILINE)
+# Pattern to detect files to push on Android for statements like:
+# import defer x from "path/to/file.js"
+# import.defer("module.mjs").catch()...
+# Require the matched path in one line. Note this might include some
+# false matches, which is safe, since files are tested for existence.
+MODULE_IMPORT_DEFER_RESOURCES_PATTERN = re.compile(
+    r"import\s*\.?\s*defer\s*\(?['\"]([^'\"\n]+)['\"]", re.MULTILINE)
 # Pattern to detect files to push on Android for expressions like:
 # shadowRealm.importValue("path/to/file.js", "obj")
 SHADOWREALM_IMPORTVALUE_RESOURCES_PATTERN = re.compile(
@@ -80,14 +96,23 @@ def read_file(file):
 class TestCase(object):
 
   def __init__(self, suite, path, name):
-    self.suite = suite        # TestSuite object
+    self.suite = suite
 
-    self.path = path          # string, e.g. 'div-mod', 'test-api/foo'
-    self.name = name          # string that identifies test in the status file
-    self.subtest_id = None    # string that identifies subtests
+    # Path (pathlib) with the relative test path, e.g. 'test-api/foo'.
+    self.path = Path(path)
 
-    self.variant = None       # name of the used testing variant
-    self.variant_flags = []   # list of strings, flags specific to this test
+    # String with a posix path to identify test in the status file and
+    # at the command line.
+    self.name = name
+
+    # String that identifies subtests.
+    self.subtest_id = None
+
+    # Name of the used testing variant.
+    self.variant = None
+
+    # List of strings, flags specific to this test.
+    self.variant_flags = []
 
     # Fields used by the test processors.
     self.origin = None # Test that this test is subtest of.
@@ -177,6 +202,12 @@ class TestCase(object):
       self._expected_outcomes = (
           self.expected_outcomes + [statusfile.PASS])
 
+  # TODO(jgruber): Due to flag contradiction logic complexity, we will never
+  # fully match the v8 logic here. What we should do instead is simply ask v8
+  # whether given flags produce a flag contradiction or not, and use that to
+  # determine the expected outcome. E.g.: add a flag to d8 called
+  # --only-check-flag-contradictions, which exits with an appropriate code
+  # after running flag contradiction logic.
   @property
   def expected_outcomes(self):
     def is_flag(maybe_flag):
@@ -192,28 +223,25 @@ class TestCase(object):
     def normalize_flags(flags):
       return [normalize_flag(flag) for flag in filter_flags(flags)]
 
-    # Note this can get it wrong if the flag name starts with the characters
-    # "--no" where "no" is part of the flag name, e.g. "--nobodys-perfect".
-    # In that case the negation "--bodys-perfect" would be returned. This is
-    # a weakness we accept and hope to never run into.
-    def negate_flag(normalized_flag):
-      return ("--" + normalized_flag[4:] if normalized_flag.startswith("--no")
-              else "--no" + normalized_flag[2:])
-
     def negate_flags(normalized_flags):
-      return [negate_flag(flag) for flag in normalized_flags]
+      negated = (negate_flag(f) for f in normalized_flags)
+      return [f for f in negated if f is not None]
 
-    def has_flag(conflicting_flag, flags):
+    def find_flag(conflicting_flag, flags):
       conflicting_flag = normalize_flag(conflicting_flag)
       if conflicting_flag in flags:
-        return True
+        return conflicting_flag
       if conflicting_flag.endswith("*"):
-        return any(flag.startswith(conflicting_flag[:-1]) for flag in flags)
-      return False
+        conflicting_flag = conflicting_flag[:-1]
+        for flag in flags:
+          if flag.startswith(conflicting_flag):
+            return flag
+      return None
 
-    def check_flags(incompatible_flags, actual_flags, rule):
+    def check_flags(incompatible_flags, actual_flags, rule, other_flag=None):
       for incompatible_flag in incompatible_flags:
-        if has_flag(incompatible_flag, actual_flags):
+        conflicting_flag = find_flag(incompatible_flag, actual_flags)
+        if conflicting_flag and (conflicting_flag != other_flag):
           self._statusfile_outcomes = outproc.OUTCOMES_FAIL
           self._expected_outcomes = outproc.OUTCOMES_FAIL
           self.expected_failure_reason = (
@@ -221,49 +249,69 @@ class TestCase(object):
               "tools/testrunner/local/variants.py expected a flag " +
               "contradiction error with " + incompatible_flag + ".")
 
+    def remove_flags_after(flags, flag):
+      try:
+        pos = flags.index(normalize_flag(flag))
+      except:
+        pass
+      else:
+        flags = flags[0:pos]
+      return flags
+
+    # Flags can be ignored with respect to contradictions by passing
+    # --flag-processing-mode=ignore-contradictions, which ignores subsequent
+    # flag contradictions; or by passing --allow-overwriting-for-next-flag,
+    # which ignores just the next flag. See FlagList::GetFlagProcessingMode.
+    def remove_ignored_flags(flags):
+      # TODO(500181840): remove if/when --fuzzing no longer influences the flag
+      # processing mode.
+      if "--fuzzing" in flags:
+        return []
+      flags = remove_flags_after(
+          flags, "--flag-processing-mode=ignore-contradictions")
+      return flags
+
     if not self._checked_flag_contradictions:
       self._checked_flag_contradictions = True
 
-      file_specific_flags = (self._get_source_flags() + self._get_suite_flags()
-                             + self._get_statusfile_flags())
-      file_specific_flags = normalize_flags(file_specific_flags)
-      extra_flags = normalize_flags(self._get_extra_flags())
+      test_flags = remove_ignored_flags(normalize_flags(self.get_flags()))
+      test_flags_without_extra = remove_ignored_flags(
+          normalize_flags(self.get_flags_without_extra()))
+      extra_flags = remove_ignored_flags(
+          normalize_flags(self._get_extra_flags()))
 
-      # Contradiction: flags contains both a flag --foo and its negation
-      # --no-foo.
-      if self.variant in ALL_VARIANT_FLAGS:
-        for flags in ALL_VARIANT_FLAGS[self.variant]:
-          all_flags = (file_specific_flags + extra_flags
-                       + normalize_flags(flags))
-          check_flags(negate_flags(all_flags), all_flags, "Flag negations")
+      # Contradiction: flags contains both a flag --foo and its negation --no-foo.
+      check_flags(negate_flags(test_flags), test_flags, "Flag negations")
 
-      # Contradiction: flags specified through the "Flags:" annotation are
-      # incompatible with the variant.
+      # Contradiction: flags are incompatible with the variant.
       if self.variant in INCOMPATIBLE_FLAGS_PER_VARIANT:
-        check_flags(INCOMPATIBLE_FLAGS_PER_VARIANT[self.variant], file_specific_flags,
-                    "INCOMPATIBLE_FLAGS_PER_VARIANT[\""+self.variant+"\"]")
+        check_flags(INCOMPATIBLE_FLAGS_PER_VARIANT[self.variant], test_flags,
+                    "INCOMPATIBLE_FLAGS_PER_VARIANT[\"" + self.variant + "\"]")
 
-      # Contradiction: flags specified through the "Flags:" annotation are
-      # incompatible with the build.
-      for variable, incompatible_flags in INCOMPATIBLE_FLAGS_PER_BUILD_VARIABLE.items():
-        if variable.startswith("!"):
-          # `variable` is negated, apply the rule if the build variable is NOT set.
-          if not self.suite.statusfile.variables[variable[1:]]:
+      # Contradiction: flags are incompatible with the build.
+      for var, flags in INCOMPATIBLE_FLAGS_PER_BUILD_VARIABLE.items():
+        if var.startswith("!"):
+          # `var` is negated, apply the rule if the build variable is NOT set.
+          if not self.suite.statusfile.variables[var[1:]]:
             check_flags(
-                incompatible_flags, file_specific_flags,
-                "INCOMPATIBLE_FLAGS_PER_BUILD_VARIABLE[\"" + variable + "\"]")
+                flags, test_flags,
+                "INCOMPATIBLE_FLAGS_PER_BUILD_VARIABLE[\"" + var + "\"]")
         else:
-          if self.suite.statusfile.variables[variable]:
+          if self.suite.statusfile.variables[var]:
             check_flags(
-                incompatible_flags, file_specific_flags,
-                "INCOMPATIBLE_FLAGS_PER_BUILD_VARIABLE[\"" + variable + "\"]")
+                flags, test_flags,
+                "INCOMPATIBLE_FLAGS_PER_BUILD_VARIABLE[\"" + var + "\"]")
 
-      # Contradiction: flags passed through --extra-flags are incompatible.
-      for extra_flag, incompatible_flags in INCOMPATIBLE_FLAGS_PER_EXTRA_FLAG.items():
-        if has_flag(extra_flag, extra_flags):
-          check_flags(
-              incompatible_flags, file_specific_flags,
-              "INCOMPATIBLE_FLAGS_PER_EXTRA_FLAG[\"" + extra_flag + "\"]")
+      # Contradiction: flags passed through --extra-flags are incompatible with
+      # other test flags.
+      for extra_flag, flags in INCOMPATIBLE_FLAGS_PER_EXTRA_FLAG.items():
+        flag = find_flag(extra_flag, extra_flags)
+        if not flag:
+          continue
+        check_flags(flags, test_flags_without_extra,
+                    "INCOMPATIBLE_FLAGS_PER_EXTRA_FLAG[\"" + extra_flag + "\"]",
+                    flag)
+
     return self._expected_outcomes
 
   @property
@@ -273,6 +321,10 @@ class TestCase(object):
   @property
   def framework_name(self):
     return self.test_config.framework_name
+
+  @property
+  def fuzz_rare(self):
+    return statusfile.FUZZ_RARE in self._statusfile_outcomes
 
   @property
   def shard_id(self):
@@ -293,7 +345,7 @@ class TestCase(object):
 
   @property
   def is_slow(self):
-    return self.is_heavy or statusfile.SLOW in self._statusfile_outcomes
+    return statusfile.SLOW in self._statusfile_outcomes
 
   @property
   def is_fail_ok(self):
@@ -324,18 +376,23 @@ class TestCase(object):
   def get_command(self, ctx):
     params = self._get_cmd_params()
     env = self._get_cmd_env()
-    shell = ctx.platform_shell(self.get_shell(),
-                               os.path.abspath(self.test_config.shell_dir))
     shell_flags = self._get_shell_flags()
     timeout = self._get_timeout(params)
-    return self._create_cmd(ctx, shell, shell_flags + params, env, timeout)
+    return self._create_cmd(ctx, shell_flags + params, env, timeout)
 
   def _get_cmd_params(self):
     """Gets all command parameters and combines them in the following order:
       - files [empty by default]
       - all flags
     """
-    return (self._get_files_params() + self.get_flags())
+    files = self._get_files_params()
+    flags = self.get_flags()
+    cwd = Path.cwd()
+    is_cwd_relative = lambda f: f.is_absolute() and f.is_relative_to(cwd)
+    make_relative = lambda f: Path(f).relative_to(cwd) if is_cwd_relative(
+        Path(f)) else f
+    relative_files = [make_relative(f) for f in files]
+    return relative_files + flags
 
   def get_flags(self):
     """Gets all flags and combines them in the following order:
@@ -359,6 +416,19 @@ class TestCase(object):
         self._get_suite_flags() +
         self._get_statusfile_flags()
     )
+
+  def get_flags_without_extra(self):
+    """Gets all flags except extra, and combines them in the following order:
+      - random seed
+      - mode flags (based on chosen mode)
+      - user flags (variant/fuzzer flags)
+      - source flags (from source code) [empty by default]
+      - test-suite flags
+      - statusfile flags
+    """
+    return (self._get_random_seed_flags() + self._get_mode_flags() +
+            self._get_variant_flags() + self._get_source_flags() +
+            self._get_suite_flags() + self._get_statusfile_flags())
 
   def _get_cmd_env(self):
     return {}
@@ -418,19 +488,36 @@ class TestCase(object):
   def get_shell(self):
     raise NotImplementedError()
 
-  def _get_suffix(self):
-    return '.js'
+  def path_and_suffix(self, suffix):
+    return self.path.with_name(self.path.name + suffix)
 
-  def _create_cmd(self, ctx, shell, params, env, timeout):
+  @property
+  def path_js(self):
+    return self.path_and_suffix('.js')
+
+  @property
+  def path_mjs(self):
+    return self.path_and_suffix('.mjs')
+
+  def _create_cmd(self, ctx, params, env, timeout):
+    shell_dir = self.test_config.shell_dir
+    try:
+      # Try to make the shell dir relative to the current working directory,
+      # keep the absolute path if it fails.
+      shell_dir = shell_dir.relative_to(Path.cwd())
+    except ValueError:
+      pass
+
     return ctx.command(
         cmd_prefix=self.test_config.command_prefix,
-        shell=os.path.abspath(os.path.join(self.test_config.shell_dir, shell)),
+        shell=ctx.platform_shell(self.get_shell(), params, shell_dir),
         args=params,
         env=env,
         timeout=timeout,
         verbose=self.test_config.verbose,
         test_case=self,
         handle_sigterm=True,
+        log_process_stats=self.test_config.log_process_stats,
     )
 
   def _parse_source_flags(self, source=None):
@@ -500,10 +587,9 @@ class TestCase(object):
     source = read_file(file)
     result = []
     def add_path(path):
-      result.append(os.path.abspath(path.replace('/', os.path.sep)))
+      result.append(Path(path).resolve())
     def add_import_path(import_path):
-      add_path(os.path.normpath(
-        os.path.join(os.path.dirname(file), import_path)))
+      add_path(file.parent / import_path)
     def strip_test262_frontmatter(input):
       return TEST262_FRONTMATTER_PATTERN.sub('', input)
     for match in RESOURCES_PATTERN.finditer(source):
@@ -520,6 +606,10 @@ class TestCase(object):
     for match in MODULE_FROM_RESOURCES_PATTERN.finditer(source):
       add_import_path(match.group(1))
     for match in MODULE_IMPORT_RESOURCES_PATTERN.finditer(source):
+      add_import_path(match.group(1))
+    for match in MODULE_IMPORT_SOURCE_RESOURCES_PATTERN.finditer(source):
+      add_import_path(match.group(1))
+    for match in MODULE_IMPORT_DEFER_RESOURCES_PATTERN.finditer(source):
       add_import_path(match.group(1))
     for match in SHADOWREALM_IMPORTVALUE_RESOURCES_PATTERN.finditer(source):
       add_import_path(match.group(1))
@@ -542,7 +632,8 @@ class TestCase(object):
       for resource in self._get_resources_for_file(next_resource):
         # Only add files that exist on disc. The pattens we check for give some
         # false positives otherwise.
-        if resource not in result and os.path.exists(resource):
+        if (resource not in result and resource.exists() and
+            not resource.is_dir()):
           to_check.append(resource)
     return sorted(list(result))
 
@@ -564,6 +655,9 @@ class D8TestCase(TestCase):
 
   def _get_shell_flags(self):
     return ['--test']
+
+  def _get_extra_flags(self):
+    return self.test_config.extra_flags + self.test_config.extra_d8_flags
 
   def skip_predictable(self):
     """Returns True if the test case is not suitable for predictable testing."""

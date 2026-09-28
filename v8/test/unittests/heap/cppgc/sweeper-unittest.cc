@@ -2,21 +2,21 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/heap/cppgc/sweeper.h"
+#include "src/heap/cppgc-internal/sweeper.h"
 
 #include <algorithm>
 
 #include "include/cppgc/allocation.h"
 #include "include/cppgc/cross-thread-persistent.h"
 #include "include/cppgc/persistent.h"
-#include "src/heap/cppgc/globals.h"
-#include "src/heap/cppgc/heap-object-header.h"
-#include "src/heap/cppgc/heap-page.h"
-#include "src/heap/cppgc/heap-visitor.h"
-#include "src/heap/cppgc/heap.h"
-#include "src/heap/cppgc/object-view.h"
-#include "src/heap/cppgc/page-memory.h"
-#include "src/heap/cppgc/stats-collector.h"
+#include "src/heap/cppgc-internal/globals.h"
+#include "src/heap/cppgc-internal/heap-object-header.h"
+#include "src/heap/cppgc-internal/heap-page.h"
+#include "src/heap/cppgc-internal/heap-visitor.h"
+#include "src/heap/cppgc-internal/heap.h"
+#include "src/heap/cppgc-internal/object-view.h"
+#include "src/heap/cppgc-internal/page-memory.h"
+#include "src/heap/cppgc-internal/stats-collector.h"
 #include "test/unittests/heap/cppgc/tests.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
@@ -62,6 +62,10 @@ class SweeperTest : public testing::TestWithHeap {
   void MarkObject(void* payload) {
     HeapObjectHeader& header = HeapObjectHeader::FromObject(payload);
     header.TryMarkAtomic();
+    BasePage* page = BasePage::FromPayload(&header);
+    page->IncrementMarkedBytes(page->is_large()
+                                   ? LargePage::From(page)->PayloadSize()
+                                   : header.AllocatedSize());
   }
 
   PageBackend* GetBackend() { return Heap::From(GetHeap())->page_backend(); }
@@ -253,8 +257,8 @@ TEST_F(SweeperTest, UnmarkObjects) {
   auto& normal_object_header = HeapObjectHeader::FromObject(normal_object);
   auto& large_object_header = HeapObjectHeader::FromObject(large_object);
 
-  normal_object_header.TryMarkAtomic();
-  large_object_header.TryMarkAtomic();
+  MarkObject(normal_object);
+  MarkObject(large_object);
 
   EXPECT_TRUE(normal_object_header.IsMarked());
   EXPECT_TRUE(large_object_header.IsMarked());

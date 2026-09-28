@@ -52,7 +52,7 @@ void PendingCompilationErrorHandler::MessageDetails::Prepare(
   }
 }
 
-Handle<String> PendingCompilationErrorHandler::MessageDetails::ArgString(
+DirectHandle<String> PendingCompilationErrorHandler::MessageDetails::ArgString(
     Isolate* isolate, int index) const {
   // `index` may be >= argc; in that case we return a default value to pass on
   // elsewhere.
@@ -70,6 +70,7 @@ Handle<String> PendingCompilationErrorHandler::MessageDetails::ArgString(
     case kAstRawString:
       UNREACHABLE();
   }
+  UNREACHABLE();
 }
 
 MessageLocation PendingCompilationErrorHandler::MessageDetails::GetLocation(
@@ -81,6 +82,8 @@ void PendingCompilationErrorHandler::ReportMessageAt(int start_position,
                                                      int end_position,
                                                      MessageTemplate message,
                                                      const char* arg) {
+  DCHECK((start_position == -1 && end_position == -1) ||
+         (start_position != -1 && start_position <= end_position));
   if (has_pending_error_ && end_position >= error_details_.start_pos()) return;
 
   has_pending_error_ = true;
@@ -92,6 +95,8 @@ void PendingCompilationErrorHandler::ReportMessageAt(int start_position,
                                                      int end_position,
                                                      MessageTemplate message,
                                                      const AstRawString* arg) {
+  DCHECK((start_position == -1 && end_position == -1) ||
+         (start_position != -1 && start_position <= end_position));
   if (has_pending_error_ && end_position >= error_details_.start_pos()) return;
 
   has_pending_error_ = true;
@@ -104,6 +109,8 @@ void PendingCompilationErrorHandler::ReportMessageAt(int start_position,
                                                      MessageTemplate message,
                                                      const AstRawString* arg0,
                                                      const char* arg1) {
+  DCHECK((start_position == -1 && end_position == -1) ||
+         (start_position != -1 && start_position <= end_position));
   if (has_pending_error_ && end_position >= error_details_.start_pos()) return;
 
   has_pending_error_ = true;
@@ -114,6 +121,8 @@ void PendingCompilationErrorHandler::ReportMessageAt(int start_position,
 void PendingCompilationErrorHandler::ReportMessageAt(
     int start_position, int end_position, MessageTemplate message,
     const AstRawString* arg0, const AstRawString* arg1, const char* arg2) {
+  DCHECK((start_position == -1 && end_position == -1) ||
+         (start_position != -1 && start_position <= end_position));
   if (has_pending_error_ && end_position >= error_details_.start_pos()) return;
 
   has_pending_error_ = true;
@@ -147,11 +156,10 @@ void PendingCompilationErrorHandler::ReportWarnings(
 
   for (const MessageDetails& warning : warning_messages_) {
     MessageLocation location = warning.GetLocation(script);
-    Handle<String> argument = warning.ArgString(isolate, 0);
+    DirectHandle<String> argument = warning.ArgString(isolate, 0);
     DCHECK_LT(warning.ArgCount(), 2);  // Arg1 is only used for errors.
-    Handle<JSMessageObject> message =
-        MessageHandler::MakeMessageObject(isolate, warning.message(), &location,
-                                          argument, Handle<FixedArray>::null());
+    DirectHandle<JSMessageObject> message = MessageHandler::MakeMessageObject(
+        isolate, warning.message(), &location, argument);
     message->set_error_level(v8::Isolate::kMessageWarning);
     MessageHandler::ReportMessage(isolate, &location, message);
   }
@@ -189,24 +197,31 @@ void PendingCompilationErrorHandler::ThrowPendingError(
   if (!has_pending_error_) return;
 
   MessageLocation location = error_details_.GetLocation(script);
-  Handle<String> arg0 = error_details_.ArgString(isolate, 0);
-  Handle<String> arg1 = error_details_.ArgString(isolate, 1);
-  Handle<String> arg2 = error_details_.ArgString(isolate, 2);
+  int num_args = 0;
+  DirectHandle<Object> args[MessageDetails::kMaxArgumentCount];
+  for (; num_args < MessageDetails::kMaxArgumentCount; ++num_args) {
+    args[num_args] = error_details_.ArgString(isolate, num_args);
+    if (args[num_args].is_null()) break;
+  }
   isolate->debug()->OnCompileError(script);
 
   Factory* factory = isolate->factory();
-  Handle<JSObject> error =
-      factory->NewSyntaxError(error_details_.message(), arg0, arg1, arg2);
+  DirectHandle<JSObject> error = factory->NewSyntaxError(
+      error_details_.message(), base::VectorOf(args, num_args));
   isolate->ThrowAt(error, &location);
 }
 
-Handle<String> PendingCompilationErrorHandler::FormatErrorMessageForTest(
+DirectHandle<String> PendingCompilationErrorHandler::FormatErrorMessageForTest(
     Isolate* isolate) {
   error_details_.Prepare(isolate);
+  int num_args = 0;
+  DirectHandle<Object> args[MessageDetails::kMaxArgumentCount];
+  for (; num_args < MessageDetails::kMaxArgumentCount; ++num_args) {
+    args[num_args] = error_details_.ArgString(isolate, num_args);
+    if (args[num_args].is_null()) break;
+  }
   return MessageFormatter::Format(isolate, error_details_.message(),
-                                  error_details_.ArgString(isolate, 0),
-                                  error_details_.ArgString(isolate, 1),
-                                  error_details_.ArgString(isolate, 2));
+                                  base::VectorOf(args, num_args));
 }
 
 }  // namespace internal

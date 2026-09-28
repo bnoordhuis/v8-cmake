@@ -7,6 +7,8 @@
 
 #include <stdint.h>
 
+#include <span>
+
 #include "v8-script.h"  // NOLINT(build/include_directory)
 #include "v8config.h"   // NOLINT(build/include_directory)
 
@@ -41,6 +43,12 @@ class V8_EXPORT StackFrame {
    * capturing the StackTrace.
    */
   int GetColumn() const { return GetLocation().GetColumnNumber() + 1; }
+
+  /**
+   * Returns zero based source position (character offset) for the associated
+   * function.
+   */
+  int GetSourcePosition() const;
 
   /**
    * Returns the id of the script for the function for this StackFrame.
@@ -130,6 +138,22 @@ class V8_EXPORT StackTrace {
     kDetailed = kOverview | kIsEval | kIsConstructor | kScriptNameOrSourceURL
   };
 
+  struct ScriptIdAndContext {
+    int id;
+    v8::Local<v8::Context> context;
+  };
+
+  struct ScriptData {
+    int id;
+    v8::Local<v8::Function> function;
+    v8::Local<v8::Context> context;
+  };
+
+  /**
+   * Returns the (unique) ID of this stack trace.
+   */
+  int GetID() const;
+
   /**
    * Returns a StackFrame at a particular index.
    */
@@ -161,6 +185,47 @@ class V8_EXPORT StackTrace {
    * a stack trace.
    */
   static Local<String> CurrentScriptNameOrSourceURL(Isolate* isolate);
+
+  /**
+   * Returns the first valid script id at the top of the JS stack. The returned
+   * value is Message::kNoScriptIdInfo if no id was found.
+   *
+   * This method is equivalent to calling StackTrace::CurrentStackTrace and
+   * walking the resulting frames from the beginning until a non-empty id is
+   * found. The difference is that this method won't allocate a stack trace.
+   */
+  static int CurrentScriptId(Isolate* isolate);
+
+  /**
+   * Writes up to the first `frame_data.size()` valid script ids and function
+   * contexts at the top of the JS stack into the given span. Returns a span
+   * sized to the number of frames worth of data written. It's similar to the
+   * CurrentStackTrace method but doesn't allocate a stack trace. Further, it
+   * skips frames that don't have valid script ids or function contexts. The
+   * final difference is that the script id written for evals or regexp is that
+   * of the script that ran eval() or regexp, not the current context.
+   *
+   */
+  V8_DEPRECATE_SOON("Use CurrentScriptData instead")
+  static std::span<v8::StackTrace::ScriptIdAndContext>
+  CurrentScriptIdsAndContexts(Isolate* isolate,
+                              std::span<ScriptIdAndContext> frame_data);
+
+  /**
+   * Writes up to the first `frame_data.size()` valid script ids, functions, and
+   * contexts at the top of the JS stack into the given span. Returns a span
+   * sized to the number of frames worth of data written. It's similar to the
+   * CurrentStackTrace method but doesn't allocate a stack trace. Further, it
+   * skips non-js frames and frames that don't have valid script ids or function
+   * contexts. The final difference is that the script id written for evals or
+   * regexp is that of the script that ran eval() or regexp, not the current
+   * context.
+   *
+   * WARNING: This is an unfinished experimental feature. Semantics and
+   * implementation may change frequently.
+   */
+  static std::span<v8::StackTrace::ScriptData> CurrentScriptData(
+      Isolate* isolate, std::span<ScriptData> frame_data);
 };
 
 }  // namespace v8

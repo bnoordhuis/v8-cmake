@@ -6,14 +6,13 @@
 #define V8_TORQUE_DECLARATIONS_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "src/torque/declarable.h"
 #include "src/torque/utils.h"
 
-namespace v8 {
-namespace internal {
-namespace torque {
+namespace v8::internal::torque {
 
 static constexpr const char* const kFromConstexprMacroName = "FromConstexpr";
 static constexpr const char* kMacroEndLabelName = "__macro_end";
@@ -31,15 +30,6 @@ std::vector<T*> FilterDeclarables(const std::vector<Declarable*> list) {
     }
   }
   return result;
-}
-
-inline std::string UnwrapTNodeTypeName(const std::string& generates) {
-  if (generates.length() < 7 || generates.substr(0, 6) != "TNode<" ||
-      generates.substr(generates.length() - 1, 1) != ">") {
-    ReportError("generated type \"", generates,
-                "\" should be of the form \"TNode<...>\"");
-  }
-  return generates.substr(6, generates.length() - 7);
 }
 
 class Declarations {
@@ -70,7 +60,7 @@ class Declarations {
   static const TypeAlias* LookupTypeAlias(const QualifiedName& name);
   static const Type* LookupType(const QualifiedName& name);
   static const Type* LookupType(const Identifier* identifier);
-  static base::Optional<const Type*> TryLookupType(const QualifiedName& name);
+  static std::optional<const Type*> TryLookupType(const QualifiedName& name);
   static const Type* LookupGlobalType(const QualifiedName& name);
 
   static Builtin* FindSomeInternalBuiltinWithType(
@@ -80,14 +70,14 @@ class Declarations {
 
   static Macro* TryLookupMacro(const std::string& name,
                                const TypeVector& types);
-  static base::Optional<Builtin*> TryLookupBuiltin(const QualifiedName& name);
+  static std::optional<Builtin*> TryLookupBuiltin(const QualifiedName& name);
 
   static std::vector<GenericCallable*> LookupGeneric(const std::string& name);
   static GenericCallable* LookupUniqueGeneric(const QualifiedName& name);
 
   static GenericType* LookupUniqueGenericType(const QualifiedName& name);
   static GenericType* LookupGlobalUniqueGenericType(const std::string& name);
-  static base::Optional<GenericType*> TryLookupGenericType(
+  static std::optional<GenericType*> TryLookupGenericType(
       const QualifiedName& name);
 
   static Namespace* DeclareNamespace(const std::string& name);
@@ -100,16 +90,17 @@ class Declarations {
                                         std::string readable_name,
                                         bool exported_to_csa,
                                         Signature signature,
-                                        base::Optional<Statement*> body,
+                                        std::optional<Statement*> body,
                                         bool is_user_defined);
   static ExternMacro* CreateExternMacro(std::string name,
                                         std::string external_assembler_name,
                                         Signature signature);
-  static Macro* DeclareMacro(
-      const std::string& name, bool accessible_from_csa,
-      base::Optional<std::string> external_assembler_name,
-      const Signature& signature, base::Optional<Statement*> body,
-      base::Optional<std::string> op = {}, bool is_user_defined = true);
+  static Macro* DeclareMacro(const std::string& name, bool accessible_from_csa,
+                             std::optional<std::string> external_assembler_name,
+                             const Signature& signature,
+                             std::optional<Statement*> body,
+                             std::optional<std::string> op = {},
+                             bool is_user_defined = true);
 
   static Method* CreateMethod(AggregateType* class_type,
                               const std::string& name, Signature signature,
@@ -124,11 +115,8 @@ class Declarations {
   static Builtin* CreateBuiltin(std::string external_name,
                                 std::string readable_name, Builtin::Kind kind,
                                 Builtin::Flags flags, Signature signature,
-                                base::Optional<Statement*> body);
-  static Builtin* DeclareBuiltin(const std::string& name, Builtin::Kind kind,
-                                 Builtin::Flags flags,
-                                 const Signature& signature,
-                                 base::Optional<Statement*> body);
+                                std::optional<std::string> use_counter_name,
+                                std::optional<Statement*> body);
 
   static RuntimeFunction* DeclareRuntimeFunction(const std::string& name,
                                                  const Signature& signature);
@@ -161,8 +149,6 @@ class Declarations {
       const std::string& name, const TypeVector& specialized_types);
 };
 
-}  // namespace torque
-}  // namespace internal
-}  // namespace v8
+}  // namespace v8::internal::torque
 
 #endif  // V8_TORQUE_DECLARATIONS_H_

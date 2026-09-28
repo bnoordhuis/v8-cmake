@@ -435,7 +435,7 @@ if (testFailed) {
   ], log);
 
   // If [sync_iterator] does not have a .throw method, return a Promise rejected
-  // with the sent value.
+  // with the a TypeError signaling the protocol error of missing the .throw.
   log = [];
   iter = %CreateAsyncFromSyncIterator(sync(['sync-value'], kNext, log));
   try {
@@ -443,7 +443,7 @@ if (testFailed) {
     assertUnreachable('Expected iter.throw(\'Boo!!\') to throw, but did not ' +
                       'throw');
   } catch (e) {
-    assertEquals('Boo!!', e);
+    assertTrue(e instanceof TypeError);
   }
 
   // [Async-from-Sync Iterator] merely delegates, and does not keep track of
@@ -626,8 +626,8 @@ if (testFailed) {
 
 (function ExtractedAsyncFromSyncIteratorMethods() {
   // TODO(ishell, caitp): Rewrite the test without using function.caller.
-  // According to ES#sec-built-in-function-objects all built-in functions
-  // must be strict. And ES#sec-forbidden-extensions states that the value of
+  // According to https://tc39.es/ecma262/#sec-built-in-function-objects all built-in functions
+  // must be strict. And https://tc39.es/ecma262/#sec-forbidden-extensions states that the value of
   // a function.caller must not be a strict function.
   return;
   // Async-from-Sync iterator methods can be extracted via function.caller.

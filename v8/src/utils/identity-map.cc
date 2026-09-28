@@ -4,7 +4,7 @@
 
 #include "src/utils/identity-map.h"
 
-#include "src/base/functional.h"
+#include "src/base/hashing.h"
 #include "src/base/logging.h"
 #include "src/heap/heap.h"
 #include "src/roots/roots-inl.h"
@@ -24,12 +24,10 @@ IdentityMapBase::~IdentityMapBase() {
 void IdentityMapBase::Clear() {
   if (keys_) {
     DCHECK(!is_iterable());
-    DCHECK_NOT_NULL(strong_roots_entry_);
-    heap_->UnregisterStrongRoots(strong_roots_entry_);
+    heap_->RemoveGlobalGCRootsProvider(this);
     DeletePointerArray(reinterpret_cast<uintptr_t*>(keys_), capacity_);
     DeletePointerArray(values_, capacity_);
     keys_ = nullptr;
-    strong_roots_entry_ = nullptr;
     values_ = nullptr;
     size_ = 0;
     capacity_ = 0;
@@ -47,26 +45,32 @@ void IdentityMapBase::DisableIteration() {
   is_iterable_ = false;
 }
 
-int IdentityMapBase::ScanKeysFor(Address address, uint32_t hash) const {
+std::pair<int, bool> IdentityMapBase::ScanKeysFor(Address address,
+                                                  uint32_t hash) const {
   int start = hash & mask_;
   Address not_mapped = ReadOnlyRoots(heap_).not_mapped_symbol().ptr();
   for (int index = start; index < capacity_; index++) {
-    if (keys_[index] == address) return index;  // Found.
-    if (keys_[index] == not_mapped) return -1;  // Not found.
+    if (keys_[index] == address) return {index, true};      // Found.
+    if (keys_[index] == not_mapped) return {index, false};  // Not found.
   }
   for (int index = 0; index < start; index++) {
-    if (keys_[index] == address) return index;  // Found.
-    if (keys_[index] == not_mapped) return -1;  // Not found.
+    if (keys_[index] == address) return {index, true};      // Found.
+    if (keys_[index] == not_mapped) return {index, false};  // Not found.
   }
-  return -1;
+  return {-1, false};
+}
+
+bool IdentityMapBase::ShouldGrow() const {
+  // Grow the map if we reached >= 80% occupancy.
+  return size_ + size_ / 4 >= capacity_;
 }
 
 std::pair<int, bool> IdentityMapBase::InsertKey(Address address,
                                                 uint32_t hash) {
-  DCHECK_EQ(gc_counter_, heap_->gc_count());
+  DCHECK_NE(heap_->gc_state(), Heap::MARK_COMPACT);
+  DCHECK(!invalidated_);
 
-  // Grow the map if we reached >= 80% occupancy.
-  if (size_ + size_ / 4 >= capacity_) {
+  if (ShouldGrow()) {
     Resize(capacity_ * kResizeFactor);
   }
 
@@ -91,6 +95,7 @@ std::pair<int, bool> IdentityMapBase::InsertKey(Address address,
 }
 
 bool IdentityMapBase::DeleteIndex(int index, uintptr_t* deleted_value) {
+  DCHECK_NE(heap_->gc_state(), Heap::MARK_COMPACT);
   if (deleted_value != nullptr) *deleted_value = values_[index];
   Address not_mapped = ReadOnlyRoots(heap_).not_mapped_symbol().ptr();
   DCHECK_NE(keys_[index], not_mapped);
@@ -131,27 +136,43 @@ bool IdentityMapBase::DeleteIndex(int index, uintptr_t* deleted_value) {
 }
 
 int IdentityMapBase::Lookup(Address key) const {
+  DCHECK_NE(heap_->gc_state(), Heap::MARK_COMPACT);
   uint32_t hash = Hash(key);
-  int index = ScanKeysFor(key, hash);
-  if (index < 0 && gc_counter_ != heap_->gc_count()) {
+  int index;
+  bool found;
+  std::tie(index, found) = ScanKeysFor(key, hash);
+  if (!found && invalidated_) {
     // Miss; rehash if there was a GC, then lookup again.
     const_cast<IdentityMapBase*>(this)->Rehash();
-    index = ScanKeysFor(key, hash);
+    std::tie(index, found) = ScanKeysFor(key, hash);
   }
-  return index;
+  return found ? index : -1;
 }
 
 std::pair<int, bool> IdentityMapBase::LookupOrInsert(Address key) {
+  DCHECK_NE(heap_->gc_state(), Heap::MARK_COMPACT);
   uint32_t hash = Hash(key);
   // Perform an optimistic lookup.
-  int index = ScanKeysFor(key, hash);
+  int index;
   bool already_exists;
-  if (index < 0) {
+  std::tie(index, already_exists) = ScanKeysFor(key, hash);
+  if (!already_exists) {
     // Miss; rehash if there was a GC, then insert.
-    if (gc_counter_ != heap_->gc_count()) Rehash();
-    std::tie(index, already_exists) = InsertKey(key, hash);
-  } else {
-    already_exists = true;
+    if (invalidated_) {
+      Rehash();
+      index = -1;
+    }
+    if (index < 0 || ShouldGrow()) {
+      std::tie(index, already_exists) = InsertKey(key, hash);
+    } else {
+      // If rehashing is not necessary, and the table is already big enough,
+      // then avoid calling InsertKey because it would search the table again
+      // and we already found an adequate location to insert the new key.
+      size_++;
+      DCHECK_LE(size_, capacity_);
+      DCHECK_EQ(keys_[index], ReadOnlyRoots(heap_).not_mapped_symbol().ptr());
+      keys_[index] = key;
+    }
   }
   DCHECK_GE(index, 0);
   return {index, already_exists};
@@ -168,6 +189,7 @@ uint32_t IdentityMapBase::Hash(Address address) const {
 //    not found => a pointer to a new storage location for the value, false
 IdentityMapFindResult<uintptr_t> IdentityMapBase::FindOrInsertEntry(
     Address key) {
+  DCHECK_NE(heap_->gc_state(), Heap::MARK_COMPACT);
   CHECK(!is_iterable());  // Don't allow insertion while iterable.
   if (capacity_ == 0) {
     return {InsertEntry(key), false};
@@ -181,6 +203,7 @@ IdentityMapFindResult<uintptr_t> IdentityMapBase::FindOrInsertEntry(
 //    found => a pointer to the storage location for the value
 //    not found => {nullptr}
 IdentityMapBase::RawEntry IdentityMapBase::FindEntry(Address key) const {
+  DCHECK_NE(heap_->gc_state(), Heap::MARK_COMPACT);
   // Don't allow find by key while iterable (might rehash).
   CHECK(!is_iterable());
   if (size_ == 0) return nullptr;
@@ -191,26 +214,26 @@ IdentityMapBase::RawEntry IdentityMapBase::FindEntry(Address key) const {
 // Inserts the given key using the object's address as the identity, returning
 // a pointer to the new storage location for the value.
 IdentityMapBase::RawEntry IdentityMapBase::InsertEntry(Address key) {
+  DCHECK_NE(heap_->gc_state(), Heap::MARK_COMPACT);
   // Don't allow find by key while iterable (might rehash).
   CHECK(!is_iterable());
   if (capacity_ == 0) {
     // Allocate the initial storage for keys and values.
     capacity_ = kInitialIdentityMapSize;
     mask_ = kInitialIdentityMapSize - 1;
-    gc_counter_ = heap_->gc_count();
+    invalidated_ = false;
 
-    keys_ = reinterpret_cast<Address*>(NewPointerArray(capacity_));
-    Address not_mapped = ReadOnlyRoots(heap_).not_mapped_symbol().ptr();
+    uintptr_t not_mapped = ReadOnlyRoots(heap_).not_mapped_symbol().ptr();
+    keys_ = reinterpret_cast<Address*>(NewPointerArray(capacity_, not_mapped));
     for (int i = 0; i < capacity_; i++) keys_[i] = not_mapped;
-    values_ = NewPointerArray(capacity_);
-    memset(values_, 0, sizeof(uintptr_t) * capacity_);
+    values_ = NewPointerArray(capacity_, 0);
 
-    strong_roots_entry_ =
-        heap_->RegisterStrongRoots("IdentityMapBase", FullObjectSlot(keys_),
-                                   FullObjectSlot(keys_ + capacity_));
+    // Register with the GC. Appending to Heap because IdentityMap is passed
+    // around between threads.
+    heap_->AddGlobalGCRootsProvider(this);
   } else {
     // Rehash if there was a GC, then insert.
-    if (gc_counter_ != heap_->gc_count()) Rehash();
+    if (invalidated_) Rehash();
   }
 
   int index;
@@ -261,9 +284,10 @@ int IdentityMapBase::NextIndex(int index) const {
 }
 
 void IdentityMapBase::Rehash() {
+  DCHECK_NE(heap_->gc_state(), Heap::MARK_COMPACT);
   CHECK(!is_iterable());  // Can't rehash while iterating.
-  // Record the current GC counter.
-  gc_counter_ = heap_->gc_count();
+  // Mark as no longer invalidated.
+  invalidated_ = false;
   // Assume that most objects won't be moved.
   std::vector<std::pair<Address, uintptr_t>> reinsert;
   // Search the table looking for keys that wouldn't be found with their
@@ -294,6 +318,7 @@ void IdentityMapBase::Rehash() {
 }
 
 void IdentityMapBase::Resize(int new_capacity) {
+  DCHECK_NE(heap_->gc_state(), Heap::MARK_COMPACT);
   CHECK(!is_iterable());  // Can't resize while iterating.
   // Resize the internal storage and reinsert all the key/value pairs.
   DCHECK_GT(new_capacity, size_);
@@ -303,14 +328,12 @@ void IdentityMapBase::Resize(int new_capacity) {
 
   capacity_ = new_capacity;
   mask_ = capacity_ - 1;
-  gc_counter_ = heap_->gc_count();
+  invalidated_ = false;
   size_ = 0;
 
-  keys_ = reinterpret_cast<Address*>(NewPointerArray(capacity_));
   Address not_mapped = ReadOnlyRoots(heap_).not_mapped_symbol().ptr();
-  for (int i = 0; i < capacity_; i++) keys_[i] = not_mapped;
-  values_ = NewPointerArray(capacity_);
-  memset(values_, 0, sizeof(uintptr_t) * capacity_);
+  keys_ = reinterpret_cast<Address*>(NewPointerArray(capacity_, not_mapped));
+  values_ = NewPointerArray(capacity_, 0);
 
   for (int i = 0; i < old_capacity; i++) {
     if (old_keys[i] == not_mapped) continue;
@@ -319,14 +342,18 @@ void IdentityMapBase::Resize(int new_capacity) {
     values_[index] = old_values[i];
   }
 
-  // Unregister old keys and register new keys.
-  DCHECK_NOT_NULL(strong_roots_entry_);
-  heap_->UpdateStrongRoots(strong_roots_entry_, FullObjectSlot(keys_),
-                           FullObjectSlot(keys_ + capacity_));
-
   // Delete old storage;
   DeletePointerArray(reinterpret_cast<uintptr_t*>(old_keys), old_capacity);
   DeletePointerArray(old_values, old_capacity);
+}
+
+void IdentityMapBase::Iterate(RootVisitor* v) {
+  v->VisitRootPointers(Root::kIdentityMap, nullptr, FullObjectSlot(keys_),
+                       FullObjectSlot(keys_ + capacity_));
+}
+
+void IdentityMapBase::GCEpilogueInSafepoint(GCType gc_type) {
+  invalidated_ = true;
 }
 
 }  // namespace internal

@@ -5,12 +5,19 @@
 #ifndef V8_HANDLES_HANDLES_INL_H_
 #define V8_HANDLES_HANDLES_INL_H_
 
+#include "src/handles/handles.h"
+// Include the non-inl header before the rest of the headers.
+
 #include "src/base/sanitizer/msan.h"
 #include "src/execution/isolate.h"
 #include "src/execution/local-isolate.h"
-#include "src/handles/handles.h"
 #include "src/handles/local-handles-inl.h"
+#include "src/objects/casting.h"
 #include "src/objects/objects.h"
+
+#ifdef DEBUG
+#include "src/utils/ostreams.h"
+#endif
 
 namespace v8 {
 namespace internal {
@@ -26,12 +33,12 @@ HandleBase::HandleBase(Address object, LocalIsolate* isolate)
 HandleBase::HandleBase(Address object, LocalHeap* local_heap)
     : location_(LocalHandleScope::GetHandle(local_heap, object)) {}
 
-bool HandleBase::is_identical_to(const HandleBase that) const {
+bool HandleBase::is_identical_to(const HandleBase& that) const {
   SLOW_DCHECK((this->location_ == nullptr || this->IsDereferenceAllowed()) &&
               (that.location_ == nullptr || that.IsDereferenceAllowed()));
   if (this->location_ == that.location_) return true;
   if (this->location_ == nullptr || that.location_ == nullptr) return false;
-  return Object(*this->location_) == Object(*that.location_);
+  return Tagged<Object>(*this->location_) == Tagged<Object>(*that.location_);
 }
 
 // Allocate a new handle for the object, do not canonicalize.
@@ -40,11 +47,13 @@ Handle<T> Handle<T>::New(Tagged<T> object, Isolate* isolate) {
   return Handle(HandleScope::CreateHandle(isolate, object.ptr()));
 }
 
-template <typename T>
-template <typename S>
-const Handle<T> Handle<T>::cast(Handle<S> that) {
-  T::cast(*FullObjectSlot(that.location()));
-  return Handle<T>(that.location_);
+template <typename T, typename U>
+inline bool Is(IndirectHandle<U> value) {
+  return Is<T>(*value);
+}
+template <typename To, typename From>
+inline Handle<To> UncheckedCast(Handle<From> value) {
+  return Handle<To>(value.location());
 }
 
 template <typename T>
@@ -60,72 +69,120 @@ Handle<T>::Handle(Tagged<T> object, LocalHeap* local_heap)
     : HandleBase(object.ptr(), local_heap) {}
 
 template <typename T>
-V8_INLINE Handle<T> handle(Tagged<T> object, Isolate* isolate) {
+V8_INLINE IndirectHandle<T> handle(Tagged<T> object, Isolate* isolate) {
   return Handle<T>(object, isolate);
 }
 
 template <typename T>
-V8_INLINE Handle<T> handle(Tagged<T> object, LocalIsolate* isolate) {
+V8_INLINE IndirectHandle<T> handle(Tagged<T> object, LocalIsolate* isolate) {
   return Handle<T>(object, isolate);
 }
 
 template <typename T>
-V8_INLINE Handle<T> handle(Tagged<T> object, LocalHeap* local_heap) {
+V8_INLINE IndirectHandle<T> handle(Tagged<T> object, LocalHeap* local_heap) {
   return Handle<T>(object, local_heap);
 }
 
 template <typename T>
-V8_INLINE Handle<T> handle(T object, Isolate* isolate) {
+V8_INLINE IndirectHandle<T> handle(T object, Isolate* isolate) {
   static_assert(kTaggedCanConvertToRawObjects);
   return handle(Tagged<T>(object), isolate);
 }
 
 template <typename T>
-V8_INLINE Handle<T> handle(T object, LocalIsolate* isolate) {
+V8_INLINE IndirectHandle<T> handle(T object, LocalIsolate* isolate) {
   static_assert(kTaggedCanConvertToRawObjects);
   return handle(Tagged<T>(object), isolate);
 }
 
 template <typename T>
-V8_INLINE Handle<T> handle(T object, LocalHeap* local_heap) {
+V8_INLINE IndirectHandle<T> handle(T object, LocalHeap* local_heap) {
   static_assert(kTaggedCanConvertToRawObjects);
   return handle(Tagged<T>(object), local_heap);
 }
 
 template <typename T>
-inline std::ostream& operator<<(std::ostream& os, Handle<T> handle) {
+inline std::ostream& operator<<(std::ostream& os, IndirectHandle<T> handle) {
   return os << Brief(*handle);
 }
 
-#ifdef V8_ENABLE_CONSERVATIVE_STACK_SCANNING
+#ifdef V8_ENABLE_DIRECT_HANDLE
 
 template <typename T>
 V8_INLINE DirectHandle<T>::DirectHandle(Tagged<T> object)
-    : obj_(object.ptr()) {}
+    : DirectHandle(object.ptr()) {}
+
+template <typename T, typename U>
+inline bool Is(DirectHandle<U> value) {
+  return Is<T>(*value);
+}
+template <typename To, typename From>
+inline DirectHandle<To> UncheckedCast(DirectHandle<From> value) {
+  return DirectHandle<To>(value.obj_);
+}
+
+#else
+
+template <typename T, typename U>
+inline bool Is(DirectHandle<U> value) {
+  return Is<T>(*value);
+}
+template <typename To, typename From>
+inline DirectHandle<To> UncheckedCast(DirectHandle<From> value) {
+  return DirectHandle<To>(UncheckedCast<To>(value.handle_));
+}
+
+#endif  // V8_ENABLE_DIRECT_HANDLE
 
 template <typename T>
-template <typename S>
-V8_INLINE const DirectHandle<T> DirectHandle<T>::cast(DirectHandle<S> that) {
-  T::cast(Object(that.address()));
-  return DirectHandle<T>(that.address());
+inline std::ostream& operator<<(std::ostream& os, DirectHandle<T> handle) {
+  return os << Brief(*handle);
 }
 
 template <typename T>
-template <typename S>
-V8_INLINE const DirectHandle<T> DirectHandle<T>::cast(Handle<S> that) {
-  DCHECK(that.location() != nullptr);
-  T::cast(*FullObjectSlot(that.address()));
-  return DirectHandle<T>(*that.location());
+V8_INLINE DirectHandle<T> direct_handle(Tagged<T> object, Isolate* isolate) {
+  return DirectHandle<T>(object, isolate);
 }
 
-#endif  // V8_ENABLE_CONSERVATIVE_STACK_SCANNING
+template <typename T>
+V8_INLINE DirectHandle<T> direct_handle(Tagged<T> object,
+                                        LocalIsolate* isolate) {
+  return DirectHandle<T>(object, isolate);
+}
+
+template <typename T>
+V8_INLINE DirectHandle<T> direct_handle(Tagged<T> object,
+                                        LocalHeap* local_heap) {
+  return DirectHandle<T>(object, local_heap);
+}
+
+template <typename T>
+V8_INLINE DirectHandle<T> direct_handle(const T* object, Isolate* isolate) {
+  return direct_handle(Tagged<T>(object), isolate);
+}
+
+template <typename T>
+V8_INLINE DirectHandle<T> direct_handle(const T* object,
+                                        LocalIsolate* isolate) {
+  return direct_handle(Tagged<T>(object), isolate);
+}
+
+template <typename T>
+V8_INLINE DirectHandle<T> direct_handle(const T* object,
+                                        LocalHeap* local_heap) {
+  return direct_handle(Tagged<T>(object), local_heap);
+}
 
 HandleScope::HandleScope(Isolate* isolate) {
+  DCHECK(LocalHeap::Current()->is_main_thread());
   HandleScopeData* data = isolate->handle_scope_data();
   isolate_ = isolate;
   prev_next_ = data->next;
   prev_limit_ = data->limit;
   data->level++;
+#ifdef V8_ENABLE_CHECKS
+  scope_level_ = data->level;
+#endif
 }
 
 HandleScope::HandleScope(HandleScope&& other) V8_NOEXCEPT
@@ -133,10 +190,16 @@ HandleScope::HandleScope(HandleScope&& other) V8_NOEXCEPT
       prev_next_(other.prev_next_),
       prev_limit_(other.prev_limit_) {
   other.isolate_ = nullptr;
+#ifdef V8_ENABLE_CHECKS
+  scope_level_ = other.scope_level_;
+#endif
 }
 
 HandleScope::~HandleScope() {
   if (V8_UNLIKELY(isolate_ == nullptr)) return;
+#ifdef V8_ENABLE_CHECKS
+  CHECK_EQ(scope_level_, isolate_->handle_scope_data()->level);
+#endif
   CloseScope(isolate_, prev_next_, prev_limit_);
 }
 
@@ -145,11 +208,17 @@ HandleScope& HandleScope::operator=(HandleScope&& other) V8_NOEXCEPT {
     isolate_ = other.isolate_;
   } else {
     DCHECK_EQ(isolate_, other.isolate_);
+#ifdef V8_ENABLE_CHECKS
+    CHECK_EQ(scope_level_, isolate_->handle_scope_data()->level);
+#endif
     CloseScope(isolate_, prev_next_, prev_limit_);
   }
   prev_next_ = other.prev_next_;
   prev_limit_ = other.prev_limit_;
   other.isolate_ = nullptr;
+#ifdef V8_ENABLE_CHECKS
+  scope_level_ = other.scope_level_;
+#endif
   return *this;
 }
 
@@ -169,7 +238,7 @@ void HandleScope::CloseScope(Isolate* isolate, Address* prev_next,
     limit = prev_limit;
     DeleteExtensions(isolate);
   }
-#ifdef ENABLE_HANDLE_ZAPPING
+#ifdef ENABLE_LOCAL_HANDLE_ZAPPING
   ZapRange(current->next, limit);
 #endif
   MSAN_ALLOCATED_UNINITIALIZED_MEMORY(
@@ -183,15 +252,19 @@ void HandleScope::CloseScope(Isolate* isolate, Address* prev_next,
 #endif
 }
 
-template <typename T>
-Handle<T> HandleScope::CloseAndEscape(Handle<T> handle_value) {
+template <typename T, template <typename> typename HandleType>
+  requires(std::is_convertible_v<HandleType<T>, DirectHandle<T>>)
+HandleType<T> HandleScope::CloseAndEscape(HandleType<T> handle_value) {
   HandleScopeData* current = isolate_->handle_scope_data();
-  T value = *handle_value;
+  Tagged<T> value = *handle_value;
+#ifdef V8_ENABLE_CHECKS
+  CHECK_EQ(scope_level_, isolate_->handle_scope_data()->level);
+#endif
   // Throw away all handles in the current scope.
   CloseScope(isolate_, prev_next_, prev_limit_);
   // Allocate one handle in the parent scope.
   DCHECK(current->level > current->sealed_level);
-  Handle<T> result(value, isolate_);
+  HandleType<T> result(value, isolate_);
   // Reinitialize the current scope (so that it's ready
   // to be used or closed again).
   prev_next_ = current->next;
@@ -202,16 +275,35 @@ Handle<T> HandleScope::CloseAndEscape(Handle<T> handle_value) {
 
 Address* HandleScope::CreateHandle(Isolate* isolate, Address value) {
   DCHECK(AllowHandleAllocation::IsAllowed());
-  DCHECK(isolate->main_thread_local_heap()->IsRunning());
-  DCHECK_WITH_MSG(isolate->thread_id() == ThreadId::Current(),
-                  "main-thread handle can only be created on the main thread.");
+  DCHECK_EQ(isolate, Isolate::TryGetCurrent());
+#ifdef DEBUG
+  if (!AllowHandleUsageOnAllThreads::IsAllowed()) {
+    DCHECK(isolate->main_thread_local_heap()->IsRunning());
+    DCHECK_WITH_MSG(
+        isolate->thread_id() == ThreadId::Current(),
+        "main-thread handle can only be created on the main thread.");
+  }
+  // We should only allocate handles for objects that can be referenced from the
+  // isolate's heap.
+#ifdef ENABLE_SLOW_DCHECKS
+  if (!HAS_SMI_TAG(value)) {
+    DCHECK(HAS_STRONG_HEAP_OBJECT_TAG(value));
+    Tagged<HeapObject> obj = UncheckedCast<HeapObject>(Tagged<Object>{value});
+    SLOW_DCHECK(isolate->heap()->CanReferenceHeapObject(obj));
+  }
+#endif  // ENABLE_SLOW_DCHECKS
+#endif  // DEBUG
   HandleScopeData* data = isolate->handle_scope_data();
   Address* result = data->next;
   if (V8_UNLIKELY(result == data->limit)) {
-    result = Extend(isolate);
+    return ExtendAndCreateHandle(isolate, value);
   }
-  // Update the current next field, set the value in the created handle,
-  // and return the result.
+  return CreateHandleUnchecked(data, result, value);
+}
+
+V8_INLINE Address* HandleScope::CreateHandleUnchecked(HandleScopeData* data,
+                                                      Address* result,
+                                                      Address value) {
   DCHECK_LT(reinterpret_cast<Address>(result),
             reinterpret_cast<Address>(data->limit));
   data->next = reinterpret_cast<Address*>(reinterpret_cast<Address>(result) +
@@ -242,8 +334,44 @@ inline SealHandleScope::~SealHandleScope() {
   DCHECK_EQ(current->level, current->sealed_level);
   current->sealed_level = prev_sealed_level_;
 }
+#endif  // DEBUG
 
-#endif
+#ifdef V8_ENABLE_DIRECT_HANDLE
+bool HandleBase::is_identical_to(const DirectHandleBase& that) const {
+  SLOW_DCHECK(
+      (this->location_ == nullptr || this->IsDereferenceAllowed()) &&
+      (that.address() == kTaggedNullAddress || that.IsDereferenceAllowed()));
+  if (this->location_ == nullptr && that.address() == kTaggedNullAddress)
+    return true;
+  if (this->location_ == nullptr || that.address() == kTaggedNullAddress)
+    return false;
+  return Tagged<Object>(*this->location_) == Tagged<Object>(that.address());
+}
+
+bool DirectHandleBase::is_identical_to(const HandleBase& that) const {
+  SLOW_DCHECK(
+      (this->address() == kTaggedNullAddress || this->IsDereferenceAllowed()) &&
+      (that.location_ == nullptr || that.IsDereferenceAllowed()));
+  if (this->address() == kTaggedNullAddress && that.location_ == nullptr)
+    return true;
+  if (this->address() == kTaggedNullAddress || that.location_ == nullptr)
+    return false;
+  return Tagged<Object>(this->address()) == Tagged<Object>(*that.location_);
+}
+
+bool DirectHandleBase::is_identical_to(const DirectHandleBase& that) const {
+  SLOW_DCHECK(
+      (this->address() == kTaggedNullAddress || this->IsDereferenceAllowed()) &&
+      (that.address() == kTaggedNullAddress || that.IsDereferenceAllowed()));
+  if (this->address() == kTaggedNullAddress &&
+      that.address() == kTaggedNullAddress)
+    return true;
+  if (this->address() == kTaggedNullAddress ||
+      that.address() == kTaggedNullAddress)
+    return false;
+  return Tagged<Object>(this->address()) == Tagged<Object>(that.address());
+}
+#endif  // V8_ENABLE_DIRECT_HANDLE
 
 }  // namespace internal
 }  // namespace v8

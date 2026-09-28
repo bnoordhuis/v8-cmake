@@ -9,14 +9,14 @@ const kMaxIntPtr: constexpr IntegerLiteral
 const kMinIntPtr: constexpr IntegerLiteral
     generates 'IntegerLiteral(ca_.Is64() ? 0x8000000000000000 : 0x80000000)';
 
-@export
 @abstract
-class TurbofanType extends HeapObject {
-}
+@cppObjectLayoutDefinition
+extern class TurbofanType extends HeapObject {}
 
 // TurbofanBitsetType is 64 bit.
-// We use two separate 32 bit bitsets in Torque, due to limitted support
+// We use two separate 32 bit bitsets in Torque, due to limited support
 // of 64 bit bitsets.
+@cppScope('TurbofanTypeLowBits')
 bitfield struct TurbofanTypeLowBits extends uint32 {
   _unused_padding_field_1: bool: 1 bit;
   other_unsigned31: bool: 1 bit;
@@ -41,7 +41,6 @@ bitfield struct TurbofanTypeLowBits extends uint32 {
   callable_function: bool: 1 bit;
   class_constructor: bool: 1 bit;
   bound_function: bool: 1 bit;
-  hole: bool: 1 bit;
   other_internal: bool: 1 bit;
   external_pointer: bool: 1 bit;
   array: bool: 1 bit;
@@ -50,38 +49,42 @@ bitfield struct TurbofanTypeLowBits extends uint32 {
   negative_big_int_63: bool: 1 bit;
   other_big_int: bool: 1 bit;
   wasm_object: bool: 1 bit;
-}
-
-bitfield struct TurbofanTypeHighBits extends uint32 {
   sandboxed_pointer: bool: 1 bit;
-  machine: bool: 1 bit;
 }
 
-@export
-class TurbofanBitsetType extends TurbofanType {
+@cppScope('TurbofanTypeHighBits')
+bitfield struct TurbofanTypeHighBits extends uint32 {
+  machine: bool: 1 bit;
+  hole: bool: 1 bit;
+  string_wrapper: bool: 1 bit;
+  typed_array: bool: 1 bit;
+}
+
+@cppObjectLayoutDefinition
+extern class TurbofanBitsetType extends TurbofanType {
   bitset_low: TurbofanTypeLowBits;
   bitset_high: TurbofanTypeHighBits;
 }
 
-@export
-class TurbofanUnionType extends TurbofanType {
+@cppObjectLayoutDefinition
+extern class TurbofanUnionType extends TurbofanType {
   type1: TurbofanType;
   type2: TurbofanType;
 }
 
-@export
-class TurbofanRangeType extends TurbofanType {
+@cppObjectLayoutDefinition
+extern class TurbofanRangeType extends TurbofanType {
   min: float64;
   max: float64;
 }
 
-@export
-class TurbofanHeapConstantType extends TurbofanType {
+@cppObjectLayoutDefinition
+extern class TurbofanHeapConstantType extends TurbofanType {
   constant: HeapObject;
 }
 
-@export
-class TurbofanOtherNumberConstantType extends TurbofanType {
+@cppObjectLayoutDefinition
+extern class TurbofanOtherNumberConstantType extends TurbofanType {
   constant: float64;
 }
 
@@ -154,8 +157,8 @@ macro TestTurbofanBitsetType(
     case (JSBoundFunction): {
       return bitsetLow.bound_function;
     }
-    case (TheHole): {
-      return bitsetLow.hole;
+    case (Hole): {
+      return bitsetHigh.hole;
     }
     case (JSArray): {
       return bitsetLow.array;
@@ -192,6 +195,16 @@ macro TestTurbofanBitsetType(
              bitsetLow.negative_big_int_63);
       }
     }
+    case (wrapper: JSPrimitiveWrapper): {
+      if (Is<String>(wrapper.value)) {
+        return bitsetHigh.string_wrapper;
+      } else {
+        return bitsetLow.other_object;
+      }
+    }
+    case (JSTypedArray): {
+      return bitsetHigh.typed_array;
+    }
     case (object: JSObject): {
       if (object.map.IsUndetectable()) {
         return bitsetLow.other_undetectable;
@@ -202,17 +215,18 @@ macro TestTurbofanBitsetType(
       }
     }
     @if(V8_ENABLE_WEBASSEMBLY)
-    case (WasmObject): {
-      return bitsetLow.wasm_object;
-    }
+      case (WasmObject): {
+        return bitsetLow.wasm_object;
+      }
     case (Object): {
       return false;
     }
   }
 }
 
-builtin TestTurbofanType(implicit context: Context)(
-    value: Object, expectedType: TurbofanType): Boolean {
+builtin TestTurbofanType(
+    implicit context: Context)(value: Object,
+    expectedType: TurbofanType): Boolean {
   typeswitch (expectedType) {
     case (t: TurbofanBitsetType): {
       return Convert<Boolean>(
@@ -244,8 +258,9 @@ builtin TestTurbofanType(implicit context: Context)(
   }
 }
 
-builtin CheckTurbofanType(implicit context: Context)(
-    value: Object, expectedType: TurbofanType, nodeId: Smi): Undefined {
+builtin CheckTurbofanType(
+    implicit context: Context)(value: Object, expectedType: TurbofanType,
+    nodeId: Smi): Undefined {
   if (TestTurbofanType(value, expectedType) == True) {
     return Undefined;
   }

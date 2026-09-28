@@ -19,7 +19,8 @@ class OptimizedCompilationInfo;
 class CompilationStatistics;
 
 struct AsPrintableStatistics {
-  const CompilationStatistics& s;
+  const char* compiler;
+  CompilationStatistics& s;
   const bool machine_output;
 };
 
@@ -55,8 +56,9 @@ class CompilationStatistics final : public Malloced {
  private:
   class TotalStats : public BasicStats {
    public:
-    TotalStats() : source_size_(0) {}
+    TotalStats() : source_size_(0), count_(0) {}
     uint64_t source_size_;
+    size_t count_;
   };
 
   class OrderedStats : public BasicStats {
@@ -82,7 +84,7 @@ class CompilationStatistics final : public Malloced {
   TotalStats total_stats_;
   PhaseKindMap phase_kind_map_;
   PhaseMap phase_map_;
-  base::Mutex record_mutex_;
+  base::Mutex access_mutex_;
 };
 
 std::ostream& operator<<(std::ostream& os, const AsPrintableStatistics& s);

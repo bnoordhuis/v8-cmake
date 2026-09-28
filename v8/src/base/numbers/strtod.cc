@@ -392,7 +392,7 @@ double Strtod(Vector<const char> buffer, int exponent) {
   Vector<const char> left_trimmed = TrimLeadingZeros(buffer);
   Vector<const char> trimmed = TrimTrailingZeros(left_trimmed);
   exponent += left_trimmed.length() - trimmed.length();
-  if (trimmed.length() == 0) return 0.0;
+  if (trimmed.empty()) return 0.0;
   if (trimmed.length() > kMaxSignificantDecimalDigits) {
     char significant_buffer[kMaxSignificantDecimalDigits];
     int significant_exponent;
@@ -402,8 +402,9 @@ double Strtod(Vector<const char> buffer, int exponent) {
         Vector<const char>(significant_buffer, kMaxSignificantDecimalDigits),
         significant_exponent);
   }
-  if (exponent + trimmed.length() - 1 >= kMaxDecimalPower)
+  if (exponent + trimmed.length() - 1 >= kMaxDecimalPower) {
     return std::numeric_limits<double>::infinity();
+  }
   if (exponent + trimmed.length() <= kMinDecimalPower) return 0.0;
 
   double guess;

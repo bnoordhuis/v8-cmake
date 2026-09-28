@@ -6,6 +6,7 @@
 #define V8_SNAPSHOT_READ_ONLY_SERIALIZER_DESERIALIZER_H_
 
 #include "src/common/globals.h"
+#include "src/utils/utils.h"
 
 namespace v8 {
 namespace internal {
@@ -13,41 +14,32 @@ namespace ro {
 
 // Common functionality for RO serialization and deserialization.
 
-// Serializer format:
-//
-// --------------------------------------------------------------------
-// page_content[1..n]      - content of each page
-// kReadOnlyRootsTable
-// #ifndef V8_STATIC_ROOTS
-// read_only_roots[1..n]   - all entries of the ro roots table
-// #endif  // V8_STATIC_ROOTS
-// kFinalizeReadOnlySpace  - end mark
-// --------------------------------------------------------------------
-//
-// where page_content is:
-// ------------------------------------------------------------------
-// kPage                   - page begin mark
-// segment_content[1..n]   - content of each segment
-// kFinalizePage           - page end mark
-// ------------------------------------------------------------------
-//
-// where segment_content is:
-// ----------------------------------------------------------------
-// kSegment                - segment mark
-// offset                  - start of segment rel. to area_start
-// size                    - size of segment in bytes
-// bytes[1..size]          - content
-// #ifndef V8_STATIC_ROOTS
-// kRelocateSegment        - segment relocation mark
-// tagged_slots_bitfield[] - bitfield of tagged slots
-// #endif  // V8_STATIC_ROOTS
-// ----------------------------------------------------------------
 enum Bytecode {
-  kPage,
+  // kAllocatePage parameters:
+  //   Uint30 page_index
+  //   Uint30 area_size_in_bytes
+  kAllocatePage,
+  // kAllocatePageAt parameters:
+  //   Uint30 page_index
+  //   Uint30 area_size_in_bytes
+  //   Uint32 compressed_page_address
+  kAllocatePageAt,
+  //
+  // kSegment parameters:
+  //   Uint30 page_index
+  //   Uint30 offset
+  //   Uint30 size_in_bytes
+  //   ... segment byte stream
   kSegment,
+  //
+  // kRelocateSegment parameters:
+  //   ... relocation byte stream
   kRelocateSegment,
-  kFinalizePage,
+  //
+  // kReadOnlyRootsTable parameters:
+  //   IF_STATIC_ROOTS(... ro roots table slots)
   kReadOnlyRootsTable,
+  //
   kFinalizeReadOnlySpace,
 };
 static constexpr int kNumberOfBytecodes =
@@ -101,23 +93,63 @@ class BitSet final {
 //
 // Note this encoding works for all remaining build configs, in particular for
 // all supported kTaggedSize values.
-struct EncodedTagged_t {
-  static constexpr int kPageIndexBits = 5;  // Max 32 RO pages.
-  static constexpr int kOffsetBits = 27;
+struct EncodedTagged {
+  static constexpr int kOffsetBits = kPageSizeBits;
   static constexpr int kSize = kUInt32Size;
+  static constexpr int kPageIndexBits =
+      kSize * 8 - kOffsetBits;  // Determines max number of RO pages.
 
-  uint32_t ToUint32() const { return *reinterpret_cast<const uint32_t*>(this); }
-  static EncodedTagged_t FromUint32(uint32_t v) {
+  explicit EncodedTagged(unsigned int page_index, unsigned int offset)
+      : page_index(page_index), offset(offset) {
+    DCHECK_LT(page_index, 1UL << kPageIndexBits);
+    DCHECK_LT(offset, 1UL << kOffsetBits);
+  }
+
+  uint32_t ToUint32() const {
+    static_assert(kSize == kUInt32Size);
+    return *reinterpret_cast<const uint32_t*>(this);
+  }
+  static EncodedTagged FromUint32(uint32_t v) {
     return FromAddress(reinterpret_cast<Address>(&v));
   }
-  static EncodedTagged_t FromAddress(Address address) {
-    return *reinterpret_cast<EncodedTagged_t*>(address);
+  static EncodedTagged FromAddress(Address address) {
+    return *reinterpret_cast<EncodedTagged*>(address);
   }
 
-  int page_index : kPageIndexBits;
-  int offset : kOffsetBits;  // Shifted by kTaggedSizeLog2.
+  const unsigned int page_index : kPageIndexBits;
+  const unsigned int offset : kOffsetBits;  // Shifted by kTaggedSizeLog2.
 };
-static_assert(EncodedTagged_t::kSize == sizeof(EncodedTagged_t));
+static_assert(EncodedTagged::kSize == sizeof(EncodedTagged));
+
+struct EncodedExternalReference {
+  static constexpr int kTagBits = 8;
+  static constexpr int kIsApiReferenceBits = 1;
+  static constexpr int kIndexBits = 23;
+  static constexpr int kSize = kUInt32Size;
+
+  uint32_t ToUint32() const {
+    static_assert(kSize == kUInt32Size);
+    return *reinterpret_cast<const uint32_t*>(this);
+  }
+  static EncodedExternalReference FromUint32(uint32_t v) {
+    return *reinterpret_cast<EncodedExternalReference*>(&v);
+  }
+
+  // This ctor is needed to convert parameter types. We can't use bool/uint32_t
+  // as underlying member types since that messes with field packing on
+  // windows.
+  EncodedExternalReference(uint16_t tag, bool is_api_reference, uint32_t index)
+      : tag(tag), is_api_reference(is_api_reference), index(index) {
+    DCHECK(is_uint23(index));
+    DCHECK(is_uint8(tag));
+  }
+
+  unsigned tag : kTagBits;
+  unsigned is_api_reference : kIsApiReferenceBits;
+  unsigned index : kIndexBits;
+};
+static_assert(EncodedExternalReference::kSize ==
+              sizeof(EncodedExternalReference));
 
 }  // namespace ro
 }  // namespace internal

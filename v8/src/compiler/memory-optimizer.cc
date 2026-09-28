@@ -37,15 +37,20 @@ bool CanAllocate(const Node* node) {
     case IrOpcode::kLoadField:
     case IrOpcode::kLoadFromObject:
     case IrOpcode::kLoadImmutableFromObject:
-    case IrOpcode::kLoadLane:
-    case IrOpcode::kLoadTransform:
     case IrOpcode::kMemoryBarrier:
-    case IrOpcode::kProtectedLoad:
+    case IrOpcode::kTrappingLoad:
     case IrOpcode::kLoadTrapOnNull:
-    case IrOpcode::kProtectedStore:
+    case IrOpcode::kTrappingStore:
     case IrOpcode::kStoreTrapOnNull:
     case IrOpcode::kRetain:
     case IrOpcode::kStackPointerGreaterThan:
+#if V8_ENABLE_WEBASSEMBLY
+    case IrOpcode::kLoadLane:
+    case IrOpcode::kLoadTransform:
+    case IrOpcode::kStoreLane:
+    case IrOpcode::kLoadStackPointer:
+    case IrOpcode::kSetStackPointer:
+#endif  // V8_ENABLE_WEBASSEMBLY
     case IrOpcode::kStaticAssert:
     // TODO(turbofan): Store nodes might do a bump-pointer allocation.
     //              We should introduce a special bump-pointer store node to
@@ -53,7 +58,6 @@ bool CanAllocate(const Node* node) {
     case IrOpcode::kStore:
     case IrOpcode::kStoreElement:
     case IrOpcode::kStoreField:
-    case IrOpcode::kStoreLane:
     case IrOpcode::kStoreToObject:
     case IrOpcode::kTraceInstruction:
     case IrOpcode::kInitializeImmutableInObject:
@@ -186,10 +190,11 @@ void WriteBarrierAssertFailed(Node* node, Node* object, const char* name,
 MemoryOptimizer::MemoryOptimizer(
     JSHeapBroker* broker, JSGraph* jsgraph, Zone* zone,
     MemoryLowering::AllocationFolding allocation_folding,
-    const char* function_debug_name, TickCounter* tick_counter)
+    const char* function_debug_name, TickCounter* tick_counter, bool is_wasm)
     : graph_assembler_(broker, jsgraph, zone, BranchSemantics::kMachine),
-      memory_lowering_(jsgraph, zone, &graph_assembler_, allocation_folding,
-                       WriteBarrierAssertFailed, function_debug_name),
+      memory_lowering_(jsgraph, zone, &graph_assembler_, is_wasm,
+                       allocation_folding, WriteBarrierAssertFailed,
+                       function_debug_name),
       wasm_address_reassociation_(jsgraph, zone),
       jsgraph_(jsgraph),
       empty_state_(AllocationState::Empty(zone)),
@@ -233,10 +238,10 @@ void MemoryOptimizer::VisitNode(Node* node, AllocationState const* state,
       return VisitLoadElement(node, state, effect_chain);
     case IrOpcode::kLoadField:
       return VisitLoadField(node, state, effect_chain);
-    case IrOpcode::kProtectedLoad:
-      return VisitProtectedLoad(node, state, effect_chain);
-    case IrOpcode::kProtectedStore:
-      return VisitProtectedStore(node, state, effect_chain);
+    case IrOpcode::kTrappingLoad:
+      return VisitTrappingLoad(node, state, effect_chain);
+    case IrOpcode::kTrappingStore:
+      return VisitTrappingStore(node, state, effect_chain);
     case IrOpcode::kStoreToObject:
     case IrOpcode::kInitializeImmutableInObject:
       return VisitStoreToObject(node, state, effect_chain);
@@ -314,8 +319,8 @@ void MemoryOptimizer::VisitAllocateRaw(Node* node, AllocationState const* state,
     }
   }
 
-  Reduction reduction = memory_lowering()->ReduceAllocateRaw(
-      node, allocation_type, allocation.allow_large_objects(), &state);
+  Reduction reduction =
+      memory_lowering()->ReduceAllocateRaw(node, allocation_type, &state);
   CHECK(reduction.Changed() && reduction.replacement() != node);
 
   ReplaceUsesAndKillNode(node, reduction.replacement());
@@ -371,24 +376,24 @@ void MemoryOptimizer::VisitLoadField(Node* node, AllocationState const* state,
   }
 }
 
-void MemoryOptimizer::VisitProtectedLoad(Node* node,
-                                         AllocationState const* state,
-                                         NodeId effect_chain) {
-  DCHECK_EQ(IrOpcode::kProtectedLoad, node->opcode());
+void MemoryOptimizer::VisitTrappingLoad(Node* node,
+                                        AllocationState const* state,
+                                        NodeId effect_chain) {
+  DCHECK_EQ(IrOpcode::kTrappingLoad, node->opcode());
   if (v8_flags.turbo_wasm_address_reassociation) {
-    wasm_address_reassociation()->VisitProtectedMemOp(node, effect_chain);
+    wasm_address_reassociation()->VisitTrappingMemOp(node, effect_chain);
     EnqueueUses(node, state, effect_chain);
   } else {
     VisitOtherEffect(node, state, effect_chain);
   }
 }
 
-void MemoryOptimizer::VisitProtectedStore(Node* node,
-                                          AllocationState const* state,
-                                          NodeId effect_chain) {
-  DCHECK_EQ(IrOpcode::kProtectedStore, node->opcode());
+void MemoryOptimizer::VisitTrappingStore(Node* node,
+                                         AllocationState const* state,
+                                         NodeId effect_chain) {
+  DCHECK_EQ(IrOpcode::kTrappingStore, node->opcode());
   if (v8_flags.turbo_wasm_address_reassociation) {
-    wasm_address_reassociation()->VisitProtectedMemOp(node, effect_chain);
+    wasm_address_reassociation()->VisitTrappingMemOp(node, effect_chain);
     EnqueueUses(node, state, effect_chain);
   } else {
     VisitOtherEffect(node, state, effect_chain);
@@ -524,7 +529,7 @@ void MemoryOptimizer::EnqueueUse(Node* node, int index,
   }
 }
 
-Graph* MemoryOptimizer::graph() const { return jsgraph()->graph(); }
+TFGraph* MemoryOptimizer::graph() const { return jsgraph()->graph(); }
 
 }  // namespace compiler
 }  // namespace internal

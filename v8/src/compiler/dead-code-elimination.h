@@ -22,9 +22,8 @@ class CommonOperatorBuilder;
 // {Type::None()} with {DeadValue}. A pure node (other than a phi) using
 // {DeadValue} is replaced by {DeadValue}. When {DeadValue} hits the effect
 // chain, a crashing {Unreachable} node is inserted and the rest of the effect
-// chain is collapsed. We wait for the {EffectControlLinearizer} to connect
-// {Unreachable} nodes to the graph end, since this is much easier if there is
-// no floating control.
+// chain is collapsed. We wait for Turboshaft to prune graphs after
+// {Unreachable}, since this is much easier if there is no floating control.
 // {DeadValue} has an input, which has to have {Type::None()}. This input is
 // important to maintain the dependency on the cause of the unreachable code.
 // {Unreachable} has a value output and {Type::None()} so it can be used by
@@ -38,7 +37,7 @@ class CommonOperatorBuilder;
 class V8_EXPORT_PRIVATE DeadCodeElimination final
     : public NON_EXPORTED_BASE(AdvancedReducer) {
  public:
-  DeadCodeElimination(Editor* editor, Graph* graph,
+  DeadCodeElimination(Editor* editor, TFGraph* graph,
                       CommonOperatorBuilder* common, Zone* temp_zone);
   ~DeadCodeElimination() final = default;
   DeadCodeElimination(const DeadCodeElimination&) = delete;
@@ -69,11 +68,11 @@ class V8_EXPORT_PRIVATE DeadCodeElimination final
   Node* DeadValue(Node* none_node,
                   MachineRepresentation rep = MachineRepresentation::kNone);
 
-  Graph* graph() const { return graph_; }
+  TFGraph* graph() const { return graph_; }
   CommonOperatorBuilder* common() const { return common_; }
   Node* dead() const { return dead_; }
 
-  Graph* const graph_;
+  TFGraph* const graph_;
   CommonOperatorBuilder* const common_;
   Node* const dead_;
   Zone* zone_;

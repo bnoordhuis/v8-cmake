@@ -11,7 +11,6 @@
 namespace v8 {
 namespace internal {
 
-class CallHandlerInfo;
 class Isolate;
 
 // The Serializer/Deserializer class is a common superclass for Serializer and
@@ -29,19 +28,12 @@ class SerializerDeserializer : public RootVisitor {
     kAnySlot,
     kMapSlot,
   };
-  static bool CanBeDeferred(HeapObject o, SlotType slot_type);
+  static bool CanBeDeferred(Tagged<HeapObject> o, SlotType slot_type);
 
-  void RestoreExternalReferenceRedirector(Isolate* isolate,
-                                          AccessorInfo accessor_info);
-  void RestoreExternalReferenceRedirector(Isolate* isolate,
-                                          CallHandlerInfo call_handler_info);
-
-// clang-format off
+  // clang-format off
 #define UNUSED_SERIALIZER_BYTE_CODES(V)                           \
-  /* Free range 0x10..0x1f */                                     \
-  V(0x1a) V(0x1b) V(0x1c) V(0x1d) V(0x1e) V(0x1f)                 \
-  /* Free range 0x20..0x2f */                                     \
-  V(0x20) V(0x21) V(0x22) V(0x23) V(0x24) V(0x25) V(0x26) V(0x27) \
+  /* Free range 0x22..0x2f */                                     \
+                          V(0x23) V(0x24) V(0x25) V(0x26) V(0x27) \
   V(0x28) V(0x29) V(0x2a) V(0x2b) V(0x2c) V(0x2d) V(0x2e) V(0x2f) \
   /* Free range 0x30..0x3f */                                     \
   V(0x30) V(0x31) V(0x32) V(0x33) V(0x34) V(0x35) V(0x36) V(0x37) \
@@ -71,7 +63,7 @@ class SerializerDeserializer : public RootVisitor {
   // The static assert below will trigger when the number of preallocated spaces
   // changed. If that happens, update the kNewObject and kBackref bytecode
   // ranges in the comments below.
-  static_assert(3 == kNumberOfSnapshotSpaces);
+  static_assert(4 == kNumberOfSnapshotSpaces);
 
   // First 32 root array items.
   static const int kRootArrayConstantsCount = 0x20;
@@ -79,20 +71,20 @@ class SerializerDeserializer : public RootVisitor {
   // 32 common raw data lengths.
   static const int kFixedRawDataCount = 0x20;
   // 16 repeats lengths.
-  static const int kFixedRepeatCount = 0x10;
+  static const int kFixedRepeatRootCount = 0x10;
 
   // 8 hot (recently seen or back-referenced) objects with optional skip.
   static const int kHotObjectCount = 8;
 
   enum Bytecode : uint8_t {
     //
-    // ---------- byte code range 0x00..0x1f ----------
+    // ---------- byte code range 0x00..0x22 ----------
     //
 
     // 0x00..0x03  Allocate new object, in specified space.
     kNewObject = 0x00,
     // Reference to previously allocated object.
-    kBackref = 0x03,
+    kBackref = 0x04,
     // Reference to an object in the read only heap.
     kReadOnlyHeapRef,
     // Object in the startup object cache.
@@ -111,13 +103,15 @@ class SerializerDeserializer : public RootVisitor {
     // Examine the build process for architecture, version or configuration
     // mismatches.
     kSynchronize,
-    // Repeats of variable length.
-    kVariableRepeat,
+    // Repeats of variable length of a root.
+    kVariableRepeatRoot,
     // Used for embedder-allocated backing stores for TypedArrays.
     kOffHeapBackingStore,
     kOffHeapResizableBackingStore,
     // Used for embedder-provided serialization data for embedder fields.
     kEmbedderFieldsData,
+    // Used for embedder-provided serialziation data for API wrappers.
+    kApiWrapperFieldsData,
     // Raw data of variable length.
     kVariableRawData,
     // Used to encode external references provided through the API.
@@ -140,13 +134,40 @@ class SerializerDeserializer : public RootVisitor {
     // Resolves an existing "pending" forward reference to point to the current
     // object.
     kResolvePendingForwardRef,
-    // Special construction bytecode for the metamap. In theory we could re-use
-    // forward-references for this, but then the forward reference would be
-    // registered during object map deserialization, before the object is
+    // Special construction bytecodes for the metamaps. In theory we could
+    // reuse forward-references for this, but then the forward reference would
+    // be registered during object map deserialization, before the object is
     // allocated, so there wouldn't be a allocated object whose map field we can
     // register as the pending field. We could either hack around this, or
     // simply introduce this new bytecode.
-    kNewMetaMap,
+    kNewContextlessMetaMap,
+    kNewContextfulMetaMap,
+    // Extended maps store their actual size in bit_field_ex_, which would be
+    // written after tagged fields without special handling. As a result
+    // during deserialization of those tagged fields GC might happen and
+    // observe an extended map with not-yet initialized size.
+    // This bytecode must be serialized right after the map field.
+    kExtendedMapBitFieldEx,
+    // When the sandbox is enabled, a prefix indicating that the following
+    // object is referenced through an indirect pointer, i.e. through an entry
+    // in a pointer table.
+    kIndirectPointerPrefix,
+    // When the sandbox is enabled, this bytecode instructs the deserializer to
+    // initialize the "self" indirect pointer of trusted objects, which
+    // references the object's pointer table entry. As the "self" indirect
+    // pointer is always the first field after the map word, it is guaranteed
+    // that it will be deserialized before any inner objects, which may require
+    // the pointer table entry for back reference to the trusted object.
+    kInitializeSelfIndirectPointer,
+    // This bytecode instructs the deserializer to allocate an entry in the
+    // JSDispatchTable for the host object and store the corresponding dispatch
+    // handle into the current slot.
+    kAllocateJSDispatchEntry,
+    // A back-reference to the already allocated n-th dispatch entry.
+    kJSDispatchEntry,
+    // A prefix indicating that the following object is referenced through a
+    // protected pointer, i.e. a pointer from one trusted object to another.
+    kProtectedPointerPrefix,
 
     //
     // ---------- byte code range 0x40..0x7f ----------
@@ -163,7 +184,7 @@ class SerializerDeserializer : public RootVisitor {
     //
 
     // 0x80..0x8f
-    kFixedRepeat = 0x80,
+    kFixedRepeatRoot = 0x80,
 
     // 0x90..0x97
     kHotObject = 0x90,
@@ -224,30 +245,30 @@ class SerializerDeserializer : public RootVisitor {
                            kLastEncodableFixedRawDataSize>;
 
   // Repeat count encoding helpers.
-  static const int kFirstEncodableRepeatCount = 2;
-  static const int kLastEncodableFixedRepeatCount =
-      kFirstEncodableRepeatCount + kFixedRepeatCount - 1;
-  static const int kFirstEncodableVariableRepeatCount =
-      kLastEncodableFixedRepeatCount + 1;
+  static const int kFirstEncodableRepeatRootCount = 2;
+  static const int kLastEncodableFixedRepeatRootCount =
+      kFirstEncodableRepeatRootCount + kFixedRepeatRootCount - 1;
+  static const int kFirstEncodableVariableRepeatRootCount =
+      kLastEncodableFixedRepeatRootCount + 1;
 
-  using FixedRepeatWithCount =
-      BytecodeValueEncoder<kFixedRepeat, kFirstEncodableRepeatCount,
-                           kLastEncodableFixedRepeatCount>;
+  using FixedRepeatRootWithCount =
+      BytecodeValueEncoder<kFixedRepeatRoot, kFirstEncodableRepeatRootCount,
+                           kLastEncodableFixedRepeatRootCount>;
 
   // Encodes/decodes repeat count into a serialized variable repeat count
   // value.
-  struct VariableRepeatCount {
+  struct VariableRepeatRootCount {
     static constexpr bool IsEncodable(int repeat_count) {
-      return repeat_count >= kFirstEncodableVariableRepeatCount;
+      return repeat_count >= kFirstEncodableVariableRepeatRootCount;
     }
 
     static constexpr int Encode(int repeat_count) {
       DCHECK(IsEncodable(repeat_count));
-      return repeat_count - kFirstEncodableVariableRepeatCount;
+      return repeat_count - kFirstEncodableVariableRepeatRootCount;
     }
 
     static constexpr int Decode(int value) {
-      return value + kFirstEncodableVariableRepeatCount;
+      return value + kFirstEncodableVariableRepeatRootCount;
     }
   };
 
@@ -261,6 +282,37 @@ class SerializerDeserializer : public RootVisitor {
   static const uint32_t kEmptyBackingStoreRefSentinel = 0;
 };
 
+struct SerializeEmbedderFieldsCallback {
+  explicit SerializeEmbedderFieldsCallback(
+      v8::SerializeInternalFieldsCallback js_cb =
+          v8::SerializeInternalFieldsCallback(),
+      v8::SerializeContextDataCallback context_cb =
+          v8::SerializeContextDataCallback(),
+      v8::SerializeAPIWrapperCallback api_wrapper_cb =
+          v8::SerializeAPIWrapperCallback())
+      : js_object_callback(js_cb),
+        context_callback(context_cb),
+        api_wrapper_callback(api_wrapper_cb) {}
+  v8::SerializeInternalFieldsCallback js_object_callback;
+  v8::SerializeContextDataCallback context_callback;
+  v8::SerializeAPIWrapperCallback api_wrapper_callback;
+};
+
+struct DeserializeEmbedderFieldsCallback {
+  explicit DeserializeEmbedderFieldsCallback(
+      v8::DeserializeInternalFieldsCallback js_cb =
+          v8::DeserializeInternalFieldsCallback(),
+      v8::DeserializeContextDataCallback context_cb =
+          v8::DeserializeContextDataCallback(),
+      v8::DeserializeAPIWrapperCallback api_wrapper_cb =
+          v8::DeserializeAPIWrapperCallback())
+      : js_object_callback(js_cb),
+        context_callback(context_cb),
+        api_wrapper_callback(api_wrapper_cb) {}
+  v8::DeserializeInternalFieldsCallback js_object_callback;
+  v8::DeserializeContextDataCallback context_callback;
+  v8::DeserializeAPIWrapperCallback api_wrapper_callback;
+};
 }  // namespace internal
 }  // namespace v8
 

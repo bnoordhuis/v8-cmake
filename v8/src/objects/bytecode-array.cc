@@ -5,9 +5,12 @@
 #include "src/objects/bytecode-array.h"
 
 #include <iomanip>
+#include <sstream>
 
+#include "src/base/string-format.h"
 #include "src/codegen/handler-table.h"
 #include "src/codegen/source-position-table.h"
+#include "src/common/globals.h"
 #include "src/interpreter/bytecode-array-iterator.h"
 #include "src/interpreter/bytecode-decoder.h"
 #include "src/objects/bytecode-array-inl.h"
@@ -16,11 +19,35 @@
 namespace v8 {
 namespace internal {
 
+int BytecodeArray::SourcePosition(int offset) const {
+  int position = 0;
+  if (!HasSourcePositionTable()) return position;
+  for (SourcePositionTableIterator it(
+           source_position_table(kAcquireLoad),
+           SourcePositionTableIterator::kJavaScriptOnly,
+           SourcePositionTableIterator::kDontSkipFunctionEntry);
+       !it.done() && it.code_offset() <= offset; it.Advance()) {
+    position = it.source_position().ScriptOffset();
+  }
+  return position;
+}
+
+int BytecodeArray::SourceStatementPosition(int offset) const {
+  int position = 0;
+  if (!HasSourcePositionTable()) return position;
+  for (SourcePositionTableIterator it(source_position_table(kAcquireLoad));
+       !it.done() && it.code_offset() <= offset; it.Advance()) {
+    if (it.is_statement()) {
+      position = it.source_position().ScriptOffset();
+    }
+  }
+  return position;
+}
+
 void BytecodeArray::PrintJson(std::ostream& os) {
   DisallowGarbageCollection no_gc;
 
-  Address base_address = GetFirstBytecodeAddress();
-  BytecodeArray handle_storage = *this;
+  Tagged<BytecodeArray> handle_storage(this);
   Handle<BytecodeArray> handle(reinterpret_cast<Address*>(&handle_storage));
   interpreter::BytecodeArrayIterator iterator(handle);
   bool first_data = true;
@@ -29,42 +56,40 @@ void BytecodeArray::PrintJson(std::ostream& os) {
 
   while (!iterator.done()) {
     if (!first_data) os << ", ";
-    Address current_address = base_address + iterator.current_offset();
     first_data = false;
 
     os << "{\"offset\":" << iterator.current_offset() << ", \"disassembly\":\"";
-    interpreter::BytecodeDecoder::Decode(
-        os, reinterpret_cast<uint8_t*>(current_address), false);
+    std::stringstream disassembly_stream;
+    iterator.PrintCurrentBytecodeTo(disassembly_stream);
 
     if (interpreter::Bytecodes::IsJump(iterator.current_bytecode())) {
-      os << " (" << iterator.GetJumpTargetOffset() << ")";
+      disassembly_stream << " (" << iterator.GetJumpTargetOffset() << ")";
     }
 
     if (interpreter::Bytecodes::IsSwitch(iterator.current_bytecode())) {
-      os << " {";
+      disassembly_stream << " {";
       bool first_entry = true;
       for (interpreter::JumpTableTargetOffset entry :
            iterator.GetJumpTableTargetOffsets()) {
-        if (!first_entry) os << ", ";
+        if (!first_entry) disassembly_stream << ", ";
         first_entry = false;
-        os << entry.target_offset;
+        disassembly_stream << entry.target_offset;
       }
-      os << "}";
+      disassembly_stream << "}";
     }
-
-    os << "\"}";
+    os << base::JSONEscaped(disassembly_stream.str()) << "\"}";
     iterator.Advance();
   }
 
   os << "]";
 
-  int constant_pool_lenght = constant_pool().length();
-  if (constant_pool_lenght > 0) {
+  uint32_t constant_pool_length = constant_pool()->ulength().value();
+  if (constant_pool_length > 0) {
     os << ", \"constantPool\": [";
-    for (int i = 0; i < constant_pool_lenght; i++) {
-      Object object = constant_pool().get(i);
+    for (uint32_t i = 0; i < constant_pool_length; i++) {
+      Tagged<Object> object = constant_pool()->get(i);
       if (i > 0) os << ", ";
-      os << "\"" << object << "\"";
+      os << "\"" << base::JSONEscaped(object) << "\"";
     }
     os << "]";
   }
@@ -76,7 +101,7 @@ void BytecodeArray::Disassemble(std::ostream& os) {
   DisallowGarbageCollection no_gc;
   // Storage for backing the handle passed to the iterator. This handle won't be
   // updated by the gc, but that's ok because we've disallowed GCs anyway.
-  BytecodeArray handle_storage = *this;
+  Tagged<BytecodeArray> handle_storage(this);
   Handle<BytecodeArray> handle(reinterpret_cast<Address*>(&handle_storage));
   Disassemble(handle, os);
 }
@@ -98,16 +123,19 @@ void BytecodeArray::Disassemble(Handle<BytecodeArray> handle,
     if (!source_positions.done() &&
         iterator.current_offset() == source_positions.code_offset()) {
       os << std::setw(5) << source_positions.source_position().ScriptOffset();
-      os << (source_positions.is_statement() ? " S> " : " E> ");
+      if (source_positions.is_breakable()) {
+        os << (source_positions.is_statement() ? " S> " : " E> ");
+      } else {
+        os << (source_positions.is_statement() ? " s> " : " e> ");
+      }
       source_positions.Advance();
     } else {
       os << "         ";
     }
-    Address current_address = base_address + iterator.current_offset();
-    os << reinterpret_cast<const void*>(current_address) << " @ "
-       << std::setw(4) << iterator.current_offset() << " : ";
-    interpreter::BytecodeDecoder::Decode(
-        os, reinterpret_cast<uint8_t*>(current_address));
+    os << reinterpret_cast<const void*>(base_address +
+                                        iterator.current_offset())
+       << " @ " << std::setw(4) << iterator.current_offset() << " : ";
+    iterator.PrintCurrentBytecodeTo(os);
     if (interpreter::Bytecodes::IsJump(iterator.current_bytecode())) {
       Address jump_target = base_address + iterator.GetJumpTargetOffset();
       os << " (" << reinterpret_cast<void*>(jump_target) << " @ "
@@ -131,37 +159,38 @@ void BytecodeArray::Disassemble(Handle<BytecodeArray> handle,
     iterator.Advance();
   }
 
-  os << "Constant pool (size = " << handle->constant_pool().length() << ")\n";
+  os << "Constant pool (size = " << handle->constant_pool()->ulength().value()
+     << ")\n";
 #ifdef OBJECT_PRINT
-  if (handle->constant_pool().length() > 0) {
-    handle->constant_pool().Print(os);
+  if (handle->constant_pool()->ulength().value() > 0) {
+    Print(handle->constant_pool(), os);
   }
 #endif
 
-  os << "Handler Table (size = " << handle->handler_table().length() << ")\n";
+  os << "Handler Table (size = " << handle->handler_table()->ulength().value()
+     << ")\n";
 #ifdef ENABLE_DISASSEMBLER
-  if (handle->handler_table().length() > 0) {
+  if (handle->handler_table()->ulength().value() > 0) {
     HandlerTable table(*handle);
     table.HandlerTableRangePrint(os);
   }
 #endif
 
-  ByteArray source_position_table = handle->SourcePositionTable();
-  os << "Source Position Table (size = " << source_position_table.length()
-     << ")\n";
+  Tagged<TrustedByteArray> source_position_table =
+      handle->SourcePositionTable();
+  os << "Source Position Table (size = "
+     << source_position_table->ulength().value() << ")\n";
 #ifdef OBJECT_PRINT
-  if (source_position_table.length() > 0) {
+  if (source_position_table->ulength().value() > 0) {
     os << Brief(source_position_table) << std::endl;
   }
 #endif
 }
 
-void BytecodeArray::CopyBytecodesTo(BytecodeArray to) {
-  BytecodeArray from = *this;
-  DCHECK_EQ(from.length(), to.length());
-  CopyBytes(reinterpret_cast<uint8_t*>(to.GetFirstBytecodeAddress()),
-            reinterpret_cast<uint8_t*>(from.GetFirstBytecodeAddress()),
-            from.length());
+void BytecodeArray::CopyBytecodesTo(Tagged<BytecodeArray> to) {
+  DCHECK_EQ(length(), to->length());
+  CopyBytes(reinterpret_cast<uint8_t*>(to->GetFirstBytecodeAddress()),
+            reinterpret_cast<uint8_t*>(GetFirstBytecodeAddress()), length());
 }
 
 }  // namespace internal

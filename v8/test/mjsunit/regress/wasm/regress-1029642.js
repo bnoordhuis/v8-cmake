@@ -2,16 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Flags: --wasm-staging
-
-// Copyright 2016 the V8 project authors. All rights reserved.
-// Use of this source code is governed by a BSD-style license that can be
-// found in the LICENSE file.
-
 d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js')
 
 const builder = new WasmModuleBuilder();
-builder.addMemory(0, 0, false);
+builder.addMemory(0, 0);
 builder.addType(makeSig([kWasmF32, kWasmF32, kWasmF64], [kWasmF64]));
 // Generate function 1 (out of 1).
 builder.addFunction(undefined, 0 /* sig */)

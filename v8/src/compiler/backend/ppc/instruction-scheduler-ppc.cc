@@ -10,6 +10,23 @@ namespace compiler {
 
 bool InstructionScheduler::SchedulerSupported() { return true; }
 
+ResourceAllocation InstructionScheduler::GetResourceTable() {
+  constexpr std::array units = std::to_array<ResourceAllocation::TableEntry>({
+      {ArchInstResource::kFetch, 1},
+      {ArchInstResource::kIntSingle, 1},
+      {ArchInstResource::kIntMulti, 1},
+      {ArchInstResource::kFP, 1},
+      {ArchInstResource::kLoad, 1},
+      {ArchInstResource::kStore, 1},
+  });
+  return ResourceAllocation(units);
+}
+
+ArchInstResource InstructionScheduler::GetInstructionResource(
+    const Instruction* instr) {
+  return ArchInstResource::kIntSingle;
+}
+
 int InstructionScheduler::GetTargetInstructionFlags(
     const Instruction* instr) const {
   switch (instr->arch_opcode()) {
@@ -20,13 +37,10 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kPPC_Xor:
     case kPPC_ShiftLeft32:
     case kPPC_ShiftLeft64:
-    case kPPC_ShiftLeftPair:
     case kPPC_ShiftRight32:
     case kPPC_ShiftRight64:
-    case kPPC_ShiftRightPair:
     case kPPC_ShiftRightAlg32:
     case kPPC_ShiftRightAlg64:
-    case kPPC_ShiftRightAlgPair:
     case kPPC_RotRight32:
     case kPPC_RotRight64:
     case kPPC_Not:
@@ -36,21 +50,16 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kPPC_RotLeftAndClearRight64:
     case kPPC_Add32:
     case kPPC_Add64:
-    case kPPC_AddWithOverflow32:
-    case kPPC_AddPair:
     case kPPC_AddDouble:
-    case kPPC_Sub:
-    case kPPC_SubWithOverflow32:
-    case kPPC_SubPair:
+    case kPPC_Sub32:
+    case kPPC_Sub64:
     case kPPC_SubDouble:
     case kPPC_Mul32:
-    case kPPC_Mul32WithHigh32:
     case kPPC_Mul64:
     case kPPC_MulHighS64:
     case kPPC_MulHighU64:
     case kPPC_MulHigh32:
     case kPPC_MulHighU32:
-    case kPPC_MulPair:
     case kPPC_MulDouble:
     case kPPC_Div32:
     case kPPC_Div64:
@@ -62,7 +71,8 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kPPC_ModU32:
     case kPPC_ModU64:
     case kPPC_ModDouble:
-    case kPPC_Neg:
+    case kPPC_Neg32:
+    case kPPC_Neg64:
     case kPPC_NegDouble:
     case kPPC_SqrtDouble:
     case kPPC_FloorDouble:
@@ -105,6 +115,7 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kPPC_DoubleToFloat32:
     case kPPC_DoubleExtractLowWord32:
     case kPPC_DoubleExtractHighWord32:
+    case kPPC_DoubleFromWord32Pair:
     case kPPC_DoubleInsertLowWord32:
     case kPPC_DoubleInsertHighWord32:
     case kPPC_DoubleConstruct:
@@ -114,9 +125,6 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kPPC_BitcastDoubleToInt64:
     case kPPC_ByteRev32:
     case kPPC_ByteRev64:
-    case kPPC_F64x2Splat:
-    case kPPC_F64x2ExtractLane:
-    case kPPC_F64x2ReplaceLane:
     case kPPC_F64x2Add:
     case kPPC_F64x2Sub:
     case kPPC_F64x2Mul:
@@ -140,9 +148,6 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kPPC_F64x2ConvertLowI32x4S:
     case kPPC_F64x2ConvertLowI32x4U:
     case kPPC_F64x2PromoteLowF32x4:
-    case kPPC_F32x4Splat:
-    case kPPC_F32x4ExtractLane:
-    case kPPC_F32x4ReplaceLane:
     case kPPC_F32x4Add:
     case kPPC_F32x4Sub:
     case kPPC_F32x4Mul:
@@ -166,9 +171,6 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kPPC_F32x4Pmin:
     case kPPC_F32x4Pmax:
     case kPPC_F32x4DemoteF64x2Zero:
-    case kPPC_I64x2Splat:
-    case kPPC_I64x2ExtractLane:
-    case kPPC_I64x2ReplaceLane:
     case kPPC_I64x2Add:
     case kPPC_I64x2Sub:
     case kPPC_I64x2Mul:
@@ -190,9 +192,6 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kPPC_I64x2ExtMulLowI32x4U:
     case kPPC_I64x2ExtMulHighI32x4U:
     case kPPC_I64x2Abs:
-    case kPPC_I32x4Splat:
-    case kPPC_I32x4ExtractLane:
-    case kPPC_I32x4ReplaceLane:
     case kPPC_I32x4Add:
     case kPPC_I32x4Sub:
     case kPPC_I32x4Mul:
@@ -228,10 +227,6 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kPPC_I32x4TruncSatF64x2SZero:
     case kPPC_I32x4TruncSatF64x2UZero:
     case kPPC_I32x4DotI8x16AddS:
-    case kPPC_I16x8Splat:
-    case kPPC_I16x8ExtractLaneU:
-    case kPPC_I16x8ExtractLaneS:
-    case kPPC_I16x8ReplaceLane:
     case kPPC_I16x8Add:
     case kPPC_I16x8Sub:
     case kPPC_I16x8Mul:
@@ -270,10 +265,6 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kPPC_I16x8ExtMulLowI8x16U:
     case kPPC_I16x8ExtMulHighI8x16U:
     case kPPC_I16x8DotI8x16S:
-    case kPPC_I8x16Splat:
-    case kPPC_I8x16ExtractLaneU:
-    case kPPC_I8x16ExtractLaneS:
-    case kPPC_I8x16ReplaceLane:
     case kPPC_I8x16Add:
     case kPPC_I8x16Sub:
     case kPPC_I8x16MinS:
@@ -316,6 +307,14 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kPPC_S128Not:
     case kPPC_S128Select:
     case kPPC_S128AndNot:
+    case kPPC_FExtractLane:
+    case kPPC_IExtractLane:
+    case kPPC_IExtractLaneU:
+    case kPPC_IExtractLaneS:
+    case kPPC_FReplaceLane:
+    case kPPC_IReplaceLane:
+    case kPPC_FSplat:
+    case kPPC_ISplat:
     case kPPC_LoadReverseSimd128RR:
       return kNoOpcodeFlags;
 

@@ -2,8 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// TODO(v8:10266): Figure out why this fails on tsan with --always-turbofan.
-// Flags: --no-always-turbofan --no-turbo-inline-js-wasm-calls
+// Flags: --no-turbo-inline-js-wasm-calls --no-wasm-in-js-inlining-wrapper --no-wasm-in-js-inlining-body
 
 let {session, contextGroup, Protocol} = InspectorTest.start(
     'Test that console profiles contain wasm function names.');
@@ -38,7 +37,7 @@ function buildModuleBytes() {
   return builder.toArray();
 }
 
-function compile(bytes) {
+function instantiate(bytes) {
   let buffer = new ArrayBuffer(bytes.length);
   let view = new Uint8Array(buffer);
   for (var i = 0; i < bytes.length; i++) {
@@ -90,8 +89,8 @@ Protocol.Profiler.onConsoleProfileFinished(e => {
   // There are two different kinds of js-to-wasm-wrappers, so there are two
   // possible positive traces.
   const expected = [
-    ['fib'], ['wasm-to-js:i:i'], ['imp'],
-    ['GenericJSToWasmWrapper', 'js-to-wasm:i:i'], ['fib']
+    ['fib'], ['wasm-to-js', 'wasm-to-js:i:i'], ['imp'],
+    ['js-to-wasm', 'js-to-wasm:i:i'], ['fib']
   ];
   if (!addSeenProfile(function_names)) return;
   for (let i = 0; i <= function_names.length - expected.length; ++i) {
@@ -139,11 +138,12 @@ async function runFibUntilProfileFound() {
   InspectorTest.log(`Wasm position: ${wasm_position}`);
 }
 
-async function compileWasm() {
+async function compileWasm(module_bytes) {
   InspectorTest.log('Compiling wasm.');
+  if (module_bytes === undefined) module_bytes = buildModuleBytes();
   checkError(await Protocol.Runtime.evaluate({
-    expression: `globalThis.instance = (${compile})(${
-        JSON.stringify(buildModuleBytes())});`
+    expression: `globalThis.instance = (${instantiate})(${
+        JSON.stringify(module_bytes)});`
   }));
 }
 
@@ -181,6 +181,27 @@ InspectorTest.runAsyncTestSuite([
     checkError(await Protocol.Profiler.start());
     await runFibUntilProfileFound();
     await Protocol.Debugger.disable();
+    await Protocol.Profiler.disable();
+  },
+
+  async function testRunningCodeInDifferentIsolate() {
+    // Do instantiate the module in the inspector isolate *and* in the debugged
+    // isolate. Trigger lazy compilation in the inspector isolate then. Check
+    // that we can profile in the debugged isolate later, i.e. the lazily
+    // compiled code was logged there.
+    let module_bytes = buildModuleBytes();
+    InspectorTest.log('Instantiating in inspector isolate.');
+    let instance = instantiate(module_bytes);
+    InspectorTest.log('Instantiating in the debugged isolate.');
+    await compileWasm(module_bytes);
+    InspectorTest.log('Enabling profiler in the debugged isolate.');
+    await Protocol.Profiler.enable();
+    checkError(await Protocol.Profiler.start());
+    InspectorTest.log('Running in the inspector isolate.');
+    instance.exports.fib(26);
+    InspectorTest.log('Running in the debugged isolate.');
+    await runFibUntilProfileFound();
+    InspectorTest.log('Disabling profiler.');
     await Protocol.Profiler.disable();
   }
 ]);

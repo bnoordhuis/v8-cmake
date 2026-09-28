@@ -2,32 +2,77 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-@abstract
-extern class JSIteratorHelper extends JSObject {
-  underlying: iterator::IteratorRecord;
+// Iterator helpers are specced as generators but implemented as direct
+// iterators. As such, generator states need to be tracked manually.
+extern enum JSIteratorHelperState extends uint31 {
+  kSuspendedStart,
+  kSuspendedYield,
+  kExecuting,
+  kCompleted
 }
 
-extern class JSIteratorMapHelper extends JSIteratorHelper {
+@abstract
+@cppObjectLayoutDefinition
+extern class JSIteratorHelper extends JSObject {
+  state: SmiTagged<JSIteratorHelperState>;
+}
+
+@abstract
+@cppObjectLayoutDefinition
+extern class JSIteratorHelperSimple extends JSIteratorHelper {
+  underlying_iterator: iterator::IteratorRecord;
+}
+
+@cppObjectLayoutDefinition
+extern class JSIteratorMapHelper extends JSIteratorHelperSimple {
   mapper: Callable;
   counter: Number;
 }
 
-extern class JSIteratorFilterHelper extends JSIteratorHelper {
+@cppObjectLayoutDefinition
+extern class JSIteratorFilterHelper extends JSIteratorHelperSimple {
   predicate: Callable;
   counter: Number;
 }
 
-extern class JSIteratorTakeHelper extends JSIteratorHelper {
+@cppObjectLayoutDefinition
+extern class JSIteratorTakeHelper extends JSIteratorHelperSimple {
   remaining: Number;
 }
 
-extern class JSIteratorDropHelper extends JSIteratorHelper {
+@cppObjectLayoutDefinition
+extern class JSIteratorDropHelper extends JSIteratorHelperSimple {
   remaining: Number;
 }
 
-extern class JSIteratorFlatMapHelper extends JSIteratorHelper {
+@cppObjectLayoutDefinition
+extern class JSIteratorFlatMapHelper extends JSIteratorHelperSimple {
   mapper: Callable;
   counter: Number;
-  innerIterator: iterator::IteratorRecord;
-  innerAlive: Boolean;
+  inner_iterator: iterator::IteratorRecord;
+}
+
+@cppObjectLayoutDefinition
+extern class JSIteratorConcatHelper extends JSIteratorHelperSimple {
+  iterables: FixedArray;
+  current: Smi;
+}
+
+extern enum JSIteratorZipHelperMode extends uint31 {
+  kShortest,
+  kLongest,
+  kStrict
+}
+
+@cppObjectLayoutDefinition
+extern class JSIteratorZipHelper extends JSIteratorHelper {
+  underlying_iterators: FixedArray;
+  mode: SmiTagged<JSIteratorZipHelperMode>;
+  active_count: Smi;
+  padding: FixedArray;
+}
+
+@cppObjectLayoutDefinition
+extern class JSIteratorZipKeyedHelper extends JSIteratorZipHelper {
+  keys: FixedArray;
 }

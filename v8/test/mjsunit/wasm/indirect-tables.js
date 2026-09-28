@@ -138,7 +138,7 @@ function js_div(a, b) { return (a / b) | 0; }
     let main = i2.exports.main;
 
     for (var j = 0; j < i; j++) {
-      assertTraps(kTrapFuncSigMismatch, () => main(0, j));
+      assertTraps(kTrapNullFunc, () => main(0, j));
       assertSame(null, table.get(j));
     }
 
@@ -203,7 +203,7 @@ function js_div(a, b) { return (a / b) | 0; }
     let main = i2.exports.main;
 
     for (var j = 0; j < i; j++) {
-      assertTraps(kTrapFuncSigMismatch, () => main(0, j));
+      assertTraps(kTrapNullFunc, () => main(0, j));
       assertSame(null, table.get(j));
     }
 
@@ -268,7 +268,7 @@ function js_div(a, b) { return (a / b) | 0; }
       let func = table.get(j);
       if (j > i) {
         assertSame(null, func);
-        assertTraps(kTrapFuncSigMismatch, () => instance.exports.main(j));
+        assertTraps(kTrapNullFunc, () => instance.exports.main(j));
       } else {
         assertEquals("function", typeof func);
         assertEquals(j, func());
@@ -331,15 +331,14 @@ function js_div(a, b) { return (a / b) | 0; }
   assertEquals(22, i1.exports.main(1));
   assertEquals(22, i2.exports.main(1));
 
-  assertTraps(kTrapFuncSigMismatch, () => i1.exports.main(2));
-  assertTraps(kTrapFuncSigMismatch, () => i2.exports.main(2));
+  assertTraps(kTrapNullFunc, () => i1.exports.main(2));
+  assertTraps(kTrapNullFunc, () => i2.exports.main(2));
   assertTraps(kTrapTableOutOfBounds, () => i1.exports.main(3));
   assertTraps(kTrapTableOutOfBounds, () => i2.exports.main(3));
 })();
 
 (function MismatchedTableSize() {
   print(arguments.callee.name);
-  let kTableSize = 5;
 
   for (var expsize = 1; expsize < 4; expsize++) {
     for (var impsize = 1; impsize < 4; impsize++) {
@@ -840,7 +839,7 @@ function js_div(a, b) { return (a / b) | 0; }
 
   let module = (() => {
     let builder = new WasmModuleBuilder();
-    builder.addMemory(1, 1, false);
+    builder.addMemory(1, 1);
     builder.addFunction("f", kSig_i_v)
       .addBody([
         kExprI32Const, 0,
@@ -870,7 +869,7 @@ function js_div(a, b) { return (a / b) | 0; }
 
   let main = (() => {
     let builder = new WasmModuleBuilder();
-    builder.addMemory(1, 1, false);
+    builder.addMemory(1, 1);
     builder.addTable(kWasmAnyFunc, 4);
     builder.addImport("q", "f1", kSig_i_v);
     builder.addImport("q", "f2", kSig_i_v);
@@ -904,7 +903,7 @@ function js_div(a, b) { return (a / b) | 0; }
 (function TestNonImportedGlobalInElementSegment() {
   print(arguments.callee.name);
   let builder = new WasmModuleBuilder();
-  let global = builder.addGlobal(kWasmFuncRef, false,
+  let global = builder.addGlobal(kWasmFuncRef, true, false,
                                  [kExprRefNull, kFuncRefCode]);
   let table = builder.addTable(kWasmFuncRef, 10, 10);
   builder.addActiveElementSegment(
@@ -914,5 +913,5 @@ function js_div(a, b) { return (a / b) | 0; }
 
   assertThrows(
     () => builder.instantiate(), WebAssembly.CompileError,
-    /non-imported globals cannot be used in constant expressions/);
+    /mutable globals cannot be used in constant expressions/);
 })();

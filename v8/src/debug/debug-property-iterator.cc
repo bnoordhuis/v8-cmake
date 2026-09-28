@@ -15,12 +15,12 @@ namespace v8 {
 namespace internal {
 
 std::unique_ptr<DebugPropertyIterator> DebugPropertyIterator::Create(
-    Isolate* isolate, Handle<JSReceiver> receiver, bool skip_indices) {
+    Isolate* isolate, DirectHandle<JSReceiver> receiver, bool skip_indices) {
   // Can't use std::make_unique as Ctor is private.
   auto iterator = std::unique_ptr<DebugPropertyIterator>(
       new DebugPropertyIterator(isolate, receiver, skip_indices));
 
-  if (receiver->IsJSProxy()) {
+  if (IsJSProxy(*receiver)) {
     iterator->AdvanceToPrototype();
   }
 
@@ -33,7 +33,7 @@ std::unique_ptr<DebugPropertyIterator> DebugPropertyIterator::Create(
 }
 
 DebugPropertyIterator::DebugPropertyIterator(Isolate* isolate,
-                                             Handle<JSReceiver> receiver,
+                                             DirectHandle<JSReceiver> receiver,
                                              bool skip_indices)
     : isolate_(isolate),
       prototype_iterator_(isolate, receiver, kStartAtReceiver,
@@ -50,6 +50,11 @@ void DebugPropertyIterator::AdvanceToPrototype() {
   is_own_ = false;
   if (!prototype_iterator_.HasAccess()) is_done_ = true;
   prototype_iterator_.AdvanceIgnoringProxies();
+  while (!prototype_iterator_.IsAtEnd() &&
+         IsJSProxy(
+             *PrototypeIterator::GetCurrent<JSReceiver>(prototype_iterator_))) {
+    prototype_iterator_.AdvanceIgnoringProxies();
+  }
   if (prototype_iterator_.IsAtEnd()) is_done_ = true;
 }
 
@@ -90,13 +95,13 @@ bool DebugPropertyIterator::has_native_setter() {
          static_cast<int>(debug::NativeAccessorType::HasSetter);
 }
 
-Handle<Name> DebugPropertyIterator::raw_name() const {
+DirectHandle<Name> DebugPropertyIterator::raw_name() const {
   DCHECK(!Done());
   if (stage_ == kExoticIndices) {
     return isolate_->factory()->SizeToString(current_key_index_);
   } else {
-    return Handle<Name>::cast(FixedArray::get(
-        *current_keys_, static_cast<int>(current_key_index_), isolate_));
+    return Cast<Name>(direct_handle(
+        current_keys_->get(static_cast<int>(current_key_index_)), isolate_));
   }
 }
 
@@ -105,9 +110,10 @@ v8::Local<v8::Name> DebugPropertyIterator::name() const {
 }
 
 v8::Maybe<v8::PropertyAttribute> DebugPropertyIterator::attributes() {
-  Handle<JSReceiver> receiver =
+  DirectHandle<JSReceiver> receiver =
       PrototypeIterator::GetCurrent<JSReceiver>(prototype_iterator_);
-  auto result = JSReceiver::GetPropertyAttributes(receiver, raw_name());
+  auto result =
+      JSReceiver::GetPropertyAttributes(isolate_, receiver, raw_name());
   if (result.IsNothing()) return Nothing<v8::PropertyAttribute>();
   // This should almost never happen, however we have seen cases where we do
   // trigger this check. In these rare events, it typically is a
@@ -126,10 +132,11 @@ v8::Maybe<v8::PropertyAttribute> DebugPropertyIterator::attributes() {
   // V8 will crash.
 
 #if DEBUG
-  base::ScopedVector<char> property_message(128);
-  base::ScopedVector<char> name_buffer(100);
-  raw_name()->NameShortPrint(name_buffer);
-  v8::base::SNPrintF(property_message, "Invalid result for property \"%s\"\n",
+  auto property_message = base::OwnedVector<char>::NewForOverwrite(128);
+  auto name_buffer = base::OwnedVector<char>::NewForOverwrite(100);
+  raw_name()->NameShortPrint(name_buffer.as_vector());
+  v8::base::SNPrintF(property_message.as_vector(),
+                     "Invalid result for property \"%s\"\n",
                      name_buffer.begin());
   DCHECK_WITH_MSG(result.FromJust() != ABSENT, property_message.begin());
 #endif
@@ -137,7 +144,7 @@ v8::Maybe<v8::PropertyAttribute> DebugPropertyIterator::attributes() {
 }
 
 v8::Maybe<v8::debug::PropertyDescriptor> DebugPropertyIterator::descriptor() {
-  Handle<JSReceiver> receiver =
+  DirectHandle<JSReceiver> receiver =
       PrototypeIterator::GetCurrent<JSReceiver>(prototype_iterator_);
 
   PropertyDescriptor descriptor;
@@ -183,11 +190,11 @@ bool DebugPropertyIterator::FillKeysForCurrentPrototypeAndStage() {
   current_keys_ = isolate_->factory()->empty_fixed_array();
   current_keys_length_ = 0;
   if (is_done_) return true;
-  Handle<JSReceiver> receiver =
+  DirectHandle<JSReceiver> receiver =
       PrototypeIterator::GetCurrent<JSReceiver>(prototype_iterator_);
   if (stage_ == kExoticIndices) {
-    if (skip_indices_ || !receiver->IsJSTypedArray()) return true;
-    Handle<JSTypedArray> typed_array = Handle<JSTypedArray>::cast(receiver);
+    if (skip_indices_ || !IsJSTypedArray(*receiver)) return true;
+    auto typed_array = Cast<JSTypedArray>(receiver);
     current_keys_length_ =
         typed_array->WasDetached() ? 0 : typed_array->GetLength();
     return true;
@@ -196,10 +203,9 @@ bool DebugPropertyIterator::FillKeysForCurrentPrototypeAndStage() {
       stage_ == kEnumerableStrings ? ENUMERABLE_STRINGS : ALL_PROPERTIES;
   if (KeyAccumulator::GetKeys(isolate_, receiver, KeyCollectionMode::kOwnOnly,
                               filter, GetKeysConversion::kConvertToString,
-                              false,
-                              skip_indices_ || receiver->IsJSTypedArray())
+                              false, skip_indices_ || IsJSTypedArray(*receiver))
           .ToHandle(&current_keys_)) {
-    current_keys_length_ = current_keys_->length();
+    current_keys_length_ = current_keys_->ulength().value();
     return true;
   }
   return false;
@@ -211,8 +217,8 @@ bool DebugPropertyIterator::should_move_to_next_stage() const {
 
 namespace {
 base::Flags<debug::NativeAccessorType, int> GetNativeAccessorDescriptorInternal(
-    Handle<JSReceiver> object, Handle<Name> name) {
-  Isolate* isolate = object->GetIsolate();
+    DirectHandle<JSReceiver> object, DirectHandle<Name> name) {
+  Isolate* isolate = Isolate::Current();
   PropertyKey key(isolate, name);
   if (key.is_element()) return debug::NativeAccessorType::None;
   LookupIterator it(isolate, object, key, LookupIterator::OWN);
@@ -220,8 +226,8 @@ base::Flags<debug::NativeAccessorType, int> GetNativeAccessorDescriptorInternal(
   if (it.state() != LookupIterator::ACCESSOR) {
     return debug::NativeAccessorType::None;
   }
-  Handle<Object> structure = it.GetAccessors();
-  if (!structure->IsAccessorInfo()) return debug::NativeAccessorType::None;
+  DirectHandle<Object> structure = it.GetAccessors();
+  if (!IsAccessorInfo(*structure)) return debug::NativeAccessorType::None;
   base::Flags<debug::NativeAccessorType, int> result;
   if (*structure == *isolate->factory()->value_unavailable_accessor()) {
     return debug::NativeAccessorType::IsValueUnavailable;
@@ -231,11 +237,11 @@ base::Flags<debug::NativeAccessorType, int> GetNativeAccessorDescriptorInternal(
     return debug::NativeAccessorType::None;
   ACCESSOR_INFO_LIST_GENERATOR(IS_BUILTIN_ACCESSOR, /* not used */)
 #undef IS_BUILTIN_ACCESSOR
-  Handle<AccessorInfo> accessor_info = Handle<AccessorInfo>::cast(structure);
-  if (accessor_info->has_getter()) {
+  auto accessor_info = Cast<AccessorInfo>(structure);
+  if (accessor_info->has_getter(isolate)) {
     result |= debug::NativeAccessorType::HasGetter;
   }
-  if (accessor_info->has_setter()) {
+  if (accessor_info->has_setter(isolate)) {
     result |= debug::NativeAccessorType::HasSetter;
   }
   return result;
@@ -247,7 +253,7 @@ void DebugPropertyIterator::CalculateNativeAccessorFlags() {
   if (stage_ == kExoticIndices) {
     native_accessor_flags_ = 0;
   } else {
-    Handle<JSReceiver> receiver =
+    DirectHandle<JSReceiver> receiver =
         PrototypeIterator::GetCurrent<JSReceiver>(prototype_iterator_);
     native_accessor_flags_ =
         GetNativeAccessorDescriptorInternal(receiver, raw_name());

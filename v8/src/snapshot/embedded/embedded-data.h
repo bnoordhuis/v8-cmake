@@ -108,7 +108,7 @@ class EmbeddedData final {
     // isolate uses it or knows about it or not (see
     // InstructionStream::OffHeapInstructionStart()).
     // So, this blob has to be checked too.
-    CodeRange* code_range = CodeRange::GetProcessWideCodeRange();
+    CodeRange* code_range = IsolateGroup::current()->GetCodeRange();
     if (code_range && code_range->embedded_blob_code_copy() != nullptr) {
       EmbeddedData remapped_d = EmbeddedData::FromBlob(code_range);
       // If the pc does not belong to the embedded code blob we should be
@@ -206,6 +206,8 @@ class EmbeddedData final {
   };
   static_assert(offsetof(BuiltinLookupEntry, end_offset) == 0 * kUInt32Size);
   static_assert(offsetof(BuiltinLookupEntry, builtin_id) == 1 * kUInt32Size);
+
+  Builtin GetBuiltinId(ReorderedBuiltinIndex embedded_index) const;
 
   // The layout of the blob is as follows:
   //

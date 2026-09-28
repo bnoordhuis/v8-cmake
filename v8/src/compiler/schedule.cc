@@ -235,6 +235,11 @@ bool IsPotentiallyThrowingCall(IrOpcode::Value opcode) {
     JS_OP_LIST(BUILD_BLOCK_JS_CASE)
 #undef BUILD_BLOCK_JS_CASE
     case IrOpcode::kCall:
+    case IrOpcode::kFastApiCall:
+    case IrOpcode::kStringToLowerCaseIntl:
+    case IrOpcode::kStringToUpperCaseIntl:
+    case IrOpcode::kStringLocaleCompareIntl:
+    case IrOpcode::kLoadDictionaryField:
       return true;
     default:
       return false;

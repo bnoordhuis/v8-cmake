@@ -34,9 +34,7 @@
   V(InvalidatedSlotsFastToSlow)                             \
   V(InvalidatedSlotsSomeInvalidatedRanges)                  \
   V(TestNewSpaceRefsInCopiedCode)                           \
-  V(GCFlags)                                                \
   V(MarkCompactCollector)                                   \
-  V(MarkCompactEpochCounter)                                \
   V(MemoryReducerActivationForSmallHeaps)                   \
   V(NoPromotion)                                            \
   V(NumberStringCacheSize)                                  \
@@ -52,12 +50,9 @@
   V(Regress587004)                                          \
   V(Regress589413)                                          \
   V(Regress658718)                                          \
-  V(Regress670675)                                          \
   V(Regress777177)                                          \
   V(Regress779503)                                          \
   V(Regress791582)                                          \
-  V(Regress845060)                                          \
-  V(RegressMissingWriteBarrierInAllocate)                   \
   V(WriteBarrier_Marking)                                   \
   V(WriteBarrier_MarkingExtension)                          \
   V(WriteBarriersInCopyJSObject)                            \
@@ -81,10 +76,6 @@
 
 namespace v8 {
 namespace internal {
-
-template <typename T>
-class Handle;
-
 namespace heap {
 
 class HeapTester {
@@ -96,23 +87,23 @@ class HeapTester {
 
   // test-alloc.cc
   static AllocationResult AllocateAfterFailures();
-  static Handle<Object> TestAllocateAfterFailures();
+  static DirectHandle<Object> TestAllocateAfterFailures();
 
   // test-invalidated-slots.cc
-  static Page* AllocateByteArraysOnPage(Heap* heap,
-                                        std::vector<ByteArray>* byte_arrays);
+  static NormalPage* AllocateByteArraysOnPage(
+      Heap* heap, std::vector<ByteArray>* byte_arrays);
 
   // test-api.cc
   static void ResetWeakHandle(bool global_gc);
 
   // test-heap.cc
-  static AllocationResult AllocateByteArrayForTest(Heap* heap, int length,
+  static AllocationResult AllocateByteArrayForTest(Heap* heap, uint32_t length,
                                                    AllocationType allocation);
   static bool CodeEnsureLinearAllocationArea(Heap* heap, int size_in_bytes);
 
   // test-mark-compact.cc
   static AllocationResult AllocateMapForTest(v8::internal::Isolate* isolate);
-  static AllocationResult AllocateFixedArrayForTest(Heap* heap, int length,
+  static AllocationResult AllocateFixedArrayForTest(Heap* heap, uint32_t length,
                                                     AllocationType allocation);
 
   static void UncommitUnusedMemory(Heap* heap);

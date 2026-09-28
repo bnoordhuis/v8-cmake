@@ -12,40 +12,24 @@
 namespace v8 {
 namespace bigint {
 
-constexpr int kKaratsubaThreshold = 34;
-constexpr int kToomThreshold = 193;
-constexpr int kFftThreshold = 1500;
-constexpr int kFftInnerThreshold = 200;
-
-constexpr int kBurnikelThreshold = 57;
-constexpr int kNewtonInversionThreshold = 50;
-// kBarrettThreshold is defined in bigint.h.
-
-constexpr int kToStringFastThreshold = 43;
-constexpr int kFromStringLargeThreshold = 300;
-
 class ProcessorImpl : public Processor {
  public:
-  explicit ProcessorImpl(Platform* platform);
-  ~ProcessorImpl();
-
   Status get_and_clear_status();
 
   void Multiply(RWDigits Z, Digits X, Digits Y);
-  void MultiplySingle(RWDigits Z, Digits X, digit_t y);
-  void MultiplySchoolbook(RWDigits Z, Digits X, Digits Y);
+  void MultiplyLarge(RWDigits& Z, Digits& X, Digits& Y);
 
   void MultiplyKaratsuba(RWDigits Z, Digits X, Digits Y);
-  void KaratsubaStart(RWDigits Z, Digits X, Digits Y, RWDigits scratch, int k);
+  void KaratsubaStart(RWDigits Z, Digits X, Digits Y, RWDigits scratch,
+                      uint32_t k);
   void KaratsubaChunk(RWDigits Z, Digits X, Digits Y, RWDigits scratch);
-  void KaratsubaMain(RWDigits Z, Digits X, Digits Y, RWDigits scratch, int n);
+  void KaratsubaMain(RWDigits Z, Digits X, Digits Y, RWDigits scratch,
+                     uint32_t n);
 
-  void Divide(RWDigits Q, Digits A, Digits B);
-  void DivideSingle(RWDigits Q, digit_t* remainder, Digits A, digit_t b);
-  void DivideSchoolbook(RWDigits Q, RWDigits R, Digits A, Digits B);
+  void DivideSchoolbook(RWDigits& Q, RWDigits& R, Digits& A, Digits& B);
   void DivideBurnikelZiegler(RWDigits Q, RWDigits R, Digits A, Digits B);
 
-  void Modulo(RWDigits R, Digits A, Digits B);
+  void CachedMod_MakeInverse(Digits& B);
 
 #if V8_ADVANCED_BIGINT_ALGORITHMS
   void MultiplyToomCook(RWDigits Z, Digits X, Digits Y);
@@ -64,9 +48,10 @@ class ProcessorImpl : public Processor {
 
   // {out_length} initially contains the allocated capacity of {out}, and
   // upon return will be set to the actual length of the result string.
-  void ToString(char* out, int* out_length, Digits X, int radix, bool sign);
-  void ToStringImpl(char* out, int* out_length, Digits X, int radix, bool sign,
-                    bool use_fast_algorithm);
+  void ToString(char* out, uint32_t* out_length, Digits& X, int radix,
+                bool sign);
+  void ToStringImpl(char* out, uint32_t* out_length, Digits& X, int radix,
+                    bool sign, bool use_fast_algorithm);
 
   void FromString(RWDigits Z, FromStringAccumulator* accumulator);
   void FromStringClassic(RWDigits Z, FromStringAccumulator* accumulator);
@@ -91,57 +76,30 @@ class ProcessorImpl : public Processor {
       }
     }
   }
-
- private:
-  uintptr_t work_estimate_{0};
-  Status status_{Status::kOk};
-  Platform* platform_;
 };
 
-// These constants are primarily needed for Barrett division in div-barrett.cc,
-// and they're also needed by fast to-string conversion in tostring.cc.
-constexpr int DivideBarrettScratchSpace(int n) { return n + 2; }
-// Local values S and W need "n plus a few" digits; U needs 2*n "plus a few".
-// In all tested cases the "few" were either 2 or 3, so give 5 to be safe.
-// S and W are not live at the same time.
-constexpr int kInvertNewtonExtraSpace = 5;
-constexpr int InvertNewtonScratchSpace(int n) {
-  return 3 * n + 2 * kInvertNewtonExtraSpace;
-}
-constexpr int InvertScratchSpace(int n) {
-  return n < kNewtonInversionThreshold ? 2 * n : InvertNewtonScratchSpace(n);
-}
-
-#define CHECK(cond)                                   \
-  if (!(cond)) {                                      \
-    std::cerr << __FILE__ << ":" << __LINE__ << ": "; \
-    std::cerr << "Assertion failed: " #cond "\n";     \
-    abort();                                          \
-  }
-
-#ifdef DEBUG
-#define DCHECK(cond) CHECK(cond)
-#else
-#define DCHECK(cond) (void(0))
-#endif
+// Prevent computations of scratch space and number of bits from overflowing.
+constexpr uint32_t kMaxNumDigits = UINT32_MAX / kDigitBits;
 
 #define USE(var) ((void)var)
 
 // RAII memory for a Digits array.
 class Storage {
  public:
-  explicit Storage(int count) : ptr_(new digit_t[count]) {}
+  Storage(uint32_t count, Platform* platform)
+      : ptr_(platform->Allocate(count), Platform::Deleter(platform)) {}
 
   digit_t* get() { return ptr_.get(); }
 
  private:
-  std::unique_ptr<digit_t[]> ptr_;
+  std::unique_ptr<digit_t[], Platform::Deleter> ptr_;
 };
 
 // A writable Digits array with attached storage.
 class ScratchDigits : public RWDigits {
  public:
-  explicit ScratchDigits(int len) : RWDigits(nullptr, len), storage_(len) {
+  ScratchDigits(uint32_t len, Platform* platform)
+      : RWDigits(nullptr, len), storage_(len, platform) {
     digits_ = storage_.get();
   }
 

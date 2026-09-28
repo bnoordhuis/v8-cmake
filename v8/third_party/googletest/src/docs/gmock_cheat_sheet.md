@@ -20,7 +20,7 @@ class Foo {
 (note that `~Foo()` **must** be virtual) we can define its mock as
 
 ```cpp
-#include "gmock/gmock.h"
+#include <gmock/gmock.h>
 
 class MockFoo : public Foo {
  public:
@@ -130,7 +130,7 @@ TEST(BarTest, DoesThis) {
 ## Setting Default Actions {#OnCall}
 
 gMock has a **built-in default action** for any function that returns `void`,
-`bool`, a numeric value, or a pointer. In C++11, it will additionally returns
+`bool`, a numeric value, or a pointer. In C++11, it additionally returns
 the default-constructed value, if one exists for the given type.
 
 To customize the default action for functions with return type `T`, use
@@ -140,7 +140,7 @@ To customize the default action for functions with return type `T`, use
   // Sets the default action for return type std::unique_ptr<Buzz> to
   // creating a new Buzz every time.
   DefaultValue<std::unique_ptr<Buzz>>::SetFactory(
-      [] { return MakeUnique<Buzz>(AccessLevel::kInternal); });
+      [] { return std::make_unique<Buzz>(AccessLevel::kInternal); });
 
   // When this fires, the default action of MakeBuzz() will run, which
   // will return a new Buzz object.

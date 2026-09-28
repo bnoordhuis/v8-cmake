@@ -3,9 +3,12 @@
 // found in the LICENSE file.
 
 @apiExposedInstanceTypeValue(0xcc)
+@cppObjectLayoutDefinition
 extern class Foreign extends HeapObject {
   foreign_address: ExternalPointer;
 }
 
-extern operator '.foreign_address_ptr' macro LoadForeignForeignAddressPtr(
-    Foreign): RawPtr;
+@cppObjectLayoutDefinition
+extern class TrustedForeign extends TrustedObject {
+  foreign_address: RawPtr;
+}

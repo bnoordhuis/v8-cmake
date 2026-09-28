@@ -5,6 +5,7 @@
 #ifndef V8_DIAGNOSTICS_BASIC_BLOCK_PROFILER_H_
 #define V8_DIAGNOSTICS_BASIC_BLOCK_PROFILER_H_
 
+#include <cstdint>
 #include <iosfwd>
 #include <list>
 #include <memory>
@@ -25,9 +26,10 @@ class BasicBlockProfilerData {
  public:
   explicit BasicBlockProfilerData(size_t n_blocks);
   V8_EXPORT_PRIVATE BasicBlockProfilerData(
-      Handle<OnHeapBasicBlockProfilerData> js_heap_data, Isolate* isolate);
+      DirectHandle<OnHeapBasicBlockProfilerData> js_heap_data,
+      Isolate* isolate);
   V8_EXPORT_PRIVATE BasicBlockProfilerData(
-      OnHeapBasicBlockProfilerData js_heap_data);
+      Tagged<OnHeapBasicBlockProfilerData> js_heap_data);
 
   BasicBlockProfilerData(const BasicBlockProfilerData&) = delete;
   BasicBlockProfilerData& operator=(const BasicBlockProfilerData&) = delete;
@@ -48,7 +50,7 @@ class BasicBlockProfilerData {
   // Copy the data from this object into an equivalent object stored on the JS
   // heap, so that it can survive snapshotting and relocation. This must
   // happen on the main thread during finalization of the compilation.
-  Handle<OnHeapBasicBlockProfilerData> CopyToJSHeap(Isolate* isolate);
+  DirectHandle<OnHeapBasicBlockProfilerData> CopyToJSHeap(Isolate* isolate);
 
   void Log(Isolate* isolate, std::ostream& os);
 
@@ -59,7 +61,7 @@ class BasicBlockProfilerData {
 
   V8_EXPORT_PRIVATE void ResetCounts();
 
-  void CopyFromJSHeap(OnHeapBasicBlockProfilerData js_heap_data);
+  void CopyFromJSHeap(Tagged<OnHeapBasicBlockProfilerData> js_heap_data);
 
   // These vectors are indexed by reverse post-order block number.
   std::vector<int32_t> block_ids_;
@@ -92,6 +94,28 @@ class BasicBlockProfiler {
   // snapshot.
   V8_EXPORT_PRIVATE std::vector<bool> GetCoverageBitmap(Isolate* isolate);
 
+  // Fast zero-allocation count of total basic blocks across all builtins.
+  V8_EXPORT_PRIVATE uint32_t GetBuiltinsBlockCount(Isolate* isolate);
+
+  // Fast single-pass zero-allocation method to copy coverage into Fuzzilli's
+  // shared memory bitmap and reset block counters back to zero.
+  V8_EXPORT_PRIVATE void UpdateBuiltinsCoverageAndReset(Isolate* isolate,
+                                                        uint32_t builtins_start,
+                                                        uint8_t* shmem_edges);
+
+  // Helper functions for shared-memory coverage bitmask operations.
+  static inline void SetCoverageBit(uint8_t* bitmap, uint32_t index) {
+    const uint32_t byte_index = index >> 3;
+    const uint32_t bit_index = index & 7;
+    bitmap[byte_index] |= static_cast<uint8_t>(1 << bit_index);
+  }
+
+  static inline bool GetCoverageBit(const uint8_t* bitmap, uint32_t index) {
+    const uint32_t byte_index = index >> 3;
+    const uint32_t bit_index = index & 7;
+    return (bitmap[byte_index] & (1 << bit_index)) != 0;
+  }
+
   const DataList* data_list() { return &data_list_; }
 
  private:
@@ -100,6 +124,34 @@ class BasicBlockProfiler {
 };
 
 std::ostream& operator<<(std::ostream& os, const BasicBlockProfilerData& s);
+
+// This struct comprises all callee inside a block.
+using BlockCallees = std::set<Builtin>;
+// This struct describes a call inside a caller, the key is block id, the value
+// is a set of callee builtins.
+using BuiltinCallees = std::unordered_map<int32_t, BlockCallees>;
+// This struct describes a map for all builtins which will call other builtin.
+using BuiltinCallMap = std::unordered_map<Builtin, BuiltinCallees>;
+
+class BuiltinsCallGraph {
+ public:
+  BuiltinsCallGraph();
+  ~BuiltinsCallGraph() = default;
+  BuiltinsCallGraph(const BuiltinsCallGraph&) = delete;
+  BuiltinsCallGraph& operator=(const BuiltinsCallGraph&) = delete;
+
+  static BuiltinsCallGraph* Get();
+  void AddBuiltinCall(Builtin caller, Builtin callee, int32_t block_id);
+  const BuiltinCallees* GetBuiltinCallees(Builtin builtin);
+  V8_INLINE bool all_hash_matched() const { return all_hash_matched_; }
+  V8_INLINE void set_all_hash_matched(bool all_hash_matched) {
+    all_hash_matched_ = all_hash_matched;
+  }
+
+ private:
+  BuiltinCallMap builtin_call_map_;
+  bool all_hash_matched_;
+};
 
 }  // namespace internal
 }  // namespace v8

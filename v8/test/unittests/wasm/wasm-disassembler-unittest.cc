@@ -24,7 +24,9 @@ void CheckDisassemblerOutput(base::Vector<const uint8_t> module_bytes,
                              std::string expected_output) {
   AccountingAllocator allocator;
 
-  ModuleResult module_result = DecodeWasmModuleForDisassembler(module_bytes);
+  std::unique_ptr<OffsetsProvider> offsets = AllocateOffsetsProvider();
+  ModuleResult module_result =
+      DecodeWasmModuleForDisassembler(module_bytes, offsets.get());
   ASSERT_TRUE(module_result.ok())
       << "Decoding error: " << module_result.error().message() << " at offset "
       << module_result.error().offset();
@@ -37,7 +39,7 @@ void CheckDisassemblerOutput(base::Vector<const uint8_t> module_bytes,
 
   constexpr bool kNoOffsets = false;
   ModuleDisassembler md(output_sb, module, &names, wire_bytes, &allocator,
-                        kNoOffsets);
+                        std::move(offsets));
   constexpr size_t max_mb = 100;  // Even 1 would be enough.
   md.PrintModule({0, 2}, max_mb);
 
@@ -125,7 +127,16 @@ TEST_F(WasmDisassemblerTest, Gc) {
   CheckDisassemblerOutput(base::ArrayVector(module_bytes), expected);
 }
 
-TEST_F(WasmDisassemblerTest, TooManyends) {
+TEST_F(WasmDisassemblerTest, CustomDescriptors) {
+  constexpr uint8_t module_bytes[] = {
+#include "wasm-disassembler-unittest-custom-descriptors.wasm.inc"
+  };
+  std::string expected;
+#include "wasm-disassembler-unittest-custom-descriptors.wat.inc"
+  CheckDisassemblerOutput(base::ArrayVector(module_bytes), expected);
+}
+
+TEST_F(WasmDisassemblerTest, TooManyEnds) {
   constexpr uint8_t module_bytes[] = {
 #include "wasm-disassembler-unittest-too-many-ends.wasm.inc"
   };
@@ -140,6 +151,80 @@ TEST_F(WasmDisassemblerTest, Stringref) {
   };
   std::string expected;
 #include "wasm-disassembler-unittest-stringref.wat.inc"
+  CheckDisassemblerOutput(base::ArrayVector(module_bytes), expected);
+}
+
+TEST_F(WasmDisassemblerTest, SharedEverything) {
+  // TODO(42204563): Add tests for other shared-everything instructions.
+  constexpr uint8_t module_bytes[] = {
+#include "wasm-disassembler-unittest-shared-everything.wasm.inc"
+  };
+  std::string expected;
+#include "wasm-disassembler-unittest-shared-everything.wat.inc"
+  CheckDisassemblerOutput(base::ArrayVector(module_bytes), expected);
+}
+
+TEST_F(WasmDisassemblerTest, Exnref) {
+  constexpr uint8_t module_bytes[] = {
+#include "wasm-disassembler-unittest-exnref.wasm.inc"
+  };
+  std::string expected;
+#include "wasm-disassembler-unittest-exnref.wat.inc"
+  CheckDisassemblerOutput(base::ArrayVector(module_bytes), expected);
+}
+
+TEST_F(WasmDisassemblerTest, Atomics) {
+  // This test case was created using:
+  // clang-format off
+  /*
+    d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
+    var builder = new WasmModuleBuilder();
+    let mem0 = builder.addMemory(1, 1, true);
+    let mem1 = builder.addMemory(1, 1, true);
+
+    builder.exportMemoryAs("$myMemory0", mem0);
+    builder.exportMemoryAs("$myMemory1", mem1);
+
+    builder.addFunction('test', kSig_v_v)
+    .addBody([
+        kExprI32Const, 0,
+        kExprI32Const, 0,
+        kExprI32Const, 0,
+        kExprI32Const, 0,
+        kExprI32Const, 0,
+        kExprI32Const, 0,
+        kExprI32Const, 0,
+        kExprI32Const, 0,
+        kExprI32Const, 0,
+        kExprI32Const, 0,
+        kExprI32Const, 0,
+        kExprI32Const, 0,
+        // Both memory indices and acquire release memory order immediate.
+        kAtomicPrefix, kExprI32AtomicLoad, 0x62, mem0, kAtomicAcqRel, 1,
+        kAtomicPrefix, kExprI32AtomicOr, 0x62, mem1, kAtomicAcqRel + (kAtomicAcqRel << 4), 2,
+        kAtomicPrefix, kExprI32AtomicStore, 0x62, mem1, kAtomicAcqRel, 3,
+        // Both immediates present but using the default explicitly.
+        kAtomicPrefix, kExprI32AtomicLoad, 0x62, mem0, kAtomicSeqCst, 1,
+        kAtomicPrefix, kExprI32AtomicOr, 0x62, mem1, kAtomicSeqCst + (kAtomicSeqCst << 4), 2,
+        kAtomicPrefix, kExprI32AtomicStore, 0x62, mem1, kAtomicSeqCst, 3,
+        // Only the memory index immediate present.
+        kAtomicPrefix, kExprI32AtomicLoad, 0x42, mem0, 1,
+        kAtomicPrefix, kExprI32AtomicOr, 0x42, mem1, 2,
+        kAtomicPrefix, kExprI32AtomicStore, 0x42, mem1, 3,
+        // Only the memory order immediate present.
+        kAtomicPrefix, kExprI32AtomicLoad, 0x22, kAtomicAcqRel, 1,
+        kAtomicPrefix, kExprI32AtomicOr, 0x22, kAtomicAcqRel + (kAtomicAcqRel << 4), 2,
+        kAtomicPrefix, kExprI32AtomicStore, 0x22, kAtomicAcqRel, 3,
+    ])
+    .exportFunc();
+    builder.instantiate();
+  */
+  // clang-format on
+  constexpr uint8_t module_bytes[] = {
+#include "wasm-disassembler-unittest-atomics.wasm.inc"
+  };
+  std::string expected;
+#include "wasm-disassembler-unittest-atomics.wat.inc"
   CheckDisassemblerOutput(base::ArrayVector(module_bytes), expected);
 }
 

@@ -2,12 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#ifndef V8_OBJECTS_JS_LIST_FORMAT_H_
+#define V8_OBJECTS_JS_LIST_FORMAT_H_
+
 #ifndef V8_INTL_SUPPORT
 #error Internationalization is expected to be enabled.
 #endif  // V8_INTL_SUPPORT
-
-#ifndef V8_OBJECTS_JS_LIST_FORMAT_H_
-#define V8_OBJECTS_JS_LIST_FORMAT_H_
 
 #include <set>
 #include <string>
@@ -29,41 +29,49 @@ class ListFormatter;
 namespace v8 {
 namespace internal {
 
-#include "torque-generated/src/objects/js-list-format-tq.inc"
-
-class JSListFormat
-    : public TorqueGeneratedJSListFormat<JSListFormat, JSObject> {
+V8_OBJECT class JSListFormat : public JSObject {
  public:
   // Creates relative time format object with properties derived from input
   // locales and options.
-  static MaybeHandle<JSListFormat> New(Isolate* isolate, Handle<Map> map,
-                                       Handle<Object> locales,
-                                       Handle<Object> options);
+  static MaybeDirectHandle<JSListFormat> New(Isolate* isolate,
+                                             DirectHandle<Map> map,
+                                             DirectHandle<Object> locales,
+                                             DirectHandle<Object> options,
+                                             const char* method_name);
 
-  static Handle<JSObject> ResolvedOptions(Isolate* isolate,
-                                          Handle<JSListFormat> format_holder);
+  static DirectHandle<JSObject> ResolvedOptions(
+      Isolate* isolate, DirectHandle<JSListFormat> format_holder);
 
-  // ecma402 #sec-formatlist
-  V8_WARN_UNUSED_RESULT static MaybeHandle<String> FormatList(
-      Isolate* isolate, Handle<JSListFormat> format_holder,
-      Handle<FixedArray> list);
+  // https://tc39.es/ecma402/#sec-formatlist
+  V8_WARN_UNUSED_RESULT static MaybeDirectHandle<String> FormatList(
+      Isolate* isolate, DirectHandle<JSListFormat> format_holder,
+      DirectHandle<FixedArray> list);
 
-  // ecma42 #sec-formatlisttoparts
-  V8_WARN_UNUSED_RESULT static MaybeHandle<JSArray> FormatListToParts(
-      Isolate* isolate, Handle<JSListFormat> format_holder,
-      Handle<FixedArray> list);
+  // ecma42 https://tc39.es/ecma262/#sec-formatlisttoparts
+  V8_WARN_UNUSED_RESULT static MaybeDirectHandle<JSArray> FormatListToParts(
+      Isolate* isolate, DirectHandle<JSListFormat> format_holder,
+      DirectHandle<FixedArray> list);
 
   V8_EXPORT_PRIVATE static const std::set<std::string>& GetAvailableLocales();
 
-  Handle<String> StyleAsString() const;
-  Handle<String> TypeAsString() const;
+  Handle<String> StyleAsString(Isolate* isolate) const;
+  Handle<String> TypeAsString(Isolate* isolate) const;
 
   // ListFormat accessors.
-  DECL_ACCESSORS(icu_formatter, Managed<icu::ListFormatter>)
+  inline Tagged<String> locale() const;
+  inline void set_locale(Tagged<String> value,
+                         WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+
+  inline Tagged<CppGCManaged<icu::ListFormatter>> icu_formatter() const;
+  inline void set_icu_formatter(Tagged<CppGCManaged<icu::ListFormatter>> value,
+                                WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+
+  inline int flags() const;
+  inline void set_flags(int value);
 
   // Style: identifying the relative time format style used.
   //
-  // ecma402/#sec-properties-of-intl-listformat-instances
+  // https://tc39.es/ecma402/#sec-properties-of-intl-listformat-instances
   enum class Style {
     LONG,   // Everything spelled out.
     SHORT,  // Abbreviations used when possible.
@@ -74,7 +82,7 @@ class JSListFormat
 
   // Type: identifying the list of types used.
   //
-  // ecma402/#sec-properties-of-intl-listformat-instances
+  // https://tc39.es/ecma402/#sec-properties-of-intl-listformat-instances
   enum class Type {
     CONJUNCTION,  // for "and"-based lists (e.g., "A, B and C")
     DISJUNCTION,  // for "or"-based lists (e.g., "A, B or C"),
@@ -84,19 +92,28 @@ class JSListFormat
   inline Type type() const;
 
   // Bit positions in |flags|.
-  DEFINE_TORQUE_GENERATED_JS_LIST_FORMAT_FLAGS()
+  using StyleBits = base::BitField<JSListFormat::Style, 0, 2, uint32_t>;
+  using TypeBits = StyleBits::Next<JSListFormat::Type, 2>;
 
-  static_assert(Style::LONG <= StyleBits::kMax);
-  static_assert(Style::SHORT <= StyleBits::kMax);
-  static_assert(Style::NARROW <= StyleBits::kMax);
-  static_assert(Type::CONJUNCTION <= TypeBits::kMax);
-  static_assert(Type::DISJUNCTION <= TypeBits::kMax);
-  static_assert(Type::UNIT <= TypeBits::kMax);
+  static_assert(StyleBits::is_valid(Style::LONG));
+  static_assert(StyleBits::is_valid(Style::SHORT));
+  static_assert(StyleBits::is_valid(Style::NARROW));
+  static_assert(TypeBits::is_valid(Type::CONJUNCTION));
+  static_assert(TypeBits::is_valid(Type::DISJUNCTION));
+  static_assert(TypeBits::is_valid(Type::UNIT));
 
   DECL_PRINTER(JSListFormat)
+  DECL_VERIFIER(JSListFormat)
 
-  TQ_OBJECT_CONSTRUCTORS(JSListFormat)
-};
+  static const int kHeaderSize;
+
+ public:
+  TaggedMember<String> locale_;
+  TaggedMember<CppGCManaged<icu::ListFormatter>> icu_formatter_;
+  TaggedMember<Smi> flags_;
+} V8_OBJECT_END;
+
+inline constexpr int JSListFormat::kHeaderSize = sizeof(JSListFormat);
 
 }  // namespace internal
 }  // namespace v8

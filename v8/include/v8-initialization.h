@@ -22,6 +22,7 @@
  */
 namespace v8 {
 
+class Allocator;
 class PageAllocator;
 class Platform;
 template <class K, class V, class T>
@@ -52,6 +53,9 @@ using ReturnAddressLocationResolver =
 using DcheckErrorCallback = void (*)(const char* file, int line,
                                      const char* message);
 
+using V8FatalErrorCallback = void (*)(const char* file, int line,
+                                      const char* message);
+
 /**
  * Container class for static utility functions.
  */
@@ -77,6 +81,12 @@ class V8_EXPORT V8 {
   /** Set the callback to invoke in case of Dcheck failures. */
   static void SetDcheckErrorHandler(DcheckErrorCallback that);
 
+  /** Set the callback to invoke in the case of CHECK failures or fatal
+   * errors. This is distinct from Isolate::SetFatalErrorHandler, which
+   * is invoked in response to API usage failures.
+   * */
+  static void SetFatalErrorHandler(V8FatalErrorCallback that);
+
   /**
    * Sets V8 flags from a string.
    */
@@ -97,10 +107,24 @@ class V8_EXPORT V8 {
    * is created. It always returns true.
    */
   V8_INLINE static bool Initialize() {
+#ifdef V8_TARGET_OS_ANDROID
+    const bool kV8TargetOsIsAndroid = true;
+#else
+    const bool kV8TargetOsIsAndroid = false;
+#endif
+
+#ifdef V8_ENABLE_CHECKS
+    const bool kV8EnableChecks = true;
+#else
+    const bool kV8EnableChecks = false;
+#endif
+
     const int kBuildConfiguration =
         (internal::PointerCompressionIsEnabled() ? kPointerCompression : 0) |
         (internal::SmiValuesAre31Bits() ? k31BitSmis : 0) |
-        (internal::SandboxIsEnabled() ? kSandbox : 0);
+        (internal::SandboxIsEnabled() ? kSandbox : 0) |
+        (kV8TargetOsIsAndroid ? kTargetOsIsAndroid : 0) |
+        (kV8EnableChecks ? kEnableChecks : 0);
     return Initialize(kBuildConfiguration);
   }
 
@@ -184,6 +208,47 @@ class V8_EXPORT V8 {
 
 #if defined(V8_ENABLE_SANDBOX)
   /**
+   * The mode the V8 sandbox operates in.
+   *
+   * These values are persisted to logs. Entries should not be renumbered and
+   * numeric values should never be reused. If you add new items here, update
+   * V8SandboxMode in tools/metrics/histograms/metadata/v8/enums.xml in
+   * Chromium.
+   */
+  enum class SandboxMode : uint8_t {
+    /**
+     * The sandbox is configured securely with a full reservation and an
+     * inaccessible Smi address range.
+     */
+    kSecure = 0,
+    /**
+     * The sandbox is configured insecurely without a known reason.
+     */
+    kInsecure = 1,
+    /**
+     * The sandbox is partially reserved, but the Smi address range is
+     * inaccessible.
+     */
+    kInsecurePartialReservationSmiInaccessible = 2,
+    /**
+     * The sandbox is fully reserved, but the Smi address range is accessible.
+     */
+    kInsecureFullReservationSmiAccessible = 3,
+    /**
+     * The sandbox is partially reserved and the Smi address range is
+     * accessible.
+     */
+    kInsecurePartialReservationSmiAccessible = 4,
+
+    kMaxValue = kInsecurePartialReservationSmiAccessible,
+  };
+
+  /**
+   * Returns the current state of the sandbox.
+   */
+  static SandboxMode GetSandboxMode();
+
+  /**
    * Returns true if the sandbox is configured securely.
    *
    * If V8 cannot create a regular sandbox during initialization, for example
@@ -228,7 +293,49 @@ class V8_EXPORT V8 {
    * address space than what has actually been reserved.
    */
   static size_t GetSandboxReservationSizeInBytes();
+
+  /**
+   * Sets an allocator that is used for allocating memory inside the sandbox.
+   *
+   * This is useful to provide a fast memory allocator based on sandbox
+   * reservation memory. The idea is that an embedder can use
+   * `GetSandboxAddressSpace()` to get ahold of the sandbox address space and
+   * then implement an allocator on top.
+   *
+   * This must be invoked after V8 is initialized but before the first Isolate
+   * is created.
+   */
+  static void SetInSandboxAllocator(std::shared_ptr<Allocator> allocator);
 #endif  // V8_ENABLE_SANDBOX
+
+  enum class WasmMemoryType {
+    kMemory32,
+    kMemory64,
+  };
+
+  /**
+   * Returns the virtual address space reservation size (in bytes) needed
+   * for one WebAssembly memory instance of the given capacity.
+   *
+   * \param type Whether this is a memory32 or memory64 instance.
+   * \param byte_capacity The maximum size, in bytes, of the WebAssembly
+   *   memory. Values exceeding the engine's maximum allocatable memory
+   *   size for the given type (determined by max_mem32_pages or
+   *   max_mem64_pages) are clamped.
+   *
+   * When trap-based bounds checking is enabled by
+   * EnableWebAssemblyTrapHandler(), the amount of virtual address space
+   * that V8 needs to reserve for each WebAssembly memory instance can
+   * be much bigger than the requested size. If the process does
+   * not have enough virtual memory available, WebAssembly memory allocation
+   * would fail. During the initialization of V8, embedders can use this method
+   * to estimate whether the process has enough virtual memory for their
+   * usage of WebAssembly, and decide whether to enable the trap handler
+   * via EnableWebAssemblyTrapHandler(), or to skip it and reduce the amount of
+   * virtual memory required to keep the application running.
+   */
+  static size_t GetWasmMemoryReservationSizeInBytes(WasmMemoryType type,
+                                                    size_t byte_capacity);
 
   /**
    * Activate trap-based bounds checking for WebAssembly.
@@ -271,6 +378,8 @@ class V8_EXPORT V8 {
     kPointerCompression = 1 << 0,
     k31BitSmis = 1 << 1,
     kSandbox = 1 << 2,
+    kTargetOsIsAndroid = 1 << 3,
+    kEnableChecks = 1 << 4,
   };
 
   /**

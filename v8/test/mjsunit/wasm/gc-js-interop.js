@@ -2,13 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Flags: --experimental-wasm-gc --allow-natives-syntax
-// Flags: --turbofan --no-always-turbofan
+// Flags: --turbofan --allow-natives-syntax
 
 d8.file.execute('test/mjsunit/wasm/gc-js-interop-helpers.js');
-
-// TODO(14034): Some operations can still trigger a deopt loop.
-const ignoreDeopts = true;
 
 let {struct, array} = CreateWasmObjects();
 for (const wasm_obj of [struct, array]) {
@@ -22,13 +18,10 @@ for (const wasm_obj of [struct, array]) {
   testThrowsRepeated(
       () => Object.prototype.__proto__.call(wasm_obj), TypeError);
   testThrowsRepeated(() => wasm_obj.__proto__ = null, TypeError);
+  // Wasm objects have no properties.
+  repeated(() => { for (let p in wasm_obj) { assertUnreachable(); } });
   testThrowsRepeated(() => {
-    for (let p in wasm_obj) {
-    }
-  }, TypeError);
-  testThrowsRepeated(() => {
-    for (let p of wasm_obj) {
-    }
+    for (let p of wasm_obj) {}
   }, TypeError);
   testThrowsRepeated(() => wasm_obj.toString(), TypeError);
   testThrowsRepeated(() => wasm_obj.valueOf(), TypeError);
@@ -58,9 +51,7 @@ for (const wasm_obj of [struct, array]) {
   repeated(() => assertSame(undefined, wasm_obj?.property));
 
   repeated(() => assertEquals(undefined, void wasm_obj));
-  // These deopt loops can also be triggered with JS only code, e.g.
-  // `2 == {valueOf: () => +2n}`.
-  testThrowsRepeated(() => 2 == wasm_obj, TypeError, ignoreDeopts);
+  testThrowsRepeated(() => 2 == wasm_obj, TypeError);
   repeated(() => assertFalse(2 === wasm_obj));
   repeated(() => assertFalse({} === wasm_obj));
   repeated(() => assertTrue(wasm_obj == wasm_obj));
@@ -69,11 +60,9 @@ for (const wasm_obj of [struct, array]) {
   repeated(() => assertFalse(wasm_obj !== wasm_obj));
   repeated(() => assertFalse(struct == array));
   repeated(() => assertTrue(struct != array));
-  // JS Symbols also have the issue of triggering deopt loops on relational
-  // comparisons, e.g. `2 < Symbol("test")`.
-  testThrowsRepeated(() => wasm_obj < wasm_obj, TypeError, ignoreDeopts);
-  testThrowsRepeated(() => wasm_obj <= wasm_obj, TypeError, ignoreDeopts);
-  testThrowsRepeated(() => wasm_obj >= wasm_obj, TypeError, ignoreDeopts);
+  testThrowsRepeated(() => wasm_obj < wasm_obj, TypeError);
+  testThrowsRepeated(() => wasm_obj <= wasm_obj, TypeError);
+  testThrowsRepeated(() => wasm_obj >= wasm_obj, TypeError);
 
   testThrowsRepeated(() => { let [] = wasm_obj; }, TypeError);
   testThrowsRepeated(() => { let [a, b] = wasm_obj; }, TypeError);
@@ -111,12 +100,14 @@ for (const wasm_obj of [struct, array]) {
   testThrowsRepeated(
       () => {class SubClass extends wasm_obj {}}, TypeError,
       'Class extends value [object Object] is not a constructor or null');
-  repeated(() => {
+  {
     class TestMemberInit {
       x = wasm_obj;
-    };
-    assertSame(wasm_obj, new TestMemberInit().x);
-  });
+    }
+    repeated(() => {
+      assertSame(wasm_obj, new TestMemberInit().x);
+    });
+  }
   repeated(() => assertSame(wasm_obj, eval('wasm_obj')));
 
   // Test functions of the global object.

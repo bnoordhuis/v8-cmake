@@ -114,7 +114,6 @@ class DebugWrapper {
 
   // Returns the resulting breakpoint id.
   setBreakPoint(func, opt_line, opt_column, opt_condition) {
-    assertTrue(%IsFunction(func));
     assertFalse(%FunctionIsAPIFunction(func));
 
     const scriptid = %FunctionGetScriptId(func);
@@ -144,8 +143,6 @@ class DebugWrapper {
   }
 
   showBreakPoints(f) {
-    if (!%IsFunction(f)) throw new Error("Not passed a Function");
-
     const source = %FunctionGetSourceCode(f);
     const offset = %FunctionGetScriptSourcePosition(f);
     const locations = %GetBreakLocations(f);
@@ -338,13 +335,15 @@ class DebugWrapper {
       }
     }
 
-    if (found == null) return { isUndefined : () => true };
+    if (found == null) return { isUndefined: () => true };
+    if (found.value === undefined) return { isUnavailable: () => true };
 
     const val = { value : () => found.value.value };
     // Not undefined in the sense that we did find a property, even though
     // the value can be 'undefined'.
     return { value : () => val,
-             isUndefined : () => false,
+             isUndefined: () => false,
+             isUnavailable: () => false,
            };
   }
 
@@ -384,6 +383,8 @@ class DebugWrapper {
              scopeIndex : () => scope_index,
              frameIndex : () => frame.callFrameId,
              scopeObject : () => this.execStateScopeObject(scope.object),
+             evaluate : (expr, throw_on_side_effect) =>
+                 this.evaluateOnCallFrame(frame, expr, throw_on_side_effect, scope_index),
              setVariableValue :
                 (name, value) => this.setVariableValue(frame, scope_index,
                                                        name, value),
@@ -449,13 +450,15 @@ class DebugWrapper {
 
     const local = scope_details[index];
 
+    if (local.value === undefined) return { isUnavailable: () => true };
+
     let localValue;
     switch (local.value.type) {
       case "undefined": localValue = undefined; break;
       default: localValue = local.value.value; break;
     }
 
-    return { value : () => localValue };
+    return { value : () => localValue, isUnavailable: () => false };
   }
 
   reconstructValue(objectId) {
@@ -561,13 +564,14 @@ class DebugWrapper {
            };
   }
 
-  evaluateOnCallFrame(frame, expr, throw_on_side_effect = false) {
+  evaluateOnCallFrame(frame, expr, throw_on_side_effect = false, scope_number = undefined) {
     const frameid = frame.callFrameId;
     const {msgid, msg} = this.createMessage(
         "Debugger.evaluateOnCallFrame",
         { callFrameId : frameid,
           expression : expr,
           throwOnSideEffect : throw_on_side_effect,
+          scopeNumber : scope_number,
         });
     this.sendMessage(msg);
     const reply = this.takeReplyChecked(msgid);
@@ -690,12 +694,16 @@ class DebugWrapper {
 
   dispatchMessage(message) {
     const method = message.method;
-    if (method == "Debugger.paused") {
-      this.handleDebuggerPaused(message);
-    } else if (method == "Debugger.scriptParsed") {
-      this.handleDebuggerScriptParsed(message);
-    } else if (method == "Debugger.scriptFailedToParse") {
-      this.handleDebuggerScriptFailedToParse(message);
+    try {
+      if (method == "Debugger.paused") {
+        this.handleDebuggerPaused(message);
+      } else if (method == "Debugger.scriptParsed") {
+        this.handleDebuggerScriptParsed(message);
+      } else if (method == "Debugger.scriptFailedToParse") {
+        this.handleDebuggerScriptFailedToParse(message);
+      }
+    } catch (e) {
+      print(e.stack);
     }
   }
 

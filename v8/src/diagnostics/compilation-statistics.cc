@@ -4,6 +4,7 @@
 
 #include "src/diagnostics/compilation-statistics.h"
 
+#include <iomanip>
 #include <ostream>
 #include <vector>
 
@@ -15,7 +16,7 @@ namespace internal {
 void CompilationStatistics::RecordPhaseStats(const char* phase_kind_name,
                                              const char* phase_name,
                                              const BasicStats& stats) {
-  base::MutexGuard guard(&record_mutex_);
+  base::MutexGuard guard(&access_mutex_);
 
   std::string phase_name_str(phase_name);
   auto it = phase_map_.find(phase_name_str);
@@ -28,7 +29,7 @@ void CompilationStatistics::RecordPhaseStats(const char* phase_kind_name,
 
 void CompilationStatistics::RecordPhaseKindStats(const char* phase_kind_name,
                                                  const BasicStats& stats) {
-  base::MutexGuard guard(&record_mutex_);
+  base::MutexGuard guard(&access_mutex_);
 
   std::string phase_kind_name_str(phase_kind_name);
   auto it = phase_kind_map_.find(phase_kind_name_str);
@@ -42,8 +43,9 @@ void CompilationStatistics::RecordPhaseKindStats(const char* phase_kind_name,
 }
 
 void CompilationStatistics::RecordTotalStats(const BasicStats& stats) {
-  base::MutexGuard guard(&record_mutex_);
+  base::MutexGuard guard(&access_mutex_);
   total_stats_.Accumulate(stats);
+  total_stats_.count_++;
 }
 
 void CompilationStatistics::BasicStats::Accumulate(const BasicStats& stats) {
@@ -82,6 +84,7 @@ std::string CompilationStatistics::BasicStats::AsJSON() {
 }
 
 static void WriteLine(std::ostream& os, bool machine_format, const char* name,
+                      const char* compiler,
                       const CompilationStatistics::BasicStats& stats,
                       const CompilationStatistics::BasicStats& total_stats) {
   const size_t kBufferSize = 128;
@@ -98,8 +101,8 @@ static void WriteLine(std::ostream& os, bool machine_format, const char* name,
 
   if (machine_format) {
     base::OS::SNPrintF(buffer, kBufferSize,
-                       "\"%s_time\"=%.3f\n\"%s_space\"=%zu", name, ms, name,
-                       stats.total_allocated_bytes_);
+                       "\"%s_%s_time\"=%.3f\n\"%s_%s_space\"=%zu", compiler,
+                       name, ms, compiler, name, stats.total_allocated_bytes_);
     os << buffer;
   } else {
     if (stats.output_graph_size_ != 0) {
@@ -121,7 +124,7 @@ static void WriteLine(std::ostream& os, bool machine_format, const char* name,
     if (!stats.function_name_.empty()) {
       os << "  " << stats.function_name_.c_str();
     }
-    os << std::endl;
+    os << '\n';
   }
 }
 
@@ -130,9 +133,9 @@ static void WriteFullLine(std::ostream& os) {
         "-----------------------------------------------------------\n";
 }
 
-static void WriteHeader(std::ostream& os) {
+static void WriteHeader(std::ostream& os, const char* compiler) {
   WriteFullLine(os);
-  os << "                Turbofan phase            Time (ms)   "
+  os << std::setw(24) << compiler << " phase            Time (ms)   "
      << "                   Space (bytes)            Growth MOps/s Function\n"
      << "                                                       "
      << "         Total         Max.     Abs. max.\n";
@@ -147,7 +150,8 @@ static void WritePhaseKindBreak(std::ostream& os) {
 std::ostream& operator<<(std::ostream& os, const AsPrintableStatistics& ps) {
   // phase_kind_map_ and phase_map_ don't get mutated, so store a bunch of
   // pointers into them.
-  const CompilationStatistics& s = ps.s;
+  CompilationStatistics& s = ps.s;
+  base::MutexGuard guard(&s.access_mutex_);
 
   using SortedPhaseKinds =
       std::vector<CompilationStatistics::PhaseKindMap::const_iterator>;
@@ -164,7 +168,7 @@ std::ostream& operator<<(std::ostream& os, const AsPrintableStatistics& ps) {
     sorted_phases[it->second.insert_order_] = it;
   }
 
-  if (!ps.machine_output) WriteHeader(os);
+  if (!ps.machine_output) WriteHeader(os, ps.compiler);
   for (const auto& phase_kind_it : sorted_phase_kinds) {
     const auto& phase_kind_name = phase_kind_it->first;
     if (!ps.machine_output) {
@@ -172,20 +176,25 @@ std::ostream& operator<<(std::ostream& os, const AsPrintableStatistics& ps) {
         const auto& phase_stats = phase_it->second;
         if (phase_stats.phase_kind_name_ != phase_kind_name) continue;
         const auto& phase_name = phase_it->first;
-        WriteLine(os, ps.machine_output, phase_name.c_str(), phase_stats,
-                  s.total_stats_);
+        WriteLine(os, ps.machine_output, phase_name.c_str(), ps.compiler,
+                  phase_stats, s.total_stats_);
       }
       WritePhaseKindBreak(os);
     }
     const auto& phase_kind_stats = phase_kind_it->second;
-    WriteLine(os, ps.machine_output, phase_kind_name.c_str(), phase_kind_stats,
-              s.total_stats_);
-    os << std::endl;
+    WriteLine(os, ps.machine_output, phase_kind_name.c_str(), ps.compiler,
+              phase_kind_stats, s.total_stats_);
+    os << '\n';
   }
 
   if (!ps.machine_output) WriteFullLine(os);
-  WriteLine(os, ps.machine_output, "totals", s.total_stats_, s.total_stats_);
+  WriteLine(os, ps.machine_output, "totals", ps.compiler, s.total_stats_,
+            s.total_stats_);
 
+  if (ps.machine_output) {
+    os << '\n';
+    os << "\"" << ps.compiler << "_totals_count\"=" << s.total_stats_.count_;
+  }
   return os;
 }
 

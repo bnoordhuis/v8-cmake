@@ -11,7 +11,9 @@
 #include "test/unittests/test-utils.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
-#if V8_CAN_CREATE_SHARED_HEAP_BOOL
+// In multi-cage mode we create one cage per isolate
+// and we don't share objects between cages.
+#if V8_CAN_CREATE_SHARED_HEAP_BOOL && !COMPRESS_POINTERS_IN_MULTIPLE_CAGES_BOOL
 
 namespace v8 {
 namespace internal {
@@ -91,9 +93,8 @@ TEST_F(GlobalSafepointTest, Interrupt) {
     // as of FeedbackVectors, and we wouldn't be testing the interrupt check.
     base::OS::Sleep(base::TimeDelta::FromMilliseconds(500));
     GlobalSafepointScope global_safepoint(i_main_isolate);
-    i_main_isolate->shared_space_isolate()
-        ->global_safepoint()
-        ->IterateSharedSpaceAndClientIsolates([](Isolate* client) {
+    i_main_isolate->global_safepoint()->IterateSharedSpaceAndClientIsolates(
+        [](Isolate* client) {
           client->stack_guard()->RequestTerminateExecution();
         });
   }

@@ -2,12 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#ifndef V8_OBJECTS_JS_PLURAL_RULES_H_
+#define V8_OBJECTS_JS_PLURAL_RULES_H_
+
 #ifndef V8_INTL_SUPPORT
 #error Internationalization is expected to be enabled.
 #endif  // V8_INTL_SUPPORT
-
-#ifndef V8_OBJECTS_JS_PLURAL_RULES_H_
-#define V8_OBJECTS_JS_PLURAL_RULES_H_
 
 #include <set>
 #include <string>
@@ -33,23 +33,22 @@ class LocalizedNumberRangeFormatter;
 namespace v8 {
 namespace internal {
 
-#include "torque-generated/src/objects/js-plural-rules-tq.inc"
-
-class JSPluralRules
-    : public TorqueGeneratedJSPluralRules<JSPluralRules, JSObject> {
+V8_OBJECT class JSPluralRules : public JSObject {
  public:
-  V8_WARN_UNUSED_RESULT static MaybeHandle<JSPluralRules> New(
-      Isolate* isolate, Handle<Map> map, Handle<Object> locales,
-      Handle<Object> options);
+  V8_WARN_UNUSED_RESULT static MaybeDirectHandle<JSPluralRules> New(
+      Isolate* isolate, DirectHandle<Map> map, DirectHandle<Object> locales,
+      DirectHandle<Object> options, const char* method_name);
 
-  static Handle<JSObject> ResolvedOptions(Isolate* isolate,
-                                          Handle<JSPluralRules> plural_rules);
+  static DirectHandle<JSObject> ResolvedOptions(
+      Isolate* isolate, DirectHandle<JSPluralRules> plural_rules);
 
-  V8_WARN_UNUSED_RESULT static MaybeHandle<String> ResolvePlural(
-      Isolate* isolate, Handle<JSPluralRules> plural_rules, double number);
+  V8_WARN_UNUSED_RESULT static MaybeDirectHandle<String> ResolvePlural(
+      Isolate* isolate, DirectHandle<JSPluralRules> plural_rules,
+      double number);
 
-  V8_WARN_UNUSED_RESULT static MaybeHandle<String> ResolvePluralRange(
-      Isolate* isolate, Handle<JSPluralRules> plural_rules, double x, double y);
+  V8_WARN_UNUSED_RESULT static MaybeDirectHandle<String> ResolvePluralRange(
+      Isolate* isolate, DirectHandle<JSPluralRules> plural_rules, double x,
+      double y);
 
   V8_EXPORT_PRIVATE static const std::set<std::string>& GetAvailableLocales();
 
@@ -59,22 +58,46 @@ class JSPluralRules
   inline void set_type(Type type);
   inline Type type() const;
 
-  Handle<String> TypeAsString() const;
+  Handle<String> TypeAsString(Isolate* isolate) const;
 
   DECL_PRINTER(JSPluralRules)
-
   // Bit positions in |flags|.
-  DEFINE_TORQUE_GENERATED_JS_PLURAL_RULES_FLAGS()
+  using TypeBit = base::BitField<JSPluralRules::Type, 0, 1, uint32_t>;
 
-  static_assert(Type::CARDINAL <= TypeBit::kMax);
-  static_assert(Type::ORDINAL <= TypeBit::kMax);
+  static_assert(TypeBit::is_valid(Type::CARDINAL));
+  static_assert(TypeBit::is_valid(Type::ORDINAL));
 
-  DECL_ACCESSORS(icu_plural_rules, Managed<icu::PluralRules>)
-  DECL_ACCESSORS(icu_number_formatter,
-                 Managed<icu::number::LocalizedNumberFormatter>)
+  inline Tagged<String> locale() const;
+  inline void set_locale(Tagged<String> value,
+                         WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
 
-  TQ_OBJECT_CONSTRUCTORS(JSPluralRules)
-};
+  inline int flags() const;
+  inline void set_flags(int value);
+
+  inline Tagged<CppGCManaged<icu::PluralRules>> icu_plural_rules() const;
+  inline void set_icu_plural_rules(
+      Tagged<CppGCManaged<icu::PluralRules>> value,
+      WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+
+  inline Tagged<CppGCManaged<icu::number::LocalizedNumberFormatter>>
+  icu_number_formatter() const;
+  inline void set_icu_number_formatter(
+      Tagged<CppGCManaged<icu::number::LocalizedNumberFormatter>> value,
+      WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+
+  DECL_VERIFIER(JSPluralRules)
+
+  static const int kHeaderSize;
+
+ public:
+  TaggedMember<String> locale_;
+  TaggedMember<Smi> flags_;
+  TaggedMember<CppGCManaged<icu::PluralRules>> icu_plural_rules_;
+  TaggedMember<CppGCManaged<icu::number::LocalizedNumberFormatter>>
+      icu_number_formatter_;
+} V8_OBJECT_END;
+
+inline constexpr int JSPluralRules::kHeaderSize = sizeof(JSPluralRules);
 
 }  // namespace internal
 }  // namespace v8

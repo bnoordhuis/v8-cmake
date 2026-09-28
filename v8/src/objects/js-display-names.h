@@ -2,16 +2,17 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#ifndef V8_OBJECTS_JS_DISPLAY_NAMES_H_
+#define V8_OBJECTS_JS_DISPLAY_NAMES_H_
+
 #ifndef V8_INTL_SUPPORT
 #error Internationalization is expected to be enabled.
 #endif  // V8_INTL_SUPPORT
 
-#ifndef V8_OBJECTS_JS_DISPLAY_NAMES_H_
-#define V8_OBJECTS_JS_DISPLAY_NAMES_H_
-
 #include <set>
 #include <string>
 
+#include "src/base/bit-field.h"
 #include "src/execution/isolate.h"
 #include "src/heap/factory.h"
 #include "src/objects/managed.h"
@@ -25,32 +26,32 @@ namespace internal {
 
 class DisplayNamesInternal;
 
-#include "torque-generated/src/objects/js-display-names-tq.inc"
-
-class JSDisplayNames
-    : public TorqueGeneratedJSDisplayNames<JSDisplayNames, JSObject> {
+V8_OBJECT class JSDisplayNames : public JSObject {
  public:
   // Creates display names object with properties derived from input
   // locales and options.
-  static MaybeHandle<JSDisplayNames> New(Isolate* isolate, Handle<Map> map,
-                                         Handle<Object> locales,
-                                         Handle<Object> options);
+  static MaybeDirectHandle<JSDisplayNames> New(Isolate* isolate,
+                                               DirectHandle<Map> map,
+                                               DirectHandle<Object> locales,
+                                               DirectHandle<Object> options,
+                                               const char* method_name);
 
-  static Handle<JSObject> ResolvedOptions(Isolate* isolate,
-                                          Handle<JSDisplayNames> format_holder);
+  static DirectHandle<JSObject> ResolvedOptions(
+      Isolate* isolate, DirectHandle<JSDisplayNames> format_holder);
 
-  static MaybeHandle<Object> Of(Isolate* isolate, Handle<JSDisplayNames> holder,
-                                Handle<Object> code_obj);
+  static MaybeDirectHandle<Object> Of(Isolate* isolate,
+                                      DirectHandle<JSDisplayNames> holder,
+                                      Handle<Object> code_obj);
 
   V8_EXPORT_PRIVATE static const std::set<std::string>& GetAvailableLocales();
 
-  Handle<String> StyleAsString() const;
-  Handle<String> FallbackAsString() const;
-  Handle<String> LanguageDisplayAsString() const;
+  Handle<String> StyleAsString(Isolate* isolate) const;
+  Handle<String> FallbackAsString(Isolate* isolate) const;
+  DirectHandle<String> LanguageDisplayAsString(Isolate* isolate) const;
 
   // Style: identifying the display names style used.
   //
-  // ecma402/#sec-properties-of-intl-displaynames-instances
+  // https://tc39.es/ecma402/#sec-properties-of-intl-displaynames-instances
   enum class Style {
     kLong,   // Everything spelled out.
     kShort,  // Abbreviations used when possible.
@@ -61,7 +62,7 @@ class JSDisplayNames
 
   // Type: identifying the fallback of the display names.
   //
-  // ecma402/#sec-properties-of-intl-displaynames-instances
+  // https://tc39.es/ecma402/#sec-properties-of-intl-displaynames-instances
   enum class Fallback {
     kCode,
     kNone,
@@ -77,22 +78,37 @@ class JSDisplayNames
   inline LanguageDisplay language_display() const;
 
   // Bit positions in |flags|.
-  DEFINE_TORQUE_GENERATED_JS_DISPLAY_NAMES_FLAGS()
+  using StyleBits = base::BitField<JSDisplayNames::Style, 0, 2, uint32_t>;
+  using FallbackBit = StyleBits::Next<JSDisplayNames::Fallback, 1>;
+  using LanguageDisplayBit =
+      FallbackBit::Next<JSDisplayNames::LanguageDisplay, 1>;
 
-  static_assert(Style::kLong <= StyleBits::kMax);
-  static_assert(Style::kShort <= StyleBits::kMax);
-  static_assert(Style::kNarrow <= StyleBits::kMax);
-  static_assert(Fallback::kCode <= FallbackBit::kMax);
-  static_assert(Fallback::kNone <= FallbackBit::kMax);
-  static_assert(LanguageDisplay::kDialect <= LanguageDisplayBit::kMax);
-  static_assert(LanguageDisplay::kStandard <= LanguageDisplayBit::kMax);
+  static_assert(StyleBits::is_valid(Style::kLong));
+  static_assert(StyleBits::is_valid(Style::kShort));
+  static_assert(StyleBits::is_valid(Style::kNarrow));
+  static_assert(FallbackBit::is_valid(Fallback::kCode));
+  static_assert(FallbackBit::is_valid(Fallback::kNone));
+  static_assert(LanguageDisplayBit::is_valid(LanguageDisplay::kDialect));
+  static_assert(LanguageDisplayBit::is_valid(LanguageDisplay::kStandard));
 
-  DECL_ACCESSORS(internal, Managed<DisplayNamesInternal>)
+  inline Tagged<CppGCManaged<DisplayNamesInternal>> internal() const;
+  inline void set_internal(Tagged<CppGCManaged<DisplayNamesInternal>> value,
+                           WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+
+  inline int flags() const;
+  inline void set_flags(int value);
 
   DECL_PRINTER(JSDisplayNames)
+  DECL_VERIFIER(JSDisplayNames)
 
-  TQ_OBJECT_CONSTRUCTORS(JSDisplayNames)
-};
+  static const int kHeaderSize;
+
+ public:
+  TaggedMember<CppGCManaged<DisplayNamesInternal>> internal_;
+  TaggedMember<Smi> flags_;
+} V8_OBJECT_END;
+
+inline constexpr int JSDisplayNames::kHeaderSize = sizeof(JSDisplayNames);
 
 }  // namespace internal
 }  // namespace v8

@@ -5,10 +5,10 @@
 #ifndef V8_OBJECTS_ARGUMENTS_INL_H_
 #define V8_OBJECTS_ARGUMENTS_INL_H_
 
-#include "src/execution/isolate-inl.h"
 #include "src/objects/arguments.h"
+// Include the non-inl header before the rest of the headers.
+
 #include "src/objects/contexts-inl.h"
-#include "src/objects/fixed-array-inl.h"
 #include "src/objects/objects-inl.h"
 
 // Has to be the last include (doesn't have include guards):
@@ -17,10 +17,47 @@
 namespace v8 {
 namespace internal {
 
-#include "torque-generated/src/objects/arguments-tq-inl.inc"
+int AliasedArgumentsEntry::aliased_context_slot() const {
+  return aliased_context_slot_.load().value();
+}
+void AliasedArgumentsEntry::set_aliased_context_slot(int value) {
+  aliased_context_slot_.store(this, Smi::FromInt(value));
+}
 
-TQ_OBJECT_CONSTRUCTORS_IMPL(JSArgumentsObject)
-TQ_OBJECT_CONSTRUCTORS_IMPL(AliasedArgumentsEntry)
+Tagged<Context> SloppyArgumentsElements::context() const {
+  return context_.load();
+}
+void SloppyArgumentsElements::set_context(Tagged<Context> value,
+                                          WriteBarrierMode mode) {
+  context_.store(this, value, mode);
+}
+Tagged<UnionOf<FixedArray, NumberDictionary>>
+SloppyArgumentsElements::arguments() const {
+  return arguments_.load();
+}
+void SloppyArgumentsElements::set_arguments(
+    Tagged<UnionOf<FixedArray, NumberDictionary>> value,
+    WriteBarrierMode mode) {
+  arguments_.store(this, value, mode);
+}
+
+Tagged<UnionOf<Smi, Hole>> SloppyArgumentsElements::mapped_entries(
+    uint32_t index, RelaxedLoadTag tag) const {
+  DCHECK_LT(index, ulength().value());
+  return objects()[index].Relaxed_Load();
+}
+
+void SloppyArgumentsElements::set_mapped_entries(
+    uint32_t index, Tagged<UnionOf<Smi, Hole>> value) {
+  DCHECK_LT(index, ulength().value());
+  objects()[index].store(this, value);
+}
+
+void SloppyArgumentsElements::set_mapped_entries(
+    uint32_t index, Tagged<UnionOf<Smi, Hole>> value, RelaxedStoreTag tag) {
+  DCHECK_LT(index, ulength().value());
+  objects()[index].Relaxed_Store(this, value);
+}
 
 }  // namespace internal
 }  // namespace v8

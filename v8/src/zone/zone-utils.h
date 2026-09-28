@@ -19,8 +19,8 @@ base::Vector<T> CloneVector(Zone* zone, base::Vector<const T> other) {
   int length = other.length();
   if (length == 0) return base::Vector<T>();
 
-  T* data = zone->NewArray<T>(length);
-  if (std::is_trivially_copyable<T>::value) {
+  T* data = zone->AllocateArray<T>(length);
+  if (std::is_trivially_copyable_v<T>) {
     MemCopy(data, other.data(), length * sizeof(T));
   } else {
     std::copy(other.begin(), other.end(), data);

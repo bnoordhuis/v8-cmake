@@ -4,6 +4,7 @@
 
 #include 'src/objects/property-descriptor-object.h'
 
+@cppScope('PropertyDescriptorObject')
 bitfield struct PropertyDescriptorObjectFlags extends uint31 {
   is_enumerable: bool: 1 bit;
   has_enumerable: bool: 1 bit;
@@ -16,6 +17,7 @@ bitfield struct PropertyDescriptorObjectFlags extends uint31 {
   has_set: bool: 1 bit;
 }
 
+@cppObjectLayoutDefinition
 extern class PropertyDescriptorObject extends Struct {
   macro IsDataDescriptor(): bool {
     return this.flags.has_value || this.flags.has_writable;
@@ -46,8 +48,8 @@ extern class PropertyDescriptorObject extends Struct {
 
   flags: SmiTagged<PropertyDescriptorObjectFlags>;
   value: JSAny|TheHole;
-  get: JSAny|TheHole;
-  set: JSAny|TheHole;
+  get: JSAny|FunctionTemplateInfo|TheHole;
+  set: JSAny|FunctionTemplateInfo|TheHole;
 }
 
 macro IsCompatiblePropertyDescriptor(

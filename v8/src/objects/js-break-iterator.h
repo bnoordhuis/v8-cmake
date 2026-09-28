@@ -2,12 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#ifndef V8_OBJECTS_JS_BREAK_ITERATOR_H_
+#define V8_OBJECTS_JS_BREAK_ITERATOR_H_
+
 #ifndef V8_INTL_SUPPORT
 #error Internationalization is expected to be enabled.
 #endif  // V8_INTL_SUPPORT
-
-#ifndef V8_OBJECTS_JS_BREAK_ITERATOR_H_
-#define V8_OBJECTS_JS_BREAK_ITERATOR_H_
 
 #include <set>
 #include <string>
@@ -26,40 +26,79 @@ class BreakIterator;
 namespace v8 {
 namespace internal {
 
-#include "torque-generated/src/objects/js-break-iterator-tq.inc"
-
-class JSV8BreakIterator
-    : public TorqueGeneratedJSV8BreakIterator<JSV8BreakIterator, JSObject> {
+V8_OBJECT class JSV8BreakIterator : public JSObject {
  public:
-  V8_WARN_UNUSED_RESULT static MaybeHandle<JSV8BreakIterator> New(
-      Isolate* isolate, Handle<Map> map, Handle<Object> input_locales,
-      Handle<Object> input_options, const char* service);
+  V8_WARN_UNUSED_RESULT static MaybeDirectHandle<JSV8BreakIterator> New(
+      Isolate* isolate, DirectHandle<Map> map,
+      DirectHandle<Object> input_locales, DirectHandle<Object> input_options,
+      const char* service);
 
-  static Handle<JSObject> ResolvedOptions(
-      Isolate* isolate, Handle<JSV8BreakIterator> break_iterator);
+  static DirectHandle<JSObject> ResolvedOptions(
+      Isolate* isolate, DirectHandle<JSV8BreakIterator> break_iterator);
 
   V8_EXPORT_PRIVATE static const std::set<std::string>& GetAvailableLocales();
 
   static void AdoptText(Isolate* isolate,
-                        Handle<JSV8BreakIterator> break_iterator,
-                        Handle<String> text);
+                        DirectHandle<JSV8BreakIterator> break_iterator,
+                        DirectHandle<String> text);
 
-  static Handle<Object> Current(Isolate* isolate,
-                                Handle<JSV8BreakIterator> break_iterator);
-  static Handle<Object> First(Isolate* isolate,
-                              Handle<JSV8BreakIterator> break_iterator);
-  static Handle<Object> Next(Isolate* isolate,
-                             Handle<JSV8BreakIterator> break_iterator);
-  static String BreakType(Isolate* isolate,
-                          Handle<JSV8BreakIterator> break_iterator);
+  static DirectHandle<Object> Current(
+      Isolate* isolate, DirectHandle<JSV8BreakIterator> break_iterator);
+  static DirectHandle<Object> First(
+      Isolate* isolate, DirectHandle<JSV8BreakIterator> break_iterator);
+  static DirectHandle<Object> Next(
+      Isolate* isolate, DirectHandle<JSV8BreakIterator> break_iterator);
+  static Tagged<String> BreakType(
+      Isolate* isolate, DirectHandle<JSV8BreakIterator> break_iterator);
+
+  inline Tagged<String> locale() const;
+  inline void set_locale(Tagged<String> value,
+                         WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+
+  inline Tagged<CppGCManaged<IcuBreakIteratorWithText>> icu_iterator_with_text()
+      const;
+  inline void set_icu_iterator_with_text(
+      Tagged<CppGCManaged<IcuBreakIteratorWithText>> value,
+      WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+
+  inline Tagged<UnionOf<Undefined, JSFunction>> bound_adopt_text() const;
+  inline void set_bound_adopt_text(
+      Tagged<UnionOf<Undefined, JSFunction>> value,
+      WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+
+  inline Tagged<UnionOf<Undefined, JSFunction>> bound_first() const;
+  inline void set_bound_first(Tagged<UnionOf<Undefined, JSFunction>> value,
+                              WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+
+  inline Tagged<UnionOf<Undefined, JSFunction>> bound_next() const;
+  inline void set_bound_next(Tagged<UnionOf<Undefined, JSFunction>> value,
+                             WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+
+  inline Tagged<UnionOf<Undefined, JSFunction>> bound_current() const;
+  inline void set_bound_current(Tagged<UnionOf<Undefined, JSFunction>> value,
+                                WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+
+  inline Tagged<UnionOf<Undefined, JSFunction>> bound_break_type() const;
+  inline void set_bound_break_type(
+      Tagged<UnionOf<Undefined, JSFunction>> value,
+      WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
 
   DECL_PRINTER(JSV8BreakIterator)
+  DECL_VERIFIER(JSV8BreakIterator)
 
-  DECL_ACCESSORS(break_iterator, Managed<icu::BreakIterator>)
-  DECL_ACCESSORS(unicode_string, Managed<icu::UnicodeString>)
+  static const int kHeaderSize;
 
-  TQ_OBJECT_CONSTRUCTORS(JSV8BreakIterator)
-};
+ public:
+  TaggedMember<String> locale_;
+  TaggedMember<CppGCManaged<IcuBreakIteratorWithText>> icu_iterator_with_text_;
+  TaggedMember<UnionOf<Undefined, JSFunction>> bound_adopt_text_;
+  TaggedMember<UnionOf<Undefined, JSFunction>> bound_first_;
+  TaggedMember<UnionOf<Undefined, JSFunction>> bound_next_;
+  TaggedMember<UnionOf<Undefined, JSFunction>> bound_current_;
+  TaggedMember<UnionOf<Undefined, JSFunction>> bound_break_type_;
+} V8_OBJECT_END;
+
+inline constexpr int JSV8BreakIterator::kHeaderSize = sizeof(JSV8BreakIterator);
 
 }  // namespace internal
 }  // namespace v8

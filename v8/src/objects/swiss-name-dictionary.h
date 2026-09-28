@@ -6,11 +6,11 @@
 #define V8_OBJECTS_SWISS_NAME_DICTIONARY_H_
 
 #include <cstdint>
+#include <optional>
 
 #include "src/base/export-template.h"
-#include "src/base/optional.h"
 #include "src/common/globals.h"
-#include "src/objects/fixed-array.h"
+#include "src/objects/fixed-primitive-array.h"
 #include "src/objects/internal-index.h"
 #include "src/objects/js-objects.h"
 #include "src/objects/swiss-hash-table-helpers.h"
@@ -19,8 +19,7 @@
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
 
-namespace v8 {
-namespace internal {
+namespace v8::internal {
 
 // A property backing store based on Swiss Tables/Abseil's flat_hash_map. The
 // implementation is heavily based on Abseil's raw_hash_set.h.
@@ -69,24 +68,33 @@ namespace internal {
 //       contains the number of the bucket representing the i-th entry of the
 //       table in enumeration order. Entries may contain unitialized data if the
 //       corresponding bucket  hasn't been used before.
-class V8_EXPORT_PRIVATE SwissNameDictionary : public HeapObject {
+V8_OBJECT class V8_EXPORT_PRIVATE SwissNameDictionary : public HeapObject {
  public:
   using Group = swiss_table::Group;
 
+  template <typename IsolateT, template <typename> typename HandleType>
+    requires(std::is_convertible_v<HandleType<SwissNameDictionary>,
+                                   DirectHandle<SwissNameDictionary>>)
+  inline static HandleType<SwissNameDictionary> Add(
+      IsolateT* isolate, HandleType<SwissNameDictionary> table,
+      DirectHandle<Name> key, DirectHandle<Object> value,
+      PropertyDetails details, InternalIndex* entry_out = nullptr);
+
+  template <template <typename> typename HandleType>
+    requires(std::is_convertible_v<HandleType<SwissNameDictionary>,
+                                   DirectHandle<SwissNameDictionary>>)
+  static HandleType<SwissNameDictionary> Shrink(
+      Isolate* isolate, HandleType<SwissNameDictionary> table);
+
+  template <template <typename> typename HandleType>
+    requires(std::is_convertible_v<HandleType<SwissNameDictionary>,
+                                   DirectHandle<SwissNameDictionary>>)
+  static HandleType<SwissNameDictionary> DeleteEntry(
+      Isolate* isolate, HandleType<SwissNameDictionary> table,
+      InternalIndex entry);
+
   template <typename IsolateT>
-  inline static Handle<SwissNameDictionary> Add(
-      IsolateT* isolate, Handle<SwissNameDictionary> table, Handle<Name> key,
-      Handle<Object> value, PropertyDetails details,
-      InternalIndex* entry_out = nullptr);
-
-  static Handle<SwissNameDictionary> Shrink(Isolate* isolate,
-                                            Handle<SwissNameDictionary> table);
-
-  static Handle<SwissNameDictionary> DeleteEntry(
-      Isolate* isolate, Handle<SwissNameDictionary> table, InternalIndex entry);
-
-  template <typename IsolateT>
-  inline InternalIndex FindEntry(IsolateT* isolate, Object key);
+  inline InternalIndex FindEntry(IsolateT* isolate, Tagged<Object> key);
 
   // This is to make the interfaces of NameDictionary::FindEntry and
   // OrderedNameDictionary::FindEntry compatible.
@@ -94,19 +102,20 @@ class V8_EXPORT_PRIVATE SwissNameDictionary : public HeapObject {
   // for FindEntry keys due to its Key typedef, but that's also used
   // for adding, where we do need handles.
   template <typename IsolateT>
-  inline InternalIndex FindEntry(IsolateT* isolate, Handle<Object> key);
+  inline InternalIndex FindEntry(IsolateT* isolate, DirectHandle<Object> key);
 
-  static inline bool IsKey(ReadOnlyRoots roots, Object key_candidate);
-  inline bool ToKey(ReadOnlyRoots roots, InternalIndex entry, Object* out_key);
+  static inline bool IsKey(ReadOnlyRoots roots, Tagged<Object> key_candidate);
+  inline bool ToKey(ReadOnlyRoots roots, InternalIndex entry,
+                    Tagged<Object>* out_key);
 
-  inline Object KeyAt(InternalIndex entry);
-  inline Name NameAt(InternalIndex entry);
-  inline Object ValueAt(InternalIndex entry);
+  inline Tagged<Object> KeyAt(InternalIndex entry);
+  inline Tagged<Name> NameAt(InternalIndex entry);
+  inline Tagged<Object> ValueAt(InternalIndex entry);
   // Returns {} if we would be reading out of the bounds of the object.
-  inline base::Optional<Object> TryValueAt(InternalIndex entry);
+  inline std::optional<Tagged<Object>> TryValueAt(InternalIndex entry);
   inline PropertyDetails DetailsAt(InternalIndex entry);
 
-  inline void ValueAtPut(InternalIndex entry, Object value);
+  inline void ValueAtPut(InternalIndex entry, Tagged<Object> value);
   inline void DetailsAtPut(InternalIndex entry, PropertyDetails value);
 
   inline int NumberOfElements();
@@ -121,33 +130,36 @@ class V8_EXPORT_PRIVATE SwissNameDictionary : public HeapObject {
   inline bool may_have_interesting_properties() { UNREACHABLE(); }
   inline void set_may_have_interesting_properties(bool value) { UNREACHABLE(); }
 
-  static Handle<SwissNameDictionary> ShallowCopy(
-      Isolate* isolate, Handle<SwissNameDictionary> table);
+  static DirectHandle<SwissNameDictionary> ShallowCopy(
+      Isolate* isolate, DirectHandle<SwissNameDictionary> table);
 
   // Strict in the sense that it checks that all used/initialized memory in
   // |this| and |other| is the same. The only exceptions are the meta table
   // pointer (which must differ  between the two tables) and PropertyDetails of
   // deleted entries (which reside in initialized memory, but are not compared).
-  bool EqualsForTesting(SwissNameDictionary other);
+  bool EqualsForTesting(Tagged<SwissNameDictionary> other);
 
   template <typename IsolateT>
-  void Initialize(IsolateT* isolate, ByteArray meta_table, int capacity);
+  void Initialize(IsolateT* isolate, Tagged<ByteArray> meta_table,
+                  int capacity);
 
-  template <typename IsolateT>
-  static Handle<SwissNameDictionary> Rehash(IsolateT* isolate,
-                                            Handle<SwissNameDictionary> table,
-                                            int new_capacity);
+  template <typename IsolateT, template <typename> typename HandleType>
+    requires(std::is_convertible_v<HandleType<SwissNameDictionary>,
+                                   DirectHandle<SwissNameDictionary>>)
+  static HandleType<SwissNameDictionary> Rehash(
+      IsolateT* isolate, HandleType<SwissNameDictionary> table,
+      int new_capacity);
   template <typename IsolateT>
   void Rehash(IsolateT* isolate);
 
   inline void SetHash(int hash);
   inline int Hash();
 
-  Object SlowReverseLookup(Isolate* isolate, Object value);
+  Tagged<Object> SlowReverseLookup(Isolate* isolate, Tagged<Object> value);
 
   class IndexIterator {
    public:
-    inline IndexIterator(Handle<SwissNameDictionary> dict, int start);
+    inline IndexIterator(DirectHandle<SwissNameDictionary> dict, int start);
 
     inline IndexIterator& operator++();
 
@@ -162,12 +174,12 @@ class V8_EXPORT_PRIVATE SwissNameDictionary : public HeapObject {
 
     // This may be an empty handle, but only if the capacity of the table is
     // 0 and pointer compression is disabled.
-    Handle<SwissNameDictionary> dict_;
+    DirectHandle<SwissNameDictionary> dict_;
   };
 
   class IndexIterable {
    public:
-    inline explicit IndexIterable(Handle<SwissNameDictionary> dict);
+    inline explicit IndexIterable(DirectHandle<SwissNameDictionary> dict);
 
     inline IndexIterator begin();
     inline IndexIterator end();
@@ -175,7 +187,7 @@ class V8_EXPORT_PRIVATE SwissNameDictionary : public HeapObject {
    private:
     // This may be an empty handle, but only if the capacity of the table is
     // 0 and pointer compression is disabled.
-    Handle<SwissNameDictionary> dict_;
+    DirectHandle<SwissNameDictionary> dict_;
   };
 
   inline IndexIterable IterateEntriesOrdered();
@@ -263,16 +275,16 @@ class V8_EXPORT_PRIVATE SwissNameDictionary : public HeapObject {
 #endif
   DECL_VERIFIER(SwissNameDictionary)
   DECL_PRINTER(SwissNameDictionary)
-  DECL_CAST(SwissNameDictionary)
-  OBJECT_CONSTRUCTORS(SwissNameDictionary, HeapObject);
 
  private:
   using ctrl_t = swiss_table::ctrl_t;
   using Ctrl = swiss_table::Ctrl;
 
-  template <typename IsolateT>
-  inline static Handle<SwissNameDictionary> EnsureGrowable(
-      IsolateT* isolate, Handle<SwissNameDictionary> table);
+  template <typename IsolateT, template <typename> typename HandleType>
+    requires(std::is_convertible_v<HandleType<SwissNameDictionary>,
+                                   DirectHandle<SwissNameDictionary>>)
+  inline static HandleType<SwissNameDictionary> EnsureGrowable(
+      IsolateT* isolate, HandleType<SwissNameDictionary> table);
 
   // Returns table of byte-encoded PropertyDetails (without enumeration index
   // stored in PropertyDetails).
@@ -280,23 +292,24 @@ class V8_EXPORT_PRIVATE SwissNameDictionary : public HeapObject {
 
   // Sets key and value to the hole for the given entry.
   inline void ClearDataTableEntry(Isolate* isolate, int entry);
-  inline void SetKey(int entry, Object key);
+  inline void SetKey(int entry, Tagged<Object> key);
 
   inline void DetailsAtPut(int entry, PropertyDetails value);
-  inline void ValueAtPut(int entry, Object value);
+  inline void ValueAtPut(int entry, Tagged<Object> value);
 
   inline PropertyDetails DetailsAt(int entry);
-  inline Object ValueAtRaw(int entry);
-  inline Object KeyAt(int entry);
+  inline Tagged<Object> ValueAtRaw(int entry);
+  inline Tagged<Object> KeyAt(int entry);
 
-  inline bool ToKey(ReadOnlyRoots roots, int entry, Object* out_key);
+  inline bool ToKey(ReadOnlyRoots roots, int entry, Tagged<Object>* out_key);
 
   inline int FindFirstEmpty(uint32_t hash);
   // Adds |key| ->  (|value|, |details|) as a new mapping to the table, which
   // must have sufficient room. Returns the entry (= bucket) used by the new
   // mapping. Does not update the number of present entries or the
   // enumeration table.
-  inline int AddInternal(Name key, Object value, PropertyDetails details);
+  inline int AddInternal(Tagged<Name> key, Tagged<Object> value,
+                         PropertyDetails details);
 
   // Use |set_ctrl| for modifications whenever possible, since that function
   // correctly maintains the copy of the first group at the end of the ctrl
@@ -313,12 +326,10 @@ class V8_EXPORT_PRIVATE SwissNameDictionary : public HeapObject {
   inline void SetCtrl(int entry, ctrl_t h);
   inline ctrl_t GetCtrl(int entry);
 
-  inline Object LoadFromDataTable(int entry, int data_offset);
-  inline Object LoadFromDataTable(PtrComprCageBase cage_base, int entry,
-                                  int data_offset);
-  inline void StoreToDataTable(int entry, int data_offset, Object data);
+  inline Tagged<Object> LoadFromDataTable(int entry, int data_offset);
+  inline void StoreToDataTable(int entry, int data_offset, Tagged<Object> data);
   inline void StoreToDataTableNoBarrier(int entry, int data_offset,
-                                        Object data);
+                                        Tagged<Object> data);
 
   inline void SetCapacity(int capacity);
   inline void SetNumberOfElements(int elements);
@@ -331,18 +342,30 @@ class V8_EXPORT_PRIVATE SwissNameDictionary : public HeapObject {
   // given bucket of the data table.
   inline void SetEntryForEnumerationIndex(int enumeration_index, int entry);
 
-  DECL_ACCESSORS(meta_table, ByteArray)
+  DECL_ACCESSORS(meta_table, Tagged<ByteArray>)
   inline void SetMetaTableField(int field_index, int value);
   inline int GetMetaTableField(int field_index);
 
   template <typename T>
-  inline static void SetMetaTableField(ByteArray meta_table, int field_index,
-                                       int value);
+  inline static void SetMetaTableField(Tagged<ByteArray> meta_table,
+                                       int field_index, int value);
   template <typename T>
-  inline static int GetMetaTableField(ByteArray meta_table, int field_index);
-};
+  inline static int GetMetaTableField(Tagged<ByteArray> meta_table,
+                                      int field_index);
 
-}  // namespace internal
-}  // namespace v8
+ public:
+  uint32_t hash_;
+  int32_t capacity_;
+  TaggedMember<ByteArray> meta_table_;
+  // The data_table is followed by ctrl_table and property_details_table.
+  // Their start offsets are computed by CtrlTableStartOffset(capacity) /
+  // PropertyDetailsTableStartOffset(capacity) since FLEXIBLE_ARRAY_MEMBER
+  // can only model a single trailing variable-length section.
+  FLEXIBLE_ARRAY_MEMBER(TaggedMember<Object>, data_table);
+} V8_OBJECT_END;
+
+}  // namespace v8::internal
+
+#include "src/objects/object-macros-undef.h"
 
 #endif  // V8_OBJECTS_SWISS_NAME_DICTIONARY_H_

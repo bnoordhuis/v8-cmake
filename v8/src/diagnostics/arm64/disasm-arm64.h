@@ -50,6 +50,7 @@ class V8_EXPORT_PRIVATE DisassemblingDecoder : public DecoderVisitor {
   int SubstituteLSRegOffsetField(Instruction* instr, const char* format);
   int SubstitutePrefetchField(Instruction* instr, const char* format);
   int SubstituteBarrierField(Instruction* instr, const char* format);
+  int SubstituteIntField(const Instruction* instr, const char* format);
 
   bool RdIsZROrSP(Instruction* instr) const {
     return (instr->Rd() == kZeroRegCode);
@@ -71,6 +72,7 @@ class V8_EXPORT_PRIVATE DisassemblingDecoder : public DecoderVisitor {
 
   void ResetOutput();
   void AppendToOutput(const char* string, ...);
+  void DisassembleNEONPolynomialMul(Instruction* instr);
 
   char* buffer_;
   uint32_t buffer_pos_;

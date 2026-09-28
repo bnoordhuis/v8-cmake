@@ -5,11 +5,6 @@
 #ifndef V8_BASELINE_BASELINE_ASSEMBLER_H_
 #define V8_BASELINE_BASELINE_ASSEMBLER_H_
 
-// TODO(v8:11421): Remove #if once baseline compiler is ported to other
-// architectures.
-#include "src/flags/flags.h"
-#if ENABLE_SPARKPLUG
-
 #include "src/codegen/macro-assembler.h"
 #include "src/interpreter/bytecode-register.h"
 #include "src/objects/tagged-index.h"
@@ -30,14 +25,18 @@ class BaselineAssembler {
   inline MemOperand ContextOperand();
   inline MemOperand FunctionOperand();
   inline MemOperand FeedbackVectorOperand();
+  inline MemOperand FeedbackCellOperand();
 
-  inline void GetCode(Isolate* isolate, CodeDesc* desc);
+  inline void GetCode(LocalIsolate* isolate, CodeDesc* desc);
   inline int pc_offset() const;
   inline void CodeEntry() const;
   inline void ExceptionHandler() const;
   V8_INLINE void RecordComment(const char* string);
   inline void Trap();
   inline void DebugBreak();
+#ifdef V8_ENABLE_SANDBOX_HARDWARE_SUPPORT
+  inline void AssertInSandboxedExecutionMode();
+#endif  // V8_ENABLE_SANDBOX_HARDWARE_SUPPORT
 
   template <typename Field>
   inline void DecodeField(Register reg);
@@ -83,8 +82,8 @@ class BaselineAssembler {
                             Label* target,
                             Label::Distance distance = Label::kFar);
   inline Condition CheckSmi(Register value);
-  inline void JumpIfSmi(Condition cc, Register value, Smi smi, Label* target,
-                        Label::Distance distance = Label::kFar);
+  inline void JumpIfSmi(Condition cc, Register value, Tagged<Smi> smi,
+                        Label* target, Label::Distance distance = Label::kFar);
   inline void JumpIfSmi(Condition cc, Register lhs, Register rhs, Label* target,
                         Label::Distance distance = Label::kFar);
   inline void JumpIfImmediate(Condition cc, Register left, int right,
@@ -96,6 +95,14 @@ class BaselineAssembler {
   inline void JumpIfTagged(Condition cc, MemOperand operand, Register value,
                            Label* target,
                            Label::Distance distance = Label::kFar);
+#ifdef V8_STATIC_ROOTS
+  // Jumps to the true or false target if the value is a static root known to by
+  // truthy/falsy, fallthrough otherwise.
+  inline void JumpIfStaticRootToBoolean(Register value, Label* true_target,
+                                        Label::Distance true_distance,
+                                        Label* false_target,
+                                        Label::Distance false_distance);
+#endif
   inline void JumpIfByte(Condition cc, Register value, int32_t byte,
                          Label* target, Label::Distance distance = Label::kFar);
 
@@ -105,8 +112,8 @@ class BaselineAssembler {
 
   inline void Move(Register output, Register source);
   inline void Move(Register output, MemOperand operand);
-  inline void Move(Register output, Smi value);
-  inline void Move(Register output, TaggedIndex value);
+  inline void Move(Register output, Tagged<Smi> value);
+  inline void Move(Register output, Tagged<TaggedIndex> value);
   inline void Move(Register output, interpreter::Register source);
   inline void Move(interpreter::Register output, Register source);
   inline void Move(Register output, RootIndex source);
@@ -166,7 +173,8 @@ class BaselineAssembler {
   inline void LoadWord16FieldZeroExtend(Register output, Register source,
                                         int offset);
   inline void LoadWord8Field(Register output, Register source, int offset);
-  inline void StoreTaggedSignedField(Register target, int offset, Smi value);
+  inline void StoreTaggedSignedField(Register target, int offset,
+                                     Tagged<Smi> value);
   inline void StoreTaggedFieldWithWriteBarrier(Register target, int offset,
                                                Register value);
   inline void StoreTaggedFieldNoWriteBarrier(Register target, int offset,
@@ -205,19 +213,46 @@ class BaselineAssembler {
   inline void AddToInterruptBudgetAndJumpIfNotExceeded(
       Register weight, Label* skip_interrupt_label);
 
-  inline void LdaContextSlot(Register context, uint32_t index, uint32_t depth);
-  inline void StaContextSlot(Register context, Register value, uint32_t index,
-                             uint32_t depth);
+  // By default, the output register may be compressed on 64-bit architectures
+  // that support pointer compression.
+  enum class CompressionMode {
+    kDefault,
+    kForceDecompression,
+  };
+  inline void LdaContextSlotNoCell(
+      Register context, uint32_t index, uint32_t depth,
+      CompressionMode compression_mode = CompressionMode::kDefault,
+      Register output = kInterpreterAccumulatorRegister);
+  inline void StaContextSlotNoCell(Register context, Register value,
+                                   uint32_t index, uint32_t depth);
   inline void LdaModuleVariable(Register context, int cell_index,
                                 uint32_t depth);
   inline void StaModuleVariable(Register context, Register value,
                                 int cell_index, uint32_t depth);
 
-  inline void AddSmi(Register lhs, Smi rhs);
+  inline void IncrementSmi(MemOperand lhs);
   inline void SmiUntag(Register value);
   inline void SmiUntag(Register output, Register value);
 
   inline void Word32And(Register output, Register lhs, int rhs);
+
+#ifdef V8_ENABLE_SPARKPLUG_PLUS
+  // Jumps to |target| unless both |lhs| and |rhs| are Smis, using a single
+  // merged tag test.
+  inline void JumpIfNotBothSmi(Register lhs, Register rhs, Label* target,
+                               Label::Distance distance = Label::kFar);
+
+  // Compares two tagged values without asserting that they are Smis.
+  inline void JumpIfTagged(Condition cc, Register lhs, Register rhs,
+                           Label* target,
+                           Label::Distance distance = Label::kFar);
+
+  // value := value + Smi(constant). Jumps to |overflow| when the result is not
+  // a valid Smi.
+  inline void SmiAddConstantAndJumpIfOverflow(
+      Register value, int constant, Label* overflow,
+      Label::Distance distance = Label::kFar);
+#endif  // V8_ENABLE_SPARKPLUG_PLUS
 
   inline void Switch(Register reg, int case_value_base, Label** labels,
                      int num_labels);
@@ -231,6 +266,15 @@ class BaselineAssembler {
   inline void LoadContext(Register output);
   inline void StoreContext(Register context);
 
+  inline void LoadFeedbackCell(Register output);
+  inline void AssertFeedbackCell(Register object);
+
+#ifdef V8_ENABLE_CET_SHADOW_STACK
+  // If CET shadow stack is enabled, reserves a few bytes as NOP that can be
+  // patched later.
+  inline void MaybeEmitPlaceHolderForDeopt();
+#endif  // V8_ENABLE_CET_SHADOW_STACK
+
   inline static void EmitReturn(MacroAssembler* masm);
 
   MacroAssembler* masm() { return masm_; }
@@ -238,16 +282,6 @@ class BaselineAssembler {
  private:
   MacroAssembler* masm_;
   ScratchRegisterScope* scratch_register_scope_ = nullptr;
-};
-
-class SaveAccumulatorScope final {
- public:
-  inline explicit SaveAccumulatorScope(BaselineAssembler* assembler);
-
-  inline ~SaveAccumulatorScope();
-
- private:
-  BaselineAssembler* assembler_;
 };
 
 class EnsureAccumulatorPreservedScope final {
@@ -268,7 +302,5 @@ class EnsureAccumulatorPreservedScope final {
 }  // namespace baseline
 }  // namespace internal
 }  // namespace v8
-
-#endif
 
 #endif  // V8_BASELINE_BASELINE_ASSEMBLER_H_

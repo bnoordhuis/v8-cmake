@@ -9,10 +9,10 @@
 
 #include "src/base/strings.h"
 #include "src/regexp/special-case.h"
-#include "unicode/usetiter.h"
 
 namespace v8 {
 namespace internal {
+namespace regexp {
 
 static const base::uc32 kSurrogateStart = 0xd800;
 static const base::uc32 kSurrogateEnd = 0xdfff;
@@ -41,7 +41,7 @@ void PrintSet(std::ofstream& out, const char* name,
       << "};\n\n";
 
   out << "//static\n"
-      << "const icu::UnicodeSet& RegExpCaseFolding::" << name << "() {\n"
+      << "const icu::UnicodeSet& CaseFolding::" << name << "() {\n"
       << "  static base::LazyInstance<" << name << "Data>::type set =\n"
       << "      LAZY_INSTANCE_INITIALIZER;\n"
       << "  return set.Pointer()->set;\n"
@@ -68,7 +68,7 @@ void PrintSpecial(std::ofstream& out) {
     // Check to see if all characters in the case-folding equivalence
     // class as defined by UnicodeSet::closeOver all map to the same
     // canonical value.
-    UChar32 canonical = RegExpCaseFolding::Canonicalize(i);
+    UChar32 canonical = CaseFolding::Canonicalize(i);
     bool class_has_matching_canonical_char = false;
     bool class_has_non_matching_canonical_char = false;
     for (int32_t j = 0; j < current.getRangeCount(); j++) {
@@ -77,7 +77,7 @@ void PrintSpecial(std::ofstream& out) {
         if (c == i) {
           continue;
         }
-        UChar32 other_canonical = RegExpCaseFolding::Canonicalize(c);
+        UChar32 other_canonical = CaseFolding::Canonicalize(c);
         if (canonical == other_canonical) {
           class_has_matching_canonical_char = true;
         } else {
@@ -110,14 +110,14 @@ void PrintSpecial(std::ofstream& out) {
   for (int32_t i = 0; i < special_add.getRangeCount(); i++) {
     for (UChar32 c = special_add.getRangeStart(i);
          c <= special_add.getRangeEnd(i); c++) {
-      UChar32 canonical = RegExpCaseFolding::Canonicalize(c);
+      UChar32 canonical = CaseFolding::Canonicalize(c);
       current.set(c, c);
       current.closeOver(USET_CASE_INSENSITIVE);
       current.removeAll(ignore);
       for (int32_t j = 0; j < current.getRangeCount(); j++) {
         for (UChar32 c2 = current.getRangeStart(j);
              c2 <= current.getRangeEnd(j); c2++) {
-          CHECK_EQ(canonical, RegExpCaseFolding::Canonicalize(c2));
+          CHECK_EQ(canonical, CaseFolding::Canonicalize(c2));
         }
       }
     }
@@ -125,52 +125,6 @@ void PrintSpecial(std::ofstream& out) {
 
   PrintSet(out, "IgnoreSet", ignore);
   PrintSet(out, "SpecialAddSet", special_add);
-}
-
-void PrintUnicodeSpecial(std::ofstream& out) {
-  icu::UnicodeSet non_simple_folding;
-  icu::UnicodeSet current;
-  UErrorCode status = U_ZERO_ERROR;
-  // Look at all characters except white spaces.
-  icu::UnicodeSet interestingCP(u"[^[:White_Space:]]", status);
-  CHECK_EQ(status, U_ZERO_ERROR);
-  icu::UnicodeSetIterator iter(interestingCP);
-  while (iter.next()) {
-    UChar32 c = iter.getCodepoint();
-    current.set(c, c);
-    current.closeOver(USET_CASE_INSENSITIVE).removeAllStrings();
-    CHECK(!current.isBogus());
-    // Remove characters from the closeover that have a simple case folding.
-    icu::UnicodeSet toRemove;
-    icu::UnicodeSetIterator closeOverIter(current);
-    while (closeOverIter.next()) {
-      UChar32 closeOverChar = closeOverIter.getCodepoint();
-      UChar32 closeOverSCF = u_foldCase(closeOverChar, U_FOLD_CASE_DEFAULT);
-      if (closeOverChar != closeOverSCF) {
-        toRemove.add(closeOverChar);
-      }
-    }
-    CHECK(!toRemove.isBogus());
-    current.removeAll(toRemove);
-
-    // The current character and its simple case folding are also always OK.
-    UChar32 scf = u_foldCase(c, U_FOLD_CASE_DEFAULT);
-    current.remove(c);
-    current.remove(scf);
-
-    // If there are any characters remaining, they were added due to full case
-    // foldings and shouldn't match the current charcter according to the spec.
-    if (!current.isEmpty()) {
-      // Ensure that the character doesn't have a simple case folding.
-      // Otherwise the current approach of simply removing the character from
-      // the set before calling closeOver won't work.
-      CHECK_EQ(c, scf);
-      non_simple_folding.add(c);
-    }
-  }
-  CHECK(!non_simple_folding.isBogus());
-
-  PrintSet(out, "UnicodeNonSimpleCloseOverSet", non_simple_folding);
 }
 
 void WriteHeader(const char* header_filename) {
@@ -190,17 +144,19 @@ void WriteHeader(const char* header_filename) {
       << "#include \"src/regexp/special-case.h\"\n\n"
       << "#include \"unicode/uniset.h\"\n"
       << "namespace v8 {\n"
-      << "namespace internal {\n\n";
+      << "namespace internal {\n"
+      << "namespace regexp {\n\n";
 
   PrintSpecial(out);
-  PrintUnicodeSpecial(out);
 
   out << "\n"
+      << "}  // namespace regexp\n"
       << "}  // namespace internal\n"
       << "}  // namespace v8\n"
       << "#endif  // V8_INTL_SUPPORT\n";
 }
 
+}  // namespace regexp
 }  // namespace internal
 }  // namespace v8
 
@@ -209,7 +165,7 @@ int main(int argc, const char** argv) {
     std::cerr << "Usage: " << argv[0] << " <output filename>\n";
     std::exit(1);
   }
-  v8::internal::WriteHeader(argv[1]);
+  v8::internal::regexp::WriteHeader(argv[1]);
 
   return 0;
 }

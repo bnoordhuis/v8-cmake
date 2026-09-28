@@ -5,7 +5,13 @@
 #ifndef V8_OBJECTS_INSTRUCTION_STREAM_H_
 #define V8_OBJECTS_INSTRUCTION_STREAM_H_
 
-#include "src/objects/heap-object.h"
+#ifdef DEBUG
+#include <set>
+#endif
+
+#include "src/codegen/code-desc.h"
+#include "src/heap/heap-write-barrier.h"
+#include "src/objects/trusted-object.h"
 
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
@@ -14,6 +20,8 @@ namespace v8 {
 namespace internal {
 
 class Code;
+class CodeDesc;
+class WritableJitAllocation;
 
 // InstructionStream contains the instruction stream for V8-generated code
 // objects.
@@ -21,10 +29,12 @@ class Code;
 // When V8_EXTERNAL_CODE_SPACE is enabled, InstructionStream objects are
 // allocated in a separate pointer compression cage instead of the cage where
 // all the other objects are allocated.
-class InstructionStream : public HeapObject {
+//
+// An InstructionStream is a trusted object as it lives outside of the sandbox
+// and contains trusted content (machine code). However, it is special in that
+// it doesn't live in the trusted space but instead in the code space.
+V8_OBJECT class InstructionStream : public TrustedObject {
  public:
-  NEVER_READ_ONLY_SPACE
-
   // All InstructionStream objects have the following layout:
   //
   //  +--------------------------+
@@ -64,18 +74,19 @@ class InstructionStream : public HeapObject {
   //
   // Set to Smi::zero() during initialization. Heap iterators may see
   // InstructionStream objects in this state.
-  inline Code code(AcquireLoadTag tag) const;
-  inline void set_code(Code value, ReleaseStoreTag tag);
-  inline Object raw_code(AcquireLoadTag tag) const;
+  inline Tagged<Code> code(AcquireLoadTag tag) const;
+  inline Tagged<Union<Smi, Code>> raw_code(AcquireLoadTag tag) const;
   // Use when the InstructionStream may be uninitialized:
-  inline bool TryGetCode(Code* code_out, AcquireLoadTag tag) const;
-  inline bool TryGetCodeUnchecked(Code* code_out, AcquireLoadTag tag) const;
+  inline bool TryGetCode(Tagged<Code>* code_out, AcquireLoadTag tag) const;
+  inline bool TryGetCodeUnchecked(Tagged<Code>* code_out,
+                                  AcquireLoadTag tag) const;
+
+  inline Address constant_pool() const;
 
   // [relocation_info]: InstructionStream relocation information.
-  inline ByteArray relocation_info() const;
-  inline void set_relocation_info(ByteArray value);
+  inline Tagged<TrustedByteArray> relocation_info() const;
   // Unchecked accessor to be used during GC.
-  inline ByteArray unchecked_relocation_info() const;
+  inline Tagged<TrustedByteArray> unchecked_relocation_info() const;
 
   inline uint8_t* relocation_start() const;
   inline uint8_t* relocation_end() const;
@@ -83,12 +94,10 @@ class InstructionStream : public HeapObject {
 
   // The size of the entire body section, containing instructions and inlined
   // metadata.
-  DECL_PRIMITIVE_ACCESSORS(body_size, int)
+  DECL_PRIMITIVE_GETTER(body_size, uint32_t)
   inline Address body_end() const;
 
-  inline void clear_padding();
-
-  static constexpr int TrailingPaddingSizeFor(int body_size) {
+  static constexpr int TrailingPaddingSizeFor(uint32_t body_size) {
     return RoundUp<kCodeAlignment>(kHeaderSize + body_size) - kHeaderSize -
            body_size;
   }
@@ -97,29 +106,50 @@ class InstructionStream : public HeapObject {
   }
   inline int Size() const;
 
-  static inline InstructionStream FromTargetAddress(Address address);
-  static inline InstructionStream FromEntryAddress(Address location_of_address);
+  static inline Tagged<InstructionStream> FromTargetAddress(Address address);
+  static inline Tagged<InstructionStream> FromEntryAddress(
+      Address location_of_address);
 
   // Relocate the code by delta bytes.
-  void Relocate(intptr_t delta);
+  void Relocate(WritableJitAllocation& jit_allocation, intptr_t delta);
 
-  DECL_CAST(InstructionStream)
+  static V8_INLINE Tagged<InstructionStream> Initialize(
+      Tagged<HeapObject> self, Tagged<Map> map, uint32_t body_size,
+      int constant_pool_offset, Tagged<TrustedByteArray> reloc_info);
+  static void ValidateJSDispatchHandles(Heap* heap, const CodeDesc& desc);
+  V8_INLINE void Finalize(Tagged<Code> code,
+                          Tagged<TrustedByteArray> reloc_info, CodeDesc desc,
+                          Heap* heap);
+  V8_INLINE bool IsFullyInitialized();
+
+#ifdef V8_ENABLE_GENERATED_CODE_VALIDATOR
+  bool IsValidated() const;
+  void SetValidated();
+#endif  // V8_ENABLE_GENERATED_CODE_VALIDATOR
+
   DECL_PRINTER(InstructionStream)
   DECL_VERIFIER(InstructionStream)
 
+#ifdef V8_ENABLE_GENERATED_CODE_VALIDATOR
+#define ISTREAM_FIELDS_VALIDATION(V) V(kIsValidatedOffset, kUInt8Size)
+#else  // !V8_ENABLE_GENERATED_CODE_VALIDATOR
+#define ISTREAM_FIELDS_VALIDATION(V)
+#endif  // V8_ENABLE_GENERATED_CODE_VALIDATOR
+
   // Layout description.
-#define ISTREAM_FIELDS(V)                                             \
-  V(kStartOfStrongFieldsOffset, 0)                                    \
-  V(kCodeOffset, kTaggedSize)                                         \
-  V(kRelocationInfoOffset, kTaggedSize)                               \
-  V(kEndOfStrongFieldsOffset, 0)                                      \
-  /* Data or code not directly visited by GC directly starts here. */ \
-  V(kDataStart, 0)                                                    \
-  V(kBodySizeOffset, kIntSize)                                        \
-  V(kUnalignedSize, OBJECT_POINTER_PADDING(kUnalignedSize))           \
+#define ISTREAM_FIELDS(V)                                                     \
+  V(kCodeOffset, kProtectedPointerSize)                                       \
+  V(kRelocationInfoOffset, kProtectedPointerSize)                             \
+  /* Data or code not directly visited by GC directly starts here. */         \
+  V(kDataStart, 0)                                                            \
+  V(kBodySizeOffset, kUInt32Size)                                             \
+  V(kConstantPoolOffsetOffset, V8_EMBEDDED_CONSTANT_POOL_BOOL ? kIntSize : 0) \
+  ISTREAM_FIELDS_VALIDATION(V)                                                \
+  V(kUnalignedSize, OBJECT_POINTER_PADDING(kUnalignedSize))                   \
   V(kHeaderSize, 0)
-  DEFINE_FIELD_OFFSET_CONSTANTS(HeapObject::kHeaderSize, ISTREAM_FIELDS)
+  DEFINE_FIELD_OFFSET_CONSTANTS(sizeof(TrustedObject), ISTREAM_FIELDS)
 #undef ISTREAM_FIELDS
+#undef ISTREAM_FIELDS_VALIDATION
 
   static_assert(kCodeAlignment >= kHeaderSize);
   // We do two things to ensure kCodeAlignment of the entry address:
@@ -135,17 +165,53 @@ class InstructionStream : public HeapObject {
   class BodyDescriptor;
 
  private:
-  // During the Code initialization process, InstructionStream::code is briefly
-  // unset (the Code object has not been allocated yet). In this state it is
-  // only visible through heap iteration.
-  inline void initialize_code_to_smi_zero(ReleaseStoreTag);
   friend class Factory;
+
+  V8_OBJECT_INNER_CLASS class V8_NODISCARD WriteBarrierPromise {
+   public:
+#ifdef DEBUG
+    explicit WriteBarrierPromise(Tagged<InstructionStream> host)
+        : write_barrier_mode_scope_(host, SKIP_WRITE_BARRIER_SCOPE) {}
+#else
+    explicit WriteBarrierPromise(Tagged<InstructionStream> host) {}
+#endif
+    WriteBarrierPromise(WriteBarrierPromise&&) V8_NOEXCEPT = default;
+    WriteBarrierPromise(const WriteBarrierPromise&) = delete;
+    WriteBarrierPromise& operator=(const WriteBarrierPromise&) = delete;
+
+#ifdef DEBUG
+    void RegisterAddress(Address address);
+    void ResolveAddress(Address address);
+    ~WriteBarrierPromise();
+
+   private:
+    std::set<Address> delayed_write_barriers_;
+    WriteBarrierModeScope write_barrier_mode_scope_;
+#else
+    void RegisterAddress(Address address) {}
+    void ResolveAddress(Address address) {}
+#endif
+  } V8_OBJECT_INNER_CLASS_END;
+
+  // Migrate code from desc without flushing the instruction cache. This
+  // function will not trigger any write barriers and the caller needs to call
+  // RelocateFromDescWriteBarriers afterwards. This is split into two functions,
+  // since the former needs write access to executable memory and we need to
+  // keep this critical section minimal since any memory write poses attack
+  // surface for CFI and will require special validation.
+  WriteBarrierPromise RelocateFromDesc(WritableJitAllocation& jit_allocation,
+                                       Heap* heap, const CodeDesc& desc,
+                                       Address constant_pool,
+                                       const DisallowGarbageCollection& no_gc);
+  void RelocateFromDescWriteBarriers(Heap* heap, const CodeDesc& desc,
+                                     Address constant_pool,
+                                     WriteBarrierPromise& promise,
+                                     const DisallowGarbageCollection& no_gc);
 
   // Must be used when loading any of InstructionStream's tagged fields.
   static inline PtrComprCageBase main_cage_base();
 
-  OBJECT_CONSTRUCTORS(InstructionStream, HeapObject);
-};
+} V8_OBJECT_END;
 
 }  // namespace internal
 }  // namespace v8

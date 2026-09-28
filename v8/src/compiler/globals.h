@@ -5,25 +5,17 @@
 #ifndef V8_COMPILER_GLOBALS_H_
 #define V8_COMPILER_GLOBALS_H_
 
+#include <ostream>
+
+#include "src/base/strong-alias.h"
 #include "src/common/globals.h"
 #include "src/flags/flags.h"
 #include "src/objects/js-objects.h"
+#include "src/runtime/runtime.h"
 
 namespace v8 {
 namespace internal {
 namespace compiler {
-
-// The nci flag is currently used to experiment with feedback collection in
-// optimized code produced by generic lowering.
-// Considerations:
-// - Should we increment the call count? https://crbug.com/v8/10524
-// - Is feedback already megamorphic in all these cases?
-//
-// TODO(jgruber): Remove once we've made a decision whether to collect feedback
-// unconditionally.
-inline bool CollectFeedbackInGenericLowering() {
-  return v8_flags.turbo_collect_feedback_in_generic_lowering;
-}
 
 enum class StackCheckKind : uint8_t {
   kJSFunctionEntry = 0,
@@ -31,6 +23,15 @@ enum class StackCheckKind : uint8_t {
   kCodeStubAssembler,
   kWasm,
 };
+
+using CanThrow = base::StrongAlias<struct CanThrowTag, bool>;
+using LazyDeoptOnThrow = base::StrongAlias<struct LazyDeoptOnThrowTag, bool>;
+
+inline std::ostream& operator<<(std::ostream& os,
+                                LazyDeoptOnThrow lazy_deopt_on_throw) {
+  return os << (lazy_deopt_on_throw ? "LazyDeoptOnThrow"
+                                    : "DoNOTLazyDeoptOnThrow");
+}
 
 inline std::ostream& operator<<(std::ostream& os, StackCheckKind kind) {
   switch (kind) {
@@ -102,6 +103,43 @@ const int kMaxFastLiteralDepth = 3;
 const int kMaxFastLiteralProperties = JSObject::kMaxInObjectProperties;
 
 enum BaseTaggedness : uint8_t { kUntaggedBase, kTaggedBase };
+
+enum class MemoryAccessKind : uint8_t {
+  kNormal,
+  kUnaligned,
+  kTrapping,
+};
+
+size_t hash_value(MemoryAccessKind);
+
+V8_EXPORT_PRIVATE std::ostream& operator<<(std::ostream&, MemoryAccessKind);
+
+inline ExternalArrayType GetArrayTypeFromElementsKind(ElementsKind kind) {
+  switch (kind) {
+#define TYPED_ARRAY_CASE(Type, type, TYPE, ctype) \
+  case TYPE##_ELEMENTS:                           \
+  case RAB_GSAB_##TYPE##_ELEMENTS:                \
+    return kExternal##Type##Array;
+    TYPED_ARRAYS(TYPED_ARRAY_CASE)
+#undef TYPED_ARRAY_CASE
+    default:
+      break;
+  }
+  UNREACHABLE();
+}
+
+inline int ExternalArrayElementSize(const ExternalArrayType element_type) {
+  switch (element_type) {
+#define TYPED_ARRAY_CASE(Type, type, TYPE, ctype) \
+  case kExternal##Type##Array:                    \
+    DCHECK_LE(sizeof(ctype), 8);                  \
+    return sizeof(ctype);
+    TYPED_ARRAYS(TYPED_ARRAY_CASE)
+    default:
+      UNREACHABLE();
+#undef TYPED_ARRAY_CASE
+  }
+}
 
 }  // namespace compiler
 }  // namespace internal

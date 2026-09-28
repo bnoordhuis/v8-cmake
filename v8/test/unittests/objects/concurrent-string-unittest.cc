@@ -24,8 +24,14 @@ namespace {
 
 #define DOUBLE_VALUE 28.123456789
 #define STRING_VALUE "28.123456789"
-#define ARRAY_VALUE \
-  { '2', '8', '.', '1', '2', '3', '4', '5', '6', '7', '8', '9' }
+// Two-byte tests must use content that genuinely requires two-byte
+// representation, since internalization is now content-aware and
+// migrates ASCII-content two-byte strings to one-byte. We prepend
+// U+2028 (LINE SEPARATOR), which JS Number conversion treats as
+// leading whitespace, so the parsed double still equals DOUBLE_VALUE.
+#define TWO_BYTE_ARRAY_VALUE \
+  {0x2028, '2', '8', '.', '1', '2', '3', '4', '5', '6', '7', '8', '9'}
+#define TWO_BYTE_ARRAY_LENGTH 13
 
 // Adapted from cctest/test-api.cc, and
 // test/cctest/heap/test-external-string-tracker.cc.
@@ -85,7 +91,7 @@ class ConcurrentStringThread final : public v8::base::Thread {
     sema_started_->Signal();
     // Check the three operations we do from the StringRef concurrently: get the
     // string, the nth character, and convert into a double.
-    EXPECT_EQ(str_->length(kAcquireLoad), static_cast<int>(length_));
+    EXPECT_EQ(str_->length(kAcquireLoad), static_cast<uint32_t>(length_));
     for (unsigned int i = 0; i < length_; ++i) {
       EXPECT_EQ(str_->Get(i, &local_isolate), chars_[i]);
     }
@@ -113,13 +119,13 @@ TEST_F(ConcurrentStringTest, InspectOneByteExternalizing) {
   Handle<String> one_byte_string = factory->InternalizeString(
       factory->NewStringFromAsciiChecked(raw_string));
   EXPECT_TRUE(one_byte_string->IsOneByteRepresentation());
-  EXPECT_TRUE(!one_byte_string->IsExternalString());
-  EXPECT_TRUE(one_byte_string->IsInternalizedString());
+  EXPECT_TRUE(!IsExternalString(*one_byte_string));
+  EXPECT_TRUE(IsInternalizedString(*one_byte_string));
 
   Handle<String> persistent_string = ph->NewHandle(one_byte_string);
 
   std::vector<uint16_t> chars;
-  for (int i = 0; i < one_byte_string->length(); ++i) {
+  for (uint32_t i = 0; i < one_byte_string->length(); ++i) {
     chars.push_back(one_byte_string->Get(i));
   }
 
@@ -135,9 +141,9 @@ TEST_F(ConcurrentStringTest, InspectOneByteExternalizing) {
   // We need to use StrDup in this case since the TestOneByteResource will get
   // ownership of raw_string otherwise.
   EXPECT_TRUE(one_byte_string->MakeExternal(
-      new TestOneByteResource(i::StrDup(raw_string))));
-  EXPECT_TRUE(one_byte_string->IsExternalOneByteString());
-  EXPECT_TRUE(one_byte_string->IsInternalizedString());
+      i_isolate(), new TestOneByteResource(i::StrDup(raw_string))));
+  EXPECT_TRUE(IsExternalOneByteString(*one_byte_string));
+  EXPECT_TRUE(IsInternalizedString(*one_byte_string));
 
   thread->Join();
 }
@@ -149,12 +155,10 @@ TEST_F(ConcurrentStringTest, InspectTwoByteExternalizing) {
   auto factory = i_isolate()->factory();
   HandleScope handle_scope(i_isolate());
 
-  // Crate an internalized two-byte string.
-  // TODO(solanes): Can we have only one raw string?
-  const char* raw_string = STRING_VALUE;
-  // TODO(solanes): Is this the best way to create a two byte string from chars?
-  const int kLength = 12;
-  const uint16_t two_byte_array[kLength] = ARRAY_VALUE;
+  // Create an internalized two-byte string. Content includes a non-ASCII
+  // char to keep the two-byte representation through internalization.
+  const int kLength = TWO_BYTE_ARRAY_LENGTH;
+  const uint16_t two_byte_array[kLength] = TWO_BYTE_ARRAY_VALUE;
   Handle<String> two_bytes_string;
   {
     Handle<SeqTwoByteString> raw =
@@ -165,12 +169,12 @@ TEST_F(ConcurrentStringTest, InspectTwoByteExternalizing) {
   }
   two_bytes_string = factory->InternalizeString(two_bytes_string);
   EXPECT_TRUE(two_bytes_string->IsTwoByteRepresentation());
-  EXPECT_TRUE(!two_bytes_string->IsExternalString());
-  EXPECT_TRUE(two_bytes_string->IsInternalizedString());
+  EXPECT_TRUE(!IsExternalString(*two_bytes_string));
+  EXPECT_TRUE(IsInternalizedString(*two_bytes_string));
 
   Handle<String> persistent_string = ph->NewHandle(two_bytes_string);
   std::vector<uint16_t> chars;
-  for (int i = 0; i < two_bytes_string->length(); ++i) {
+  for (uint32_t i = 0; i < two_bytes_string->length(); ++i) {
     chars.push_back(two_bytes_string->Get(i));
   }
   base::Semaphore sema_started(0);
@@ -181,11 +185,16 @@ TEST_F(ConcurrentStringTest, InspectTwoByteExternalizing) {
 
   sema_started.Wait();
 
-  // Externalize it to a two-bytes external string.
+  // Externalize it to a two-bytes external string. The resource needs to
+  // match the string content so we copy the array into a NUL-terminated
+  // heap buffer that the resource takes ownership of.
+  uint16_t* resource_data = i::NewArray<uint16_t>(kLength + 1);
+  std::copy_n(two_byte_array, kLength, resource_data);
+  resource_data[kLength] = 0;
   EXPECT_TRUE(two_bytes_string->MakeExternal(
-      new TestTwoByteResource(AsciiToTwoByteString(raw_string))));
-  EXPECT_TRUE(two_bytes_string->IsExternalTwoByteString());
-  EXPECT_TRUE(two_bytes_string->IsInternalizedString());
+      i_isolate(), new TestTwoByteResource(resource_data)));
+  EXPECT_TRUE(IsExternalTwoByteString(*two_bytes_string));
+  EXPECT_TRUE(IsInternalizedString(*two_bytes_string));
 
   thread->Join();
 }
@@ -205,24 +214,25 @@ TEST_F(ConcurrentStringTest, InspectOneByteExternalizing_ThinString) {
   // Create a string.
   const char* raw_string = STRING_VALUE;
   Handle<String> thin_string = factory->NewStringFromAsciiChecked(raw_string);
-  EXPECT_TRUE(!thin_string->IsExternalString());
-  EXPECT_TRUE(!thin_string->IsInternalizedString());
+  EXPECT_TRUE(!IsExternalString(*thin_string));
+  EXPECT_TRUE(!IsInternalizedString(*thin_string));
 
   // Crate an internalized one-byte version of that string string.
-  Handle<String> internalized_string = factory->InternalizeString(thin_string);
+  DirectHandle<String> internalized_string =
+      factory->InternalizeString(thin_string);
   EXPECT_TRUE(internalized_string->IsOneByteRepresentation());
-  EXPECT_TRUE(!internalized_string->IsExternalString());
-  EXPECT_TRUE(internalized_string->IsInternalizedString());
+  EXPECT_TRUE(!IsExternalString(*internalized_string));
+  EXPECT_TRUE(IsInternalizedString(*internalized_string));
 
   // We now should have an internalized string, and a thin string pointing to
   // it.
-  EXPECT_TRUE(thin_string->IsThinString());
+  EXPECT_TRUE(IsThinString(*thin_string));
   EXPECT_NE(*thin_string, *internalized_string);
 
   Handle<String> persistent_string = ph->NewHandle(thin_string);
 
   std::vector<uint16_t> chars;
-  for (int i = 0; i < thin_string->length(); ++i) {
+  for (uint32_t i = 0; i < thin_string->length(); ++i) {
     chars.push_back(thin_string->Get(i));
   }
 
@@ -238,14 +248,14 @@ TEST_F(ConcurrentStringTest, InspectOneByteExternalizing_ThinString) {
   // We need to use StrDup in this case since the TestOneByteResource will get
   // ownership of raw_string otherwise.
   EXPECT_TRUE(internalized_string->MakeExternal(
-      new TestOneByteResource(i::StrDup(raw_string))));
-  EXPECT_TRUE(internalized_string->IsExternalOneByteString());
-  EXPECT_TRUE(internalized_string->IsInternalizedString());
+      i_isolate(), new TestOneByteResource(i::StrDup(raw_string))));
+  EXPECT_TRUE(IsExternalOneByteString(*internalized_string));
+  EXPECT_TRUE(IsInternalizedString(*internalized_string));
 
   // Check that the thin string is unmodified.
-  EXPECT_TRUE(!thin_string->IsExternalString());
-  EXPECT_TRUE(!thin_string->IsInternalizedString());
-  EXPECT_TRUE(thin_string->IsThinString());
+  EXPECT_TRUE(!IsExternalString(*thin_string));
+  EXPECT_TRUE(!IsInternalizedString(*thin_string));
+  EXPECT_TRUE(IsThinString(*thin_string));
 
   thread->Join();
 }
@@ -262,12 +272,10 @@ TEST_F(ConcurrentStringTest, InspectTwoByteExternalizing_ThinString) {
   auto factory = i_isolate()->factory();
   HandleScope handle_scope(i_isolate());
 
-  // Crate an internalized two-byte string.
-  // TODO(solanes): Can we have only one raw string?
-  const char* raw_string = STRING_VALUE;
-  // TODO(solanes): Is this the best way to create a two byte string from chars?
-  const int kLength = 12;
-  const uint16_t two_byte_array[kLength] = ARRAY_VALUE;
+  // Create an internalized two-byte string. Content includes a non-ASCII
+  // char to keep the two-byte representation through internalization.
+  const int kLength = TWO_BYTE_ARRAY_LENGTH;
+  const uint16_t two_byte_array[kLength] = TWO_BYTE_ARRAY_VALUE;
   Handle<String> thin_string;
   {
     Handle<SeqTwoByteString> raw =
@@ -277,14 +285,15 @@ TEST_F(ConcurrentStringTest, InspectTwoByteExternalizing_ThinString) {
     thin_string = raw;
   }
 
-  Handle<String> internalized_string = factory->InternalizeString(thin_string);
+  DirectHandle<String> internalized_string =
+      factory->InternalizeString(thin_string);
   EXPECT_TRUE(internalized_string->IsTwoByteRepresentation());
-  EXPECT_TRUE(!internalized_string->IsExternalString());
-  EXPECT_TRUE(internalized_string->IsInternalizedString());
+  EXPECT_TRUE(!IsExternalString(*internalized_string));
+  EXPECT_TRUE(IsInternalizedString(*internalized_string));
 
   Handle<String> persistent_string = ph->NewHandle(thin_string);
   std::vector<uint16_t> chars;
-  for (int i = 0; i < thin_string->length(); ++i) {
+  for (uint32_t i = 0; i < thin_string->length(); ++i) {
     chars.push_back(thin_string->Get(i));
   }
   base::Semaphore sema_started(0);
@@ -295,16 +304,21 @@ TEST_F(ConcurrentStringTest, InspectTwoByteExternalizing_ThinString) {
 
   sema_started.Wait();
 
-  // Externalize it to a two-bytes external string.
+  // Externalize it to a two-bytes external string. The resource needs to
+  // match the string content so we copy the array into a NUL-terminated
+  // heap buffer that the resource takes ownership of.
+  uint16_t* resource_data = i::NewArray<uint16_t>(kLength + 1);
+  std::copy_n(two_byte_array, kLength, resource_data);
+  resource_data[kLength] = 0;
   EXPECT_TRUE(internalized_string->MakeExternal(
-      new TestTwoByteResource(AsciiToTwoByteString(raw_string))));
-  EXPECT_TRUE(internalized_string->IsExternalTwoByteString());
-  EXPECT_TRUE(internalized_string->IsInternalizedString());
+      i_isolate(), new TestTwoByteResource(resource_data)));
+  EXPECT_TRUE(IsExternalTwoByteString(*internalized_string));
+  EXPECT_TRUE(IsInternalizedString(*internalized_string));
 
   // Check that the thin string is unmodified.
-  EXPECT_TRUE(!thin_string->IsExternalString());
-  EXPECT_TRUE(!thin_string->IsInternalizedString());
-  EXPECT_TRUE(thin_string->IsThinString());
+  EXPECT_TRUE(!IsExternalString(*thin_string));
+  EXPECT_TRUE(!IsInternalizedString(*thin_string));
+  EXPECT_TRUE(IsThinString(*thin_string));
 
   thread->Join();
 }

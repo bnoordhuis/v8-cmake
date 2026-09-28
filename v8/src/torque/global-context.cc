@@ -13,6 +13,7 @@ GlobalContext::GlobalContext(Ast ast)
       collect_kythe_data_(false),
       force_assert_statements_(false),
       annotate_ir_(false),
+      torque_dwarf_(false),
       ast_(std::move(ast)) {
   CurrentScope::Scope current_scope(nullptr);
   CurrentSourcePosition::Scope current_source_position(
@@ -29,7 +30,10 @@ TargetArchitecture::TargetArchitecture(bool force_32bit)
           kSmiTagSize + (force_32bit ? SmiTagging<kApiInt32Size>::kSmiShiftSize
                                      : kSmiShiftSize)),
       external_ptr_size_(force_32bit ? sizeof(int32_t)
-                                     : kExternalPointerSlotSize) {}
+                                     : kExternalPointerSlotSize),
+      cppheap_ptr_size_(force_32bit ? sizeof(int32_t)
+                                    : kCppHeapPointerSlotSize),
+      trusted_ptr_size_(force_32bit ? sizeof(int32_t) : kTrustedPointerSize) {}
 
 }  // namespace torque
 }  // namespace internal

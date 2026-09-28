@@ -2,8 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Flags: --expose-wasm
-
 d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
 
 function dummy_func(val) {
@@ -130,7 +128,7 @@ function checkAnyFuncTable(call, start, count, value) {
     if (value) {
       assertEquals(value, call(start + i));
     } else {
-      assertTraps(kTrapFuncSigMismatch, () => call(start + i));
+      assertTraps(kTrapNullFunc, () => call(start + i));
     }
   }
 }

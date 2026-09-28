@@ -8,16 +8,22 @@
 #include "src/codegen/flush-instruction-cache.h"
 #include "src/execution/v8threads.h"
 #include "src/handles/handles-inl.h"
+#include "src/heap/heap-inl.h"  // Because spaces-inl.h is disallowed by DEPS.
 #include "src/heap/paged-spaces-inl.h"
 #include "src/logging/counters-scopes.h"
 #include "src/logging/log.h"
-#include "src/objects/oddball.h"
+#include "src/logging/runtime-call-stats-scope.h"
+#include "src/objects/api-callbacks-inl.h"
 #include "src/roots/roots-inl.h"
 
 namespace v8 {
 namespace internal {
 
 void StartupDeserializer::DeserializeIntoIsolate() {
+  TRACE_EVENT0("v8", "V8.DeserializeIsolate");
+  RCS_SCOPE(isolate(), RuntimeCallCounterId::kDeserializeIsolate);
+  base::ElapsedTimer timer;
+  if (V8_UNLIKELY(v8_flags.profile_deserialization)) timer.Start();
   NestedTimedHistogramScope histogram_timer(
       isolate()->counters()->snapshot_deserialize_isolate());
   HandleScope scope(isolate());
@@ -32,6 +38,8 @@ void StartupDeserializer::DeserializeIntoIsolate() {
   DCHECK(!isolate()->builtins()->is_initialized());
 
   {
+    DeserializeAndCheckExternalReferenceTable();
+
     isolate()->heap()->IterateSmiRoots(this);
     isolate()->heap()->IterateRoots(
         this,
@@ -42,13 +50,19 @@ void StartupDeserializer::DeserializeIntoIsolate() {
     isolate()->heap()->IterateWeakRoots(
         this, base::EnumSet<SkipRoot>{SkipRoot::kUnserializable});
     DeserializeDeferredObjects();
-    for (Handle<AccessorInfo> info : accessor_infos()) {
-      RestoreExternalReferenceRedirector(isolate(), *info);
+    PostProcessExposedTrustedObjects();
+    if (USE_SIMULATOR_BOOL) {
+      for (DirectHandle<AccessorInfo> info : accessor_infos()) {
+        info->RestoreCallbackRedirectionAfterDeserialization(isolate());
+      }
+      for (DirectHandle<InterceptorInfo> info : interceptor_infos()) {
+        info->RestoreCallbackRedirectionAfterDeserialization(isolate());
+      }
+      for (DirectHandle<FunctionTemplateInfo> info :
+           function_template_infos()) {
+        info->RestoreCallbackRedirectionAfterDeserialization(isolate());
+      }
     }
-    for (Handle<CallHandlerInfo> info : call_handler_infos()) {
-      RestoreExternalReferenceRedirector(isolate(), *info);
-    }
-
     // Flush the instruction cache for the entire code-space. Must happen after
     // builtins deserialization.
     FlushICache();
@@ -70,11 +84,30 @@ void StartupDeserializer::DeserializeIntoIsolate() {
   isolate()->builtins()->MarkInitialized();
 
   LogNewMapEvents();
-  WeakenDescriptorArrays();
 
   if (should_rehash()) {
     // Hash seed was initialized in ReadOnlyDeserializer.
     Rehash();
+  }
+
+  if (V8_UNLIKELY(v8_flags.profile_deserialization)) {
+    // ATTENTION: The Memory.json benchmark greps for this exact output. Do not
+    // change it without also updating Memory.json.
+    const size_t bytes = source()->length();
+    const double ms = timer.Elapsed().InMillisecondsF();
+    PrintF("[Deserializing isolate (%zu bytes) took %0.3f ms]\n", bytes, ms);
+  }
+}
+
+void StartupDeserializer::DeserializeAndCheckExternalReferenceTable() {
+  // Verify that any external reference entries that were deduplicated in the
+  // serializer are also deduplicated in this isolate.
+  ExternalReferenceTable* table = isolate()->external_reference_table();
+  while (true) {
+    uint32_t index = source()->GetUint30();
+    if (index == ExternalReferenceTable::kSizeIsolateIndependent) break;
+    uint32_t encoded_index = source()->GetUint30();
+    CHECK_EQ(table->address(index), table->address(encoded_index));
   }
 }
 
@@ -85,7 +118,10 @@ void StartupDeserializer::LogNewMapEvents() {
 void StartupDeserializer::FlushICache() {
   DCHECK(!deserializing_user_code());
   // The entire isolate is newly deserialized. Simply flush all code pages.
-  for (Page* p : *isolate()->heap()->code_space()) {
+  // Note: This loop needs PageIterator::operator++, which requires including
+  // heap-inl.h. We could consider moving this implementation elsewhere to
+  // avoid that.
+  for (NormalPage* p : *isolate()->heap()->code_space()) {
     FlushInstructionCache(p->area_start(), p->area_end() - p->area_start());
   }
 }

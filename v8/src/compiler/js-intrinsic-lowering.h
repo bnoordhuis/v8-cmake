@@ -41,16 +41,15 @@ class V8_EXPORT_PRIVATE JSIntrinsicLowering final
   Reduction ReduceCopyDataProperties(Node* node);
   Reduction ReduceCopyDataPropertiesWithExcludedPropertiesOnStack(Node* node);
   Reduction ReduceCreateIterResultObject(Node* node);
+  Reduction ReduceGeneratorYieldResult(Node* node);
   Reduction ReduceDeoptimizeNow(Node* node);
   Reduction ReduceCreateJSGeneratorObject(Node* node);
   Reduction ReduceGeneratorClose(Node* node);
-  Reduction ReduceAsyncFunctionAwaitCaught(Node* node);
-  Reduction ReduceAsyncFunctionAwaitUncaught(Node* node);
+  Reduction ReduceAsyncFunctionAwait(Node* node);
   Reduction ReduceAsyncFunctionEnter(Node* node);
   Reduction ReduceAsyncFunctionReject(Node* node);
   Reduction ReduceAsyncFunctionResolve(Node* node);
-  Reduction ReduceAsyncGeneratorAwaitCaught(Node* node);
-  Reduction ReduceAsyncGeneratorAwaitUncaught(Node* node);
+  Reduction ReduceAsyncGeneratorAwait(Node* node);
   Reduction ReduceAsyncGeneratorReject(Node* node);
   Reduction ReduceAsyncGeneratorResolve(Node* node);
   Reduction ReduceAsyncGeneratorYieldWithAwait(Node* node);
@@ -58,6 +57,7 @@ class V8_EXPORT_PRIVATE JSIntrinsicLowering final
   Reduction ReduceIsInstanceType(Node* node, InstanceType instance_type);
   Reduction ReduceIsJSReceiver(Node* node);
   Reduction ReduceIsBeingInterpreted(Node* node);
+  Reduction ReduceMajorGCForCompilerTesting(Node* node);
   Reduction ReduceTurbofanStaticAssert(Node* node);
   Reduction ReduceVerifyType(Node* node);
   Reduction ReduceCheckTurboshaftTypeOf(Node* node);
@@ -66,6 +66,8 @@ class V8_EXPORT_PRIVATE JSIntrinsicLowering final
   Reduction ReduceToString(Node* node);
   Reduction ReduceCall(Node* node);
   Reduction ReduceIncBlockCounter(Node* node);
+  Reduction ReduceAddLhsIsStringConstantInternalize(Node* node);
+  Reduction ReduceAddRhsIsStringConstantInternalize(Node* node);
   Reduction ReduceGetImportMetaObject(Node* node);
 
   Reduction Change(Node* node, const Operator* op);
@@ -82,7 +84,8 @@ class V8_EXPORT_PRIVATE JSIntrinsicLowering final
                    int stack_parameter_count,
                    enum FrameStateFlag frame_state_flag = kNeedsFrameState);
 
-  Graph* graph() const;
+  TFGraph* graph() const;
+  Zone* zone() const;
   JSGraph* jsgraph() const { return jsgraph_; }
   JSHeapBroker* broker() const { return broker_; }
   Isolate* isolate() const;

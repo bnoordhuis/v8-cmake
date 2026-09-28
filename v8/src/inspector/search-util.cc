@@ -31,8 +31,9 @@ String16 findMagicComment(const String16& content, const String16& name,
     pos -= 4;
     if (content[pos] != '/') continue;
     if ((content[pos + 1] != '/' || multiline) &&
-        (content[pos + 1] != '*' || !multiline))
+        (content[pos + 1] != '*' || !multiline)) {
       continue;
+    }
     if (content[pos + 2] != '#' && content[pos + 2] != '@') continue;
     if (content[pos + 3] != ' ' && content[pos + 3] != '\t') continue;
     equalSignPos = pos + 4 + nameLength;
@@ -110,12 +111,14 @@ std::vector<std::pair<int, String16>> scriptRegexpMatchesByLines(
   for (size_t lineNumber = 0; lineNumber < size; ++lineNumber) {
     size_t lineEnd = endings->at(lineNumber);
     String16 line = text.substring(start, lineEnd - start);
-    if (line.length() && line[line.length() - 1] == '\r')
+    if (line.length() && line[line.length() - 1] == '\r') {
       line = line.substring(0, line.length() - 1);
+    }
 
     int matchLength;
-    if (regex.match(line, 0, &matchLength) != -1)
+    if (regex.match(line, 0, &matchLength) != -1) {
       result.push_back(std::pair<int, String16>(lineNumber, line));
+    }
 
     start = lineEnd + 1;
   }
@@ -141,19 +144,19 @@ std::unique_ptr<V8Regex> createSearchRegex(V8InspectorImpl* inspector,
 }  // namespace
 
 std::vector<std::unique_ptr<protocol::Debugger::SearchMatch>>
-searchInTextByLinesImpl(V8InspectorSession* session, const String16& text,
+searchInTextByLinesImpl(V8InspectorImpl* inspector, const String16& text,
                         const String16& query, const bool caseSensitive,
                         const bool isRegex) {
-  std::unique_ptr<V8Regex> regex = createSearchRegex(
-      static_cast<V8InspectorSessionImpl*>(session)->inspector(), query,
-      caseSensitive, isRegex);
+  std::unique_ptr<V8Regex> regex =
+      createSearchRegex(inspector, query, caseSensitive, isRegex);
   std::vector<std::pair<int, String16>> matches =
-      scriptRegexpMatchesByLines(*regex.get(), text);
+      scriptRegexpMatchesByLines(*regex, text);
 
   std::vector<std::unique_ptr<protocol::Debugger::SearchMatch>> result;
   result.reserve(matches.size());
-  for (const auto& match : matches)
+  for (const auto& match : matches) {
     result.push_back(buildObjectForSearchMatch(match.first, match.second));
+  }
   return result;
 }
 
@@ -163,6 +166,10 @@ String16 findSourceURL(const String16& content, bool multiline) {
 
 String16 findSourceMapURL(const String16& content, bool multiline) {
   return findMagicComment(content, "sourceMappingURL", multiline);
+}
+
+String16 findDebugId(const String16& content, bool multiline) {
+  return findMagicComment(content, "debugId", multiline);
 }
 
 }  // namespace v8_inspector

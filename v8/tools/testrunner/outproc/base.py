@@ -159,7 +159,7 @@ class ExpectedOutProc(OutProc):
       ):
         if expected != actual:
           return True
-      return False
+    return False
 
   def regenerate_expected_files(self, output):
     if not self._regenerate_expected_files:
@@ -176,7 +176,8 @@ class ExpectedOutProc(OutProc):
     if expected == actual:
       return None
     lines = difflib.unified_diff(
-        expected, actual, fromfile=self._expected_filename, tofile='<actual>')
+        expected, actual, fromfile=str(self._expected_filename),
+        tofile='<actual>')
     return 'Output does not match expectation:\n' + ''.join(lines)
 
   def _act_block_iterator(self, output):
@@ -216,9 +217,9 @@ class ExpectedOutProc(OutProc):
             line.startswith('###') or
             # Android linker warning.
             line.startswith('WARNING: linker:') or
-            # FIXME(machenbach): The test driver shouldn't try to use slow
-            # asserts if they weren't compiled. This fails in optdebug=2.
-            line == 'Warning: unknown flag --enable-slow-asserts.' or
+            # We don't differentiate release/debug when passing flags. That
+            # might produce some warnings for debug flags missing in release.
+            line.startswith('Warning: unknown flag') or
             line == 'Try --help for options')
 
   def _ignore_expected_line(self, line):

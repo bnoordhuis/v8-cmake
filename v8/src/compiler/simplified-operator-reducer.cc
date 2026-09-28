@@ -4,14 +4,18 @@
 
 #include "src/compiler/simplified-operator-reducer.h"
 
+#include <optional>
+
 #include "src/compiler/common-operator.h"
 #include "src/compiler/js-graph.h"
 #include "src/compiler/js-heap-broker.h"
 #include "src/compiler/machine-operator.h"
 #include "src/compiler/node-matchers.h"
+#include "src/compiler/node-properties.h"
 #include "src/compiler/opcodes.h"
 #include "src/compiler/operator-properties.h"
 #include "src/compiler/simplified-operator.h"
+#include "src/heap/factory-inl.h"
 #include "src/numbers/conversions-inl.h"
 
 namespace v8 {
@@ -30,6 +34,14 @@ Decision DecideObjectIsSmi(Node* const input) {
   if (m.IsChangeInt31ToTaggedSigned()) return Decision::kTrue;
   if (m.IsHeapConstant()) return Decision::kFalse;
   return Decision::kUnknown;
+}
+
+bool IsUint64Double(double value) {
+  // It is a bit ugly to use the constant `0x1.0p64` here, but there are no nice
+  // ways to express 2^64 in C++. UINT64_MAX + 1 would look good, but is
+  // incorrect because of rounding.
+  return value >= 0.0 && value < 0x1.0p64 && std::floor(value) == value &&
+         !IsMinusZero(value);
 }
 
 }  // namespace
@@ -64,7 +76,7 @@ Reduction SimplifiedOperatorReducer::Reduce(Node* node) {
     case IrOpcode::kChangeTaggedToBit: {
       HeapObjectMatcher m(node->InputAt(0));
       if (m.HasResolvedValue()) {
-        base::Optional<bool> maybe_result =
+        std::optional<bool> maybe_result =
             m.Ref(broker()).TryGetBooleanValue(broker());
         if (maybe_result.has_value()) return ReplaceInt32(*maybe_result);
       }
@@ -75,6 +87,10 @@ Reduction SimplifiedOperatorReducer::Reduce(Node* node) {
       Float64Matcher m(node->InputAt(0));
       if (m.HasResolvedValue()) return ReplaceNumber(m.ResolvedValue());
       if (m.IsChangeTaggedToFloat64()) return Replace(m.node()->InputAt(0));
+      break;
+    }
+    case IrOpcode::kChangeFloat64OrUndefinedToTagged: {
+      // TODO(385155404): Handle some constants here.
       break;
     }
     case IrOpcode::kChangeInt31ToTaggedSigned:
@@ -90,6 +106,8 @@ Reduction SimplifiedOperatorReducer::Reduce(Node* node) {
     case IrOpcode::kTruncateTaggedToFloat64: {
       NumberMatcher m(node->InputAt(0));
       if (m.HasResolvedValue()) return ReplaceFloat64(m.ResolvedValue());
+      // TODO(385155404): Consider handling ChangeFloat64OrUndefinedToTagged
+      // here.
       if (m.IsChangeFloat64ToTagged() || m.IsChangeFloat64ToTaggedPointer()) {
         return Replace(m.node()->InputAt(0));
       }
@@ -104,8 +122,11 @@ Reduction SimplifiedOperatorReducer::Reduce(Node* node) {
     case IrOpcode::kChangeTaggedSignedToInt32:
     case IrOpcode::kChangeTaggedToInt32: {
       NumberMatcher m(node->InputAt(0));
-      if (m.HasResolvedValue())
+      if (m.HasResolvedValue()) {
         return ReplaceInt32(DoubleToInt32(m.ResolvedValue()));
+      }
+      // TODO(385155404): Consider handling ChangeFloat64OrUndefinedToTagged
+      // here.
       if (m.IsChangeFloat64ToTagged() || m.IsChangeFloat64ToTaggedPointer()) {
         return Change(node, machine()->ChangeFloat64ToInt32(), m.InputAt(0));
       }
@@ -116,8 +137,11 @@ Reduction SimplifiedOperatorReducer::Reduce(Node* node) {
     }
     case IrOpcode::kChangeTaggedToUint32: {
       NumberMatcher m(node->InputAt(0));
-      if (m.HasResolvedValue())
+      if (m.HasResolvedValue()) {
         return ReplaceUint32(DoubleToUint32(m.ResolvedValue()));
+      }
+      // TODO(385155404): Consider handling ChangeFloat64OrUndefinedToTagged
+      // here.
       if (m.IsChangeFloat64ToTagged() || m.IsChangeFloat64ToTaggedPointer()) {
         return Change(node, machine()->ChangeFloat64ToUint32(), m.InputAt(0));
       }
@@ -126,18 +150,22 @@ Reduction SimplifiedOperatorReducer::Reduce(Node* node) {
     }
     case IrOpcode::kChangeUint32ToTagged: {
       Uint32Matcher m(node->InputAt(0));
-      if (m.HasResolvedValue())
+      if (m.HasResolvedValue()) {
         return ReplaceNumber(FastUI2D(m.ResolvedValue()));
+      }
       break;
     }
-    case IrOpcode::kTruncateTaggedToWord32: {
+    case IrOpcode::kTruncateNumberOrOddballToWord32: {
       NumberMatcher m(node->InputAt(0));
-      if (m.HasResolvedValue())
+      if (m.HasResolvedValue()) {
         return ReplaceInt32(DoubleToInt32(m.ResolvedValue()));
+      }
       if (m.IsChangeInt31ToTaggedSigned() || m.IsChangeInt32ToTagged() ||
           m.IsChangeUint32ToTagged()) {
         return Replace(m.InputAt(0));
       }
+      // TODO(385155404): Consider handling ChangeFloat64OrUndefinedToTagged
+      // here.
       if (m.IsChangeFloat64ToTagged() || m.IsChangeFloat64ToTaggedPointer()) {
         return Change(node, machine()->TruncateFloat64ToWord32(), m.InputAt(0));
       }
@@ -145,21 +173,51 @@ Reduction SimplifiedOperatorReducer::Reduce(Node* node) {
     }
     case IrOpcode::kCheckedFloat64ToInt32: {
       Float64Matcher m(node->InputAt(0));
-      if (m.HasResolvedValue() && IsInt32Double(m.ResolvedValue())) {
+      if (m.HasResolvedValue() && IsInt32Double(m.ScalarValue())) {
         Node* value =
-            jsgraph()->Int32Constant(static_cast<int32_t>(m.ResolvedValue()));
+            jsgraph()->Int32Constant(static_cast<int32_t>(m.ScalarValue()));
         ReplaceWithValue(node, value);
         return Replace(value);
       }
       break;
     }
-    case IrOpcode::kCheckedTaggedToArrayIndex:
-    case IrOpcode::kCheckedTaggedToInt32:
-    case IrOpcode::kCheckedTaggedSignedToInt32: {
-      NodeMatcher m(node->InputAt(0));
-      if (m.IsConvertTaggedHoleToUndefined()) {
-        node->ReplaceInput(0, m.InputAt(0));
-        return Changed(node);
+    case IrOpcode::kCheckedInt32ToUint64: {
+      Int32Matcher m(node->InputAt(0));
+      if (m.HasResolvedValue() && m.ResolvedValue() >= 0) {
+        Node* value =
+            jsgraph()->Uint64Constant(static_cast<uint64_t>(m.ResolvedValue()));
+        ReplaceWithValue(node, value);
+        return Replace(value);
+      }
+      break;
+    }
+    case IrOpcode::kCheckedInt64ToUint64: {
+      Int64Matcher m(node->InputAt(0));
+      if (m.HasResolvedValue() && m.ResolvedValue() >= 0) {
+        Node* value =
+            jsgraph()->Uint64Constant(static_cast<uint64_t>(m.ResolvedValue()));
+        ReplaceWithValue(node, value);
+        return Replace(value);
+      }
+      break;
+    }
+    case IrOpcode::kCheckedFloat64ToUint64: {
+      Float64Matcher m(node->InputAt(0));
+      if (m.HasResolvedValue() && IsUint64Double(m.ScalarValue())) {
+        Node* value =
+            jsgraph()->Uint64Constant(static_cast<uint64_t>(m.ScalarValue()));
+        ReplaceWithValue(node, value);
+        return Replace(value);
+      }
+      break;
+    }
+    case IrOpcode::kCheckedTaggedToUint64: {
+      NumberMatcher m(node->InputAt(0));
+      if (m.HasResolvedValue() && IsUint64Double(m.ResolvedValue())) {
+        Node* value =
+            jsgraph()->Uint64Constant(static_cast<uint64_t>(m.ResolvedValue()));
+        ReplaceWithValue(node, value);
+        return Replace(value);
       }
       break;
     }
@@ -171,11 +229,34 @@ Reduction SimplifiedOperatorReducer::Reduce(Node* node) {
       }
       break;
     }
-    case IrOpcode::kCheckNumber: {
-      NodeMatcher m(node->InputAt(0));
-      if (m.IsConvertTaggedHoleToUndefined()) {
-        node->ReplaceInput(0, m.InputAt(0));
+    case IrOpcode::kCheckedTaggedSignedToInt32: {
+      if (node->InputAt(0)->opcode() ==
+          IrOpcode::kConvertTaggedHoleToUndefined) {
+        node->ReplaceInput(0, node->InputAt(0)->InputAt(0));
         return Changed(node);
+      }
+      break;
+    }
+    case IrOpcode::kCheckedTaggedToTaggedPointer: {
+      Node* const input = node->InputAt(0);
+      switch (DecideObjectIsSmi(input)) {
+        case Decision::kFalse:
+          ReplaceWithValue(node, input);
+          return Replace(input);
+        case Decision::kTrue: {
+          Node* effect = NodeProperties::GetEffectInput(node);
+          Node* control = NodeProperties::GetControlInput(node);
+          Node* deopt = jsgraph()->graph()->NewNode(
+              simplified()->CheckIf(DeoptimizeReason::kSmi,
+                                    CheckParametersOf(node->op()).feedback()),
+              jsgraph()->Int32Constant(0), effect, control);
+          Node* unreachable = jsgraph()->graph()->NewNode(
+              jsgraph()->common()->Unreachable(), deopt, control);
+          NodeProperties::ReplaceEffectInput(node, unreachable);
+          return Changed(node);
+        }
+        case Decision::kUnknown:
+          break;
       }
       break;
     }
@@ -202,9 +283,6 @@ Reduction SimplifiedOperatorReducer::Reduce(Node* node) {
       if (m.IsCheckSmi()) {
         ReplaceWithValue(node, input);
         return Replace(input);
-      } else if (m.IsConvertTaggedHoleToUndefined()) {
-        node->ReplaceInput(0, m.InputAt(0));
-        return Changed(node);
       }
       break;
     }
@@ -222,8 +300,9 @@ Reduction SimplifiedOperatorReducer::Reduce(Node* node) {
     }
     case IrOpcode::kNumberAbs: {
       NumberMatcher m(node->InputAt(0));
-      if (m.HasResolvedValue())
+      if (m.HasResolvedValue()) {
         return ReplaceNumber(std::fabs(m.ResolvedValue()));
+      }
       break;
     }
     case IrOpcode::kReferenceEqual: {
@@ -293,26 +372,31 @@ Reduction SimplifiedOperatorReducer::ReplaceFloat64(double value) {
   return Replace(jsgraph()->Float64Constant(value));
 }
 
+Reduction SimplifiedOperatorReducer::ReplaceFloat64(Float64 value) {
+  return Replace(jsgraph()->Float64Constant(value));
+}
 
 Reduction SimplifiedOperatorReducer::ReplaceInt32(int32_t value) {
   return Replace(jsgraph()->Int32Constant(value));
 }
 
-
 Reduction SimplifiedOperatorReducer::ReplaceNumber(double value) {
-  return Replace(jsgraph()->Constant(value));
+  return Replace(jsgraph()->ConstantMaybeHole(value));
 }
 
+Reduction SimplifiedOperatorReducer::ReplaceNumber(Float64 value) {
+  return Replace(jsgraph()->ConstantMaybeHole(value));
+}
 
 Reduction SimplifiedOperatorReducer::ReplaceNumber(int32_t value) {
-  return Replace(jsgraph()->Constant(value));
+  return Replace(jsgraph()->ConstantNoHole(value));
 }
 
 Factory* SimplifiedOperatorReducer::factory() const {
   return jsgraph()->isolate()->factory();
 }
 
-Graph* SimplifiedOperatorReducer::graph() const { return jsgraph()->graph(); }
+TFGraph* SimplifiedOperatorReducer::graph() const { return jsgraph()->graph(); }
 
 MachineOperatorBuilder* SimplifiedOperatorReducer::machine() const {
   return jsgraph()->machine();

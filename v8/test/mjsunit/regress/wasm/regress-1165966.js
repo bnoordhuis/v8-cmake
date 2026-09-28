@@ -2,15 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Flags: --wasm-staging
-
 // This test case is simplified slightly from a fuzzer-generated test case. It
 // causes spills for one of the inputs to kExprI64x2ExtMulHighI32x4U, which the
 // codegen incorrectly assumes will always be a register.
 d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
 
 const builder = new WasmModuleBuilder();
-builder.addMemory(16, 32, false, true);
+builder.addMemory(16, 32, true);
 // Generate function 1 (out of 1).
 builder.addFunction(undefined, kSig_i_v)
   .addLocals(kWasmI64, 1)
