@@ -13,6 +13,7 @@
 #include "src/common/globals.h"
 #include "src/debug/debug-interface.h"
 #include "src/heap/heap.h"
+#include "src/profiler/heap-snapshot-common.h"
 
 namespace v8 {
 namespace internal {
@@ -30,7 +31,7 @@ class StringsStorage;
 // generate consistent IDs for moved objects.
 class HeapProfilerNativeMoveListener {
  public:
-  HeapProfilerNativeMoveListener(HeapProfiler* profiler)
+  explicit HeapProfilerNativeMoveListener(HeapProfiler* profiler)
       : profiler_(profiler) {}
   HeapProfilerNativeMoveListener(const HeapProfilerNativeMoveListener& other) =
       delete;
@@ -52,13 +53,31 @@ class HeapProfilerNativeMoveListener {
 };
 
 class HeapProfiler : public HeapObjectAllocationTracker {
+  using HeapSnapshotMode = v8::HeapProfiler::HeapSnapshotMode;
+
  public:
   explicit HeapProfiler(Heap* heap);
   ~HeapProfiler() override;
   HeapProfiler(const HeapProfiler&) = delete;
   HeapProfiler& operator=(const HeapProfiler&) = delete;
 
-  HeapSnapshot* TakeSnapshot(
+  V8_EXPORT_PRIVATE HeapSnapshot* TakeSnapshot(
+      const v8::HeapProfiler::HeapSnapshotOptions options);
+
+  // Implementation of --heap-snapshot-on-oom.
+  void WriteSnapshotToDiskAfterGC(
+      const v8::HeapProfiler::HeapSnapshotOptions options =
+          GetDefaultHeapSnapshotOptionsForTestingUsage());
+
+  // Returns the default heap snapshot options for snapshots intended for V8
+  // devs.
+  static v8::HeapProfiler::HeapSnapshotOptions
+  GetDefaultHeapSnapshotOptionsForTestingUsage();
+
+  // Just takes a snapshot performing GC as part of the snapshot.
+  void TakeSnapshotToFile(const v8::HeapProfiler::HeapSnapshotOptions options,
+                          std::string filename);
+  V8_EXPORT_PRIVATE std::string TakeSnapshotToString(
       const v8::HeapProfiler::HeapSnapshotOptions options);
 
   bool StartSamplingHeapProfiler(uint64_t sample_interval, int stack_depth,
@@ -80,10 +99,13 @@ class HeapProfiler : public HeapObjectAllocationTracker {
   int GetSnapshotsCount() const;
   bool IsTakingSnapshot() const;
   HeapSnapshot* GetSnapshot(int index);
-  SnapshotObjectId GetSnapshotObjectId(Handle<Object> obj);
+  V8_EXPORT_PRIVATE SnapshotObjectId
+  GetSnapshotObjectId(DirectHandle<Object> obj);
   SnapshotObjectId GetSnapshotObjectId(NativeObject obj);
-  void DeleteAllSnapshots();
+  V8_EXPORT_PRIVATE void DeleteAllSnapshots();
   void RemoveSnapshot(HeapSnapshot* snapshot);
+
+  std::vector<v8::Local<v8::Value>> GetDetachedJSWrapperObjects();
 
   void ObjectMoveEvent(Address from, Address to, int size,
                        bool is_native_object);
@@ -97,7 +119,7 @@ class HeapProfiler : public HeapObjectAllocationTracker {
   void RemoveBuildEmbedderGraphCallback(
       v8::HeapProfiler::BuildEmbedderGraphCallback callback, void* data);
   void BuildEmbedderGraph(Isolate* isolate, v8::EmbedderGraph* graph);
-  bool HasBuildEmbedderGraphCallback() {
+  bool HasBuildEmbedderGraphCallback() const {
     return !build_embedder_graph_callbacks_.empty();
   }
 
@@ -109,15 +131,17 @@ class HeapProfiler : public HeapObjectAllocationTracker {
   v8::EmbedderGraph::Node::Detachedness GetDetachedness(
       const v8::Local<v8::Value> v8_value, uint16_t class_id);
 
+  const char* CopyNameForHeapSnapshot(const char* name);
+
   bool is_tracking_object_moves() const { return is_tracking_object_moves_; }
 
-  Handle<HeapObject> FindHeapObjectById(SnapshotObjectId id);
+  DirectHandle<HeapObject> FindHeapObjectById(SnapshotObjectId id);
   void ClearHeapObjectMap();
 
   Isolate* isolate() const;
 
-  void QueryObjects(Handle<Context> context,
-                    debug::QueryObjectPredicate* predicate,
+  void QueryObjects(DirectHandle<Context> context,
+                    QueryObjectPredicate* predicate,
                     std::vector<v8::Global<v8::Object>>* objects);
   void set_native_move_listener(
       std::unique_ptr<HeapProfilerNativeMoveListener> listener) {

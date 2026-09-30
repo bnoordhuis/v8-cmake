@@ -6,17 +6,10 @@
 #define V8_COMPILER_COMMON_NODE_CACHE_H_
 
 #include "src/compiler/node-cache.h"
+#include "src/utils/boxed-float.h"
 
 namespace v8 {
 namespace internal {
-
-// Forward declarations.
-class ExternalReference;
-class HeapObject;
-template <typename>
-class Handle;
-
-
 namespace compiler {
 
 // Bundles various caches for common nodes.
@@ -56,9 +49,9 @@ class CommonNodeCache final {
     return float32_constants_.Find(base::bit_cast<int32_t>(value));
   }
 
-  Node** FindFloat64Constant(double value) {
+  Node** FindFloat64Constant(Float64 value) {
     // We canonicalize double constants at the bit representation level.
-    return float64_constants_.Find(base::bit_cast<int64_t>(value));
+    return float64_constants_.Find(value.get_bits());
   }
 
   Node** FindExternalConstant(ExternalReference value);

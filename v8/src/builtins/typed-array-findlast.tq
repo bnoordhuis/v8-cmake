@@ -9,8 +9,9 @@ const kBuiltinNameFindLast: constexpr string =
     '%TypedArray%.prototype.findLast';
 
 // https://tc39.es/proposal-array-find-from-last/index.html#sec-%typedarray%.prototype.findlast
-transitioning macro FindLastAllElements(implicit context: Context)(
-    attachedArrayAndLength: typed_array::AttachedJSTypedArrayAndLength,
+transitioning macro FindLastAllElements(
+    implicit context: Context)(
+    attachedArrayAndLength: typed_array::ValidJSTypedArrayAndLength,
     predicate: Callable, thisArg: JSAny): JSAny {
   let witness =
       typed_array::NewAttachedJSTypedArrayWitness(attachedArrayAndLength.array);
@@ -50,8 +51,7 @@ transitioning macro FindLastAllElements(implicit context: Context)(
 }
 
 // https://tc39.es/proposal-array-find-from-last/index.html#sec-%typedarray%.prototype.findlast
-transitioning javascript builtin
-TypedArrayPrototypeFindLast(
+transitioning javascript builtin TypedArrayPrototypeFindLast(
     js-implicit context: NativeContext, receiver: JSAny)(...arguments): JSAny {
   // arguments[0] = predicate
   // arguments[1] = thisArg
@@ -61,8 +61,8 @@ TypedArrayPrototypeFindLast(
     // 3. Let len be IntegerIndexedObjectLength(O).
     const array: JSTypedArray = Cast<JSTypedArray>(receiver)
         otherwise NotTypedArray;
-    const attachedArrayAndLength = EnsureAttachedAndReadLength(array)
-        otherwise IsDetachedOrOutOfBounds;
+    const attachedArrayAndLength = EnsureValidAndReadLength(
+        array, TypedArrayAccessMode::kRead) otherwise Fail;
     // 4. If IsCallable(predicate) is false, throw a TypeError exception.
     const predicate = Cast<Callable>(arguments[0]) otherwise NotCallable;
     const thisArg = arguments[1];
@@ -71,8 +71,10 @@ TypedArrayPrototypeFindLast(
     ThrowCalledNonCallable(arguments[0]);
   } label NotTypedArray deferred {
     ThrowTypeError(MessageTemplate::kNotTypedArray, kBuiltinNameFindLast);
-  } label IsDetachedOrOutOfBounds deferred {
-    ThrowTypeError(MessageTemplate::kDetachedOperation, kBuiltinNameFindLast);
+  } label Fail deferred {
+    ThrowTypeError(
+        MessageTemplate::kTypedArrayValidateErrorOperation,
+        kBuiltinNameFindLast);
   }
 }
 }

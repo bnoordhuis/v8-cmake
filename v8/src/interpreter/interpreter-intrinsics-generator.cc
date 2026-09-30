@@ -15,6 +15,8 @@ namespace v8 {
 namespace internal {
 namespace interpreter {
 
+#include "src/codegen/define-code-stub-assembler-macros.inc"
+
 class IntrinsicsGenerator {
  public:
   explicit IntrinsicsGenerator(InterpreterAssembler* assembler)
@@ -107,21 +109,20 @@ TNode<Object> IntrinsicsGenerator::InvokeIntrinsic(
 
 TNode<Object> IntrinsicsGenerator::IntrinsicAsBuiltinCall(
     const InterpreterAssembler::RegListNodePair& args, TNode<Context> context,
-    Builtin name, int arg_count) {
-  Callable callable = Builtins::CallableFor(isolate_, name);
+    Builtin builtin, int arg_count) {
   switch (arg_count) {
     case 1:
-      return __ CallStub(callable, context,
-                         __ LoadRegisterFromRegisterList(args, 0));
+      return __ CallBuiltin(builtin, context,
+                            __ LoadRegisterFromRegisterList(args, 0));
     case 2:
-      return __ CallStub(callable, context,
-                         __ LoadRegisterFromRegisterList(args, 0),
-                         __ LoadRegisterFromRegisterList(args, 1));
+      return __ CallBuiltin(builtin, context,
+                            __ LoadRegisterFromRegisterList(args, 0),
+                            __ LoadRegisterFromRegisterList(args, 1));
     case 3:
-      return __ CallStub(callable, context,
-                         __ LoadRegisterFromRegisterList(args, 0),
-                         __ LoadRegisterFromRegisterList(args, 1),
-                         __ LoadRegisterFromRegisterList(args, 2));
+      return __ CallBuiltin(builtin, context,
+                            __ LoadRegisterFromRegisterList(args, 0),
+                            __ LoadRegisterFromRegisterList(args, 1),
+                            __ LoadRegisterFromRegisterList(args, 2));
     default:
       UNREACHABLE();
   }
@@ -140,13 +141,44 @@ IntrinsicsGenerator::CopyDataPropertiesWithExcludedPropertiesOnStack(
     int arg_count) {
   TNode<IntPtrT> offset = __ TimesSystemPointerSize(__ IntPtrConstant(1));
   auto base = __ Signed(__ IntPtrSub(args.base_reg_location(), offset));
-  Callable callable = Builtins::CallableFor(
-      isolate_, Builtin::kCopyDataPropertiesWithExcludedPropertiesOnStack);
   TNode<IntPtrT> excluded_property_count = __ IntPtrSub(
       __ ChangeInt32ToIntPtr(args.reg_count()), __ IntPtrConstant(1));
-  return __ CallStub(callable, context,
-                     __ LoadRegisterFromRegisterList(args, 0),
-                     excluded_property_count, base);
+  return __ CallBuiltin(
+      Builtin::kCopyDataPropertiesWithExcludedPropertiesOnStack, context,
+      __ LoadRegisterFromRegisterList(args, 0), excluded_property_count, base);
+}
+
+TNode<Object> IntrinsicsGenerator::GeneratorYieldResult(
+    const InterpreterAssembler::RegListNodePair& args, TNode<Context> context,
+    int arg_count) {
+  TNode<Object> value = assembler_->LoadRegisterFromRegisterList(args, 0);
+  TNode<Object> generator = assembler_->LoadRegisterFromRegisterList(args, 1);
+
+  compiler::TypedCodeAssemblerVariable<Object> result(assembler_);
+  compiler::CodeAssemblerLabel allocate(assembler_), allocate_done(assembler_);
+
+  // Check if yielded_value_ is TheHole (signaling to skip allocating the result
+  // object.
+  TNode<Object> current_yielded_value = assembler_->LoadObjectField(
+      assembler_->CAST(generator), offsetof(JSGeneratorObject, yielded_value_));
+  assembler_->GotoIf(assembler_->TaggedNotEqual(current_yielded_value,
+                                                assembler_->TheHoleConstant()),
+                     &allocate);
+
+  // Store value
+  assembler_->StoreObjectField(assembler_->CAST(generator),
+                               offsetof(JSGeneratorObject, yielded_value_),
+                               value);
+  result = assembler_->TheHoleConstant();
+  assembler_->Goto(&allocate_done);
+
+  assembler_->Bind(&allocate);
+  result = __ CallBuiltin(Builtin::kCreateIterResultObject, context, value,
+                          __ FalseConstant());
+  assembler_->Goto(&allocate_done);
+
+  assembler_->Bind(&allocate_done);
+  return assembler_->UncheckedCast<Object>(result.value());
 }
 
 TNode<Object> IntrinsicsGenerator::CreateIterResultObject(
@@ -159,7 +191,8 @@ TNode<Object> IntrinsicsGenerator::CreateIterResultObject(
 TNode<Object> IntrinsicsGenerator::CreateAsyncFromSyncIterator(
     const InterpreterAssembler::RegListNodePair& args, TNode<Context> context,
     int arg_count) {
-  TNode<Object> sync_iterator = __ LoadRegisterFromRegisterList(args, 0);
+  TNode<JSAny> sync_iterator =
+      __ CAST(__ LoadRegisterFromRegisterList(args, 0));
   return __ CreateAsyncFromSyncIterator(context, sync_iterator);
 }
 
@@ -176,7 +209,7 @@ TNode<Object> IntrinsicsGenerator::GeneratorGetResumeMode(
   TNode<JSGeneratorObject> generator =
       __ CAST(__ LoadRegisterFromRegisterList(args, 0));
   const TNode<Object> value =
-      __ LoadObjectField(generator, JSGeneratorObject::kResumeModeOffset);
+      __ LoadObjectField(generator, offsetof(JSGeneratorObject, resume_mode_));
 
   return value;
 }
@@ -187,7 +220,7 @@ TNode<Object> IntrinsicsGenerator::GeneratorClose(
   TNode<JSGeneratorObject> generator =
       __ CAST(__ LoadRegisterFromRegisterList(args, 0));
   __ StoreObjectFieldNoWriteBarrier(
-      generator, JSGeneratorObject::kContinuationOffset,
+      generator, offsetof(JSGeneratorObject, continuation_),
       __ SmiConstant(JSGeneratorObject::kGeneratorClosed));
   return __ UndefinedConstant();
 }
@@ -198,18 +231,11 @@ TNode<Object> IntrinsicsGenerator::GetImportMetaObject(
   return __ GetImportMetaObject(context);
 }
 
-TNode<Object> IntrinsicsGenerator::AsyncFunctionAwaitCaught(
+TNode<Object> IntrinsicsGenerator::AsyncFunctionAwait(
     const InterpreterAssembler::RegListNodePair& args, TNode<Context> context,
     int arg_count) {
-  return IntrinsicAsBuiltinCall(args, context,
-                                Builtin::kAsyncFunctionAwaitCaught, arg_count);
-}
-
-TNode<Object> IntrinsicsGenerator::AsyncFunctionAwaitUncaught(
-    const InterpreterAssembler::RegListNodePair& args, TNode<Context> context,
-    int arg_count) {
-  return IntrinsicAsBuiltinCall(
-      args, context, Builtin::kAsyncFunctionAwaitUncaught, arg_count);
+  return IntrinsicAsBuiltinCall(args, context, Builtin::kAsyncFunctionAwait,
+                                arg_count);
 }
 
 TNode<Object> IntrinsicsGenerator::AsyncFunctionEnter(
@@ -233,18 +259,11 @@ TNode<Object> IntrinsicsGenerator::AsyncFunctionResolve(
                                 arg_count);
 }
 
-TNode<Object> IntrinsicsGenerator::AsyncGeneratorAwaitCaught(
+TNode<Object> IntrinsicsGenerator::AsyncGeneratorAwait(
     const InterpreterAssembler::RegListNodePair& args, TNode<Context> context,
     int arg_count) {
-  return IntrinsicAsBuiltinCall(args, context,
-                                Builtin::kAsyncGeneratorAwaitCaught, arg_count);
-}
-
-TNode<Object> IntrinsicsGenerator::AsyncGeneratorAwaitUncaught(
-    const InterpreterAssembler::RegListNodePair& args, TNode<Context> context,
-    int arg_count) {
-  return IntrinsicAsBuiltinCall(
-      args, context, Builtin::kAsyncGeneratorAwaitUncaught, arg_count);
+  return IntrinsicAsBuiltinCall(args, context, Builtin::kAsyncGeneratorAwait,
+                                arg_count);
 }
 
 TNode<Object> IntrinsicsGenerator::AsyncGeneratorReject(
@@ -279,6 +298,8 @@ void IntrinsicsGenerator::AbortIfArgCountMismatch(int expected,
 }
 
 #undef __
+
+#include "src/codegen/undef-code-stub-assembler-macros.inc"
 
 }  // namespace interpreter
 }  // namespace internal

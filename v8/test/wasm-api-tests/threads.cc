@@ -2,10 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "test/wasm-api-tests/wasm-api-test.h"
-
 #include <mutex>
 #include <thread>
+
+#include "src/base/platform/platform.h"
+#include "src/wasm/c-api.h"
+#include "test/wasm-api-tests/wasm-api-test.h"
 
 namespace v8 {
 namespace internal {
@@ -19,7 +21,7 @@ const int kNumThreads = 10;
 const int kIterationsPerThread = 3;
 int g_traces;
 
-own<Trap> Callback(void* env, const Val args[], Val results[]) {
+own<Trap> Callback(void* env, const vec<Val>& args, vec<Val>& results) {
   std::lock_guard<std::mutex> lock(*reinterpret_cast<std::mutex*>(env));
   g_traces += args[0].i32();
   return nullptr;
@@ -27,18 +29,28 @@ own<Trap> Callback(void* env, const Val args[], Val results[]) {
 
 void Main(Engine* engine, Shared<Module>* shared, std::mutex* mutex, int id) {
   own<Store> store = Store::make(engine);
+
+  // The physical stack size for std::thread on macOS is 512KB.
+  // We set V8's stack limit to the maximum possible size that fits:
+  // 512KB minus the safety margin.
+  v8::Isolate* isolate =
+      reinterpret_cast<::wasm::StoreImpl*>(store.get())->isolate();
+  uintptr_t stack_start = v8::base::Stack::GetStackStart();
+  uintptr_t limit = stack_start - 512 * KB + V8_STACK_LIMIT_MARGIN_KB * KB;
+  isolate->SetStackLimit(limit);
+
   own<Module> module = Module::obtain(store.get(), shared);
   EXPECT_NE(nullptr, module.get());
   for (int i = 0; i < kIterationsPerThread; i++) {
     std::this_thread::sleep_for(std::chrono::microseconds(100));
 
     // Create imports.
-    own<FuncType> func_type =
-        FuncType::make(ownvec<ValType>::make(ValType::make(::wasm::I32)),
-                       ownvec<ValType>::make());
+    own<FuncType> func_type = FuncType::make(
+        ownvec<ValType>::make(ValType::make(::wasm::ValKind::I32)),
+        ownvec<ValType>::make());
     own<Func> func = Func::make(store.get(), func_type.get(), Callback, mutex);
-    own<::wasm::GlobalType> global_type =
-        ::wasm::GlobalType::make(ValType::make(::wasm::I32), ::wasm::CONST);
+    own<::wasm::GlobalType> global_type = ::wasm::GlobalType::make(
+        ValType::make(::wasm::ValKind::I32), ::wasm::Mutability::CONST);
     own<Global> global =
         Global::make(store.get(), global_type.get(), Val::i32(id));
 
@@ -46,11 +58,13 @@ void Main(Engine* engine, Shared<Module>* shared, std::mutex* mutex, int id) {
     // With the current implementation of the WasmModuleBuilder, global
     // imports always come before function imports, regardless of the
     // order of builder()->Add*Import() calls below.
-    Extern* imports[] = {global.get(), func.get()};
+    vec<Extern*> imports = vec<Extern*>::make(global.get(), func.get());
     own<Instance> instance = Instance::make(store.get(), module.get(), imports);
     ownvec<Extern> exports = instance->exports();
     Func* run_func = exports[0]->func();
-    run_func->call();
+    vec<Val> rets = vec<Val>::make_uninitialized();
+    vec<Val> args = vec<Val>::make_uninitialized();
+    run_func->call(args, rets);
   }
 }
 

@@ -18,8 +18,11 @@ namespace wasm {
 constexpr RegList kLiftoffAssemblerGpCacheRegs = {eax, ecx, edx, esi, edi};
 
 // Omit xmm7, which is the kScratchDoubleReg.
-constexpr DoubleRegList kLiftoffAssemblerFpCacheRegs = {xmm0, xmm1, xmm2, xmm3,
+// Omit xmm0, which is not an allocatable register (see register-ia32.h).
+constexpr DoubleRegList kLiftoffAssemblerFpCacheRegs = {xmm1, xmm2, xmm3,
                                                         xmm4, xmm5, xmm6};
+
+constexpr Simd128RegList kLiftoffAssemblerSimd128CacheRegs = {};
 
 // For the "WasmLiftoffFrameSetup" builtin.
 constexpr Register kLiftoffFrameSetupFunctionReg = edi;
@@ -36,16 +39,10 @@ constexpr RegList kLiftoffAssemblerGpCacheRegs = {rax, rcx, rdx, rbx, rsi,
 constexpr DoubleRegList kLiftoffAssemblerFpCacheRegs = {xmm0, xmm1, xmm2, xmm3,
                                                         xmm4, xmm5, xmm6, xmm7};
 
+constexpr Simd128RegList kLiftoffAssemblerSimd128CacheRegs = {};
+
 // For the "WasmLiftoffFrameSetup" builtin.
 constexpr Register kLiftoffFrameSetupFunctionReg = r12;
-
-#elif V8_TARGET_ARCH_MIPS
-
-constexpr RegList kLiftoffAssemblerGpCacheRegs = {a0, a1, a2, a3, t0, t1, t2,
-                                                  t3, t4, t5, t6, s7, v0, v1};
-
-constexpr DoubleRegList kLiftoffAssemblerFpCacheRegs = {
-    f0, f2, f4, f6, f8, f10, f12, f14, f16, f18, f20, f22, f24};
 
 #elif V8_TARGET_ARCH_MIPS64
 
@@ -54,6 +51,8 @@ constexpr RegList kLiftoffAssemblerGpCacheRegs = {a0, a1, a2, a3, a4, a5, a6,
 
 constexpr DoubleRegList kLiftoffAssemblerFpCacheRegs = {
     f0, f2, f4, f6, f8, f10, f12, f14, f16, f18, f20, f22, f24, f26};
+
+constexpr Simd128RegList kLiftoffAssemblerSimd128CacheRegs = {};
 
 // For the "WasmLiftoffFrameSetup" builtin.
 constexpr Register kLiftoffFrameSetupFunctionReg = t0;
@@ -66,10 +65,13 @@ constexpr RegList kLiftoffAssemblerGpCacheRegs = {a0, a1, a2, a3, a4, a5, a6,
                                                   a7, t0, t1, t2, t3, t4, t5,
                                                   s0, s1, s2, s5, s7};
 
-// f29: zero, f30-f31: macro-assembler scratch float Registers.
+// f29: zero
+// f27-f28 and f30-f31: macro-assembler scratch float Registers.
 constexpr DoubleRegList kLiftoffAssemblerFpCacheRegs = {
-    f0,  f1,  f2,  f3,  f4,  f5,  f6,  f7,  f8,  f9,  f10, f11, f12, f13, f14,
-    f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28};
+    f0,  f1,  f2,  f3,  f4,  f5,  f6,  f7,  f8,  f9,  f10, f11, f12, f13,
+    f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26};
+
+constexpr Simd128RegList kLiftoffAssemblerSimd128CacheRegs = {};
 
 // For the "WasmLiftoffFrameSetup" builtin.
 constexpr Register kLiftoffFrameSetupFunctionReg = t0;
@@ -84,6 +86,8 @@ constexpr RegList kLiftoffAssemblerGpCacheRegs = {r0, r1, r2, r3, r4,
 constexpr DoubleRegList kLiftoffAssemblerFpCacheRegs = {
     d0, d1, d2, d3, d4, d5, d6, d7, d8, d9, d10, d11, d12};
 
+constexpr Simd128RegList kLiftoffAssemblerSimd128CacheRegs = {};
+
 // For the "WasmLiftoffFrameSetup" builtin.
 constexpr Register kLiftoffFrameSetupFunctionReg = r4;
 
@@ -95,10 +99,13 @@ constexpr RegList kLiftoffAssemblerGpCacheRegs = {
     x0,  x1,  x2,  x3,  x4,  x5,  x6,  x7,  x8,  x9,  x10, x11,
     x12, x13, x14, x15, x19, x20, x21, x22, x23, x24, x25, x27};
 
-// d15: fp_zero, d30-d31: macro-assembler scratch V Registers.
+// d15: fp_zero, d28-d31: not allocatable registers, d30-d31: macro-assembler
+// scratch V Registers.
 constexpr DoubleRegList kLiftoffAssemblerFpCacheRegs = {
-    d0,  d1,  d2,  d3,  d4,  d5,  d6,  d7,  d8,  d9,  d10, d11, d12, d13, d14,
-    d16, d17, d18, d19, d20, d21, d22, d23, d24, d25, d26, d27, d28, d29};
+    d0,  d1,  d2,  d3,  d4,  d5,  d6,  d7,  d8,  d9,  d10, d11, d12, d13,
+    d14, d16, d17, d18, d19, d20, d21, d22, d23, d24, d25, d26, d27};
+
+constexpr Simd128RegList kLiftoffAssemblerSimd128CacheRegs = {};
 
 // For the "WasmLiftoffFrameSetup" builtin.
 constexpr Register kLiftoffFrameSetupFunctionReg = x8;
@@ -111,16 +118,21 @@ constexpr RegList kLiftoffAssemblerGpCacheRegs = {r2, r3, r4, r5,
 constexpr DoubleRegList kLiftoffAssemblerFpCacheRegs = {
     d0, d1, d2, d3, d4, d5, d6, d7, d8, d9, d10, d11, d12};
 
+constexpr Simd128RegList kLiftoffAssemblerSimd128CacheRegs = {};
+
 // For the "WasmLiftoffFrameSetup" builtin.
 constexpr Register kLiftoffFrameSetupFunctionReg = r7;
 
 #elif V8_TARGET_ARCH_PPC64
 
-constexpr RegList kLiftoffAssemblerGpCacheRegs = {r3, r4,  r5,  r6,  r7, r8,
-                                                  r9, r10, r11, r15, cp};
+constexpr RegList kLiftoffAssemblerGpCacheRegs = {r3, r4, r5,  r6,  r7,
+                                                  r8, r9, r10, r15, cp};
 
 constexpr DoubleRegList kLiftoffAssemblerFpCacheRegs = {
-    d0, d1, d2, d3, d4, d5, d6, d7, d8, d9, d10, d11, d12};
+    d1, d2, d3, d4, d5, d6, d7, d8, d9, d10, d11, d12};
+
+constexpr Simd128RegList kLiftoffAssemblerSimd128CacheRegs = {
+    v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12};
 
 // For the "WasmLiftoffFrameSetup" builtin.
 constexpr Register kLiftoffFrameSetupFunctionReg = r15;
@@ -129,18 +141,22 @@ constexpr Register kLiftoffFrameSetupFunctionReg = r15;
 // Any change of kLiftoffAssemblerGpCacheRegs also need to update
 // kPushedGpRegs in frame-constants-riscv.h
 constexpr RegList kLiftoffAssemblerGpCacheRegs = {a0, a1, a2, a3, a4, a5,
-                                                  a6, a7, t0, t1, t2, s7};
+                                                  a6, a7, s2, t1, t2, s7};
 
 // Any change of kLiftoffAssemblerGpCacheRegs also need to update
 // kPushedFpRegs in frame-constants-riscv.h
-// ft0 don't be putted int kLiftoffAssemblerFpCacheRegs because v0 is a special
-// simd register and code of ft0 and v0 is same.
 constexpr DoubleRegList kLiftoffAssemblerFpCacheRegs = {
-    ft1, ft2, ft3, ft4, ft5, ft6, ft7, fa0,  fa1, fa2,
-    fa3, fa4, fa5, fa6, fa7, ft8, ft9, ft10, ft11};
+    ft1, ft2, ft3, ft4, ft5, ft6, ft7, fa0, fa1,
+    fa2, fa3, fa4, fa5, fa6, fa7, ft8, ft9, ft10};
+
+// v0  is a special vector register and therefore not in this list.
+constexpr Simd128RegList kLiftoffAssemblerSimd128CacheRegs = {
+    v1,  v4,  v5,  v6,  v7,  v8,  v9,  v10, v11, v12, v13, v14, v15,
+    v16, v17, v18, v19, v20, v21, v22, v23, v27, v28, v29, v30, v31};
 
 // For the "WasmLiftoffFrameSetup" builtin.
-constexpr Register kLiftoffFrameSetupFunctionReg = t0;
+constexpr Register kLiftoffFrameSetupFunctionReg = s2;
+
 #else
 
 constexpr RegList kLiftoffAssemblerGpCacheRegs = RegList::FromBits(0xff);
@@ -148,9 +164,12 @@ constexpr RegList kLiftoffAssemblerGpCacheRegs = RegList::FromBits(0xff);
 constexpr DoubleRegList kLiftoffAssemblerFpCacheRegs =
     DoubleRegList::FromBits(0xff);
 
+constexpr Simd128RegList kLiftoffAssemblerSimd128CacheRegs =
+    Simd128RegList::FromBits(0xff);
+
 #endif
 
-static_assert(kLiftoffFrameSetupFunctionReg != kWasmInstanceRegister);
+static_assert(kLiftoffFrameSetupFunctionReg != kWasmImplicitArgRegister);
 static_assert(kLiftoffFrameSetupFunctionReg != kRootRegister);
 #ifdef V8_COMPRESS_POINTERS
 static_assert(kLiftoffFrameSetupFunctionReg != kPtrComprCageBaseRegister);

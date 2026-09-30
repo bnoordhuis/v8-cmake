@@ -1,6 +1,7 @@
 // Copyright 2020 the V8 project authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
 #ifndef V8_OBJECTS_JS_SEGMENTER_INL_H_
 #define V8_OBJECTS_JS_SEGMENTER_INL_H_
 
@@ -9,6 +10,8 @@
 #endif  // V8_INTL_SUPPORT
 
 #include "src/objects/js-segmenter.h"
+// Include the non-inl header before the rest of the headers.
+
 #include "src/objects/objects-inl.h"
 
 // Has to be the last include (doesn't have include guards):
@@ -17,16 +20,26 @@
 namespace v8 {
 namespace internal {
 
-#include "torque-generated/src/objects/js-segmenter-tq-inl.inc"
+Tagged<String> JSSegmenter::locale() const { return locale_.load(); }
+void JSSegmenter::set_locale(Tagged<String> value, WriteBarrierMode mode) {
+  locale_.store(this, value, mode);
+}
 
-TQ_OBJECT_CONSTRUCTORS_IMPL(JSSegmenter)
+Tagged<CppGCManaged<icu::BreakIterator>> JSSegmenter::icu_break_iterator() const {
+  return Cast<CppGCManaged<icu::BreakIterator>>(icu_break_iterator_.load());
+}
+void JSSegmenter::set_icu_break_iterator(
+    Tagged<CppGCManaged<icu::BreakIterator>> value, WriteBarrierMode mode) {
+  icu_break_iterator_.store(this, value, mode);
+}
 
-// Base segmenter accessors.
-ACCESSORS(JSSegmenter, icu_break_iterator, Managed<icu::BreakIterator>,
-          kIcuBreakIteratorOffset)
+int JSSegmenter::flags() const { return flags_.load().value(); }
+void JSSegmenter::set_flags(int value) {
+  flags_.store(this, Smi::FromInt(value));
+}
 
 inline void JSSegmenter::set_granularity(Granularity granularity) {
-  DCHECK_GE(GranularityBits::kMax, granularity);
+  DCHECK(GranularityBits::is_valid(granularity));
   int hints = flags();
   hints = GranularityBits::update(hints, granularity);
   set_flags(hints);

@@ -5,6 +5,8 @@
 #ifndef V8_CODEGEN_ARM64_REGLIST_ARM64_H_
 #define V8_CODEGEN_ARM64_REGLIST_ARM64_H_
 
+#include <type_traits>
+
 #include "src/codegen/arm64/utils-arm64.h"
 #include "src/codegen/register-arch.h"
 #include "src/codegen/reglist-base.h"
@@ -15,8 +17,10 @@ namespace internal {
 
 using RegList = RegListBase<Register>;
 using DoubleRegList = RegListBase<DoubleRegister>;
+using Simd128RegList = RegListBase<Simd128Register>;
 ASSERT_TRIVIALLY_COPYABLE(RegList);
 ASSERT_TRIVIALLY_COPYABLE(DoubleRegList);
+ASSERT_TRIVIALLY_COPYABLE(Simd128RegList);
 
 constexpr int kRegListSizeInBits = sizeof(RegList) * kBitsPerByte;
 
@@ -25,6 +29,7 @@ constexpr int kRegListSizeInBits = sizeof(RegList) * kBitsPerByte;
 class V8_EXPORT_PRIVATE CPURegList {
  public:
   template <typename... CPURegisters>
+    requires(std::is_convertible_v<CPURegisters, CPURegister> && ...)
   explicit CPURegList(CPURegister reg0, CPURegisters... regs)
       : list_(((uint64_t{1} << reg0.code()) | ... |
                (regs.is_valid() ? uint64_t{1} << regs.code() : 0))),
@@ -94,34 +99,37 @@ class V8_EXPORT_PRIVATE CPURegList {
   CPURegister PopHighestIndex();
 
   // AAPCS64 callee-saved registers.
-  static CPURegList GetCalleeSaved(int size = kXRegSizeInBits);
-  static CPURegList GetCalleeSavedV(int size = kDRegSizeInBits);
+  static CPURegList GetCalleeSaved();
+  // Note that D registers are the lower 64-bit parts of respective V
+  // registers.
+  static CPURegList GetCalleeSavedD();
+  static CPURegList GetCalleeSavedV();
 
   // AAPCS64 caller-saved registers. Note that this includes lr.
-  // TODO(all): Determine how we handle d8-d15 being callee-saved, but the top
-  // 64-bits being caller-saved.
-  static CPURegList GetCallerSaved(int size = kXRegSizeInBits);
-  static CPURegList GetCallerSavedV(int size = kDRegSizeInBits);
+  static CPURegList GetCallerSaved();
+  // Note that D registers are the lower 64-bit parts of respective V
+  // registers. Thus there's no need to save both D and V registers, saving
+  // just V registers is enough.
+  static CPURegList GetCallerSavedD();
+  static CPURegList GetCallerSavedV();
 
   bool IsEmpty() const { return list_ == 0; }
 
-  bool IncludesAliasOf(const CPURegister& other1,
-                       const CPURegister& other2 = NoCPUReg,
-                       const CPURegister& other3 = NoCPUReg,
-                       const CPURegister& other4 = NoCPUReg) const {
+  template <typename... CPURegisters>
+    requires(std::is_convertible_v<CPURegisters, CPURegister> && ...)
+  bool IncludesAliasOf(CPURegister other0, CPURegisters... others) const {
     uint64_t list = 0;
-    if (!other1.IsNone() && (other1.type() == type_)) {
-      list |= (uint64_t{1} << other1.code());
-    }
-    if (!other2.IsNone() && (other2.type() == type_)) {
-      list |= (uint64_t{1} << other2.code());
-    }
-    if (!other3.IsNone() && (other3.type() == type_)) {
-      list |= (uint64_t{1} << other3.code());
-    }
-    if (!other4.IsNone() && (other4.type() == type_)) {
-      list |= (uint64_t{1} << other4.code());
-    }
+    auto add_to_list = [&](CPURegister reg) {
+      if (!reg.IsNone() && (reg.type() == type_)) {
+        list |= (uint64_t{1} << reg.code());
+      }
+    };
+    // Add the first register to the list.
+    add_to_list(other0);
+    // Add the subsequent registers to the list, with some template pack
+    // fold expansion.
+    (add_to_list(others), ...);
+
     return (list_ & list) != 0;
   }
 
@@ -160,10 +168,12 @@ class V8_EXPORT_PRIVATE CPURegList {
 
 // AAPCS64 callee-saved registers.
 #define kCalleeSaved CPURegList::GetCalleeSaved()
+#define kCalleeSavedD CPURegList::GetCalleeSavedD()
 #define kCalleeSavedV CPURegList::GetCalleeSavedV()
 
 // AAPCS64 caller-saved registers. Note that this includes lr.
 #define kCallerSaved CPURegList::GetCallerSaved()
+#define kCallerSavedD CPURegList::GetCallerSavedD()
 #define kCallerSavedV CPURegList::GetCallerSavedV()
 
 }  // namespace internal

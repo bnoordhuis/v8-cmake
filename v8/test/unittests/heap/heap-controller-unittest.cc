@@ -53,14 +53,22 @@ TEST_F(MemoryControllerTest, HeapGrowingFactor) {
 }
 
 TEST_F(MemoryControllerTest, MaxHeapGrowingFactor) {
-  CheckEqualRounded(1.3, V8Controller::MaxGrowingFactor(V8HeapTrait::kMinSize));
-  CheckEqualRounded(1.600,
-                    V8Controller::MaxGrowingFactor(V8HeapTrait::kMaxSize / 2));
-  CheckEqualRounded(2.0,
-                    V8Controller::MaxGrowingFactor(
-                        (V8HeapTrait::kMaxSize - Heap::kPointerMultiplier)));
+  const uint64_t physical_memory = 0;
+  const size_t min_heap_size = i::Heap::kDefaultMinHeapSize;
+  const size_t max_heap_size =
+      1024u * i::Heap::HeapLimitMultiplier(physical_memory) * MB;
+
+  CheckEqualRounded(
+      1.3, V8Controller::MaxGrowingFactor(physical_memory, min_heap_size));
+  CheckEqualRounded(
+      i::Heap::HeapLimitMultiplier(physical_memory) > 1 ? 1.6 : 1.533,
+      V8Controller::MaxGrowingFactor(physical_memory, max_heap_size / 2));
+  CheckEqualRounded(
+      2.0, V8Controller::MaxGrowingFactor(physical_memory, max_heap_size - 1));
+  CheckEqualRounded(
+      4.0, V8Controller::MaxGrowingFactor(physical_memory, max_heap_size));
   CheckEqualRounded(4.0, V8Controller::MaxGrowingFactor(
-                             static_cast<size_t>(V8HeapTrait::kMaxSize)));
+                             physical_memory, i::Heap::kDefaultMaxHeapSize));
 }
 
 TEST_F(MemoryControllerTest, OldGenerationAllocationLimit) {
@@ -71,41 +79,22 @@ TEST_F(MemoryControllerTest, OldGenerationAllocationLimit) {
   double mutator_speed = 1;
   size_t new_space_capacity = 16 * MB;
 
-  double factor = V8Controller::GrowingFactor(heap, max_old_generation_size,
-                                              gc_speed, mutator_speed);
+  double factor = V8Controller::GrowingFactor(
+      i_isolate(), heap->physical_memory(), max_old_generation_size, gc_speed,
+      mutator_speed, Heap::HeapGrowingMode::kDefault);
 
   EXPECT_EQ(static_cast<size_t>(old_gen_size * factor + new_space_capacity),
-            V8Controller::CalculateAllocationLimit(
-                heap, old_gen_size, 0u, max_old_generation_size,
-                new_space_capacity, factor, Heap::HeapGrowingMode::kDefault));
-
-  factor = std::min({factor, V8HeapTrait::kConservativeGrowingFactor});
-  EXPECT_EQ(static_cast<size_t>(old_gen_size * factor + new_space_capacity),
-            V8Controller::CalculateAllocationLimit(
-                heap, old_gen_size, 0u, max_old_generation_size,
-                new_space_capacity, factor, Heap::HeapGrowingMode::kSlow));
-
-  factor = std::min({factor, V8HeapTrait::kConservativeGrowingFactor});
-  EXPECT_EQ(
-      static_cast<size_t>(old_gen_size * factor + new_space_capacity),
-      V8Controller::CalculateAllocationLimit(
-          heap, old_gen_size, 0u, max_old_generation_size, new_space_capacity,
-          factor, Heap::HeapGrowingMode::kConservative));
-
-  factor = V8HeapTrait::kMinGrowingFactor;
-  EXPECT_EQ(static_cast<size_t>(old_gen_size * factor + new_space_capacity),
-            V8Controller::CalculateAllocationLimit(
-                heap, old_gen_size, 0u, max_old_generation_size,
-                new_space_capacity, factor, Heap::HeapGrowingMode::kMinimal));
+            V8HeapTrait::BoundAllocationLimit(
+                old_gen_size, old_gen_size * factor, 0u,
+                max_old_generation_size, new_space_capacity));
 
   factor = V8HeapTrait::kMinGrowingFactor;
   size_t min_old_generation_size =
-      2 * static_cast<size_t>(old_gen_size * factor + new_space_capacity);
-  EXPECT_EQ(
-      min_old_generation_size,
-      V8Controller::CalculateAllocationLimit(
-          heap, old_gen_size, min_old_generation_size, max_old_generation_size,
-          new_space_capacity, factor, Heap::HeapGrowingMode::kMinimal));
+      2 * static_cast<size_t>(old_gen_size * factor);
+  EXPECT_EQ(min_old_generation_size,
+            V8HeapTrait::BoundAllocationLimit(
+                old_gen_size, old_gen_size * factor, min_old_generation_size,
+                max_old_generation_size, new_space_capacity));
 }
 
 }  // namespace internal

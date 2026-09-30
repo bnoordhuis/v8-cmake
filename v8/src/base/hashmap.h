@@ -2,15 +2,16 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#ifndef V8_BASE_HASHMAP_H_
+#define V8_BASE_HASHMAP_H_
+
 // The reason we write our own hash map instead of using unordered_map in STL,
 // is that STL containers use a mutex pool on debug build, which will lead to
 // deadlock when we are using async signal handler.
 
-#ifndef V8_BASE_HASHMAP_H_
-#define V8_BASE_HASHMAP_H_
-
 #include <stdlib.h>
 
+#include "include/v8config.h"
 #include "src/base/bits.h"
 #include "src/base/hashmap-entry.h"
 #include "src/base/logging.h"
@@ -22,7 +23,7 @@ namespace base {
 class DefaultAllocationPolicy {
  public:
   template <typename T, typename TypeTag = T[]>
-  V8_INLINE T* NewArray(size_t length) {
+  V8_INLINE T* AllocateArray(size_t length) {
     return static_cast<T*>(base::Malloc(length * sizeof(T)));
   }
   template <typename T, typename TypeTag = T[]>
@@ -96,6 +97,7 @@ class TemplateHashMapImpl {
   // It returns the value of the deleted entry
   // or null if there is no value for such key.
   Value Remove(const Key& key, uint32_t hash);
+  Value Remove(Entry* entry);
 
   // Empties the hash map (occupancy() == 0).
   void Clear();
@@ -197,7 +199,7 @@ TemplateHashMapImpl<Key, Value, MatchFun, AllocationPolicy>::
     : impl_(original->impl_.match(), std::move(allocator)) {
   impl_.capacity_ = original->capacity();
   impl_.occupancy_ = original->occupancy();
-  impl_.map_ = impl_.allocator().template NewArray<Entry>(capacity());
+  impl_.map_ = impl_.allocator().template AllocateArray<Entry>(capacity());
   memcpy(impl_.map_, original->impl_.map_, capacity() * sizeof(Entry));
 }
 
@@ -266,11 +268,21 @@ Value TemplateHashMapImpl<Key, Value, MatchFun, AllocationPolicy>::Remove(
     const Key& key, uint32_t hash) {
   // Lookup the entry for the key to remove.
   Entry* p = Probe(key, hash);
+
   if (!p->exists()) {
     // Key not found nothing to remove.
     return nullptr;
   }
 
+  return Remove(p);
+}
+
+template <typename Key, typename Value, typename MatchFun,
+          class AllocationPolicy>
+Value TemplateHashMapImpl<Key, Value, MatchFun, AllocationPolicy>::Remove(
+    Entry* p) {
+  DCHECK_LE(impl_.map_ - 1, p);
+  DCHECK_LT(p, map_end());
   Value value = p->value;
   // To remove an entry we need to ensure that it does not create an empty
   // entry that will cause the search for another entry to stop too soon. If all
@@ -305,7 +317,7 @@ Value TemplateHashMapImpl<Key, Value, MatchFun, AllocationPolicy>::Remove(
     }
 
     // Find the initial position for the entry at position q.
-    Entry* r = impl_.map_ + (q->hash & (capacity() - 1));
+    Entry* r = impl_.map_ + (q->hash() & (capacity() - 1));
 
     // If the entry at position q has its initial position outside the range
     // between p and q it can be moved forward to position p and will still be
@@ -326,9 +338,7 @@ template <typename Key, typename Value, typename MatchFun,
           class AllocationPolicy>
 void TemplateHashMapImpl<Key, Value, MatchFun, AllocationPolicy>::Clear() {
   // Mark all entries as empty.
-  for (size_t i = 0; i < capacity(); ++i) {
-    impl_.map_[i].clear();
-  }
+  memset(impl_.map_, 0, capacity() * sizeof(Entry));
   impl_.occupancy_ = 0;
 }
 
@@ -345,7 +355,8 @@ typename TemplateHashMapImpl<Key, Value, MatchFun, AllocationPolicy>::Entry*
 TemplateHashMapImpl<Key, Value, MatchFun, AllocationPolicy>::Next(
     Entry* entry) const {
   const Entry* end = map_end();
-  DCHECK(impl_.map_ - 1 <= entry && entry < end);
+  DCHECK_LE(impl_.map_ - 1, entry);
+  DCHECK_LT(entry, map_end());
   for (entry++; entry < end; entry++) {
     if (entry->exists()) {
       return entry;
@@ -360,6 +371,7 @@ template <typename LookupKey>
 typename TemplateHashMapImpl<Key, Value, MatchFun, AllocationPolicy>::Entry*
 TemplateHashMapImpl<Key, Value, MatchFun, AllocationPolicy>::Probe(
     const LookupKey& key, uint32_t hash) const {
+  hash &= 0x7FFFFFFF;
   DCHECK(base::bits::IsPowerOfTwo(capacity()));
   size_t i = hash & (capacity() - 1);
   DCHECK(i < capacity());
@@ -367,7 +379,7 @@ TemplateHashMapImpl<Key, Value, MatchFun, AllocationPolicy>::Probe(
   DCHECK(occupancy() < capacity());  // Guarantees loop termination.
   Entry* map = impl_.map_;
   while (map[i].exists() &&
-         !impl_.match()(hash, map[i].hash, key, map[i].key)) {
+         !impl_.match()(hash, map[i].hash(), key, map[i].key)) {
     i = (i + 1) & (capacity() - 1);
   }
 
@@ -381,6 +393,9 @@ TemplateHashMapImpl<Key, Value, MatchFun, AllocationPolicy>::FillEmptyEntry(
     Entry* entry, const Key& key, const Value& value, uint32_t hash) {
   DCHECK(!entry->exists());
 
+  // The entry stores hash in 31 bits; mask the top bit to match Probe's
+  // masking and avoid base::BitField's CHECK on overflow.
+  hash &= Entry::kHashValueMask;
   new (entry) Entry(key, value, hash);
   impl_.occupancy_++;
 
@@ -398,7 +413,7 @@ template <typename Key, typename Value, typename MatchFun,
 void TemplateHashMapImpl<Key, Value, MatchFun, AllocationPolicy>::Initialize(
     uint32_t capacity) {
   DCHECK(base::bits::IsPowerOfTwo(capacity));
-  impl_.map_ = impl_.allocator().template NewArray<Entry>(capacity);
+  impl_.map_ = impl_.allocator().template AllocateArray<Entry>(capacity);
   if (impl_.map_ == nullptr) {
     FATAL("Out of memory: HashMap::Initialize");
     return;
@@ -420,9 +435,9 @@ void TemplateHashMapImpl<Key, Value, MatchFun, AllocationPolicy>::Resize() {
   // Rehash all current entries.
   for (Entry* entry = old_map; n > 0; entry++) {
     if (entry->exists()) {
-      Entry* new_entry = Probe(entry->key, entry->hash);
+      Entry* new_entry = Probe(entry->key, entry->hash());
       new_entry =
-          FillEmptyEntry(new_entry, entry->key, entry->value, entry->hash);
+          FillEmptyEntry(new_entry, entry->key, entry->value, entry->hash());
       n--;
     }
   }
@@ -537,7 +552,7 @@ class TemplateHashMap
     Value* second;
   };
 
-  class Iterator {
+  class V8_GSL_POINTER Iterator {
    public:
     Iterator& operator++() {
       entry_ = map_->Next(entry_);
@@ -545,7 +560,7 @@ class TemplateHashMap
     }
 
     value_type* operator->() { return reinterpret_cast<value_type*>(entry_); }
-    bool operator!=(const Iterator& other) { return entry_ != other.entry_; }
+    bool operator==(const Iterator& other) { return entry_ == other.entry_; }
 
    private:
     Iterator(const Base* map, typename Base::Entry* entry)

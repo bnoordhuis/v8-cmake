@@ -15,6 +15,13 @@ d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
 // `GenerateAndRunTest` additionally generates the inputs for `RunTest`, which
 // is good for fuzzing the js-to-wasm wrappers.
 
+// Some documentation if the test fails in the CQ.
+console.log("This test is a fuzzer, it tests the generic js-to-wasm wrapper");
+console.log("with random signatures. If this test fails, then it may not fail");
+console.log("for the CL that actually introduced the issue, but for a");
+console.log("later CL in the CQ. You may want to use flako to identify that");
+console.log("actual culprit.");
+
 const debug = false;
 
 let kSig_r_i = makeSig([kWasmI32], [kWasmExternRef]);
@@ -375,12 +382,26 @@ function RunTest(params, returns, map) {
 
   // Check result
   for (let i = 0; i < returns.length; ++i) {
+    let details = undefined;
+    if (debug) {
+      details = `${i}, converting ${args[map[i]]} \
+                 from ${TypeString(params[map[i]])} \
+                 to ${TypeString(returns[i])}`;
+    }
     assertEquals(
         ConversionFunction(returns[i], params[map[i]], args[map[i]]),
-        result[i]);
+        result[i], details);
   }
 }
 
-for (let i = 0; i < 2; ++i) {
+// Regression test for crbug.com/390035515.
+RunTest(
+    [
+      kWasmI64, kWasmI64, kWasmI64, kWasmI64, kWasmI64, kWasmI64, kWasmI64,
+      kWasmI64, kWasmI64, kWasmI64
+    ],
+    [kWasmI64], [0]);
+
+for (let i = 0; i < (debug ? 200 : 2); ++i) {
   GenerateAndRunTest();
 }

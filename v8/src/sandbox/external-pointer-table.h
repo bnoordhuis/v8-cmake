@@ -8,9 +8,10 @@
 #include "include/v8config.h"
 #include "src/base/atomicops.h"
 #include "src/base/memory.h"
-#include "src/base/platform/mutex.h"
 #include "src/common/globals.h"
-#include "src/sandbox/external-entity-table.h"
+#include "src/sandbox/compactible-external-entity-table.h"
+#include "src/sandbox/tagged-payload.h"
+#include "src/utils/allocation.h"
 
 #ifdef V8_COMPRESS_POINTERS
 
@@ -18,6 +19,8 @@ namespace v8 {
 namespace internal {
 
 class Isolate;
+class Counters;
+class ReadOnlyArtifacts;
 
 /**
  * The entries of an ExternalPointerTable.
@@ -36,23 +39,39 @@ class Isolate;
 struct ExternalPointerTableEntry {
   // Make this entry an external pointer entry containing the given pointer
   // tagged with the given tag.
-  inline void MakeExternalPointerEntry(Address value, ExternalPointerTag tag);
+  inline void MakeExternalPointerEntry(Address value, ExternalPointerTag tag,
+                                       bool mark_as_alive);
 
   // Load and untag the external pointer stored in this entry.
   // This entry must be an external pointer entry.
   // If the specified tag doesn't match the actual tag of this entry, the
   // resulting pointer will be invalid and cannot be dereferenced.
-  inline Address GetExternalPointer(ExternalPointerTag tag) const;
+  inline Address GetExternalPointer(ExternalPointerTagRange tag_range) const;
 
   // Tag and store the given external pointer in this entry.
   // This entry must be an external pointer entry.
   inline void SetExternalPointer(Address value, ExternalPointerTag tag);
+
+  // Returns true if this entry contains an external pointer with the given tag.
+  inline bool HasExternalPointer(ExternalPointerTagRange tag_range) const;
 
   // Exchanges the external pointer stored in this entry with the provided one.
   // Returns the old external pointer. This entry must be an external pointer
   // entry. If the provided tag doesn't match the tag of the old entry, the
   // returned pointer will be invalid.
   inline Address ExchangeExternalPointer(Address value, ExternalPointerTag tag);
+
+  // Load the tag of the external pointer stored in this entry.
+  // This entry must be an external pointer entry.
+  inline ExternalPointerTag GetExternalPointerTag() const;
+
+  // Returns the address of the managed resource contained in this entry or
+  // nullptr if this entry does not reference a managed resource.
+  inline Address ExtractManagedResourceOrNull() const;
+
+  // Invalidate the entry. Any access to a zapped entry will result in an
+  // invalid pointer that will crash upon dereference.
+  inline void MakeZappedEntry();
 
   // Make this entry a freelist entry, containing the index of the next entry
   // on the freelist.
@@ -62,79 +81,51 @@ struct ExternalPointerTableEntry {
   // called even when the entry is not a freelist entry. However, the result
   // is only valid if this is a freelist entry. This behaviour is required
   // for efficient entry allocation, see TryAllocateEntryFromFreelist.
-  inline uint32_t GetNextFreelistEntryIndex() const;
+  inline std::optional<uint32_t> GetNextFreelistEntryIndex() const;
 
   // Make this entry an evacuation entry containing the address of the handle to
   // the entry being evacuated.
   inline void MakeEvacuationEntry(Address handle_location);
 
-  // Move the content of this entry into the provided entry while also clearing
-  // the marking bit. Used during table compaction. This invalidates the entry.
-  inline void UnmarkAndMigrateInto(ExternalPointerTableEntry& other);
+  // Returns true if this entry contains an evacuation entry.
+  inline bool HasEvacuationEntry() const;
 
-  // Mark this entry as alive during table garbage collection.
-  inline void Mark();
+  // Move the content of this entry into the provided entry, possibly clearing
+  // the marking bit. Used during table compaction and during promotion.
+  // Invalidates the source entry.
+  inline void Evacuate(ExternalPointerTableEntry& dest, EvacuateMarkMode mode);
+
+  // Copy the content of the given entry into this entry.
+  // The source entry remains valid.
+  inline void CopyFrom(const ExternalPointerTableEntry& src);
+
+  // Mark this entry as alive during table garbage collection. Returns true if
+  // the entry transitioned from un-marked to marked, and false otherwise.
+  inline bool Mark();
+
+  static constexpr bool IsWriteProtected = false;
 
  private:
+  friend struct ExternalEntityTableCompactionTraits<ExternalPointerTableEntry>;
+  friend class CompactibleExternalEntityTable<
+      ExternalPointerTableEntry, kExternalPointerTableReservationSize>;
   friend class ExternalPointerTable;
+  friend class ExternalPointerTableEntryPrinter;
 
-  // ExternalPointerTable entries consist of a single pointer-sized word
-  // containing a tag and marking bit together with the actual content (e.g. an
-  // external pointer).
-  struct Payload {
-    Payload(Address pointer, ExternalPointerTag tag)
-        : encoded_word_(Tag(pointer, tag)) {}
-
-    Address Untag(ExternalPointerTag tag) const { return encoded_word_ & ~tag; }
-
-    static Address Tag(Address pointer, ExternalPointerTag tag) {
-      return pointer | tag;
-    }
-
-    bool IsTaggedWith(ExternalPointerTag tag) const {
-      return (encoded_word_ & kExternalPointerTagMask) == tag;
-    }
-
-    void SetMarkBit() { encoded_word_ |= kExternalPointerMarkBit; }
-
-    void ClearMarkBit() { encoded_word_ &= ~kExternalPointerMarkBit; }
-
-    bool HasMarkBitSet() const {
-      return (encoded_word_ & kExternalPointerMarkBit) != 0;
-    }
-
-    bool ContainsFreelistLink() const {
-      return IsTaggedWith(kExternalPointerFreeEntryTag);
-    }
-
-    uint32_t ExtractFreelistLink() const {
-      return static_cast<uint32_t>(encoded_word_);
-    }
-
-    bool ContainsEvacuationEntry() const {
-      return IsTaggedWith(kExternalPointerEvacuationEntryTag);
-    }
-
-    Address ExtractEvacuationEntryHandleLocation() const {
-      return Untag(kExternalPointerEvacuationEntryTag);
-    }
-
-    bool ContainsExternalPointer() const {
-      return !ContainsFreelistLink() && !ContainsEvacuationEntry();
-    }
-
-    bool operator==(Payload other) const {
-      return encoded_word_ == other.encoded_word_;
-    }
-    bool operator!=(Payload other) const {
-      return encoded_word_ != other.encoded_word_;
-    }
-
-   private:
-    Address encoded_word_;
+  struct ExternalPointerTablePayloadTaggingScheme {
+    using TagType = ExternalPointerTag;
+    static constexpr uint64_t kMarkBit = kExternalPointerMarkBit;
+    static constexpr uint64_t kTagShift = kExternalPointerTagShift;
+    static constexpr uint64_t kTagMask = kExternalPointerTagMask;
+    static constexpr uint64_t kPayloadMask = kExternalPointerPayloadMask;
+    static constexpr uint64_t kPayloadShift = 0;
+    static constexpr TagType kFreeEntryTag = kExternalPointerFreeEntryTag;
+    static constexpr TagType kEvacuationEntryTag =
+        kExternalPointerEvacuationEntryTag;
   };
+  using Payload = TaggedPayload<ExternalPointerTablePayloadTaggingScheme>;
 
-  inline Payload GetRawPayload() {
+  inline Payload GetRawPayload() const {
     return payload_.load(std::memory_order_relaxed);
   }
   inline void SetRawPayload(Payload new_payload) {
@@ -147,6 +138,9 @@ struct ExternalPointerTableEntry {
 #endif  // LEAK_SANITIZER
   }
 
+  // ExternalPointerTable entries consist of a single pointer-sized word
+  // containing a tag and marking bit together with the actual content (e.g. an
+  // external pointer).
   std::atomic<Payload> payload_;
 
 #if defined(LEAK_SANITIZER)
@@ -170,21 +164,38 @@ struct ExternalPointerTableEntry {
 #if defined(LEAK_SANITIZER)
 //  When LSan is active, we need "fat" entries, see above.
 static_assert(sizeof(ExternalPointerTableEntry) == 16);
-constexpr size_t kExternalPointerTableReservationSizeAfterAccountingForLSan =
-    kExternalPointerTableReservationSize * 2;
 #else
 //  We expect ExternalPointerTable entries to consist of a single 64-bit word.
 static_assert(sizeof(ExternalPointerTableEntry) == 8);
-constexpr size_t kExternalPointerTableReservationSizeAfterAccountingForLSan =
-    kExternalPointerTableReservationSize;
 #endif
+
+/**
+ * Trait used to implement table compaction for ExternalPointerTableEntry.
+ */
+template <>
+struct ExternalEntityTableCompactionTraits<ExternalPointerTableEntry> {
+  using Handle = ExternalPointerHandle;
+  static constexpr Handle kNullHandle = kNullExternalPointerHandle;
+  static bool IsValidHandle(Handle handle);
+  static uint32_t HandleToIndex(Handle handle);
+  static Handle IndexToHandle(uint32_t index);
+  template <typename Table>
+  static void FreeEntry(Table* base_table, uint32_t index);
+  template <typename Table>
+  static void RelocateAuxiliaryEntryData(Table* base_table, uint32_t old_index,
+                                         uint32_t new_index);
+};
 
 /**
  * A table storing pointers to objects outside the V8 heap.
  *
  * When V8_ENABLE_SANDBOX, its primary use is for pointing to objects outside
  * the sandbox, as described below.
+ * When V8_COMPRESS_POINTERS, external pointer tables are also used to ease
+ * alignment requirements in heap object fields via indirection.
  *
+ * A table's role for the V8 Sandbox:
+ * --------------------------------
  * An external pointer table provides the basic mechanisms to ensure
  * memory-safe access to objects located outside the sandbox, but referenced
  * from within it. When an external pointer table is used, objects located
@@ -200,11 +211,14 @@ constexpr size_t kExternalPointerTableReservationSizeAfterAccountingForLSan =
  * which ensures that every entry is either an invalid pointer or a valid
  * pointer pointing to a live object.
  *
- * Spatial memory safety can, if necessary, be ensured by storing the size of a
- * referenced object together with the object itself outside the sandbox, and
- * referencing both through a single entry in the table.
+ * Spatial memory safety can, if necessary, be ensured either by storing the
+ * size of the referenced object together with the object itself outside the
+ * sandbox, or by storing both the pointer and the size in one (double-width)
+ * table entry.
  *
- * The garbage collection algorithm for the table works as follows:
+ * Table memory management:
+ * ------------------------
+ * The garbage collection algorithm works as follows:
  *  - One bit of every entry is reserved for the marking bit.
  *  - Every store to an entry automatically sets the marking bit when ORing
  *    with the tag. This avoids the need for write barriers.
@@ -213,38 +227,79 @@ constexpr size_t kExternalPointerTableReservationSizeAfterAccountingForLSan =
  *  - When the GC marking visitor finds a live object with an external pointer,
  *    it marks the corresponding entry as alive through Mark(), which sets the
  *    marking bit using an atomic CAS operation.
- *  - When marking is finished, SweepAndCompact() iterates of the table once
+ *  - When marking is finished, SweepAndCompact() iterates over a Space once
  *    while the mutator is stopped and builds a freelist from all dead entries
- *    while also removing the marking bit from any live entry.
+ *    while also possibly clearing the marking bit from any live entry.
  *
- * When V8_COMPRESS_POINTERS, external pointer tables are also used to ease
- * alignment requirements in heap object fields via indirection.
+ * Generational collection for tables:
+ * -----------------------------------
+ * Young-generation objects with external pointer slots allocate their
+ * ExternalPointerTable entries in a spatially partitioned young external
+ * pointer space.  There are two different mechanisms:
+ *  - When using the semi-space nursery, promoting an object evacuates its EPT
+ *    entries to the old external pointer space.
+ *  - For the in-place MinorMS nursery, possibly-concurrent marking populates
+ *    the SURVIVOR_TO_EXTERNAL_POINTER remembered sets.  In the pause, promoted
+ *    objects use this remembered set to evacuate their EPT entries to the old
+ *    external pointer space.  Survivors have their EPT entries are left in
+ *    place.
+ * In a full collection, segments from the young EPT space are eagerly promoted
+ * during the pause, leaving the young generation empty.
+ *
+ * Table compaction:
+ * -----------------
+ * Additionally, the external pointer table supports compaction.
+ * For details about the compaction algorithm see the
+ * CompactibleExternalEntityTable class.
  */
 class V8_EXPORT_PRIVATE ExternalPointerTable
-    : public ExternalEntityTable<
-          ExternalPointerTableEntry,
-          kExternalPointerTableReservationSizeAfterAccountingForLSan> {
- public:
-  // Size of an ExternalPointerTable, for layout computation in IsolateData.
-  static int constexpr kSize = 4 * kSystemPointerSize;
-  static_assert(kMaxExternalPointers == kMaxCapacity);
+    : public CompactibleExternalEntityTable<
+          ExternalPointerTableEntry, kExternalPointerTableReservationSize> {
+  using Base =
+      CompactibleExternalEntityTable<ExternalPointerTableEntry,
+                                     kExternalPointerTableReservationSize>;
 
+#if defined(LEAK_SANITIZER)
+  //  When LSan is active, we use "fat" entries, see above.
+  static_assert(kMaxExternalPointers == Base::kMaxCapacity * 2);
+#else
+  static_assert(kMaxExternalPointers == Base::kMaxCapacity);
+#endif
+  static_assert(Base::kSupportsCompaction);
+
+ public:
   ExternalPointerTable() = default;
   ExternalPointerTable(const ExternalPointerTable&) = delete;
   ExternalPointerTable& operator=(const ExternalPointerTable&) = delete;
 
-  // Initializes this external pointer table by reserving the backing memory
-  // and initializing the freelist.
-  void Init();
+  // The Spaces used by an ExternalPointerTable.
+  struct Space : public Base::Space {
+   public:
+    // During table compaction, we may record the addresses of fields
+    // containing external pointer handles (if they are evacuation candidates).
+    // As such, if such a field is invalidated (for example because the host
+    // object is converted to another object type), we need to be notified of
+    // that. Note that we do not need to care about "re-validated" fields here:
+    // if an external pointer field is first converted to different kind of
+    // field, then again converted to a external pointer field, then it will be
+    // re-initialized, at which point it will obtain a new entry in the
+    // external pointer table which cannot be a candidate for evacuation.
+    inline void NotifyExternalPointerFieldInvalidated(
+        Address field_address, ExternalPointerTagRange tag_range);
 
-  // Resets this external pointer table and deletes all associated memory.
-  void TearDown();
+    // Not atomic.  Mutators and concurrent marking must be paused.
+    void AssertEmpty() { CHECK(segments_.empty()); }
+  };
+
+  // Initializes all slots in the RO space from pre-existing artifacts.
+  void SetUpFromReadOnlyArtifacts(Space* read_only_space,
+                                  const ReadOnlyArtifacts* artifacts);
 
   // Retrieves the entry referenced by the given handle.
   //
   // This method is atomic and can be called from background threads.
   inline Address Get(ExternalPointerHandle handle,
-                     ExternalPointerTag tag) const;
+                     ExternalPointerTagRange tag_range) const;
 
   // Sets the entry referenced by the given handle.
   //
@@ -260,159 +315,137 @@ class V8_EXPORT_PRIVATE ExternalPointerTable
   inline Address Exchange(ExternalPointerHandle handle, Address value,
                           ExternalPointerTag tag);
 
-  // Allocates a new entry in the external pointer table. The caller must
-  // provide the initial value and tag.
+  // Retrieves the tag used for the entry referenced by the given handle.
+  //
+  // This method is atomic and can be called from background threads.
+  inline ExternalPointerTag GetTag(ExternalPointerHandle handle) const;
+
+  // Invalidates the entry referenced by the given handle.
+  inline void Zap(ExternalPointerHandle handle);
+
+  // Allocates a new entry in the given space. The caller must provide the
+  // initial value and tag for the entry.
   //
   // This method is atomic and can be called from background threads.
   inline ExternalPointerHandle AllocateAndInitializeEntry(
-      Address initial_value, ExternalPointerTag tag);
+      Space* space, Address initial_value, ExternalPointerTag tag);
+
+  // Duplicates an entry, returning a handle to the new entry.
+  inline ExternalPointerHandle DuplicateEntry(Space* space,
+                                              ExternalPointerHandle handle);
 
   // Marks the specified entry as alive.
   //
-  // If the table is currently being compacted, this may also mark the entry
-  // for evacuation for which the location of the handle is required. See the
-  // comments about table compaction below for more details.
+  // If the space to which the entry belongs is currently being compacted, this
+  // may also mark the entry for evacuation for which the location of the
+  // handle is required. See the comments about the compaction algorithm for
+  // more details.
   //
   // This method is atomic and can be called from background threads.
-  inline void Mark(ExternalPointerHandle handle, Address handle_location);
+  inline void Mark(Space* space, ExternalPointerHandle handle,
+                   Address handle_location);
 
-  // Table compaction.
-  //
-  // The table is to some degree self-compacting: since the freelist is
-  // sorted in ascending order (see SweepAndCompact()), empty slots at the start
-  // of the table will usually quickly be filled. Further, empty blocks at the
-  // end of the table will be decommitted to reduce memory usage. However, live
-  // entries at the end of the table can prevent this decommitting and cause
-  // fragmentation. The following simple algorithm is therefore used to
-  // compact the table if that is deemed necessary:
-  //  - At the start of the GC marking phase, determine if the table needs to be
-  //    compacted. This decisiont is mostly based on the absolute and relative
-  //    size of the freelist.
-  //  - If compaction is needed, this algorithm attempts to shrink the table by
-  //    FreelistSize/2 entries during compaction by moving all live entries out
-  //    of the evacuation area (the last FreelistSize/2 entries of the table),
-  //    then decommitting those blocks at the end of SweepAndCompact().
-  //  - During marking, whenever a live entry inside the evacuation area is
-  //    found, a new "evacuation entry" is allocated from the freelist (which is
-  //    assumed to have enough free slots) and the address of the handle is
-  //    written into it.
-  //  - During sweeping, these evacuation entries are resolved: the content of
-  //    the old entry is copied into the new entry and the handle in the object
-  //    is updated to point to the new entry.
-  //
-  // When compacting, it is expected that the evacuation area contains few live
-  // entries and that the freelist will be able to serve all evacuation entry
-  // allocations. In that case, compaction is essentially free (very little
-  // marking overhead, no memory overhead). However, it can happen that the
-  // application allocates a large number of entries from the table during
-  // marking, in which case the freelist would no longer be able to serve all
-  // allocation without growing. If that situation is detected, compaction is
-  // aborted during marking.
-  //
-  // This algorithm assumes that table entries (except for the null entry) are
-  // never shared between multiple objects. Otherwise, the following could
-  // happen: object A initially has handle H1 and is scanned during incremental
-  // marking. Next, object B with handle H2 is scanned and marked for
-  // evacuation. Afterwards, object A copies the handle H2 from object B.
-  // During sweeping, only object B's handle will be updated to point to the
-  // new entry while object A's handle is now dangling. If shared entries ever
-  // become necessary, setting external pointer handles would have to be
-  // guarded by write barriers to avoid this scenario.
+  // Evacuate the specified entry from one space to another, updating the handle
+  // location in place and returning the valid evacuated handle.
+  inline ExternalPointerHandle Evacuate(Space* from_space, Space* to_space,
+                                        ExternalPointerHandle handle,
+                                        Address handle_location,
+                                        EvacuateMarkMode mode);
 
-  // Frees unmarked entries and finishes table compaction (if running).
+  // Evacuate all segments from from_space to to_space, leaving from_space empty
+  // with an empty free list.  Then free unmarked entries, finishing compaction
+  // if it was running, and collecting freed entries onto to_space's free list.
+  //
+  // The from_space will be left empty with an empty free list.
   //
   // This method must only be called while mutator threads are stopped as it is
   // not safe to allocate table entries while the table is being swept.
   //
+  // SweepAndCompact is the same as EvacuateAndSweepAndCompact, except without
+  // the evacuation phase.
+  //
+  // Sweep is the same as SweepAndCompact, but assumes that compaction was not
+  // running.
+  //
   // Returns the number of live entries after sweeping.
-  uint32_t SweepAndCompact(Isolate* isolate);
+  uint32_t EvacuateAndSweepAndCompact(Space* to_space, Space* from_space,
+                                      Counters* counters);
+  uint32_t SweepAndCompact(Space* space, Counters* counters);
+  uint32_t Sweep(Space* space, Counters* counters);
 
-  // Determine if table compaction is needed and if so start the compaction.
-  // This is expected to be called at the start of the GC marking phase.
-  void StartCompactingIfNeeded();
+  inline bool Contains(Space* space, ExternalPointerHandle handle) const;
+
+  // Verifies that all entries in the given space are valid.
+  //
+  // In practice, this means that every active entry must point to a valid
+  // (e.g. not freed or corrupted) object of the expected type. As a general
+  // rule, the table must be in a consistent state (and so pass verification)
+  // whenever we can execute JS or Wasm code.
+  void Verify(Isolate* isolate, Space* space);
+
+  // A resource outside of the V8 heap whose lifetime is tied to something
+  // inside the V8 heap. This class makes that relationship explicit.
+  //
+  // Knowing about such objects is important for the sandbox to guarantee
+  // memory safety. In particular, it is necessary to prevent issues where the
+  // external resource is destroyed before the entry in the
+  // ExternalPointerTable (EPT) that references it is freed. In that case, the
+  // EPT entry would then contain a dangling pointer which could be abused by
+  // an attacker to cause a use-after-free outside of the sandbox.
+  //
+  // Currently, this is solved by remembering the EPT entry in the external
+  // object and zapping/invalidating it when the resource is destroyed. An
+  // alternative approach that might be preferable in the future would be to
+  // destroy the external resource only when the EPT entry is freed. This would
+  // avoid the need to manually keep track of the entry, for example.
+  class ManagedResource : public Malloced {
+   public:
+    // This method must be called before destroying the external resource.
+    // When the sandbox is enabled, it will take care of zapping its EPT entry.
+    inline void ZapExternalPointerTableEntry();
+
+   private:
+    friend class ExternalPointerTable;
+    // Currently required for snapshot stress mode, see deserializer.cc.
+    template <typename IsolateT>
+    friend class Deserializer;
+
+    ExternalPointerTable* owning_table_ = nullptr;
+    ExternalPointerHandle ept_entry_ = kNullExternalPointerHandle;
+  };
 
  private:
-  // Required for Isolate::CheckIsolateLayout().
-  friend class Isolate;
+  friend struct ExternalEntityTableCompactionTraits<ExternalPointerTableEntry>;
+  friend class CompactibleExternalEntityTable<
+      ExternalPointerTableEntry, kExternalPointerTableReservationSize>;
 
-  inline uint32_t HandleToIndex(ExternalPointerHandle handle) const;
-  inline ExternalPointerHandle IndexToHandle(uint32_t index) const;
+  static inline bool IsValidHandle(ExternalPointerHandle handle);
+  static inline uint32_t HandleToIndex(ExternalPointerHandle handle);
+  static inline ExternalPointerHandle IndexToHandle(uint32_t index);
 
-  inline void MaybeCreateEvacuationEntry(uint32_t index,
-                                         Address handle_location);
-
-  void ResolveEvacuationEntryDuringSweeping(
-      uint32_t index, ExternalPointerHandle* handle_location,
-      uint32_t start_of_evacuation_area);
-
-  inline bool IsCompacting();
-
-  inline void StartCompacting(uint32_t start_of_evacuation_area);
-
-  inline void StopCompacting();
-
-  inline void AbortCompacting(uint32_t start_of_evacuation_area);
-
-  inline bool CompactingWasAbortedDuringMarking();
-
-#ifdef DEBUG
-  // In debug builds during GC marking, this value is ORed into
-  // ExternalPointerHandles whose entries are marked for evacuation. During
-  // sweeping, the Handles for evacuated entries are checked to have this
-  // marker value. This allows detecting re-initialized entries, which are
-  // problematic for table compaction. This is only possible for entries marked
-  // for evacuation as the location of the Handle is only known for those.
-  static constexpr uint32_t kVisitedHandleMarker = 0x1;
-  static_assert(kExternalPointerIndexShift >= 1);
-
-  inline bool HandleWasVisitedDuringMarking(ExternalPointerHandle handle) {
-    return (handle & kVisitedHandleMarker) == kVisitedHandleMarker;
-  }
-#endif  // DEBUG
-
-  // When compacting the table, the extra_ field in our parent class contains
-  // the index of the first entry in the evacuation area. The evacuation area is
-  // the region at the end of the table from which entries are moved out of so
-  // that the underyling memory pages can be freed after sweeping. The field can
-  // have the following values:
-  // - kNotCompactingMarker: compaction is not currently running.
-  // - A kEntriesPerBlock aligned value within (0, capacity): table compaction
-  //   is running and all entries after this value should be evacuated.
-  // - A value that has kCompactionAbortedMarker in its top bits: table
-  //   compaction has been aborted during marking. The original start of the
-  //   evacuation area is still contained in the lower bits.
-  //
-  // This value indicates that the table is not currently being compacted. It
-  // is set to uint32_t max so that determining whether an entry should be
-  // evacuated becomes a single comparison:
-  // `bool should_be_evacuated = index >= start_of_evacuation_area`.
-  static constexpr uint32_t kNotCompactingMarker =
-      std::numeric_limits<uint32_t>::max();
-
-  // This value may be ORed into the start of evacuation area threshold (stored
-  // in the extra_ field) during the GC marking phase to indicate that table
-  // compaction has been aborted because the freelist grew to short and so
-  // evacuation entry allocation is no longer possible. This will prevent any
-  // further evacuation attempts as entries will be evacuated if their index is
-  // at or above the start of the evacuation area, which is now a huge value.
-  static constexpr uint32_t kCompactionAbortedMarker = 0xf0000000;
-
-  // Outcome of external pointer table compaction to use for the
-  // ExternalPointerTableCompactionOutcome histogram.
-  enum class TableCompactionOutcome {
-    // Table compaction was successful.
-    kSuccess = 0,
-    // Table compaction was partially successful: marking finished successfully,
-    // but not all blocks that we wanted to free could be freed because some new
-    // entries had already been allocated in them again.
-    kPartialSuccess = 1,
-    // Table compaction was aborted during marking because the freelist grew to
-    // short.
-    kAbortedDuringMarking = 2,
-  };
+  inline void TakeOwnershipOfManagedResourceIfNecessary(
+      Address value, ExternalPointerHandle handle, ExternalPointerTag tag);
+  inline void FreeManagedResourceIfPresent(uint32_t entry_index);
+  inline void RelocateManagedResourceIfPresent(uint32_t old_index,
+                                               uint32_t new_index);
 };
 
-static_assert(sizeof(ExternalPointerTable) == ExternalPointerTable::kSize);
+#ifdef OBJECT_PRINT
+
+class ExternalPointerTableEntryPrinter {
+ public:
+  static void PrintHeader(const char* space_name);
+  static void PrintIfInUse(
+      ExternalPointerHandle handle, const ExternalPointerTableEntry& entry,
+      std::function<bool(ExternalPointerTag)> entry_callback);
+  static void PrintFooter();
+};
+
+template <>
+class TableEntryPrinter<ExternalPointerTableEntry>
+    : public ExternalPointerTableEntryPrinter {};
+
+#endif  // OBJECT_PRINT
 
 }  // namespace internal
 }  // namespace v8

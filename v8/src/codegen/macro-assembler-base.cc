@@ -4,6 +4,7 @@
 
 #include "src/codegen/macro-assembler-base.h"
 
+#include "src/base/strong-alias.h"
 #include "src/builtins/builtins.h"
 #include "src/builtins/constants-table-builder.h"
 #include "src/codegen/external-reference-encoder.h"
@@ -19,9 +20,17 @@ MacroAssemblerBase::MacroAssemblerBase(Isolate* isolate,
                                        const AssemblerOptions& options,
                                        CodeObjectRequired create_code_object,
                                        std::unique_ptr<AssemblerBuffer> buffer)
-    : Assembler(options, std::move(buffer)), isolate_(isolate) {
-  if (create_code_object == CodeObjectRequired::kYes) {
-    code_object_ = Handle<HeapObject>::New(
+    : MacroAssemblerBase(isolate, isolate->allocator(), options,
+                         create_code_object, std::move(buffer)) {}
+
+MacroAssemblerBase::MacroAssemblerBase(Isolate* isolate,
+                                       MaybeAssemblerZone zone,
+                                       AssemblerOptions options,
+                                       CodeObjectRequired create_code_object,
+                                       std::unique_ptr<AssemblerBuffer> buffer)
+    : Assembler(zone, options, std::move(buffer)), isolate_(isolate) {
+  if (create_code_object) {
+    code_object_ = IndirectHandle<HeapObject>::New(
         ReadOnlyRoots(isolate).self_reference_marker(), isolate);
   }
 }
@@ -103,6 +112,9 @@ int32_t MacroAssemblerBase::RootRegisterOffsetForBuiltin(Builtin builtin) {
 // static
 intptr_t MacroAssemblerBase::RootRegisterOffsetForExternalReference(
     Isolate* isolate, const ExternalReference& reference) {
+  if (reference.IsIsolateFieldId()) {
+    return reference.offset_from_root_register();
+  }
   return static_cast<intptr_t>(reference.address() - isolate->isolate_root());
 }
 
@@ -122,6 +134,8 @@ int32_t MacroAssemblerBase::RootRegisterOffsetForExternalReferenceTableEntry(
 // static
 bool MacroAssemblerBase::IsAddressableThroughRootRegister(
     Isolate* isolate, const ExternalReference& reference) {
+  if (reference.IsIsolateFieldId()) return true;
+
   Address address = reference.address();
   return isolate->root_register_addressable_region().contains(address);
 }
@@ -130,8 +144,8 @@ bool MacroAssemblerBase::IsAddressableThroughRootRegister(
 Tagged_t MacroAssemblerBase::ReadOnlyRootPtr(RootIndex index,
                                              Isolate* isolate) {
   DCHECK(CanBeImmediate(index));
-  Object obj = isolate->root(index);
-  CHECK(obj.IsHeapObject());
+  Tagged<Object> obj = isolate->root(index);
+  CHECK(IsHeapObject(obj));
   return V8HeapCompressionScheme::CompressObject(obj.ptr());
 }
 

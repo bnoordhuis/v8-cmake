@@ -6,9 +6,13 @@
 #define V8_MAGLEV_MAGLEV_COMPILATION_INFO_H_
 
 #include <memory>
+#include <optional>
 
+#include "src/flags/flags.h"
 #include "src/handles/handles.h"
 #include "src/handles/maybe-handles.h"
+#include "src/utils/utils.h"
+#include "src/zone/zone.h"
 
 namespace v8 {
 
@@ -22,7 +26,6 @@ class Isolate;
 class PersistentHandles;
 class SharedFunctionInfo;
 class TranslationArrayBuilder;
-class Zone;
 
 namespace compiler {
 class JSHeapBroker;
@@ -34,39 +37,142 @@ class MaglevCompilationUnit;
 class MaglevGraphLabeller;
 class MaglevCodeGenerator;
 
-// A list of v8_flag values copied into the MaglevCompilationInfo for
-// guaranteed {immutable,threadsafe} access.
-#define MAGLEV_COMPILATION_FLAG_LIST(V) \
-  V(code_comments)                      \
-  V(maglev)                             \
-  V(print_maglev_code)                  \
-  V(print_maglev_graph)                 \
-  V(trace_maglev_regalloc)
+inline bool FlagsMightEnableMaglevTracing() {
+  return v8_flags.code_comments || v8_flags.print_maglev_code ||
+         v8_flags.print_maglev_graph || v8_flags.print_maglev_graphs ||
+         v8_flags.trace_maglev_escape_analysis ||
+         v8_flags.trace_maglev_graph_building ||
+         v8_flags.trace_maglev_inlining || v8_flags.trace_turbo_inlining ||
+         v8_flags.trace_maglev_object_tracking ||
+         v8_flags.trace_maglev_phi_untagging ||
+         v8_flags.trace_maglev_regalloc || v8_flags.trace_maglev_truncation ||
+         v8_flags.trace_maglev_kna || v8_flags.trace_maglev_graph_optimizer ||
+         v8_flags.trace_maglev_kna_processor ||
+         v8_flags.turbolev_trace_loop_peeling ||
+         v8_flags.trace_turbolev_escape_analysis;
+}
+
+struct CompilationFlags {
+  // If the feedback suggests that the result of an addition will be a safe
+  // integer (where Float64 can represent integers exactly), then we can
+  // speculate its range. During the truncation pass:
+  //
+  // 1. If Float64SpeculateSafeAdd CANNOT be truncated to Int32 (i.e., its
+  //    result is used as a Float64 or Tagged value), it's lowered to a
+  //    standard Float64Add.
+  // 2. If it CAN be truncated to Int32, we check if we should speculate:
+  //    - If the result is already known to be a safe integer (via range
+  //      analysis), we lower it to Int32Add (non-speculative).
+  //    - If we decide to speculate (e.g., at least one input is already a safe
+  //      integer or a Phi), we insert speculative truncations for the inputs
+  //      (which may eager deopt if an input isn't a safe integer) and
+  //      lower to Int32Add.
+  //    - Otherwise, we fall back to Float64Add.
+  const bool can_speculative_additive_safe_int;
+
+  const bool trace_inlining;
+  const bool trace_loop_peeling;
+  const bool trace_escape_analysis;
+  const bool is_non_eager_inlining_enabled;
+  const bool is_inline_api_calls_enabled;
+  const bool enable_truncated_int32_phis;
+  const int max_eager_inlined_bytecode;
+  const int max_inlined_bytecode_size;
+  const int max_inlined_bytecode_size_small;
+  const int max_inlined_bytecode_size_small_with_heapnum_in_out;
+  const int max_inlined_bytecode_size_cumulative;
+  const int max_inlined_bytecode_size_small_total;
+  const int max_inline_depth;
+  const int max_inline_depth_small;
+  const double min_inlining_frequency;
+
+  static CompilationFlags ForMaglev() {
+    return {
+        /* can_speculative_additive_safe_int */ false,
+        v8_flags.trace_maglev_inlining,
+        /* trace_loop_peeling */ false,
+        /* trace_escape_analysis */ false,
+        v8_flags.maglev_non_eager_inlining,
+        v8_flags.maglev_inline_api_calls,
+        /* enable_truncated_int32_phis */ false,
+        v8_flags.max_maglev_eager_inlined_bytecode_size,
+        v8_flags.max_maglev_inlined_bytecode_size,
+        v8_flags.max_maglev_inlined_bytecode_size_small,
+        v8_flags.max_maglev_inlined_bytecode_size_small_with_heapnum_in_out,
+        v8_flags.max_maglev_inlined_bytecode_size_cumulative,
+        v8_flags.max_maglev_inlined_bytecode_size_small_total,
+        v8_flags.max_maglev_inline_depth,
+        v8_flags.max_maglev_hard_inline_depth,
+        v8_flags.min_maglev_inlining_frequency,
+    };
+  }
+
+  static CompilationFlags ForTurbolev() {
+    return {
+        /* can_speculative_additive_safe_int */ Is64() &&
+            v8_flags.turbolev_additive_safe_int_feedback &&
+            v8_flags.turbolev_non_eager_inlining,
+        v8_flags.trace_turbo_inlining,
+        v8_flags.turbolev_trace_loop_peeling,
+        v8_flags.trace_turbolev_escape_analysis,
+        v8_flags.turbolev_non_eager_inlining,
+        // TODO(victorgomes): Inline API calls are still not supported by
+        // Turbolev.
+        /* is_inline_api_calls_enabled */ false,
+        v8_flags.turbolev_truncated_int32_phis,
+        v8_flags.max_turbolev_eager_inlined_bytecode_size,
+        v8_flags.max_inlined_bytecode_size,
+        v8_flags.max_inlined_bytecode_size_small,
+        v8_flags.max_inlined_bytecode_size_small_with_heapnum_in_out,
+        v8_flags.max_inlined_bytecode_size_cumulative,
+        v8_flags.max_inlined_bytecode_size_small_total,
+        v8_flags.max_turbolev_inline_depth,
+        v8_flags.max_turbolev_inline_depth,
+        v8_flags.min_inlining_frequency,
+    };
+  }
+};
 
 class MaglevCompilationInfo final {
  public:
-  static std::unique_ptr<MaglevCompilationInfo> New(Isolate* isolate,
-                                                    Handle<JSFunction> function,
-                                                    BytecodeOffset osr_offset) {
+  static std::unique_ptr<MaglevCompilationInfo> NewForTurbolev(
+      Isolate* isolate, compiler::JSHeapBroker* broker,
+      IndirectHandle<JSFunction> function, BytecodeOffset osr_offset,
+      bool specialize_to_function_context, std::string function_name) {
+    // Doesn't use make_unique due to the private ctor.
+    return std::unique_ptr<MaglevCompilationInfo>(new MaglevCompilationInfo(
+        isolate, function, osr_offset, broker, specialize_to_function_context,
+        /*is_turbolev*/ true, std::move(function_name)));
+  }
+  static std::unique_ptr<MaglevCompilationInfo> New(
+      Isolate* isolate, IndirectHandle<JSFunction> function,
+      BytecodeOffset osr_offset) {
     // Doesn't use make_unique due to the private ctor.
     return std::unique_ptr<MaglevCompilationInfo>(
         new MaglevCompilationInfo(isolate, function, osr_offset));
   }
-  ~MaglevCompilationInfo();
+  V8_EXPORT_PRIVATE ~MaglevCompilationInfo();
 
   Zone* zone() { return &zone_; }
-  compiler::JSHeapBroker* broker() const { return broker_.get(); }
+  compiler::JSHeapBroker* broker() const { return broker_; }
   MaglevCompilationUnit* toplevel_compilation_unit() const {
     return toplevel_compilation_unit_;
   }
-  Handle<JSFunction> toplevel_function() const { return toplevel_function_; }
+  IndirectHandle<JSFunction> toplevel_function() const {
+    return toplevel_function_;
+  }
+  const std::string& function_name() const { return function_name_; }
   BytecodeOffset toplevel_osr_offset() const { return osr_offset_; }
   bool toplevel_is_osr() const { return osr_offset_ != BytecodeOffset::None(); }
-  void set_code(Handle<Code> code) {
+  void set_code(IndirectHandle<Code> code) {
     DCHECK(code_.is_null());
     code_ = code;
   }
-  MaybeHandle<Code> get_code() { return code_; }
+  MaybeIndirectHandle<Code> get_code() { return code_; }
+
+  bool is_turbolev() const { return is_turbolev_; }
+  bool is_tracing_enabled() const { return is_tracing_enabled_; }
+  bool trace_json_enabled() const { return trace_json_enabled_; }
 
   bool has_graph_labeller() const { return !!graph_labeller_; }
   void set_graph_labeller(MaglevGraphLabeller* graph_labeller);
@@ -75,15 +181,11 @@ class MaglevCompilationInfo final {
     return graph_labeller_.get();
   }
 
+#ifdef V8_ENABLE_MAGLEV
   void set_code_generator(std::unique_ptr<MaglevCodeGenerator> code_generator);
   MaglevCodeGenerator* code_generator() const { return code_generator_.get(); }
+#endif
 
-  // Flag accessors (for thread-safe access to global flags).
-  // TODO(v8:7700): Consider caching these.
-#define V(Name) \
-  bool Name() const { return Name##_; }
-  MAGLEV_COMPILATION_FLAG_LIST(V)
-#undef V
   bool collect_source_positions() const { return collect_source_positions_; }
 
   bool specialize_to_function_context() const {
@@ -103,9 +205,29 @@ class MaglevCompilationInfo final {
       std::unique_ptr<CanonicalHandlesMap>&& canonical_handles);
   std::unique_ptr<CanonicalHandlesMap> DetachCanonicalHandles();
 
+  bool is_detached();
+
+  const CompilationFlags& flags() const { return flags_; }
+
+  uint16_t trace_id() const { return trace_id_; }
+
+  int optimization_id() const { return optimization_id_; }
+  void set_optimization_id(int id) { optimization_id_ = id; }
+
+  bool could_not_inline_all_candidates() {
+    return could_not_inline_all_candidates_;
+  }
+  void set_could_not_inline_all_candidates() {
+    could_not_inline_all_candidates_ = true;
+  }
+
  private:
-  MaglevCompilationInfo(Isolate* isolate, Handle<JSFunction> function,
-                        BytecodeOffset osr_offset);
+  V8_EXPORT_PRIVATE MaglevCompilationInfo(
+      Isolate* isolate, IndirectHandle<JSFunction> function,
+      BytecodeOffset osr_offset,
+      std::optional<compiler::JSHeapBroker*> broker = std::nullopt,
+      std::optional<bool> specialize_to_function_context = std::nullopt,
+      bool is_turbolev = false, std::string function_name = "");
 
   // Storing the raw pointer to the CanonicalHandlesMap is generally not safe.
   // Use DetachCanonicalHandles() to transfer ownership instead.
@@ -116,21 +238,40 @@ class MaglevCompilationInfo final {
   friend compiler::JSHeapBroker;
 
   Zone zone_;
-  const std::unique_ptr<compiler::JSHeapBroker> broker_;
+  compiler::JSHeapBroker* broker_;
   // Must be initialized late since it requires an initialized heap broker.
   MaglevCompilationUnit* toplevel_compilation_unit_ = nullptr;
-  Handle<JSFunction> toplevel_function_;
-  Handle<Code> code_;
+  IndirectHandle<JSFunction> toplevel_function_;
+  std::string function_name_;
+  IndirectHandle<Code> code_;
   BytecodeOffset osr_offset_;
+  const uint16_t trace_id_;
+  int optimization_id_ = -1;
+
+  // True if this MaglevCompilationInfo owns its broker and false otherwise. In
+  // particular, when used as Turboshaft front-end, this will use Turboshaft's
+  // broker.
+  bool owns_broker_ = true;
+
+  // When this MaglevCompilationInfo is created to be used in Turboshaft's
+  // frontend, {is_turbolev} is true.
+  bool is_turbolev_ = false;
+
+  // True if some inlinees were skipped due to total size constraints.
+  bool could_not_inline_all_candidates_ = false;
+
+  bool is_tracing_enabled_ = false;
+  bool trace_json_enabled_ = false;
 
   std::unique_ptr<MaglevGraphLabeller> graph_labeller_;
 
+#ifdef V8_ENABLE_MAGLEV
   // Produced off-thread during ExecuteJobImpl.
   std::unique_ptr<MaglevCodeGenerator> code_generator_;
+#endif
 
-#define V(Name) const bool Name##_;
-  MAGLEV_COMPILATION_FLAG_LIST(V)
-#undef V
+  const CompilationFlags flags_;
+
   bool collect_source_positions_;
 
   // If enabled, the generated code can rely on the function context to be a

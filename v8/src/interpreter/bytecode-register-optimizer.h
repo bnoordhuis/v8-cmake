@@ -8,6 +8,7 @@
 #include "src/ast/variables.h"
 #include "src/base/compiler-specific.h"
 #include "src/common/globals.h"
+#include "src/interpreter/bytecode-generator.h"
 #include "src/interpreter/bytecode-register-allocator.h"
 #include "src/zone/zone-containers.h"
 #include "src/zone/zone.h"
@@ -24,6 +25,8 @@ class V8_EXPORT_PRIVATE BytecodeRegisterOptimizer final
     : public NON_EXPORTED_BASE(BytecodeRegisterAllocator::Observer),
       public NON_EXPORTED_BASE(ZoneObject) {
  public:
+  using TypeHint = BytecodeGenerator::TypeHint;
+
   class BytecodeWriter {
    public:
     BytecodeWriter() = default;
@@ -73,7 +76,8 @@ class V8_EXPORT_PRIVATE BytecodeRegisterOptimizer final
     if (Bytecodes::IsJump(bytecode) || Bytecodes::IsSwitch(bytecode) ||
         bytecode == Bytecode::kDebugger ||
         bytecode == Bytecode::kSuspendGenerator ||
-        bytecode == Bytecode::kResumeGenerator) {
+        bytecode == Bytecode::kResumeGenerator ||
+        bytecode == Bytecode::kForOfNext) {
       // All state must be flushed before emitting
       // - a jump bytecode (as the register equivalents at the jump target
       //   aren't known)
@@ -82,6 +86,8 @@ class V8_EXPORT_PRIVATE BytecodeRegisterOptimizer final
       // - a call to the debugger (as it can manipulate locals and parameters),
       // - a generator suspend (as this involves saving all registers).
       // - a generator register restore.
+      // - forof optimization bytecode to make sure `done` register is
+      // initialized in every loop
       Flush();
     }
 
@@ -96,6 +102,7 @@ class V8_EXPORT_PRIVATE BytecodeRegisterOptimizer final
     // clobbered when the bytecode is dispatched.
     if (BytecodeOperands::WritesOrClobbersAccumulator(implicit_register_use)) {
       PrepareOutputRegister(accumulator_);
+      DCHECK_EQ(GetTypeHint(accumulator_), TypeHint::kAny);
     }
   }
 
@@ -115,11 +122,23 @@ class V8_EXPORT_PRIVATE BytecodeRegisterOptimizer final
   // Maintain the map between Variable and Register.
   void SetVariableInRegister(Variable* var, Register reg);
 
-  // Get the variable in the reg.
-  Variable* GetVariableInRegister(Register reg);
+  // Get the variable that might be in the reg. This is a variable value that
+  // is preserved across flushes.
+  Variable* GetPotentialVariableInRegister(Register reg);
+
+  // Get the variable that might be in the accumulator. This is a variable value
+  // that is preserved across flushes.
+  Variable* GetPotentialVariableInAccumulator() {
+    return GetPotentialVariableInRegister(accumulator_);
+  }
 
   // Return true if the var is in the reg.
   bool IsVariableInRegister(Variable* var, Register reg);
+
+  TypeHint GetTypeHint(Register reg);
+  void SetTypeHintForAccumulator(TypeHint hint);
+  void ResetTypeHintForAccumulator();
+  bool IsAccumulatorReset();
 
   int maxiumum_register_index() const { return max_register_index_; }
 
@@ -141,7 +160,6 @@ class V8_EXPORT_PRIVATE BytecodeRegisterOptimizer final
   void OutputRegisterTransfer(RegisterInfo* input, RegisterInfo* output);
 
   void CreateMaterializedEquivalent(RegisterInfo* info);
-  RegisterInfo* GetMaterializedEquivalent(RegisterInfo* info);
   RegisterInfo* GetMaterializedEquivalentNotAccumulator(RegisterInfo* info);
   void Materialize(RegisterInfo* info);
   void AddToEquivalenceSet(RegisterInfo* set_member,

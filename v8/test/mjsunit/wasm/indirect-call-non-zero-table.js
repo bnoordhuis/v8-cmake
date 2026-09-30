@@ -2,8 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Flags: --expose-wasm --experimental-wasm-return-call
-
 d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
 
 (function IndirectCallToNonZeroTable() {
@@ -87,12 +85,12 @@ d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
   assertTraps(kTrapTableOutOfBounds, () => instance.exports.return_call1(3));
 
   // Try to call through the uninitialized table entry.
-  assertTraps(kTrapFuncSigMismatch, () => instance.exports.call2(0));
+  assertTraps(kTrapNullFunc, () => instance.exports.call2(0));
   assertEquals(v4, instance.exports.call2(3));
   assertEquals(v5, instance.exports.call2(4));
   assertTraps(kTrapFuncSigMismatch,
     () => instance.exports.call_invalid_sig(4));
-  assertTraps(kTrapFuncSigMismatch, () => instance.exports.return_call2(0));
+  assertTraps(kTrapNullFunc, () => instance.exports.return_call2(0));
   assertEquals(v4, instance.exports.return_call2(3));
   assertEquals(v5, instance.exports.return_call2(4));
   assertTraps(kTrapFuncSigMismatch,

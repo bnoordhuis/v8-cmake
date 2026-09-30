@@ -2,14 +2,14 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#ifndef V8_EXECUTION_LOONG64_SIMULATOR_LOONG64_H_
+#define V8_EXECUTION_LOONG64_SIMULATOR_LOONG64_H_
+
 // Declares a Simulator for loongisa instructions if we are not generating a
 // native loongisa binary. This Simulator allows us to run and debug loongisa
 // code generation on regular desktop machines. V8 calls into generated code via
 // the GeneratedCode wrapper, which will start execution in the Simulator or
 // forwards to the real entry on a loongisa HW platform.
-
-#ifndef V8_EXECUTION_LOONG64_SIMULATOR_LOONG64_H_
-#define V8_EXECUTION_LOONG64_SIMULATOR_LOONG64_H_
 
 // globals.h defines USE_SIMULATOR.
 #include "src/common/globals.h"
@@ -25,8 +25,7 @@ int Compare(const T& a, const T& b) {
 }
 
 // Returns the negative absolute value of its argument.
-template <typename T,
-          typename = typename std::enable_if<std::is_signed<T>::value>::type>
+template <typename T, typename = typename std::enable_if_t<std::is_signed_v<T>>>
 T Nabs(T a) {
   return a < 0 ? a : -a;
 }
@@ -212,9 +211,11 @@ class Simulator : public SimulatorBase {
   float ceil(float value);
   float floor(float value);
   float trunc(float value);
+  float roundeven(float value);
   double ceil(double value);
   double floor(double value);
   double trunc(double value);
+  double roundeven(double value);
 
   // Accessors for register state. Reading the pc value adheres to the LOONG64
   // architecture specification and is off by a 8 from the currently executing
@@ -266,8 +267,18 @@ class Simulator : public SimulatorBase {
 
   Address get_sp() const { return static_cast<Address>(get_register(sp)); }
 
-  // Accessor to the internal simulator stack area.
+  // Accessor to the internal simulator stack area. Adds a safety
+  // margin to prevent overflows (kAdditionalStackMargin).
   uintptr_t StackLimit(uintptr_t c_limit) const;
+
+  uintptr_t StackBase() const;
+
+  // Return central stack view, without additional safety margins.
+  // Users, for example wasm::StackMemory, can add their own.
+  base::Vector<uint8_t> GetCentralStackView() const;
+  static constexpr int JSStackLimitMargin() { return kAdditionalStackMargin; }
+
+  void IterateRegistersAndStack(::heap::base::StackVisitor* visitor);
 
   // Executes LOONG64 instructions until the PC reaches end_sim_pc.
   void Execute();
@@ -290,8 +301,16 @@ class Simulator : public SimulatorBase {
     }
 
     explicit CallArgument(float argument) {
-      // TODO(all): CallArgument(float) is untested.
-      UNIMPLEMENTED();
+      // Make the FPU register a NaN to try to trap errors if the callee expects
+      // a double. If it expects a float, the callee should ignore the top word.
+      double sNaN = std::numeric_limits<double>::signaling_NaN();
+      DCHECK(sizeof(sNaN) == sizeof(bits_));
+      memcpy(&bits_, &sNaN, sizeof(sNaN));
+
+      // Write the float payload to the FPU register.
+      DCHECK(sizeof(argument) <= sizeof(bits_));
+      memcpy(&bits_, &argument, sizeof(argument));
+      type_ = FP_ARG;
     }
 
     // This indicates the end of the arguments list, so that CallArgument
@@ -326,10 +345,10 @@ class Simulator : public SimulatorBase {
   double CallFP(Address entry, double d0, double d1);
 
   // Push an address onto the JS stack.
-  uintptr_t PushAddress(uintptr_t address);
+  V8_EXPORT_PRIVATE uintptr_t PushAddress(uintptr_t address);
 
   // Pop an address from the JS stack.
-  uintptr_t PopAddress();
+  V8_EXPORT_PRIVATE uintptr_t PopAddress();
 
   // Debugger input.
   void set_last_debugger_input(char* input);
@@ -368,14 +387,12 @@ class Simulator : public SimulatorBase {
 
   // Read floating point return values.
   template <typename T>
-  typename std::enable_if<std::is_floating_point<T>::value, T>::type
-  ReadReturn() {
+  typename std::enable_if_t<std::is_floating_point_v<T>, T> ReadReturn() {
     return static_cast<T>(get_fpu_register_double(f0));
   }
   // Read non-float return values.
   template <typename T>
-  typename std::enable_if<!std::is_floating_point<T>::value, T>::type
-  ReadReturn() {
+  typename std::enable_if_t<!std::is_floating_point_v<T>, T> ReadReturn() {
     return ConvertReturn<T>(get_register(a0));
   }
 
@@ -393,6 +410,18 @@ class Simulator : public SimulatorBase {
     FLOAT_DOUBLE,
     WORD_DWORD
   };
+
+  // "Probe" if an address range can be read. This is currently implemented
+  // by doing a 1-byte read of the last accessed byte, since the assumption is
+  // that if the last byte is accessible, also all lower bytes are accessible
+  // (which holds true for Wasm).
+  // Returns true if the access was successful, false if the access raised a
+  // signal which was then handled by the trap handler (also see
+  // {trap_handler::ProbeMemory}). If the access raises a signal which is not
+  // handled by the trap handler (e.g. because the current PC is not registered
+  // as a trapping instruction), the signal will propagate and make the process
+  // crash. If no trap handler is available, this always returns true.
+  bool ProbeMemory(uintptr_t address, uintptr_t access_size);
 
   // Read and write memory.
   inline uint32_t ReadBU(int64_t addr);
@@ -584,9 +613,17 @@ class Simulator : public SimulatorBase {
   uint32_t FCSR_;
 
   // Simulator support.
-  // Allocate 1MB for stack.
-  size_t stack_size_;
-  char* stack_;
+  uintptr_t stack_;
+  static const size_t kStackProtectionSize = KB;
+  // This includes a protection margin at each end of the stack area.
+  static size_t AllocatedStackSize() {
+    return (v8_flags.sim_stack_size * KB) + (2 * kStackProtectionSize);
+  }
+  static size_t UsableStackSize() { return v8_flags.sim_stack_size * KB; }
+  uintptr_t stack_limit_;
+  // Added in Simulator::StackLimit()
+  static const int kAdditionalStackMargin = 20 * KB;
+
   bool pc_modified_;
   int64_t icount_;
   int break_count_;
@@ -653,6 +690,18 @@ class Simulator : public SimulatorBase {
 
   class GlobalMonitor {
    public:
+    class SimulatorMutex final {
+     public:
+      explicit SimulatorMutex(GlobalMonitor* global_monitor) {
+        if (!global_monitor->IsSingleThreaded()) {
+          guard.emplace(global_monitor->mutex_);
+        }
+      }
+
+     private:
+      std::optional<base::MutexGuard> guard;
+    };
+
     class LinkedAddress {
      public:
       LinkedAddress();
@@ -679,32 +728,33 @@ class Simulator : public SimulatorBase {
       int failure_counter_;
     };
 
-    // Exposed so it can be accessed by Simulator::{Read,Write}Ex*.
-    base::Mutex mutex;
-
     void NotifyLoadLinked_Locked(uintptr_t addr, LinkedAddress* linked_address);
     void NotifyStore_Locked(LinkedAddress* linked_address);
     bool NotifyStoreConditional_Locked(uintptr_t addr,
                                        LinkedAddress* linked_address);
 
+    // Called when the simulator is constructed.
+    void PrependLinkedAddress(LinkedAddress* linked_address);
     // Called when the simulator is destroyed.
     void RemoveLinkedAddress(LinkedAddress* linked_address);
 
     static GlobalMonitor* Get();
 
    private:
+    bool IsSingleThreaded() const { return num_linked_address_ == 1; }
+
     // Private constructor. Call {GlobalMonitor::Get()} to get the singleton.
     GlobalMonitor() = default;
     friend class base::LeakyObject<GlobalMonitor>;
 
-    bool IsProcessorInLinkedList_Locked(LinkedAddress* linked_address) const;
-    void PrependProcessor_Locked(LinkedAddress* linked_address);
-
     LinkedAddress* head_ = nullptr;
+    std::atomic<uint32_t> num_linked_address_ = 0;
+    base::Mutex mutex_;
   };
 
   LocalMonitor local_monitor_;
   GlobalMonitor::LinkedAddress global_monitor_thread_;
+  GlobalMonitor* global_monitor_;
 };
 
 }  // namespace internal

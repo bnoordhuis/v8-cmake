@@ -5,6 +5,7 @@
 type CompilationType extends int32 constexpr 'Script::CompilationType';
 type CompilationState extends int32 constexpr 'Script::CompilationState';
 
+@cppScope('Script')
 bitfield struct ScriptFlags extends uint31 {
   compilation_type: CompilationType: 1 bit;
   compilation_state: CompilationState: 1 bit;
@@ -13,8 +14,10 @@ bitfield struct ScriptFlags extends uint31 {
   // Whether an instrumentation breakpoint is set for this script (wasm only).
   break_on_entry: bool: 1 bit;
   produce_compile_hints: bool: 1 bit;
+  deserialized: bool: 1 bit;
 }
 
+@cppObjectLayoutDefinition
 extern class Script extends Struct {
   // [source]: the script source.
   source: String|Undefined;
@@ -45,8 +48,10 @@ extern class Script extends Struct {
   // the arguments.
   eval_from_shared_or_wrapped_arguments: SharedFunctionInfo|FixedArray|
       Undefined;
-  eval_from_position: Smi|Foreign;  // Smi or Managed<wasm::NativeModule>
-  shared_function_infos: WeakFixedArray|WeakArrayList;
+  eval_from_position: Smi|
+      CppGCManagedBase;  // Smi or CppGCManaged<wasm::NativeModule>
+  eval_from_scope_info: ScopeInfo|Undefined;
+  infos: WeakFixedArray|WeakArrayList;
 
   // [compiled_lazy_function_positions]: ArrayList containing SMIs marking
   // the start positions of lazy functions which got compiled.
@@ -60,6 +65,9 @@ extern class Script extends Struct {
 
   // [source_mapping_url]: sourceMappingURL magic comment
   source_mapping_url: Object;
+
+  // [debug_id]: debugId magic comment
+  debug_id: String|Undefined;
 
   // [host_defined_options]: Options defined by the embedder.
   host_defined_options: FixedArray;

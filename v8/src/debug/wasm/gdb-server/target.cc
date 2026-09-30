@@ -318,7 +318,9 @@ Target::ProcessPacketResult Target::ProcessPacket(Packet* pkt_in,
 
       uint32_t length = static_cast<uint32_t>(len);
       uint8_t buff[Transport::kBufSize];
-      if (wasm_addr.ModuleId() > 0) {
+      if (wasm_addr.Type() == WasmAddressType::Object) {
+        // Object space: a module wire-byte offset. LLDB reads code bytes here,
+        // e.g. to install a breakpoint or to disassemble.
         uint32_t read =
             gdb_server_->GetWasmModuleBytes(wasm_addr, buff, length);
         if (read > 0) {
@@ -327,7 +329,16 @@ Target::ProcessPacketResult Target::ProcessPacket(Packet* pkt_in,
           err = ErrorCode::Failed;
         }
       } else {
-        err = ErrorCode::BadArgs;
+        // Memory space: an offset into the module's linear memory (e.g. when
+        // inspecting local variables or stack values). Read the running
+        // instance's memory using the only loaded module.
+        uint32_t read = gdb_server_->GetWasmMemory(
+            gdb_server_->GetFirstModuleId(), wasm_addr.Offset(), buff, length);
+        if (read > 0) {
+          pkt_out->AddBlock(buff, read);
+        } else {
+          err = ErrorCode::Failed;
+        }
       }
       break;
     }
@@ -509,6 +520,8 @@ Target::ErrorCode Target::ProcessQueryPacket(const Packet* pkt_in,
   // OUT: $xx..xxyy..yyzz..zz (A sequence of uint64_t values represented as
   //                           consecutive 8-bytes blocks).
   std::vector<std::string> toks = StringSplit(str, ":;");
+  if (toks.empty()) return ErrorCode::BadFormat;
+
   if (toks[0] == "WasmCallStack") {
     std::vector<wasm_addr_t> call_stack_pcs = gdb_server_->GetWasmCallStack();
     std::vector<uint64_t> buffer;
@@ -588,9 +601,12 @@ Target::ErrorCode Target::ProcessQueryPacket(const Packet* pkt_in,
   // OUT: $xx..xx
   if (toks[0] == "WasmMem") {
     if (toks.size() == 4) {
-      uint32_t module_id = strtoul(toks[1].data(), nullptr, 10);
-      uint32_t address = strtoul(toks[2].data(), nullptr, 16);
-      uint32_t length = strtoul(toks[3].data(), nullptr, 16);
+      uint32_t module_id =
+          static_cast<uint32_t>(strtoul(toks[1].data(), nullptr, 10));
+      uint32_t address =
+          static_cast<uint32_t>(strtoul(toks[2].data(), nullptr, 16));
+      uint32_t length =
+          static_cast<uint32_t>(strtoul(toks[3].data(), nullptr, 16));
       if (length > Transport::kBufSize / 2) {
         return ErrorCode::BadArgs;
       }
@@ -612,9 +628,12 @@ Target::ErrorCode Target::ProcessQueryPacket(const Packet* pkt_in,
   // OUT: $xx..xx
   if (toks[0] == "WasmData") {
     if (toks.size() == 4) {
-      uint32_t module_id = strtoul(toks[1].data(), nullptr, 10);
-      uint32_t address = strtoul(toks[2].data(), nullptr, 16);
-      uint32_t length = strtoul(toks[3].data(), nullptr, 16);
+      uint32_t module_id =
+          static_cast<uint32_t>(strtoul(toks[1].data(), nullptr, 10));
+      uint32_t address =
+          static_cast<uint32_t>(strtoul(toks[2].data(), nullptr, 16));
+      uint32_t length =
+          static_cast<uint32_t>(strtoul(toks[3].data(), nullptr, 16));
       if (length > Transport::kBufSize / 2) {
         return ErrorCode::BadArgs;
       }

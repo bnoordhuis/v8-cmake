@@ -5,10 +5,11 @@
 #ifndef V8_HEAP_FREE_LIST_H_
 #define V8_HEAP_FREE_LIST_H_
 
+#include <atomic>
+
 #include "src/base/macros.h"
 #include "src/common/globals.h"
 #include "src/heap/allocation-result.h"
-#include "src/heap/memory-chunk.h"
 #include "src/objects/free-space.h"
 #include "src/objects/map.h"
 #include "src/utils/utils.h"
@@ -28,18 +29,16 @@ class Isolate;
 class LargeObjectSpace;
 class LargePage;
 class LinearAllocationArea;
-class Page;
+class NormalPage;
 class PagedSpace;
 class SemiSpace;
 
 using FreeListCategoryType = int32_t;
 
-static const FreeListCategoryType kFirstCategory = 0;
-static const FreeListCategoryType kInvalidCategory = -1;
+static constexpr FreeListCategoryType kFirstCategory = 0;
+static constexpr FreeListCategoryType kInvalidCategory = -1;
 
 enum FreeMode { kLinkCategory, kDoNotLinkCategory };
-
-enum class SpaceAccountingMode { kSpaceAccounted, kSpaceUnaccounted };
 
 // A free list category maintains a linked list of free memory blocks.
 class FreeListCategory {
@@ -51,6 +50,9 @@ class FreeListCategory {
     next_ = nullptr;
   }
 
+  // Unlinks the category from the freelist.
+  void Unlink(FreeList* owner);
+  // Resets all the fields of the category.
   void Reset(FreeList* owner);
 
   void RepairFreeList(Heap* heap);
@@ -59,18 +61,19 @@ class FreeListCategory {
   // category is currently unlinked.
   void Relink(FreeList* owner);
 
-  void Free(Address address, size_t size_in_bytes, FreeMode mode,
-            FreeList* owner);
+  void Free(const Heap* heap, const WritableFreeSpace& writable_free_space,
+            FreeMode mode, FreeList* owner);
 
   // Performs a single try to pick a node of at least |minimum_size| from the
   // category. Stores the actual size in |node_size|. Returns nullptr if no
   // node is found.
-  V8_EXPORT_PRIVATE FreeSpace PickNodeFromList(size_t minimum_size,
-                                               size_t* node_size);
+  V8_EXPORT_PRIVATE Tagged<FreeSpace> PickNodeFromList(size_t minimum_size,
+                                                       size_t* node_size);
 
   // Picks a node of at least |minimum_size| from the category. Stores the
   // actual size in |node_size|. Returns nullptr if no node is found.
-  FreeSpace SearchForNodeInList(size_t minimum_size, size_t* node_size);
+  Tagged<FreeSpace> SearchForNodeInList(const Heap* heap, size_t minimum_size,
+                                        size_t* node_size);
 
   inline bool is_linked(FreeList* owner) const;
   bool is_empty() { return top().is_null(); }
@@ -81,8 +84,8 @@ class FreeListCategory {
 
   template <typename Callback>
   void IterateNodesForTesting(Callback callback) {
-    for (FreeSpace cur_node = top(); !cur_node.is_null();
-         cur_node = cur_node.next()) {
+    for (Tagged<FreeSpace> cur_node = top(); !cur_node.is_null();
+         cur_node = cur_node->next()) {
       callback(cur_node);
     }
   }
@@ -90,14 +93,14 @@ class FreeListCategory {
  private:
   // For debug builds we accurately compute free lists lengths up until
   // {kVeryLongFreeList} by manually walking the list.
-  static const int kVeryLongFreeList = 500;
+  static constexpr int kVeryLongFreeList = 500;
 
   // Updates |available_|, |length_| and free_list_->Available() after an
   // allocation of size |allocation_size|.
   inline void UpdateCountersAfterAllocation(size_t allocation_size);
 
-  FreeSpace top() { return top_; }
-  void set_top(FreeSpace top) { top_ = top; }
+  Tagged<FreeSpace> top() { return top_; }
+  void set_top(Tagged<FreeSpace> top) { top_ = top; }
   FreeListCategory* prev() { return prev_; }
   void set_prev(FreeListCategory* prev) { prev_ = prev; }
   FreeListCategory* next() { return next_; }
@@ -111,7 +114,7 @@ class FreeListCategory {
   uint32_t available_ = 0;
 
   // |top_|: Points to the top FreeSpace in the free list category.
-  FreeSpace top_;
+  Tagged<FreeSpace> top_;
 
   FreeListCategory* prev_ = nullptr;
   FreeListCategory* next_ = nullptr;
@@ -137,11 +140,8 @@ class FreeList {
   V8_EXPORT_PRIVATE static std::unique_ptr<FreeList>
   CreateFreeListForNewSpace();
 
+  FreeList(int number_of_categories, size_t min_block_size);
   virtual ~FreeList() = default;
-
-  // Returns how much memory can be allocated after freeing maximum_freed
-  // memory.
-  virtual size_t GuaranteedAllocatable(size_t maximum_freed) = 0;
 
   // Adds a node on the free list. The block of size {size_in_bytes} starting
   // at {start} is placed on the free list. The return value is the number of
@@ -149,20 +149,23 @@ class FreeList {
   // was too small. Bookkeeping information will be written to the block, i.e.,
   // its contents will be destroyed. The start address should be word aligned,
   // and the size should be a non-zero multiple of the word size.
-  virtual size_t Free(Address start, size_t size_in_bytes, FreeMode mode);
+  virtual size_t Free(const Isolate* isolate,
+                      const WritableFreeSpace& free_space, FreeMode mode);
 
   // Allocates a free space node from the free list of at least size_in_bytes
   // bytes. Returns the actual node size in node_size which can be bigger than
   // size_in_bytes. This method returns null if the allocation request cannot be
   // handled by the free list.
-  virtual V8_WARN_UNUSED_RESULT FreeSpace Allocate(size_t size_in_bytes,
-                                                   size_t* node_size,
-                                                   AllocationOrigin origin) = 0;
+  virtual V8_WARN_UNUSED_RESULT Tagged<FreeSpace> Allocate(
+      const Heap* heap, size_t size_in_bytes, size_t* node_size,
+      AllocationOrigin origin) = 0;
 
   // Returns a page containing an entry for a given type, or nullptr otherwise.
-  V8_EXPORT_PRIVATE virtual Page* GetPageForSize(size_t size_in_bytes) = 0;
+  V8_EXPORT_PRIVATE virtual NormalPage* GetPageForSize(
+      size_t size_in_bytes) = 0;
 
   virtual void Reset();
+  virtual void ResetForNonBlackAllocatedPages();
 
   // Return the number of bytes available on the free list.
   size_t Available() {
@@ -174,22 +177,22 @@ class FreeList {
   void IncreaseAvailableBytes(size_t bytes) { available_ += bytes; }
   void DecreaseAvailableBytes(size_t bytes) { available_ -= bytes; }
 
-  size_t wasted_bytes() const { return wasted_bytes_; }
-  void increase_wasted_bytes(size_t bytes) { wasted_bytes_ += bytes; }
-  void decrease_wasted_bytes(size_t bytes) { wasted_bytes_ -= bytes; }
-
-  bool IsEmpty() {
-    bool empty = true;
-    ForAllFreeListCategories([&empty](FreeListCategory* category) {
-      if (!category->is_empty()) empty = false;
-    });
-    return empty;
+  size_t wasted_bytes() const {
+    return wasted_bytes_.load(std::memory_order_relaxed);
   }
+  void increase_wasted_bytes(size_t bytes) {
+    wasted_bytes_.fetch_add(bytes, std::memory_order_relaxed);
+  }
+  void decrease_wasted_bytes(size_t bytes) {
+    wasted_bytes_.fetch_sub(bytes, std::memory_order_relaxed);
+  }
+
+  inline bool IsEmpty();
 
   // Used after booting the VM.
   void RepairLists(Heap* heap);
 
-  V8_EXPORT_PRIVATE size_t EvictFreeListItems(Page* page);
+  V8_EXPORT_PRIVATE void EvictFreeListItems(NormalPage* page);
 
   int number_of_categories() { return number_of_categories_; }
   FreeListCategoryType last_category() { return last_category_; }
@@ -248,12 +251,13 @@ class FreeList {
   // Tries to retrieve a node from the first category in a given |type|.
   // Returns nullptr if the category is empty or the top entry is smaller
   // than minimum_size.
-  FreeSpace TryFindNodeIn(FreeListCategoryType type, size_t minimum_size,
-                          size_t* node_size);
+  Tagged<FreeSpace> TryFindNodeIn(FreeListCategoryType type,
+                                  size_t minimum_size, size_t* node_size);
 
   // Searches a given |type| for a node of at least |minimum_size|.
-  FreeSpace SearchForNodeInList(FreeListCategoryType type, size_t minimum_size,
-                                size_t* node_size);
+  Tagged<FreeSpace> SearchForNodeInList(const Heap* heap,
+                                        FreeListCategoryType type,
+                                        size_t minimum_size, size_t* node_size);
 
   // Returns the smallest category in which an object of |size_in_bytes| could
   // fit.
@@ -264,10 +268,10 @@ class FreeList {
     return categories_[type];
   }
 
-  inline Page* GetPageForCategoryType(FreeListCategoryType type);
+  inline NormalPage* GetPageForCategoryType(FreeListCategoryType type);
 
-  int number_of_categories_ = 0;
-  FreeListCategoryType last_category_ = 0;
+  const int number_of_categories_ = 0;
+  const FreeListCategoryType last_category_ = 0;
   size_t min_block_size_ = 0;
 
   FreeListCategory** categories_ = nullptr;
@@ -276,11 +280,11 @@ class FreeList {
   size_t available_ = 0;
   // Number of wasted bytes in this free list that are not available for
   // allocation.
-  size_t wasted_bytes_ = 0;
+  std::atomic<size_t> wasted_bytes_ = 0;
 
   friend class FreeListCategory;
-  friend class Page;
-  friend class MemoryChunk;
+  friend class MutablePage;
+  friend class NormalPage;
   friend class ReadOnlyPage;
   friend class MapSpace;
 };
@@ -293,26 +297,24 @@ class FreeList {
 // consumption should be lower (since fragmentation should be lower).
 class V8_EXPORT_PRIVATE FreeListMany : public FreeList {
  public:
-  size_t GuaranteedAllocatable(size_t maximum_freed) override;
-
-  Page* GetPageForSize(size_t size_in_bytes) override;
+  NormalPage* GetPageForSize(size_t size_in_bytes) override;
 
   FreeListMany();
   ~FreeListMany() override;
 
-  V8_WARN_UNUSED_RESULT FreeSpace Allocate(size_t size_in_bytes,
-                                           size_t* node_size,
-                                           AllocationOrigin origin) override;
+  V8_WARN_UNUSED_RESULT Tagged<FreeSpace> Allocate(
+      const Heap* heap, size_t size_in_bytes, size_t* node_size,
+      AllocationOrigin origin) override;
 
  protected:
-  static const size_t kMinBlockSize = 3 * kTaggedSize;
+  static constexpr size_t kMinBlockSize = 3 * kTaggedSize;
 
   // This is a conservative upper bound. The actual maximum block size takes
   // padding and alignment of data and code pages into account.
-  static const size_t kMaxBlockSize = MemoryChunk::kPageSize;
+  static constexpr size_t kMaxBlockSize = kRegularPageSize;
   // Largest size for which categories are still precise, and for which we can
   // therefore compute the category in constant time.
-  static const size_t kPreciseCategoryMaxSize = 256;
+  static constexpr size_t kPreciseCategoryMaxSize = 256;
 
   // Categories boundaries generated with:
   // perl -E '
@@ -322,7 +324,7 @@ class V8_EXPORT_PRIVATE FreeListMany : public FreeList {
   //      }
   //      say join ", ", @cat;
   //      say "\n", scalar @cat'
-  static const int kNumberOfCategories = 24;
+  static constexpr int kNumberOfCategories = 24;
   static constexpr unsigned int categories_min[kNumberOfCategories] = {
       24,  32,  48,  64,  80,  96,   112,  128,  144,  160,   176,   192,
       208, 224, 240, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536};
@@ -356,13 +358,15 @@ class V8_EXPORT_PRIVATE FreeListManyCached : public FreeListMany {
  public:
   FreeListManyCached();
 
-  V8_WARN_UNUSED_RESULT FreeSpace Allocate(size_t size_in_bytes,
-                                           size_t* node_size,
-                                           AllocationOrigin origin) override;
+  V8_WARN_UNUSED_RESULT Tagged<FreeSpace> Allocate(
+      const Heap* heap, size_t size_in_bytes, size_t* node_size,
+      AllocationOrigin origin) override;
 
-  size_t Free(Address start, size_t size_in_bytes, FreeMode mode) override;
+  size_t Free(const Isolate* isolate, const WritableFreeSpace& free_space,
+              FreeMode mode) override;
 
   void Reset() override;
+  void ResetForNonBlackAllocatedPages() override;
 
   bool AddCategory(FreeListCategory* category) override;
   void RemoveCategory(FreeListCategory* category) override;
@@ -436,16 +440,19 @@ class V8_EXPORT_PRIVATE FreeListManyCachedFastPathBase
  public:
   enum class SmallBlocksMode { kAllow, kProhibit };
 
-  FreeListManyCachedFastPathBase(SmallBlocksMode small_blocks_mode)
+  explicit FreeListManyCachedFastPathBase(SmallBlocksMode small_blocks_mode)
       : small_blocks_mode_(small_blocks_mode) {
     if (small_blocks_mode_ == SmallBlocksMode::kProhibit) {
-      min_block_size_ = kFastPathStart;
+      min_block_size_ =
+          (v8_flags.minor_ms && (v8_flags.minor_ms_min_lab_size_kb > 0))
+              ? (v8_flags.minor_ms_min_lab_size_kb * KB)
+              : kFastPathStart;
     }
   }
 
-  V8_WARN_UNUSED_RESULT FreeSpace Allocate(size_t size_in_bytes,
-                                           size_t* node_size,
-                                           AllocationOrigin origin) override;
+  V8_WARN_UNUSED_RESULT Tagged<FreeSpace> Allocate(
+      const Heap* heap, size_t size_in_bytes, size_t* node_size,
+      AllocationOrigin origin) override;
 
  protected:
   // Objects in the 18th category are at least 2048 bytes
@@ -507,9 +514,9 @@ class FreeListManyCachedFastPathForNewSpace
 class V8_EXPORT_PRIVATE FreeListManyCachedOrigin
     : public FreeListManyCachedFastPath {
  public:
-  V8_WARN_UNUSED_RESULT FreeSpace Allocate(size_t size_in_bytes,
-                                           size_t* node_size,
-                                           AllocationOrigin origin) override;
+  V8_WARN_UNUSED_RESULT Tagged<FreeSpace> Allocate(
+      const Heap* heap, size_t size_in_bytes, size_t* node_size,
+      AllocationOrigin origin) override;
 };
 
 }  // namespace internal

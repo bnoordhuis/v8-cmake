@@ -73,7 +73,6 @@ void AssemblerRISCVC::c_lwsp(Register rd, uint16_t uimm8) {
 void AssemblerRISCVC::c_jr(Register rs1) {
   DCHECK(rs1 != zero_reg);
   GenInstrCR(0b1000, C2, rs1, zero_reg);
-  BlockTrampolinePoolFor(1);
 }
 
 void AssemblerRISCVC::c_mv(Register rd, Register rs2) {
@@ -86,7 +85,8 @@ void AssemblerRISCVC::c_ebreak() { GenInstrCR(0b1001, C2, zero_reg, zero_reg); }
 void AssemblerRISCVC::c_jalr(Register rs1) {
   DCHECK(rs1 != zero_reg);
   GenInstrCR(0b1001, C2, rs1, zero_reg);
-  BlockTrampolinePoolFor(1);
+  // This could potentially be the location of a safepoint.
+  RecordPcForSafepoint();
 }
 
 void AssemblerRISCVC::c_add(Register rd, Register rs2) {
@@ -220,7 +220,6 @@ void AssemblerRISCVC::c_j(int16_t imm12) {
                    ((imm12 & 0x40) >> 1) | ((imm12 & 0x20) >> 5) |
                    ((imm12 & 0x10) << 5) | (imm12 & 0xe);
   GenInstrCJ(0b101, C1, uimm11);
-  BlockTrampolinePoolFor(1);
 }
 
 // CB Instructions
@@ -252,6 +251,89 @@ void AssemblerRISCVC::c_srai(Register rs1, int8_t shamt6) {
 void AssemblerRISCVC::c_andi(Register rs1, int8_t imm6) {
   DCHECK(((rs1.code() & 0b11000) == 0b01000) && is_int6(imm6));
   GenInstrCBA(0b100, 0b10, C1, rs1, imm6);
+}
+
+// Zcb Instructions
+
+void AssemblerRISCVC::c_lbu(Register rd, Register rs1, uint16_t uimm) {
+  DCHECK(((rd.code() & 0b11000) == 0b01000) &&
+         ((rs1.code() & 0b11000) == 0b01000) && is_uint2(uimm));
+  // uimm[1] = enc[5], uimm[0] = enc[6]; bits [12:10] are fixed to 000.
+  uint8_t uimm5 = ((uimm & 0x1) << 1) | ((uimm >> 1) & 0x1);
+  GenInstrCL(0b100, C0, rd, rs1, uimm5);
+}
+
+void AssemblerRISCVC::c_lhu(Register rd, Register rs1, uint16_t uimm) {
+  DCHECK(((rd.code() & 0b11000) == 0b01000) &&
+         ((rs1.code() & 0b11000) == 0b01000) && is_uint2(uimm) &&
+         ((uimm & 0x1) == 0));
+  // uimm[1] = enc[5], enc[6] = 0; bits [12:10] are fixed to 001.
+  uint8_t uimm5 = 0b00100 | ((uimm >> 1) & 0x1);
+  GenInstrCL(0b100, C0, rd, rs1, uimm5);
+}
+
+void AssemblerRISCVC::c_lh(Register rd, Register rs1, uint16_t uimm) {
+  DCHECK(((rd.code() & 0b11000) == 0b01000) &&
+         ((rs1.code() & 0b11000) == 0b01000) && is_uint2(uimm) &&
+         ((uimm & 0x1) == 0));
+  // uimm[1] = enc[5], enc[6] = 1; bits [12:10] are fixed to 001.
+  uint8_t uimm5 = 0b00110 | ((uimm >> 1) & 0x1);
+  GenInstrCL(0b100, C0, rd, rs1, uimm5);
+}
+
+void AssemblerRISCVC::c_sb(Register rs2, Register rs1, uint16_t uimm) {
+  DCHECK(((rs2.code() & 0b11000) == 0b01000) &&
+         ((rs1.code() & 0b11000) == 0b01000) && is_uint2(uimm));
+  // uimm[1] = enc[5], uimm[0] = enc[6]; bits [12:10] are fixed to 010.
+  uint8_t uimm5 = 0b01000 | ((uimm & 0x1) << 1) | ((uimm >> 1) & 0x1);
+  GenInstrCS(0b100, C0, rs2, rs1, uimm5);
+}
+
+void AssemblerRISCVC::c_sh(Register rs2, Register rs1, uint16_t uimm) {
+  DCHECK(((rs2.code() & 0b11000) == 0b01000) &&
+         ((rs1.code() & 0b11000) == 0b01000) && is_uint2(uimm) &&
+         ((uimm & 0x1) == 0));
+  // uimm[1] = enc[5], enc[6] = 0; bits [12:10] are fixed to 011.
+  uint8_t uimm5 = 0b01100 | ((uimm >> 1) & 0x1);
+  GenInstrCS(0b100, C0, rs2, rs1, uimm5);
+}
+
+void AssemblerRISCVC::c_mul(Register rd, Register rs2) {
+  DCHECK(((rd.code() & 0b11000) == 0b01000) &&
+         ((rs2.code() & 0b11000) == 0b01000));
+  GenInstrCA(0b100111, C1, rd, 0b10, rs2);
+}
+
+void AssemblerRISCVC::c_zext_b(Register rd) {
+  DCHECK(((rd.code() & 0b11000) == 0b01000));
+  GenInstrCU(0b100, 0b11, C1, rd, 0b111000);
+}
+
+void AssemblerRISCVC::c_sext_b(Register rd) {
+  DCHECK(((rd.code() & 0b11000) == 0b01000));
+  GenInstrCU(0b100, 0b11, C1, rd, 0b111001);
+}
+
+void AssemblerRISCVC::c_zext_h(Register rd) {
+  DCHECK(((rd.code() & 0b11000) == 0b01000));
+  GenInstrCU(0b100, 0b11, C1, rd, 0b111010);
+}
+
+void AssemblerRISCVC::c_sext_h(Register rd) {
+  DCHECK(((rd.code() & 0b11000) == 0b01000));
+  GenInstrCU(0b100, 0b11, C1, rd, 0b111011);
+}
+
+#ifdef V8_TARGET_ARCH_RISCV64
+void AssemblerRISCVC::c_zext_w(Register rd) {
+  DCHECK(((rd.code() & 0b11000) == 0b01000));
+  GenInstrCU(0b100, 0b11, C1, rd, 0b111100);
+}
+#endif
+
+void AssemblerRISCVC::c_not(Register rd) {
+  DCHECK(((rd.code() & 0b11000) == 0b01000));
+  GenInstrCU(0b100, 0b11, C1, rd, 0b111101);
 }
 
 bool AssemblerRISCVC::IsCJal(Instr instr) {

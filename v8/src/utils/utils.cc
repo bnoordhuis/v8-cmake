@@ -10,7 +10,7 @@
 #include <cstring>
 #include <vector>
 
-#include "src/base/functional.h"
+#include "src/base/hashing.h"
 #include "src/base/logging.h"
 #include "src/base/platform/platform.h"
 #include "src/base/platform/wrappers.h"
@@ -25,11 +25,6 @@ namespace internal {
 
 std::ostream& operator<<(std::ostream& os, FeedbackSlot slot) {
   return os << "#" << slot.id_;
-}
-
-size_t hash_value(BytecodeOffset id) {
-  base::hash<int> h;
-  return h(id.id_);
 }
 
 std::ostream& operator<<(std::ostream& os, BytecodeOffset id) {
@@ -206,15 +201,14 @@ int WriteBytes(const char* filename, const uint8_t* bytes, int size,
 
 // Returns false iff d is NaN, +0, or -0.
 bool DoubleToBoolean(double d) {
-  IeeeDoubleArchType u;
-  u.d = d;
-  if (u.bits.exp == 2047) {
+  IeeeDoubleArchType u{d};
+  if (u.exp() == 2047) {
     // Detect NaN for IEEE double precision floating point.
-    if ((u.bits.man_low | u.bits.man_high) != 0) return false;
+    if ((u.man_low() | u.man_high()) != 0) return false;
   }
-  if (u.bits.exp == 0) {
+  if (u.exp() == 0) {
     // Detect +0, and -0 for IEEE double precision floating point.
-    if ((u.bits.man_low | u.bits.man_high) == 0) return false;
+    if ((u.man_low() | u.man_high()) == 0) return false;
   }
   return true;
 }
@@ -237,14 +231,14 @@ uintptr_t GetCurrentStackPosition() {
 //   "~"      none; the tilde is not an identifier
 bool PassesFilter(base::Vector<const char> name,
                   base::Vector<const char> filter) {
-  if (filter.size() == 0) return name.size() == 0;
+  if (filter.empty()) return name.empty();
   auto filter_it = filter.begin();
   bool positive_filter = true;
   if (*filter_it == '-') {
     ++filter_it;
     positive_filter = false;
   }
-  if (filter_it == filter.end()) return name.size() != 0;
+  if (filter_it == filter.end()) return !name.empty();
   if (*filter_it == '*') return positive_filter;
   if (*filter_it == '~') return !positive_filter;
 
@@ -255,9 +249,7 @@ bool PassesFilter(base::Vector<const char> name,
 
   if (name.size() < min_match_length) return !positive_filter;
 
-  // TODO(sigurds): Use the new version of std::mismatch here, once we
-  // can assume C++14.
-  auto res = std::mismatch(filter_it, filter.end(), name.begin());
+  auto res = std::mismatch(filter_it, filter.end(), name.begin(), name.end());
   if (res.first == filter.end()) {
     if (res.second == name.end()) {
       // The strings match, so {name} passes if we have a {positive_filter}.

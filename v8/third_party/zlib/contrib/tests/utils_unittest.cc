@@ -9,9 +9,29 @@
 
 #include "compression_utils_portable.h"
 #include "gtest.h"
+
+#if !defined(CMAKE_STANDALONE_UNITTESTS)
+#include "base/files/file_path.h"
+#include "base/files/scoped_temp_dir.h"
+#include "base/path_service.h"
+
+#include "third_party/zlib/contrib/minizip/unzip.h"
+#include "third_party/zlib/contrib/minizip/zip.h"
+#endif
+
+#include "compare256.h"
 #include "zlib.h"
 
-void TestPayloads(size_t input_size, zlib_internal::WrapperType type) {
+// Some tests are for little endian optimizations and should be skipped if
+// running on big endian.
+#if !defined(__BYTE_ORDER__) || __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+#define ZLIB_TEST_LITTLE_ENDIAN 1
+#else
+#define ZLIB_TEST_LITTLE_ENDIAN 0
+#endif
+
+void TestPayloads(size_t input_size, zlib_internal::WrapperType type,
+                  const int compression_level = Z_DEFAULT_COMPRESSION) {
   std::vector<unsigned char> input;
   input.reserve(input_size);
   for (size_t i = 1; i <= input_size; ++i)
@@ -27,7 +47,7 @@ void TestPayloads(size_t input_size, zlib_internal::WrapperType type) {
   unsigned long compressed_size = static_cast<unsigned long>(compressed.size());
   int result = zlib_internal::CompressHelper(
       type, compressed.data(), &compressed_size, input.data(), input.size(),
-      Z_DEFAULT_COMPRESSION, nullptr, nullptr);
+      compression_level, nullptr, nullptr);
   ASSERT_EQ(result, Z_OK);
 
   unsigned long decompressed_size =
@@ -56,6 +76,25 @@ TEST(ZlibTest, RawWrapper) {
   // should be payload_size + 2 for short payloads.
   for (size_t i = 1; i < 1024; ++i)
     TestPayloads(i, zlib_internal::WrapperType::ZRAW);
+}
+
+TEST(ZlibTest, LargePayloads) {
+  static const size_t lengths[] = { 6000, 8000, 10'000, 15'000, 20'000, 30'000,
+                                    50'000, 100'000, 150'000, 2'500'000,
+                                    5'000'000, 10'000'000, 20'000'000 };
+
+  for (size_t length: lengths) {
+    TestPayloads(length, zlib_internal::WrapperType::ZLIB);
+    TestPayloads(length, zlib_internal::WrapperType::GZIP);
+  }
+}
+
+TEST(ZlibTest, CompressionLevels) {
+  static const int levels[] = { 1, 2, 3, 4, 5, 6, 7, 8, 9 };
+  for (int level: levels) {
+    TestPayloads(5'000'000, zlib_internal::WrapperType::ZLIB, level);
+    TestPayloads(5'000'000, zlib_internal::WrapperType::GZIP, level);
+  }
 }
 
 TEST(ZlibTest, InflateCover) {
@@ -1015,3 +1054,462 @@ TEST(ZlibTest, DeflateZFixedCorruption) {
       memcmp(zFixedCorruptionData, decompressed.data(), decompressed.size()),
       0);
 }
+
+TEST(ZlibTest, DeflateCopy) {
+  // Check that deflateCopy() works.
+
+  z_stream stream1;
+  stream1.zalloc = Z_NULL;
+  stream1.zfree = Z_NULL;
+  int ret =
+      deflateInit(&stream1, Z_DEFAULT_COMPRESSION);
+  ASSERT_EQ(ret, Z_OK);
+  std::vector<uint8_t> compressed(
+      deflateBound(&stream1, strlen(zFixedCorruptionData)));
+  stream1.next_out = compressed.data();
+  stream1.avail_out = compressed.size();
+
+  // Compress the first 1000 bytes.
+  stream1.next_in = (uint8_t*)zFixedCorruptionData;
+  stream1.avail_in = 1000;
+  ret = deflate(&stream1, Z_NO_FLUSH);
+  ASSERT_EQ(ret, Z_OK);
+
+  // Copy the stream state.
+  z_stream stream2;
+  ret = deflateCopy(&stream2, &stream1);
+  ASSERT_EQ(ret, Z_OK);
+  deflateEnd(&stream1);
+
+  // Compress the remaining bytes.
+  stream2.next_in = (uint8_t*)zFixedCorruptionData + (1000 - stream2.avail_in);
+  stream2.avail_in = strlen(zFixedCorruptionData) - (1000 - stream2.avail_in);
+  ret = deflate(&stream2, Z_FINISH);
+  ASSERT_EQ(ret, Z_STREAM_END);
+  size_t compressed_sz = compressed.size() - stream2.avail_out;
+  deflateEnd(&stream2);
+
+  // Check that decompression is successful.
+  std::vector<uint8_t> decompressed(strlen(zFixedCorruptionData));
+  z_stream stream;
+  stream.zalloc = Z_NULL;
+  stream.zfree = Z_NULL;
+  ret = inflateInit(&stream);
+  ASSERT_EQ(ret, Z_OK);
+  stream.next_in = compressed.data();
+  stream.avail_in = compressed_sz;
+  stream.next_out = decompressed.data();
+  stream.avail_out = decompressed.size();
+  ret = inflate(&stream, Z_FINISH);
+  ASSERT_EQ(ret, Z_STREAM_END);
+  inflateEnd(&stream);
+
+  EXPECT_EQ(decompressed.size(), strlen(zFixedCorruptionData));
+  EXPECT_EQ(
+      memcmp(zFixedCorruptionData, decompressed.data(), decompressed.size()),
+      0);
+}
+
+TEST(ZlibTest, GzipStored) {
+  // Check that deflating uncompressed blocks with a gzip header doesn't write
+  // out of bounds (crbug.com/325990053).
+  z_stream stream;
+  stream.zalloc = Z_NULL;
+  stream.zfree = Z_NULL;
+  static const int kGzipWrapper = 16;
+  int ret = deflateInit2(&stream, Z_NO_COMPRESSION, Z_DEFLATED,
+                         9 + kGzipWrapper, 9, Z_DEFAULT_STRATEGY);
+  ASSERT_EQ(ret, Z_OK);
+
+  const std::vector<uint8_t> src(512 * 1024);
+  stream.next_in = (unsigned char*)src.data();
+  stream.avail_in = src.size();
+
+  std::vector<uint8_t> out(1000);
+  stream.next_out = (unsigned char*)out.data();
+  stream.avail_out = out.size();
+
+  ret = deflate(&stream, Z_NO_FLUSH);
+  ASSERT_EQ(ret, Z_OK);
+
+  deflateEnd(&stream);
+}
+
+TEST(ZlibTest, DeflateBound) {
+  // Check that the deflateBound() isn't too low when using non-default
+  // parameters (crbug.com/40270738).
+  const int level = 9;
+  const int windowBits = 15;
+  const int memLevel = 1;
+  const int strategy = Z_FIXED;
+  const uint8_t src[] = {
+      49,  255, 255, 20,  45,  49,  167, 56,  55,  255, 255, 255, 223, 255, 49,
+      255, 3,   78,  0,   0,   141, 253, 209, 163, 29,  195, 43,  60,  199, 123,
+      112, 35,  134, 13,  148, 102, 212, 4,   184, 103, 7,   102, 225, 102, 156,
+      164, 78,  48,  70,  49,  125, 162, 55,  116, 161, 174, 83,  0,   59,  0,
+      225, 140, 0,   0,   63,  63,  4,   15,  198, 30,  126, 196, 33,  99,  135,
+      41,  192, 82,  28,  105, 216, 170, 221, 14,  61,  1,   0,   0,   22,  195,
+      45,  53,  244, 163, 167, 158, 229, 68,  18,  112, 49,  174, 43,  75,  90,
+      161, 85,  19,  36,  163, 118, 228, 169, 180, 161, 237, 234, 253, 197, 234,
+      66,  106, 12,  42,  124, 96,  160, 144, 183, 194, 157, 167, 202, 217};
+
+  z_stream stream;
+  stream.zalloc = Z_NULL;
+  stream.zfree = Z_NULL;
+  int ret =
+      deflateInit2(&stream, level, Z_DEFLATED, windowBits, memLevel, strategy);
+  ASSERT_EQ(ret, Z_OK);
+  size_t deflate_bound = deflateBound(&stream, sizeof(src));
+
+  uint8_t out[sizeof(src) * 10];
+  stream.next_in = (uint8_t*)src;
+  stream.avail_in = sizeof(src);
+  stream.next_out = out;
+  stream.avail_out = sizeof(out);
+  ret = deflate(&stream, Z_FINISH);
+  ASSERT_EQ(ret, Z_STREAM_END);
+
+  size_t out_size = sizeof(out) - stream.avail_out;
+  EXPECT_LE(out_size, deflate_bound);
+
+  deflateEnd(&stream);
+}
+
+TEST(ZlibTest, InflateCopySIGILLReproduction) {
+  z_stream c_stream;
+  c_stream.zalloc = Z_NULL;
+  c_stream.zfree = Z_NULL;
+  c_stream.opaque = Z_NULL;
+
+  // 1. Start with Z_FIXED to set distcode to distfix.
+  EXPECT_EQ(Z_OK, deflateInit2(&c_stream, Z_DEFAULT_COMPRESSION, Z_DEFLATED, 15,
+                               8, Z_FIXED));
+
+  std::string data1 =
+      "Some data for a fixed block. This ensures distcode "
+      "points to distfix.";
+  c_stream.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(data1.data()));
+  c_stream.avail_in = data1.size();
+
+  std::vector<Bytef> compressed(4096);
+  c_stream.next_out = compressed.data();
+  c_stream.avail_out = compressed.size();
+
+  EXPECT_EQ(Z_OK, deflate(&c_stream, Z_SYNC_FLUSH));
+
+  // 2. Switch to Z_DEFAULT_STRATEGY to trigger dynamic trees in the next block.
+  EXPECT_EQ(Z_OK, deflateParams(&c_stream, Z_DEFAULT_COMPRESSION,
+                                Z_DEFAULT_STRATEGY));
+
+  // Feed enough data to ensure a dynamic block is created.
+  std::string data2;
+  for (int j = 0; j < 100; ++j) {
+    data2 += "Much more data that should definitely trigger a dynamic block. " +
+             std::to_string(j) + " ";
+    data2 += "Repeated data: abcdefghijklmnopqrstuvwxyz 0123456789. ";
+  }
+  c_stream.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(data2.data()));
+  c_stream.avail_in = data2.size();
+
+  EXPECT_EQ(Z_STREAM_END, deflate(&c_stream, Z_FINISH));
+  compressed.resize(c_stream.total_out);
+  EXPECT_EQ(Z_OK, deflateEnd(&c_stream));
+
+  // 3. Decompress and call inflateCopy at every byte boundary.
+  for (size_t i = 1; i <= compressed.size(); ++i) {
+    z_stream d_stream;
+    d_stream.zalloc = Z_NULL;
+    d_stream.zfree = Z_NULL;
+    d_stream.opaque = Z_NULL;
+    d_stream.next_in = compressed.data();
+    d_stream.avail_in = i;
+
+    EXPECT_EQ(Z_OK, inflateInit(&d_stream));
+
+    std::vector<Bytef> out(1024 * 1024);
+    d_stream.next_out = out.data();
+    d_stream.avail_out = out.size();
+
+    int ret = inflate(&d_stream, Z_NO_FLUSH);
+    EXPECT_TRUE(ret == Z_OK || ret == Z_STREAM_END || ret == Z_BUF_ERROR);
+
+    z_stream copy_stream;
+    copy_stream.zalloc = Z_NULL;
+    copy_stream.zfree = Z_NULL;
+    copy_stream.opaque = Z_NULL;
+
+    // This is where the SIGILL crash should happen.
+    int copy_ret = inflateCopy(&copy_stream, &d_stream);
+    if (copy_ret == Z_OK) {
+      inflateEnd(&copy_stream);
+    }
+
+    inflateEnd(&d_stream);
+  }
+}
+
+// TODO(gustavoa): make these tests run standalone.
+#ifndef CMAKE_STANDALONE_UNITTESTS
+
+TEST(ZlibTest, ZipFilenameCommentSize) {
+  // Check that minizip rejects zip member filenames or comments longer than
+  // the zip format can represent.
+
+  base::ScopedTempDir temp_dir;
+  ASSERT_TRUE(temp_dir.CreateUniqueTempDir());
+  base::FilePath zip_file = temp_dir.GetPath().AppendASCII("crbug1470539.zip");
+
+  zipFile zf = zipOpen(zip_file.AsUTF8Unsafe().c_str(), APPEND_STATUS_CREATE);
+  ASSERT_NE(zf, nullptr);
+
+  // Adding a member with 2^16 byte filename is okay.
+  std::string long_filename(UINT16_MAX, 'a');
+  EXPECT_EQ(zipOpenNewFileInZip(zf, long_filename.c_str(), nullptr, nullptr, 0,
+                                nullptr, 0, nullptr, Z_DEFLATED,
+                                Z_DEFAULT_COMPRESSION),
+            ZIP_OK);
+  EXPECT_EQ(zipWriteInFileInZip(zf, "1", 1), ZIP_OK);
+  EXPECT_EQ(zipCloseFileInZip(zf), ZIP_OK);
+
+  // Adding a member with 2^16+1 byte filename is NOT okay.
+  std::string too_long_filename = long_filename + 'a';
+  EXPECT_EQ(zipOpenNewFileInZip(zf, too_long_filename.c_str(), nullptr, nullptr,
+                                0, nullptr, 0, nullptr, Z_DEFLATED,
+                                Z_DEFAULT_COMPRESSION),
+            ZIP_PARAMERROR);
+
+  // Adding a member with 2^16 byte comment is okay.
+  std::string long_comment(UINT16_MAX, 'x');
+  EXPECT_EQ(zipOpenNewFileInZip(zf, "x", nullptr, nullptr, 0, nullptr, 0,
+                                long_comment.c_str(), Z_DEFLATED,
+                                Z_DEFAULT_COMPRESSION),
+            ZIP_OK);
+  EXPECT_EQ(zipCloseFileInZip(zf), ZIP_OK);
+
+  // Adding a member with 2^16+1 byte comment is NOT okay.
+  std::string too_long_comment = long_comment + 'x';
+  EXPECT_EQ(zipOpenNewFileInZip(zf, "x", nullptr, nullptr, 0, nullptr, 0,
+                                too_long_comment.c_str(), Z_DEFLATED,
+                                Z_DEFAULT_COMPRESSION),
+            ZIP_PARAMERROR);
+
+  EXPECT_EQ(zipClose(zf, nullptr), ZIP_OK);
+
+  // Check that the long filename and comment members were successfully added.
+  unzFile uzf = unzOpen(zip_file.AsUTF8Unsafe().c_str());
+  ASSERT_NE(uzf, nullptr);
+  char buf[UINT16_MAX + 2];
+
+  ASSERT_EQ(unzGoToFirstFile(uzf), UNZ_OK);
+  ASSERT_EQ(unzGetCurrentFileInfo(uzf, nullptr, buf, sizeof(buf), nullptr, 0,
+                                  nullptr, 0),
+            UNZ_OK);
+  EXPECT_EQ(std::string(buf), long_filename);
+
+  ASSERT_EQ(unzGoToNextFile(uzf), UNZ_OK);
+  ASSERT_EQ(unzGetCurrentFileInfo(uzf, nullptr, nullptr, 0, nullptr, 0, buf,
+                                  sizeof(buf)),
+            UNZ_OK);
+  EXPECT_EQ(std::string(buf), long_comment);
+
+  EXPECT_EQ(unzGoToNextFile(uzf), UNZ_END_OF_LIST_OF_FILE);
+  EXPECT_EQ(unzClose(uzf), UNZ_OK);
+}
+
+TEST(ZlibTest, ZipExtraFieldSize) {
+  // Check that minizip rejects zip members with too large extra fields.
+
+  std::string extra_field;
+  extra_field.append("\x12\x34");  // Header ID.
+  extra_field.append("\xfb\xff");  // Data size (not including the header).
+  extra_field.append(UINT16_MAX - 4, 'a');
+
+  base::ScopedTempDir temp_dir;
+  ASSERT_TRUE(temp_dir.CreateUniqueTempDir());
+  base::FilePath zip_file = temp_dir.GetPath().AppendASCII("extrafield.zip");
+
+  zipFile zf = zipOpen(zip_file.AsUTF8Unsafe().c_str(), APPEND_STATUS_CREATE);
+  ASSERT_NE(zf, nullptr);
+
+  // Adding a member with 2^16 byte extra field should work.
+  EXPECT_EQ(zipOpenNewFileInZip(zf, "a", nullptr, extra_field.data(),
+                                extra_field.size(), extra_field.data(),
+                                extra_field.size(), nullptr, Z_DEFLATED,
+                                Z_DEFAULT_COMPRESSION),
+            ZIP_OK);
+  EXPECT_EQ(zipWriteInFileInZip(zf, "1", 1), ZIP_OK);
+  EXPECT_EQ(zipCloseFileInZip(zf), ZIP_OK);
+
+  // More then 2^16 bytes doesn't work. Neither for size_extrafield_local, nor
+  // size_extrafield_global.
+  std::string extra_field_long = extra_field + 'x';
+  EXPECT_EQ(
+      zipOpenNewFileInZip(zf, "b", nullptr, nullptr, 0, extra_field_long.data(),
+                          extra_field_long.size(), nullptr, Z_DEFLATED,
+                          Z_DEFAULT_COMPRESSION),
+      ZIP_PARAMERROR);
+  EXPECT_EQ(zipOpenNewFileInZip(zf, "b", nullptr, extra_field_long.data(),
+                                extra_field_long.size(), nullptr, 0, nullptr,
+                                Z_DEFLATED, Z_DEFAULT_COMPRESSION),
+            ZIP_PARAMERROR);
+
+  EXPECT_EQ(zipClose(zf, nullptr), ZIP_OK);
+
+  // Check that the data can be read back.
+  unzFile uzf = unzOpen(zip_file.AsUTF8Unsafe().c_str());
+  ASSERT_NE(uzf, nullptr);
+  char buf[UINT16_MAX + 1] = {0};
+
+  ASSERT_EQ(unzGoToFirstFile(uzf), UNZ_OK);
+  ASSERT_EQ(unzGetCurrentFileInfo(uzf, nullptr, nullptr, 0, buf,
+                                  sizeof(buf) - 1, nullptr, 0),
+            UNZ_OK);
+  EXPECT_EQ(std::string(buf), extra_field);
+
+  EXPECT_EQ(unzGoToNextFile(uzf), UNZ_END_OF_LIST_OF_FILE);
+  EXPECT_EQ(unzClose(uzf), UNZ_OK);
+}
+
+static base::FilePath TestDataDir() {
+  base::FilePath path;
+  bool success = base::PathService::Get(base::DIR_SRC_TEST_DATA_ROOT, &path);
+  EXPECT_TRUE(success);
+  return path
+      .AppendASCII("third_party")
+      .AppendASCII("zlib")
+      .AppendASCII("google")
+      .AppendASCII("test")
+      .AppendASCII("data");
+}
+
+TEST(ZlibTest, ZipUnicodePathExtraSizeFilenameOverflow) {
+  // This is based on components/test/data/unzip_service/bug953599.zip (added
+  // in https://crrev.com/1004132), with the Unicode Path Extra Field's
+  // dataSize hex edited to four.
+  base::FilePath zip_file = TestDataDir().AppendASCII("unicode_path_extra_overflow.zip");
+  unzFile uzf = unzOpen(zip_file.AsUTF8Unsafe().c_str());
+  ASSERT_NE(uzf, nullptr);
+  EXPECT_EQ(unzGoToFirstFile(uzf), UNZ_ERRNO);
+  EXPECT_EQ(unzClose(uzf), UNZ_OK);
+}
+
+TEST(ZlibTest, ZipUnicodePathExtra) {
+  // This is components/test/data/unzip_service/bug953599.zip (added in
+  // https://crrev.com/1004132).
+  base::FilePath zip_file = TestDataDir().AppendASCII("unicode_path_extra.zip");
+  unzFile uzf = unzOpen(zip_file.AsUTF8Unsafe().c_str());
+  ASSERT_NE(uzf, nullptr);
+
+  char long_buf[15], short_buf[3];
+  unz_file_info file_info;
+
+  ASSERT_EQ(unzGoToFirstFile(uzf), UNZ_OK);
+  ASSERT_EQ(unzGetCurrentFileInfo(uzf, &file_info, long_buf, sizeof(long_buf),
+                                  nullptr, 0, nullptr, 0), UNZ_OK);
+  ASSERT_EQ(file_info.size_filename, 11);
+  ASSERT_EQ(file_info.size_utf8_filename, 14);
+  ASSERT_EQ(std::string(file_info.utf8_filename), "\xec\x83\x88 \xeb\xac\xb8\xec\x84\x9c.txt");
+
+  // Even if the file name buffer is too short to hold the whole filename, the
+  // unicode path extra field should get parsed correctly, size_filename set,
+  // and the file name buffer should receive the first bytes.
+  ASSERT_EQ(unzGoToFirstFile(uzf), UNZ_OK);
+  ASSERT_EQ(unzGetCurrentFileInfo(uzf, &file_info, short_buf, sizeof(short_buf),
+                                  nullptr, 0, nullptr, 0), UNZ_OK);
+  ASSERT_EQ(file_info.size_filename, 11);
+  ASSERT_EQ(std::string(short_buf, sizeof(short_buf)), "\xc8\xfe\x20");
+  ASSERT_EQ(file_info.size_utf8_filename, 14);
+  ASSERT_EQ(std::string(file_info.utf8_filename), "\xec\x83\x88 \xeb\xac\xb8\xec\x84\x9c.txt");
+
+  // Also with a null filename buffer, the unicode path extra field should get
+  // parsed and size_filename set correctly.
+  ASSERT_EQ(unzGoToFirstFile(uzf), UNZ_OK);
+  ASSERT_EQ(unzGetCurrentFileInfo(uzf, &file_info, nullptr, 0, nullptr, 0,
+                                  nullptr, 0), UNZ_OK);
+  ASSERT_EQ(file_info.size_filename, 11);
+  ASSERT_EQ(file_info.size_utf8_filename, 14);
+  ASSERT_EQ(std::string(file_info.utf8_filename), "\xec\x83\x88 \xeb\xac\xb8\xec\x84\x9c.txt");
+
+  EXPECT_EQ(unzClose(uzf), UNZ_OK);
+}
+
+TEST(ZlibTest, ZipEncryptionFlagMismatch) {
+  // Test archive created with info-zip:
+  // $ echo -n a > a && zip -P a -k a.zip a
+  // and then hex-edited to drop the encrypted flag from the central directory.
+  base::FilePath zip_file = TestDataDir().AppendASCII("enc_flag_mismatch.zip");
+
+  unzFile uzf = unzOpen(zip_file.AsUTF8Unsafe().c_str());
+  ASSERT_NE(uzf, nullptr);
+
+  char name[100];
+  unz_file_info file_info;
+
+  ASSERT_EQ(unzGoToFirstFile(uzf), UNZ_OK);
+  ASSERT_EQ(unzGetCurrentFileInfo(uzf, &file_info, name, sizeof(name),
+                                  nullptr, 0, nullptr, 0), UNZ_OK);
+  ASSERT_EQ(std::string(name), "A");
+
+  // minizip should reject the member due to lfh/cd encrypted flag mismatch.
+  EXPECT_EQ(unzOpenCurrentFilePassword(uzf, "a"), UNZ_BADZIPFILE);
+
+  EXPECT_EQ(unzClose(uzf), UNZ_OK);
+}
+
+TEST(ZlibTest, Crbug500521311) {
+  base::FilePath zip_file = TestDataDir().AppendASCII("bug500521311.zip");
+  unzFile uzf = unzOpen(zip_file.AsUTF8Unsafe().c_str());
+  ASSERT_NE(uzf, nullptr);
+
+  char buf[256];
+  unz_file_info file_info;
+
+  // aaaaaa...
+  ASSERT_EQ(unzGoToFirstFile(uzf), UNZ_OK);
+  ASSERT_EQ(unzGetCurrentFileInfo(uzf, &file_info, buf, sizeof(buf),
+                                  nullptr, 0, nullptr, 0), UNZ_OK);
+  EXPECT_EQ(std::string(file_info.utf8_filename),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+
+  // The Unicode Path Extra Field in the first Local File Header could
+  // previously cause unzGoToNextFile() to advance the wrong amount,
+  // potentially skipping a central directory entry.
+  ASSERT_EQ(unzGoToNextFile(uzf), UNZ_OK);
+
+  // evil.exe
+  ASSERT_EQ(unzGetCurrentFileInfo(uzf, &file_info, buf, sizeof(buf),
+                                  nullptr, 0, nullptr, 0), UNZ_OK);
+  EXPECT_EQ(std::string(buf), "evil.exe");
+  EXPECT_EQ(unzGoToNextFile(uzf), UNZ_END_OF_LIST_OF_FILE);
+  EXPECT_EQ(unzClose(uzf), UNZ_OK);
+}
+
+// compare256() returns the number of equal leading bytes. The buffers are
+// exactly the 256 bytes it may read, so ASan traps any over-read.
+TEST(ZlibTest, Compare256) {
+  if (!ZLIB_TEST_LITTLE_ENDIAN) {
+    GTEST_SKIP() << "compare256() is little-endian only";
+  }
+  for (int equal = 0; equal <= 256; ++equal) {
+    std::vector<unsigned char> a(256, 'a'), b(256, 'a');
+    if (equal < 256)
+      b[equal] = 'b';
+    EXPECT_EQ(compare256(a.data(), b.data()), equal);
+  }
+}
+
+// longest_match() computes 2 + compare256(scan + 2, match + 2), the first two
+// bytes being known equal, so a match must still reach MAX_MATCH (258).
+TEST(ZlibTest, Compare256ReachesMaxMatch) {
+  if (!ZLIB_TEST_LITTLE_ENDIAN) {
+    GTEST_SKIP() << "compare256() is little-endian only";
+  }
+  for (int match_len = 250; match_len <= 258; ++match_len) {
+    std::vector<unsigned char> a(258, 'a'), b(258, 'a');
+    if (match_len < 258)
+      b[match_len] = 'b';
+    EXPECT_EQ(2 + compare256(a.data() + 2, b.data() + 2), match_len);
+  }
+}
+
+#endif

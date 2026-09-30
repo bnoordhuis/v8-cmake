@@ -2,8 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Flags: --harmony-rab-gsab --allow-natives-syntax --turbofan
-// Flags: --no-always-turbofan --turbo-rab-gsab
+// Flags: --allow-natives-syntax --turbofan
 
 "use strict";
 
@@ -44,6 +43,15 @@ function asU32(index) {
   }
 }
 %NeverOptimizeFunction(asU32);
+
+function asF16(index) {
+  const start = index * 2;
+  const ab = new ArrayBuffer(2);
+  const ta = new Uint8Array(ab);
+  for (let i = 0; i < 2; ++i) ta[i] = start + i;
+  return new Float16Array(ab)[0];
+}
+%NeverOptimizeFunction(asF16);
 
 function asF32(index) {
   const start = index * 4;
@@ -184,6 +192,16 @@ function PrintBuffer(buffer) {
 }
 %NeverOptimizeFunction(PrintBuffer);
 
+// Detach a buffer to trip the protector up front, to prevent deopts in later
+// tests.
+(function() {
+  const ab = new ArrayBuffer(1);
+  const dv1 = new DataView(ab);
+  const dv2 = new DataView(ab);
+  %ArrayBufferDetach(ab);
+  assertThrows(() => dv1.byteLength, TypeError);
+})();
+
 (function() {
 for (let shared of [false, true]) {
   for (let length_tracking of [false, true]) {
@@ -226,13 +244,9 @@ for (let shared of [false, true]) {
         blen = Resize(ab, 9);
         assertEquals(blen, ByteLength(ta));
         assertEquals(Math.floor(blen / target.BYTES_PER_ELEMENT), Length(ta));
-        assertOptimized(ByteLength);
-        assertOptimized(Length);
         blen = Resize(ab, 24);
         assertEquals(blen, ByteLength(ta));
         assertEquals(Math.floor(blen / target.BYTES_PER_ELEMENT), Length(ta));
-        assertOptimized(ByteLength);
-        assertOptimized(Length);
 
         if (!shared) {
           %ArrayBufferDetach(ab);
@@ -452,7 +466,7 @@ assertOptimized(ByteLength);
 })();
 
 const dataview_data_sizes = ['Int8', 'Uint8', 'Int16', 'Uint16', 'Int32',
-                             'Uint32', 'Float32', 'Float64', 'BigInt64',
+                             'Uint32', 'Float16', 'Float32', 'Float64', 'BigInt64',
                              'BigUint64'];
 
 // Global variable used for DataViews; this is important for triggering some

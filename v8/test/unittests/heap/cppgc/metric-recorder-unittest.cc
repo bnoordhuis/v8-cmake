@@ -2,9 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/heap/cppgc/metric-recorder.h"
+#include "src/heap/cppgc-internal/metric-recorder.h"
 
-#include "src/heap/cppgc/stats-collector.h"
+#include "src/heap/cppgc-internal/stats-collector.h"
 #include "test/unittests/heap/cppgc/tests.h"
 
 namespace cppgc {
@@ -209,64 +209,39 @@ TEST_F(MetricRecorderTest, CycleEndHistogramReportsCorrectValues) {
   }
   EndGC(300);
   // Check durations.
-  static constexpr int64_t kDurationComparisonTolerance = 5000;
-  EXPECT_LT(std::abs(MetricRecorderImpl::GCCycle_event.main_thread_incremental
-                         .mark_duration_us -
-                     10000),
-            kDurationComparisonTolerance);
-  EXPECT_LT(std::abs(MetricRecorderImpl::GCCycle_event.main_thread_incremental
-                         .sweep_duration_us -
-                     20000),
-            kDurationComparisonTolerance);
-  EXPECT_LT(std::abs(MetricRecorderImpl::GCCycle_event.main_thread_atomic
-                         .mark_duration_us -
-                     30000),
-            kDurationComparisonTolerance);
-  EXPECT_LT(std::abs(MetricRecorderImpl::GCCycle_event.main_thread_atomic
-                         .weak_duration_us -
-                     50000),
-            kDurationComparisonTolerance);
-  EXPECT_LT(std::abs(MetricRecorderImpl::GCCycle_event.main_thread_atomic
-                         .compact_duration_us -
-                     60000),
-            kDurationComparisonTolerance);
-  EXPECT_LT(std::abs(MetricRecorderImpl::GCCycle_event.main_thread_atomic
-                         .sweep_duration_us -
-                     70000),
-            kDurationComparisonTolerance);
-  EXPECT_LT(
-      std::abs(MetricRecorderImpl::GCCycle_event.main_thread.mark_duration_us -
-               40000),
-      kDurationComparisonTolerance);
-  EXPECT_LT(
-      std::abs(MetricRecorderImpl::GCCycle_event.main_thread.weak_duration_us -
-               50000),
-      kDurationComparisonTolerance);
-  EXPECT_LT(
-      std::abs(
-          MetricRecorderImpl::GCCycle_event.main_thread.compact_duration_us -
-          60000),
-      kDurationComparisonTolerance);
-  EXPECT_LT(
-      std::abs(MetricRecorderImpl::GCCycle_event.main_thread.sweep_duration_us -
-               90000),
-      kDurationComparisonTolerance);
-  EXPECT_LT(std::abs(MetricRecorderImpl::GCCycle_event.total.mark_duration_us -
-                     120000),
-            kDurationComparisonTolerance);
-  EXPECT_LT(std::abs(MetricRecorderImpl::GCCycle_event.total.weak_duration_us -
-                     50000),
-            kDurationComparisonTolerance);
-  EXPECT_LT(
-      std::abs(MetricRecorderImpl::GCCycle_event.total.compact_duration_us -
-               60000),
-      kDurationComparisonTolerance);
-  EXPECT_LT(std::abs(MetricRecorderImpl::GCCycle_event.total.sweep_duration_us -
-                     190000),
-            kDurationComparisonTolerance);
+  EXPECT_GE(MetricRecorderImpl::GCCycle_event.main_thread_incremental
+                .mark_duration_us,
+            10000);
+  EXPECT_GE(MetricRecorderImpl::GCCycle_event.main_thread_incremental
+                .sweep_duration_us,
+            20000);
+  EXPECT_GE(
+      MetricRecorderImpl::GCCycle_event.main_thread_atomic.mark_duration_us,
+      30000);
+  EXPECT_GE(
+      MetricRecorderImpl::GCCycle_event.main_thread_atomic.weak_duration_us,
+      50000);
+  EXPECT_GE(
+      MetricRecorderImpl::GCCycle_event.main_thread_atomic.compact_duration_us,
+      60000);
+  EXPECT_GE(
+      MetricRecorderImpl::GCCycle_event.main_thread_atomic.sweep_duration_us,
+      70000);
+  EXPECT_GE(MetricRecorderImpl::GCCycle_event.main_thread.mark_duration_us,
+            40000);
+  EXPECT_GE(MetricRecorderImpl::GCCycle_event.main_thread.weak_duration_us,
+            50000);
+  EXPECT_GE(MetricRecorderImpl::GCCycle_event.main_thread.compact_duration_us,
+            60000);
+  EXPECT_GE(MetricRecorderImpl::GCCycle_event.main_thread.sweep_duration_us,
+            90000);
+  EXPECT_GE(MetricRecorderImpl::GCCycle_event.total.mark_duration_us, 120000);
+  EXPECT_GE(MetricRecorderImpl::GCCycle_event.total.weak_duration_us, 50000);
+  EXPECT_GE(MetricRecorderImpl::GCCycle_event.total.compact_duration_us, 60000);
+  EXPECT_GE(MetricRecorderImpl::GCCycle_event.total.sweep_duration_us, 190000);
   // Check collection rate and efficiency.
   EXPECT_DOUBLE_EQ(
-      0.3, MetricRecorderImpl::GCCycle_event.collection_rate_in_percent);
+      0.7, MetricRecorderImpl::GCCycle_event.collection_rate_in_percent);
   static constexpr double kEfficiencyComparisonTolerance = 0.0005;
   EXPECT_LT(
       std::abs(MetricRecorderImpl::GCCycle_event.efficiency_in_bytes_per_us -

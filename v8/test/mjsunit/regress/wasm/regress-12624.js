@@ -2,8 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Flags: --experimental-wasm-gc --no-liftoff
-
 // Under certain conditions, the following subgraph was not optimized correctly:
 // cond
 //  |  \
@@ -17,7 +15,7 @@ d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
 
 var builder = new WasmModuleBuilder();
 
-builder.addGlobal(kWasmI32, true, wasmI32Const(1));
+builder.addGlobal(kWasmI32, true, false, wasmI32Const(1));
 
 builder.addFunction("main", kSig_i_i)
   .addBody([

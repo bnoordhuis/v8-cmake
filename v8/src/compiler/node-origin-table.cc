@@ -3,8 +3,9 @@
 // found in the LICENSE file.
 
 #include "src/compiler/node-origin-table.h"
-#include "src/compiler/graph.h"
+
 #include "src/compiler/node-aux-data.h"
+#include "src/compiler/turbofan-graph.h"
 
 namespace v8 {
 namespace internal {
@@ -39,21 +40,50 @@ class NodeOriginTable::Decorator final : public GraphDecorator {
   NodeOriginTable* origins_;
 };
 
-NodeOriginTable::NodeOriginTable(Graph* graph)
+NodeOriginTable::PhaseScope::PhaseScope(NodeOriginTable* origins,
+                                        const char* phase_name)
+    : origins_(origins) {
+  if (origins != nullptr) {
+    prev_phase_name_ = origins->current_phase_name_;
+    origins->current_phase_name_ =
+        phase_name == nullptr ? "unnamed" : phase_name;
+  }
+}
+
+NodeOriginTable::PhaseScope::~PhaseScope() {
+  if (origins_) {
+    origins_->previous_phase_name_ = origins_->current_phase_name_;
+    origins_->current_phase_name_ = prev_phase_name_;
+  }
+}
+
+NodeOriginTable::NodeOriginTable(TFGraph* graph)
     : graph_(graph),
       decorator_(nullptr),
       current_origin_(NodeOrigin::Unknown()),
       current_bytecode_position_(0),
       current_phase_name_("unknown"),
+      previous_phase_name_("unknown"),
       table_(graph->zone()) {}
 
+NodeOriginTable::NodeOriginTable(Zone* zone)
+    : graph_(nullptr),
+      decorator_(nullptr),
+      current_origin_(NodeOrigin::Unknown()),
+      current_bytecode_position_(0),
+      current_phase_name_("unknown"),
+      previous_phase_name_("unknown"),
+      table_(zone) {}
+
 void NodeOriginTable::AddDecorator() {
+  DCHECK_NOT_NULL(graph_);
   DCHECK_NULL(decorator_);
   decorator_ = graph_->zone()->New<Decorator>(this);
   graph_->AddDecorator(decorator_);
 }
 
 void NodeOriginTable::RemoveDecorator() {
+  DCHECK_NOT_NULL(graph_);
   DCHECK_NOT_NULL(decorator_);
   graph_->RemoveDecorator(decorator_);
   decorator_ = nullptr;
@@ -71,6 +101,10 @@ void NodeOriginTable::SetNodeOrigin(Node* node, const NodeOrigin& no) {
 }
 void NodeOriginTable::SetNodeOrigin(NodeId id, NodeId origin) {
   table_.Set(id, NodeOrigin(current_phase_name_, "", origin));
+}
+void NodeOriginTable::SetNodeOrigin(NodeId id, NodeId origin,
+                                    const char* phase_name) {
+  table_.Set(id, NodeOrigin(phase_name, "", origin));
 }
 void NodeOriginTable::SetNodeOrigin(NodeId id, NodeOrigin::OriginKind kind,
                                     NodeId origin) {

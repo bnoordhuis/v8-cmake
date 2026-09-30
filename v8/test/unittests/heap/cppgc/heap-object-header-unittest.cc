@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/heap/cppgc/heap-object-header.h"
+#include "src/heap/cppgc-internal/heap-object-header.h"
 
 #include <atomic>
 #include <memory>
@@ -11,7 +11,7 @@
 #include "src/base/atomic-utils.h"
 #include "src/base/macros.h"
 #include "src/base/platform/platform.h"
-#include "src/heap/cppgc/globals.h"
+#include "src/heap/cppgc-internal/globals.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 namespace cppgc {
@@ -136,8 +136,8 @@ class ConcurrentGCThread final : public v8::base::Thread {
   void Run() final {
     while (header_->IsInConstruction<AccessMode::kAtomic>()) {
     }
-    USE(v8::base::AsAtomicPtr(const_cast<size_t*>(&payload_->value))
-            ->load(std::memory_order_relaxed));
+    USE(std::atomic_ref<size_t>(const_cast<size_t&>(payload_->value))
+            .load(std::memory_order_relaxed));
   }
 
  private:
@@ -154,8 +154,8 @@ TEST(HeapObjectHeaderTest, ConstructionBitProtectsNonAtomicWrites) {
   constexpr size_t kSize =
       (sizeof(HeapObjectHeader) + sizeof(Payload) + kAllocationMask) &
       ~kAllocationMask;
-  typename std::aligned_storage<kSize, kAllocationGranularity>::type data;
-  HeapObjectHeader* header = new (&data) HeapObjectHeader(kSize, 1);
+  alignas(kAllocationGranularity) char data[kSize];
+  HeapObjectHeader* header = new (data) HeapObjectHeader(kSize, 1);
   ConcurrentGCThread gc_thread(
       header, reinterpret_cast<Payload*>(header->ObjectStart()));
   CHECK(gc_thread.Start());
@@ -173,7 +173,7 @@ TEST(HeapObjectHeaderDeathTest, ConstructorTooLargeSize) {
 }
 
 TEST(HeapObjectHeaderDeathTest, ConstructorTooLargeGCInfoIndex) {
-  constexpr GCInfoIndex kGCInfoIndex = GCInfoTable::kMaxIndex + 1;
+  constexpr GCInfoIndex kGCInfoIndex = kMaxGCInfoIndex + 1;
   constexpr size_t kSize = kAllocationGranularity;
   EXPECT_DEATH_IF_SUPPORTED(HeapObjectHeader header(kSize, kGCInfoIndex), "");
 }

@@ -2,13 +2,14 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#ifndef V8_WASM_CONSTANT_EXPRESSION_INTERFACE_H_
+#define V8_WASM_CONSTANT_EXPRESSION_INTERFACE_H_
+
 #if !V8_ENABLE_WEBASSEMBLY
 #error This header should only be included if WebAssembly is enabled.
 #endif  // !V8_ENABLE_WEBASSEMBLY
 
-#ifndef V8_WASM_CONSTANT_EXPRESSION_INTERFACE_H_
-#define V8_WASM_CONSTANT_EXPRESSION_INTERFACE_H_
-
+#include "src/objects/objects.h"
 #include "src/wasm/decoder.h"
 #include "src/wasm/function-body-decoder-impl.h"
 #include "src/wasm/wasm-value.h"
@@ -16,7 +17,7 @@
 namespace v8 {
 namespace internal {
 
-class WasmInstanceObject;
+class WasmTrustedInstanceData;
 class JSArrayBuffer;
 
 namespace wasm {
@@ -47,12 +48,13 @@ class V8_EXPORT_PRIVATE ConstantExpressionInterface {
       WasmFullDecoder<ValidationTag, ConstantExpressionInterface,
                       decoding_mode>;
 
-  ConstantExpressionInterface(const WasmModule* module, Isolate* isolate,
-                              Handle<WasmInstanceObject> instance)
+  ConstantExpressionInterface(
+      const WasmModule* module, Isolate* isolate,
+      DirectHandle<WasmTrustedInstanceData> trusted_instance_data)
       : module_(module),
         outer_module_(nullptr),
         isolate_(isolate),
-        instance_(instance) {
+        trusted_instance_data_(trusted_instance_data) {
     DCHECK_NOT_NULL(isolate);
   }
 
@@ -80,6 +82,7 @@ class V8_EXPORT_PRIVATE ConstantExpressionInterface {
     return computed_value_;
   }
   bool end_found() const { return end_found_; }
+  bool ends_with_struct_new() const { return ends_with_struct_new_; }
   bool has_error() const { return error_ != MessageTemplate::kNone; }
   MessageTemplate error() const {
     DCHECK(has_error());
@@ -90,13 +93,21 @@ class V8_EXPORT_PRIVATE ConstantExpressionInterface {
  private:
   bool generate_value() const { return isolate_ != nullptr && !has_error(); }
 
+  DirectHandle<Map> GetRtt(ModuleTypeIndex index, const TypeDefinition& type,
+                           const Value& descriptor);
+
+  void ArrayNewImpl(FullDecoder* decoder, const ArrayIndexImmediate& imm,
+                    const Value& length, const Value& initial_value,
+                    Value* result, WriteBarrierMode write_barrier);
+
   bool end_found_ = false;
+  bool ends_with_struct_new_ = false;
   WasmValue computed_value_;
   MessageTemplate error_ = MessageTemplate::kNone;
   const WasmModule* module_;
   WasmModule* outer_module_;
   Isolate* isolate_;
-  Handle<WasmInstanceObject> instance_;
+  DirectHandle<WasmTrustedInstanceData> trusted_instance_data_;
 };
 
 }  // namespace wasm

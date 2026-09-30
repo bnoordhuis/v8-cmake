@@ -28,17 +28,22 @@ namespace interpreter {
 #define SIGNED_SCALABLE_SCALAR_OPERAND_TYPE_LIST(V) \
   V(Imm, OperandTypeInfo::kScalableSignedByte)
 
-#define UNSIGNED_SCALABLE_SCALAR_OPERAND_TYPE_LIST(V) \
-  V(Idx, OperandTypeInfo::kScalableUnsignedByte)      \
-  V(UImm, OperandTypeInfo::kScalableUnsignedByte)     \
+#define UNSIGNED_SCALABLE_SCALAR_OPERAND_TYPE_LIST(V)          \
+  V(ConstantPoolIndex, OperandTypeInfo::kScalableUnsignedByte) \
+  V(FeedbackSlot, OperandTypeInfo::kScalableUnsignedByte)      \
+  V(ContextSlot, OperandTypeInfo::kScalableUnsignedByte)       \
+  V(CoverageSlot, OperandTypeInfo::kScalableUnsignedByte)      \
+  V(UImm, OperandTypeInfo::kScalableUnsignedByte)              \
   V(RegCount, OperandTypeInfo::kScalableUnsignedByte)
 
-#define UNSIGNED_FIXED_SCALAR_OPERAND_TYPE_LIST(V)    \
-  V(Flag8, OperandTypeInfo::kFixedUnsignedByte)       \
-  V(Flag16, OperandTypeInfo::kFixedUnsignedShort)     \
-  V(IntrinsicId, OperandTypeInfo::kFixedUnsignedByte) \
-  V(RuntimeId, OperandTypeInfo::kFixedUnsignedShort)  \
-  V(NativeContextIndex, OperandTypeInfo::kFixedUnsignedByte)
+#define UNSIGNED_FIXED_SCALAR_OPERAND_TYPE_LIST(V)           \
+  V(Flag8, OperandTypeInfo::kFixedUnsignedByte)              \
+  V(Flag16, OperandTypeInfo::kFixedUnsignedShort)            \
+  V(IntrinsicId, OperandTypeInfo::kFixedUnsignedByte)        \
+  V(RuntimeId, OperandTypeInfo::kFixedUnsignedShort)         \
+  V(NativeContextIndex, OperandTypeInfo::kFixedUnsignedByte) \
+  V(AbortReason, OperandTypeInfo::kFixedUnsignedByte)        \
+  V(EmbeddedFeedback, OperandTypeInfo::kFixedUnsignedByte)
 
 // Carefully ordered for operand type range checks below.
 #define NON_REGISTER_OPERAND_TYPE_LIST(V)       \
@@ -48,9 +53,10 @@ namespace interpreter {
   SIGNED_SCALABLE_SCALAR_OPERAND_TYPE_LIST(V)
 
 // Carefully ordered for operand type range checks below.
-#define REGISTER_OPERAND_TYPE_LIST(V) \
-  REGISTER_INPUT_OPERAND_TYPE_LIST(V) \
-  REGISTER_OUTPUT_OPERAND_TYPE_LIST(V)
+#define REGISTER_OPERAND_TYPE_LIST(V)  \
+  REGISTER_INPUT_OPERAND_TYPE_LIST(V)  \
+  REGISTER_OUTPUT_OPERAND_TYPE_LIST(V) \
+  V(RegInOut, OperandTypeInfo::kScalableSignedByte)
 
 // The list of operand types used by bytecodes.
 // Carefully ordered for operand type range checks below.
@@ -218,12 +224,12 @@ class BytecodeOperands : public AllStatic {
   // Returns true if |operand_type| is a scalable signed byte.
   static constexpr bool IsScalableSignedByte(OperandType operand_type) {
     return base::IsInRange(operand_type, OperandType::kImm,
-                           OperandType::kRegOutTriple);
+                           OperandType::kRegInOut);
   }
 
   // Returns true if |operand_type| is a scalable unsigned byte.
   static constexpr bool IsScalableUnsignedByte(OperandType operand_type) {
-    return base::IsInRange(operand_type, OperandType::kIdx,
+    return base::IsInRange(operand_type, OperandType::kConstantPoolIndex,
                            OperandType::kRegCount);
   }
 };

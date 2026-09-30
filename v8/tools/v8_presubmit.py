@@ -30,21 +30,21 @@
 import hashlib
 md5er = hashlib.md5
 
-
+from contextlib import AbstractContextManager
+import io
 import json
 import multiprocessing
 import optparse
 import os
-from os.path import abspath, join, dirname, basename, exists
+from os.path import abspath, join, dirname, basename, exists, isfile, isdir
 import pickle
 import re
 import subprocess
 from subprocess import PIPE
 import sys
+import time
 
 from testrunner.local import statusfile
-from testrunner.local import testsuite
-from testrunner.local import utils
 
 def decode(arg, encoding="utf-8"):
   return arg.decode(encoding)
@@ -79,11 +79,18 @@ ASSERT_OPTIMIZED_PATTERN = re.compile("assertOptimized")
 FLAGS_ENABLE_MAGLEV = re.compile("//\s*Flags:.*--maglev[^-].*\n")
 FLAGS_ENABLE_TURBOFAN = re.compile("//\s*Flags:.*--turbofan[^-].*\n")
 ASSERT_UNOPTIMIZED_PATTERN = re.compile("assertUnoptimized")
-FLAGS_NO_ALWAYS_OPT = re.compile("//\s*Flags:.*--no-?always-turbofan.*\n")
 
 TOOLS_PATH = dirname(abspath(__file__))
 DEPS_DEPOT_TOOLS_PATH = abspath(
     join(TOOLS_PATH, '..', 'third_party', 'depot_tools'))
+# If the depot_tools don't exist in the V8 directory, we are probably in a
+# chromium checkout, so we can use the depot tools of the chromium checkout.
+if not isdir(DEPS_DEPOT_TOOLS_PATH):
+  DEPS_DEPOT_TOOLS_PATH = abspath(
+      join(TOOLS_PATH, '..', '..', 'third_party', 'depot_tools'))
+
+sys.path.append(DEPS_DEPOT_TOOLS_PATH)
+import rdb_wrapper
 
 
 def CppLintWorker(command):
@@ -94,7 +101,7 @@ def CppLintWorker(command):
     error_count = -1
     while True:
       out_line = decode(process.stderr.readline())
-      if out_line == '' and process.poll() != None:
+      if out_line == '' and process.poll() is not None:
         if error_count == -1:
           print("Failed to process %s" % command.pop())
           return 1
@@ -116,6 +123,16 @@ def CppLintWorker(command):
           ' in your third_party directory. Lint check skipped.')
     process.kill()
 
+def ClangFormatWorker(command):
+  try:
+    # Run unchecked to only flag timeouts.
+    subprocess.run(
+        command, stderr=subprocess.PIPE, check=False, timeout=30)
+  except:
+    sys.stdout.write(f'Got a clang-format timeout with {command.pop()}\n')
+    return 1
+  return 0
+
 def TorqueLintWorker(command):
   try:
     process = subprocess.Popen(command, stderr=subprocess.PIPE)
@@ -124,7 +141,7 @@ def TorqueLintWorker(command):
     error_count = 0
     while True:
       out_line = decode(process.stderr.readline())
-      if out_line == '' and process.poll() != None:
+      if out_line == '' and process.poll() is not None:
         break
       out_lines += out_line
       error_count += 1
@@ -396,7 +413,7 @@ class CppLintProcessor(CacheableSourceFileProcessor):
     filters = ','.join([n for n in LINT_RULES])
     arguments = ['--filter', filters]
 
-    cpplint = os.path.join(DEPS_DEPOT_TOOLS_PATH, 'cpplint.py')
+    cpplint = join(DEPS_DEPOT_TOOLS_PATH, 'cpplint.py')
     return cpplint, arguments
 
 
@@ -422,13 +439,14 @@ class TorqueLintProcessor(CacheableSourceFileProcessor):
     return TorqueLintWorker
 
   def GetProcessorScript(self):
-    torque_tools = os.path.join(TOOLS_PATH, "torque")
-    torque_path = os.path.join(torque_tools, "format-torque.py")
+    torque_tools = join(TOOLS_PATH, "torque")
+    torque_path = join(torque_tools, "format-torque.py")
     arguments = ["-il"]
-    if os.path.isfile(torque_path):
+    if isfile(torque_path):
       return torque_path, arguments
 
     return None, arguments
+
 
 class JSLintProcessor(CacheableSourceFileProcessor):
   """
@@ -449,8 +467,51 @@ class JSLintProcessor(CacheableSourceFileProcessor):
     return JSLintWorker
 
   def GetProcessorScript(self):
-    jslint = os.path.join(DEPS_DEPOT_TOOLS_PATH, 'clang_format.py')
+    jslint = join(DEPS_DEPOT_TOOLS_PATH, 'clang_format.py')
     return jslint, []
+
+
+class ClangFormatProcessor(CacheableSourceFileProcessor):
+  """
+  Check if clang-format runs into timeouts with any files.
+
+  Note, we are not actually enforcing the format as that creates too
+  many differences on config updates.
+  """
+
+  def __init__(self, use_cache=True):
+    super(ClangFormatProcessor, self).__init__(
+      use_cache=use_cache, cache_file_path='.clang-format-cache', file_type='C/C++')
+
+  def IsRelevant(self, name):
+    return name.endswith('.cc') or name.endswith('.h')
+
+  def IgnoreDir(self, name):
+    return (super(ClangFormatProcessor, self).IgnoreDir(name)
+            or (name == 'third_party'))
+
+  # Clang-format is too slow on these files.
+  IGNORE_FORMAT = [
+    'gay-fixed.cc',
+    'gay-precision.cc',
+    'gay-shortest.cc',
+  ]
+
+  def IgnoreFile(self, name):
+    return (super(ClangFormatProcessor, self).IgnoreFile(name)
+              or (name in ClangFormatProcessor.IGNORE_FORMAT))
+
+  def GetPathsToSearch(self):
+    dirs = ['include', 'samples', 'src']
+    test_dirs = ['cctest', 'common', 'fuzzer', 'inspector', 'unittests']
+    return dirs + [join('test', dir) for dir in test_dirs]
+
+  def GetProcessorWorker(self):
+    return ClangFormatWorker
+
+  def GetProcessorScript(self):
+    arguments = ['--fail-on-incomplete-format', '--Werror', '-n']
+    return join(DEPS_DEPOT_TOOLS_PATH, 'clang_format.py'), arguments
 
 
 COPYRIGHT_HEADER_PATTERN = re.compile(
@@ -484,16 +545,16 @@ class SourceProcessor(SourceFileProcessor):
 
   # Overwriting the one in the parent class.
   def FindFilesIn(self, path):
-    if os.path.exists(path+'/.git'):
+    if exists(path+'/.git'):
       output = subprocess.Popen('git ls-files --full-name',
                                 stdout=PIPE, cwd=path, shell=True)
       result = []
       for file in decode(output.stdout.read()).split():
-        for dir_part in os.path.dirname(file).replace(os.sep, '/').split('/'):
+        for dir_part in dirname(file).replace(os.sep, '/').split('/'):
           if self.IgnoreDir(dir_part):
             break
         else:
-          if (self.IsRelevant(file) and os.path.exists(file)
+          if (self.IsRelevant(file) and exists(file)
               and not self.IgnoreFile(file)):
             result.append(join(path, file))
       if output.wait() == 0:
@@ -605,11 +666,6 @@ class SourceProcessor(SourceFileProcessor):
           print("%s Flag --maglev or --turbofan should be set if " \
                 "assertOptimized() is used" % name)
           result = False
-        if ASSERT_UNOPTIMIZED_PATTERN.search(contents) and \
-            not FLAGS_NO_ALWAYS_OPT.search(contents):
-          print("%s Flag --no-always-turbofan should be set if " \
-                "assertUnoptimized() is used" % name)
-          result = False
 
       match = self.runtime_function_call_pattern.search(contents)
       if match:
@@ -701,10 +757,10 @@ class StatusFilesProcessor(SourceFileProcessor):
     for file_path in files:
       if file_path.startswith(testrunner_path):
         for suitepath in os.listdir(test_path):
-          suitename = os.path.basename(suitepath)
-          status_file = os.path.join(
+          suitename = basename(suitepath)
+          status_file = join(
               test_path, suitename, suitename + ".status")
-          if os.path.exists(status_file):
+          if exists(status_file):
             status_files.add(status_file)
         return status_files
 
@@ -715,10 +771,10 @@ class StatusFilesProcessor(SourceFileProcessor):
         if pieces:
           # Infer affected status file name. Only care for existing status
           # files. Some directories under "test" don't have any.
-          if not os.path.isdir(join(test_path, pieces[0])):
+          if not isdir(join(test_path, pieces[0])):
             continue
           status_file = join(test_path, pieces[0], pieces[0] + ".status")
-          if not os.path.exists(status_file):
+          if not exists(status_file):
             continue
           status_files.add(status_file)
     return status_files
@@ -778,17 +834,25 @@ def FindTests(workspace):
       'tools/ignition/linux_perf_report_test.py',
       'tools/ignition/bytecode_dispatches_report_test.py',
       'tools/ignition/linux_perf_bytecode_annotate_test.py',
+      # TODO(https://crbug.com/430336825): Unskip once bug is resolved.
+      'tools/protoc_wrapper/protoc_wrapper_test.py',
   ]
   scripts_without_excluded = []
   for root, dirs, files in os.walk(join(workspace, 'tools')):
     for f in files:
       if f.endswith('_test.py'):
-        fullpath = os.path.join(root, f)
+        fullpath = join(root, f)
         scripts.append(fullpath)
   for script in scripts:
     if not any(exc_dir in script for exc_dir in exclude):
       scripts_without_excluded.append(script)
   return scripts_without_excluded
+
+
+def CheckMarkdown(workspace):
+  script = join(workspace, 'tools', 'dev', 'markdown_checker.py')
+  print('Running ' + script)
+  return subprocess.call(['vpython3', script], stdout=subprocess.PIPE) == 0
 
 
 def PyTests(workspace):
@@ -810,37 +874,99 @@ def GetOptions():
   return result
 
 
+class TeeIO:
+
+  def __init__(self, source, dest):
+    self.source = source
+    self.dest = dest
+
+  def write(self, obj):
+    self.source.write(obj)
+    self.dest.write(obj)
+
+  def flush(self):
+    self.source.flush()
+    self.dest.flush()
+
+
+class TeeOutput(AbstractContextManager):
+
+  def __init__(self, new_target):
+    self._new_target = new_target
+    self.old_out = sys.stdout
+    self.old_err = sys.stderr
+
+  def __enter__(self):
+    sys.stdout = TeeIO(self.old_out, self._new_target)
+    sys.stderr = TeeIO(self.old_err, self._new_target)
+    return self._new_target
+
+  def __exit__(self, exctype, excinst, exctb):
+    sys.stdout = self.old_out
+    sys.stderr = self.old_err
+
+
+def run_checks(checks, workspace):
+  failures = []
+
+  def capture_output(check_function):
+    start_time = time.time()
+    with TeeOutput(io.StringIO()) as f:
+      success = check_function(workspace)
+      return (rdb_wrapper.STATUS_PASS if success else rdb_wrapper.STATUS_FAIL,
+              None if success else f.getvalue()[-1024:],
+              time.time() - start_time)
+
+  def run(check_function, named_object=None, sink=None):
+    name = (named_object or check_function).__name__
+    print('__________________')
+    print(f'Running {name}...')
+    status, output, duration = capture_output(check_function)
+    if status == rdb_wrapper.STATUS_PASS:
+      print(f'{name} SUCCEDED')
+    else:
+      failures.append(name)
+      print(f'!!! {name} FAILED')
+    if sink:
+      sink.report(name, status, duration, output)
+
+  with rdb_wrapper.client('v8:full_presubmit/') as sink:
+    for check in checks:
+      if callable(check):
+        run(check, sink=sink)
+      else:
+        run(check.RunOnPath, check.__class__, sink=sink)
+
+  return '\n'.join(failures)
+
+
 def Main():
   workspace = abspath(join(dirname(sys.argv[0]), '..'))
   parser = GetOptions()
   (options, args) = parser.parse_args()
-  success = True
-  print("Running checkdeps...")
-  success &= CheckDeps(workspace)
   use_linter_cache = not options.no_linter_cache
+  checks = [
+      CheckDeps,
+      ClangFormatProcessor(use_cache=use_linter_cache),
+      TorqueLintProcessor(use_cache=use_linter_cache),
+      JSLintProcessor(use_cache=use_linter_cache),
+      SourceProcessor(),
+      StatusFilesProcessor(),
+      CheckMarkdown,
+      PyTests,
+      GCMoleProcessor(),
+  ]
   if not options.no_lint:
-    print("Running C++ lint check...")
-    success &= CppLintProcessor(use_cache=use_linter_cache).RunOnPath(workspace)
+    checks.append(CppLintProcessor(use_cache=use_linter_cache))
 
-  print("Running Torque formatting check...")
-  success &= TorqueLintProcessor(use_cache=use_linter_cache).RunOnPath(
-    workspace)
-  print("Running JavaScript formatting check...")
-  success &= JSLintProcessor(use_cache=use_linter_cache).RunOnPath(
-    workspace)
-  print("Running copyright header, trailing whitespaces and " \
-        "two empty lines between declarations check...")
-  success &= SourceProcessor().RunOnPath(workspace)
-  print("Running status-files check...")
-  success &= StatusFilesProcessor().RunOnPath(workspace)
-  print("Running python tests...")
-  success &= PyTests(workspace)
-  print("Running gcmole pattern check...")
-  success &= GCMoleProcessor().RunOnPath(workspace)
-  if success:
-    return 0
-  else:
+
+  failure_lines = run_checks(checks, workspace)
+  if failure_lines:
+    print('__________________')
+    print('==================')
+    print(f'Checks failed:\n{failure_lines}')
     return 1
+  return 0
 
 
 if __name__ == '__main__':

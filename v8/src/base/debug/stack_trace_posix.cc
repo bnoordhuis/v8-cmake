@@ -41,6 +41,7 @@
 #include "src/base/free_deleter.h"
 #include "src/base/logging.h"
 #include "src/base/macros.h"
+#include "src/base/platform/memory-protection-key.h"
 
 namespace v8 {
 namespace base {
@@ -124,6 +125,11 @@ class BacktraceOutputHandler {
  public:
   virtual void HandleOutput(const char* output) = 0;
 
+  // If this output handler writes directly to a file descriptor, this file
+  // descriptor can be exposed by overwriting this method. That is in turn
+  // useful for ProcessBacktrace which can then use backtrace_symbols_fd.
+  virtual int OutputFileDescriptor() const { return 0; }
+
  protected:
   virtual ~BacktraceOutputHandler() = default;
 };
@@ -154,7 +160,7 @@ void ProcessBacktrace(void* const* trace, size_t size,
   if (in_signal_handler == 0) {
     std::unique_ptr<char*, FreeDeleter> trace_symbols(
         backtrace_symbols(trace, static_cast<int>(size)));
-    if (trace_symbols.get()) {
+    if (trace_symbols) {
       for (size_t i = 0; i < size; ++i) {
         std::string trace_symbol = trace_symbols.get()[i];
         DemangleSymbols(&trace_symbol);
@@ -165,6 +171,14 @@ void ProcessBacktrace(void* const* trace, size_t size,
 
       printed = true;
     }
+  } else if (handler->OutputFileDescriptor() != 0) {
+    // In this case, we can use backtrace_symbols_fd to write directly to the
+    // output file descriptor. This isn't quite as nice as we don't control the
+    // formatting and because mangled function names will be used, but still
+    // better than just raw addresses (which are also included in this output).
+    backtrace_symbols_fd(trace, static_cast<int>(size),
+                         handler->OutputFileDescriptor());
+    printed = true;
   }
 
   if (!printed) {
@@ -192,62 +206,70 @@ void StackDumpSignalHandler(int signal, siginfo_t* info, void* void_context) {
   // of StackTrace can behave in an async-signal-safe manner.
   in_signal_handler = 1;
 
+#if V8_HAS_PKU_SUPPORT
+  MemoryProtectionKey::SetDefaultPermissionsForAllKeysInSignalHandler();
+#endif
+
   PrintToStderr("Received signal ");
   char buf[1024] = {0};
   internal::itoa_r(signal, buf, sizeof(buf), 10, 0);
   PrintToStderr(buf);
   if (signal == SIGBUS) {
-    if (info->si_code == BUS_ADRALN)
+    if (info->si_code == BUS_ADRALN) {
       PrintToStderr(" BUS_ADRALN ");
-    else if (info->si_code == BUS_ADRERR)
+    } else if (info->si_code == BUS_ADRERR) {
       PrintToStderr(" BUS_ADRERR ");
-    else if (info->si_code == BUS_OBJERR)
+    } else if (info->si_code == BUS_OBJERR) {
       PrintToStderr(" BUS_OBJERR ");
-    else
+    } else {
       PrintToStderr(" <unknown> ");
+    }
   } else if (signal == SIGFPE) {
-    if (info->si_code == FPE_FLTDIV)
+    if (info->si_code == FPE_FLTDIV) {
       PrintToStderr(" FPE_FLTDIV ");
-    else if (info->si_code == FPE_FLTINV)
+    } else if (info->si_code == FPE_FLTINV) {
       PrintToStderr(" FPE_FLTINV ");
-    else if (info->si_code == FPE_FLTOVF)
+    } else if (info->si_code == FPE_FLTOVF) {
       PrintToStderr(" FPE_FLTOVF ");
-    else if (info->si_code == FPE_FLTRES)
+    } else if (info->si_code == FPE_FLTRES) {
       PrintToStderr(" FPE_FLTRES ");
-    else if (info->si_code == FPE_FLTSUB)
+    } else if (info->si_code == FPE_FLTSUB) {
       PrintToStderr(" FPE_FLTSUB ");
-    else if (info->si_code == FPE_FLTUND)
+    } else if (info->si_code == FPE_FLTUND) {
       PrintToStderr(" FPE_FLTUND ");
-    else if (info->si_code == FPE_INTDIV)
+    } else if (info->si_code == FPE_INTDIV) {
       PrintToStderr(" FPE_INTDIV ");
-    else if (info->si_code == FPE_INTOVF)
+    } else if (info->si_code == FPE_INTOVF) {
       PrintToStderr(" FPE_INTOVF ");
-    else
+    } else {
       PrintToStderr(" <unknown> ");
+    }
   } else if (signal == SIGILL) {
-    if (info->si_code == ILL_BADSTK)
+    if (info->si_code == ILL_BADSTK) {
       PrintToStderr(" ILL_BADSTK ");
-    else if (info->si_code == ILL_COPROC)
+    } else if (info->si_code == ILL_COPROC) {
       PrintToStderr(" ILL_COPROC ");
-    else if (info->si_code == ILL_ILLOPN)
+    } else if (info->si_code == ILL_ILLOPN) {
       PrintToStderr(" ILL_ILLOPN ");
-    else if (info->si_code == ILL_ILLADR)
+    } else if (info->si_code == ILL_ILLADR) {
       PrintToStderr(" ILL_ILLADR ");
-    else if (info->si_code == ILL_ILLTRP)
+    } else if (info->si_code == ILL_ILLTRP) {
       PrintToStderr(" ILL_ILLTRP ");
-    else if (info->si_code == ILL_PRVOPC)
+    } else if (info->si_code == ILL_PRVOPC) {
       PrintToStderr(" ILL_PRVOPC ");
-    else if (info->si_code == ILL_PRVREG)
+    } else if (info->si_code == ILL_PRVREG) {
       PrintToStderr(" ILL_PRVREG ");
-    else
+    } else {
       PrintToStderr(" <unknown> ");
+    }
   } else if (signal == SIGSEGV) {
-    if (info->si_code == SEGV_MAPERR)
+    if (info->si_code == SEGV_MAPERR) {
       PrintToStderr(" SEGV_MAPERR ");
-    else if (info->si_code == SEGV_ACCERR)
+    } else if (info->si_code == SEGV_ACCERR) {
       PrintToStderr(" SEGV_ACCERR ");
-    else
+    } else {
       PrintToStderr(" <unknown> ");
+    }
   }
   if (signal == SIGBUS || signal == SIGFPE || signal == SIGILL ||
       signal == SIGSEGV) {
@@ -276,6 +298,8 @@ class PrintBacktraceOutputHandler : public BacktraceOutputHandler {
     // stack dumping signal handler). NO malloc or stdio is allowed here.
     PrintToStderr(output);
   }
+
+  int OutputFileDescriptor() const override { return STDERR_FILENO; }
 };
 
 class StreamBacktraceOutputHandler : public BacktraceOutputHandler {
@@ -341,7 +365,11 @@ bool EnableInProcessStackDumping() {
 
   struct sigaction action;
   memset(&action, 0, sizeof(action));
-  action.sa_flags = SA_RESETHAND | SA_SIGINFO;
+  // Use SA_ONSTACK so that iff an alternate stack has been registered, the
+  // handler will run on that stack instead of the default stack. This can be
+  // useful for example if the stack pointer gets corrupted or in case of stack
+  // overflows, since that might prevent the handler from running properly.
+  action.sa_flags = SA_RESETHAND | SA_SIGINFO | SA_ONSTACK;
   action.sa_sigaction = &StackDumpSignalHandler;
   sigemptyset(&action.sa_mask);
 

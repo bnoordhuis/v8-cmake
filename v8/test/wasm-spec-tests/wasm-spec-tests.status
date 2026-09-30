@@ -4,100 +4,50 @@
 
 [
 [ALWAYS, {
-  'skip-stack-guard-page': [PASS, ['((arch == ppc or arch == ppc64 or arch == s390 or arch == s390x) and simulator_run)', SKIP]],
-  # Missing rebase in the proposal repository.
-  'proposals/js-types/table': [FAIL],
-  # "data" is supposed to fail for "data segment does not fit"; missing rebase
-  # on https://github.com/WebAssembly/spec/commit/7fa2f20a.
-  'proposals/memory64/data': [FAIL],
-  # "elem" is supposed to fail for "elements segment does not fit"; missing
-  # rebase on https://github.com/WebAssembly/spec/commit/7fa2f20a.
-  'proposals/memory64/elem': [FAIL],
-  # "imports" is supposed to fail for "multiple tables"; missing rebase on
-  # https://github.com/WebAssembly/spec/commit/7fa2f20a.
-  'proposals/memory64/imports': [FAIL],
-  # "linking" is supposed to fail for "elements segment does not fit"; missing
-  # rebase on https://github.com/WebAssembly/spec/commit/7fa2f20a.
-  'proposals/memory64/linking': [FAIL],
-  # "table" is supposed to fail for "multiple tables"; missing rebase on
-  # https://github.com/WebAssembly/spec/commit/7fa2f20a.
-  'proposals/memory64/table': [FAIL],
-  # "unreached-invalid" is supposed to fail for "type mismatch"; missing rebase
-  # on https://github.com/WebAssembly/spec/commit/7fa2f20a.
-  'proposals/memory64/unreached-invalid': [FAIL],
-
-  # TODO(wasm): Roll newest tests into "js-types" repository.
-  'proposals/js-types/globals': [FAIL],
+  'skip-stack-guard-page': [PASS, ['((arch == ppc64 or arch == s390x) and simulator_run)', SKIP]],
 
   # Tests that need to run sequentially (e.g. due to memory consumption).
-  'simd_f32x4*': [PASS, HEAVY],
-  'simd_f64x2*': [PASS, HEAVY],
+  'simd/simd_f32x4*': [PASS, HEAVY],
+  'simd/simd_f64x2*': [PASS, HEAVY],
   'f32*': [PASS, HEAVY],
   'f64*': [PASS, HEAVY],
 
-  # TODO(13918): Implement multi-memory in V8.
-  'proposals/multi-memory/address0': [FAIL],
-  'proposals/multi-memory/address1': [FAIL],
-  'proposals/multi-memory/align0': [FAIL],
-  'proposals/multi-memory/binary0': [FAIL],
-  'proposals/multi-memory/data0': [FAIL],
-  'proposals/multi-memory/data1': [FAIL],
-  'proposals/multi-memory/data_drop0': [FAIL],
-  'proposals/multi-memory/exports0': [FAIL],
-  'proposals/multi-memory/float_exprs0': [FAIL],
-  'proposals/multi-memory/float_exprs1': [FAIL],
-  'proposals/multi-memory/float_memory0': [FAIL],
-  'proposals/multi-memory/imports0': [FAIL],
-  'proposals/multi-memory/imports1': [FAIL],
-  'proposals/multi-memory/imports2': [FAIL],
-  'proposals/multi-memory/imports3': [FAIL],
-  'proposals/multi-memory/imports4': [FAIL],
-  'proposals/multi-memory/linking0': [FAIL],
-  'proposals/multi-memory/linking1': [FAIL],
-  'proposals/multi-memory/linking2': [FAIL],
-  'proposals/multi-memory/linking3': [FAIL],
-  'proposals/multi-memory/load0': [FAIL],
-  'proposals/multi-memory/load1': [FAIL],
-  'proposals/multi-memory/load2': [FAIL],
-  'proposals/multi-memory/load': [FAIL],
-  'proposals/multi-memory/memory_copy0': [FAIL],
-  'proposals/multi-memory/memory_fill0': [FAIL],
-  'proposals/multi-memory/memory_grow': [FAIL],
-  'proposals/multi-memory/memory_init0': [FAIL],
-  'proposals/multi-memory/memory-multi': [FAIL],
-  'proposals/multi-memory/memory_size0': [FAIL],
-  'proposals/multi-memory/memory_size1': [FAIL],
-  'proposals/multi-memory/memory_size2': [FAIL],
-  'proposals/multi-memory/memory_size': [FAIL],
-  'proposals/multi-memory/memory_trap0': [FAIL],
-  'proposals/multi-memory/memory_trap1': [FAIL],
-  'proposals/multi-memory/simd_memory-multi': [FAIL],
-  'proposals/multi-memory/start0': [FAIL],
-  'proposals/multi-memory/store0': [FAIL],
-  'proposals/multi-memory/store1': [FAIL],
-  'proposals/multi-memory/store': [FAIL],
-  'proposals/multi-memory/traps0': [FAIL],
+  # TODO(clemensb/evih): Resolve https://github.com/WebAssembly/memory64/pull/103#issuecomment-2548870034
+  'memory64/memory64': [FAIL],
+  'memory64/table64': [FAIL],
+  'table': [FAIL],
 
-  # These tests need to be rebased to include
-  # https://github.com/WebAssembly/spec/pull/1649 and
-  # https://github.com/WebAssembly/spec/pull/1650.
-  'proposals/extended-const/binary': [FAIL],
-  'proposals/extended-const/binary-leb128': [FAIL],
-  'proposals/js-types/binary-leb128': [FAIL],
-  'proposals/js-types/binary': [FAIL],
-  'proposals/tail-call/binary': [FAIL],
-  'proposals/tail-call/binary-leb128': [FAIL],
+  # Temporarily disable custom descriptors tests while we update the spec to
+  # disallow "L" subtyping.
+  'proposals/custom-descriptors/custom-descriptors/descriptors': [FAIL],
+  'proposals/custom-descriptors/custom-descriptors/br_on_cast_desc_eq': [FAIL],
+  'proposals/custom-descriptors/custom-descriptors/br_on_cast_desc_eq_fail': [FAIL],
+  'proposals/custom-descriptors/custom-descriptors/ref_cast_desc_eq': [FAIL],
 }],  # ALWAYS
+
+['lower_limits_mode', {
+  # These tests need longer strings.
+  'f32': [SKIP],
+  'f32_cmp': [SKIP],
+  'f64': [SKIP],
+  'f64_cmp': [SKIP],
+  'simd/simd_f32x4_arith': [SKIP],
+  'simd/simd_f32x4_cmp': [SKIP],
+  'simd/simd_f32x4_pmin_pmax': [SKIP],
+  'simd/simd_f64x2_arith': [SKIP],
+  'simd/simd_f64x2_cmp': [SKIP],
+  'simd/simd_f64x2_pmin_pmax': [SKIP],
+}],
 
 ['arch == arm and not simulator_run', {
   # See https://crbug.com/v8/10938 denormals not handled correctly on ARM.
-  'simd_f32x4': [PASS, FAIL],
-  'simd_f32x4_arith': [PASS, FAIL],
-  'simd_f32x4_cmp': [PASS, FAIL],
+  'simd/simd_f32x4': [PASS, FAIL],
+  'simd/simd_f32x4_arith': [PASS, FAIL],
+  'simd/simd_f32x4_cmp': [PASS, FAIL],
   # This test only has 1 problematic use of f32x4.min and f32x4.div, consider
   # removing it from upstream, then we can run this test.
-  'simd_splat' : [PASS, FAIL],
-  'simd_f32x4_pmin_pmax' : [PASS, FAIL],
+  'simd/simd_splat' : [PASS, FAIL],
+  'simd/simd_f32x4_pmin_pmax' : [PASS, FAIL],
 }],  # arch == arm and not simulator_run
 
 ['arch == mips64el or arch == mips64', {
@@ -106,30 +56,9 @@
   'float_exprs': [SKIP],
   'f32': [SKIP],
   'f64': [SKIP],
-  'f32_bitwise': [SKIP],
-  'f64_bitwise': [SKIP],
-  'proposals/reference-types/conversions':  [SKIP],
-  'proposals/bulk-memory-operations/conversions': [SKIP],
-  'proposals/js-types/f32': [SKIP],
-  'proposals/js-types/f64': [SKIP],
-  'proposals/js-types/f32_bitwise': [SKIP],
-  'proposals/js-types/f64_bitwise': [SKIP],
-  'proposals/js-types/float_exprs': [SKIP],
-  'proposals/js-types/float_misc': [SKIP],
-  'proposals/js-types/conversions': [SKIP],
-  'proposals/bulk-memory-operations/f32': [SKIP],
-  'proposals/bulk-memory-operations/f64': [SKIP],
-  'proposals/reference-types/f32': [SKIP],
-  'proposals/reference-types/f64': [SKIP],
-  'proposals/bulk-memory-operations/float_misc': [SKIP],
-  'proposals/reference-types/float_misc': [SKIP],
-  'proposals/tail-call/f32': [SKIP],
-  'proposals/tail-call/f32_bitwise': [SKIP],
-  'proposals/tail-call/f64': [SKIP],
-  'proposals/tail-call/f64_bitwise': [SKIP],
-  'proposals/tail-call/float_exprs': [SKIP],
-  'proposals/tail-call/float_misc': [SKIP],
-  'proposals/tail-call/conversions': [SKIP],
+
+  # MIPS64 doesn't support JSPI yet.
+  'proposals/js-promise-integration/*': [SKIP],
 }],  # 'arch == mips64el or arch == mips64'
 
 ['(arch == mips64el or arch == mips64) and not simulator_run', {
@@ -141,64 +70,57 @@
 ['(arch == mips64el or arch == loong64) and simulator_run', {
   # These tests need larger stack size on simulator.
   'skip-stack-guard-page': '--sim-stack-size=8192',
-  'proposals/tail-call/skip-stack-guard-page': '--sim-stack-size=8192',
 }],  # '(arch == mips64el or arch == loong64) and simulator_run'
 
 ['arch == riscv64', {
    # These tests need larger stack size on simulator.
    'skip-stack-guard-page': '--sim-stack-size=8192',
-   'proposals/tail-call/skip-stack-guard-page': '--sim-stack-size=8192',
 }],  # 'arch == riscv64'
-
-
 
 ['arch == riscv32', {
    # These tests need larger stack size on simulator.
    'skip-stack-guard-page': '--sim-stack-size=8192',
-   'proposals/tail-call/skip-stack-guard-page': '--sim-stack-size=8192',
 
    'func': ['variant == stress', SKIP],
 }],  # 'arch == riscv32'
 
-['arch == ppc or arch == ppc64', {
+['arch == ppc64', {
   # These tests fail because ppc float min and max doesn't convert sNaN to qNaN.
   'f32': [SKIP],
   'f64': [SKIP],
-  'proposals/js-types/f32': [SKIP],
-  'proposals/js-types/f64': [SKIP],
-  'proposals/bulk-memory-operations/f32': [SKIP],
-  'proposals/bulk-memory-operations/f64': [SKIP],
-  'proposals/reference-types/f32': [SKIP],
-  'proposals/reference-types/f64': [SKIP],
-  'proposals/tail-call/f32': [SKIP],
-  'proposals/tail-call/f64': [SKIP],
   # This test fails because ppc float to double doesn't convert sNaN to qNaN.
   'conversions': [SKIP],
-  'proposals/js-types/conversions': [SKIP],
-  'proposals/bulk-memory-operations/conversions': [SKIP],
-  'proposals/reference-types/conversions':  [SKIP],
-  'proposals/tail-call/conversions':  [SKIP],
-}],  # 'arch == ppc or arch == ppc64'
+}],  # 'arch == ppc64'
 
-['arch == s390 or arch == s390x', {
-  # These tests fail because s390 float min and max doesn't convert sNaN to qNaN.
+['arch == s390x', {
+  # These tests fail because s390x float min and max doesn't convert sNaN to qNaN.
   'f32': [SKIP],
   'f64': [SKIP],
-  'proposals/js-types/f32': [SKIP],
-  'proposals/js-types/f64': [SKIP],
-  'proposals/bulk-memory-operations/f32': [SKIP],
-  'proposals/bulk-memory-operations/f64': [SKIP],
-  'proposals/reference-types/f32': [SKIP],
-  'proposals/reference-types/f64': [SKIP],
-  'proposals/tail-call/f32': [SKIP],
-  'proposals/tail-call/f64': [SKIP],
-}],  # 'arch == s390 or arch == s390x'
+}],  # 'arch == s390x'
 
 ##############################################################################
-# TODO(v8:7777): Change this once wasm is supported in jitless mode.
-['not has_webassembly or variant == jitless', {
+['not has_webassembly', {
   '*': [SKIP],
-}],  # not has_webassembly or variant == jitless
+}],  # not has_webassembly
+
+##############################################################################
+['not has_wasm_interpreter and variant == jitless', {
+  '*': [SKIP],
+}],  # not has_wasm_interpreter and variant == jitless
+
+##############################################################################
+['has_wasm_interpreter and variant == jitless', {
+  'float_exprs': [SKIP],
+  'memory64/*': [SKIP],
+  'multi-memory/*': [SKIP],
+  'instance': [SKIP],
+  'proposals/*': [SKIP],
+  'ref_null': [SKIP],
+  'exceptions/throw': [SKIP],
+  'exceptions/throw_ref': [SKIP],
+  'exceptions/try_table': [SKIP],
+  'simd/simd_memory-multi': [SKIP],
+ }],  # has_wasm_interpreter and variant == jitless
 
 ##############################################################################
 ['variant == stress_snapshot', {
@@ -208,9 +130,10 @@
 ##############################################################################
 ['no_simd_hardware == True', {
   'linking': [SKIP],
+
+  'relaxed-simd*': [SKIP],
   'simd*': [SKIP],
-  'proposals/tail-call/simd_lane': [SKIP],
-  'proposals/js-types/linking': [SKIP],
+  'proposals/js-promise-integration/simd*': [SKIP],
 }],  # no_simd_hardware == True
 
 ##############################################################################
@@ -224,7 +147,20 @@
 # Skip tests that require a large amount of virtual address space (inside the
 # sandbox if that is enabled) if tsan is enabled.
 ['tsan == True', {
-  'memory_copy': [SKIP],
+  'bulk-memory/memory_copy': [SKIP],
 }],  # tsan == True
+
+['system == windows and asan', {
+  # TODO(502105792): Started failing on Windows asan after we started updating
+  # the TEB StackLimit/StackBase on stack switch. Possibly a false positive
+  # according to asan warning.
+  'proposals/stack-switching/stack-switching/cont': [SKIP],
+}],  # system == windows and asan
+
+##############################################################################
+['clang_coverage and mode == debug', {
+  # Slow tests.
+  'simd/simd_f*': [PASS, SLOW],
+}],  # 'clang_coverage and mode == debug'
 
 ]

@@ -4,12 +4,14 @@
 
 #include "src/builtins/builtins-utils-gen.h"
 #include "src/builtins/builtins.h"
-#include "src/codegen/code-stub-assembler.h"
+#include "src/codegen/code-stub-assembler-inl.h"
 
 namespace v8 {
 namespace internal {
 
-// ES #sec-isfinite-number
+#include "src/codegen/define-code-stub-assembler-macros.inc"
+
+// https://tc39.es/ecma262/#sec-isfinite-number
 TF_BUILTIN(GlobalIsFinite, CodeStubAssembler) {
   auto context = Parameter<Context>(Descriptor::kContext);
 
@@ -58,7 +60,7 @@ TF_BUILTIN(GlobalIsFinite, CodeStubAssembler) {
   Return(FalseConstant());
 }
 
-// ES6 #sec-isnan-number
+// https://tc39.es/ecma262/#sec-isnan-number
 TF_BUILTIN(GlobalIsNaN, CodeStubAssembler) {
   auto context = Parameter<Context>(Descriptor::kContext);
 
@@ -105,6 +107,8 @@ TF_BUILTIN(GlobalIsNaN, CodeStubAssembler) {
   BIND(&return_false);
   Return(FalseConstant());
 }
+
+#include "src/codegen/undef-code-stub-assembler-macros.inc"
 
 }  // namespace internal
 }  // namespace v8

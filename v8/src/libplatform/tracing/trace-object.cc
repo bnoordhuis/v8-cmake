@@ -2,11 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "base/trace_event/common/trace_event_common.h"
 #include "include/libplatform/v8-tracing.h"
 #include "include/v8-platform.h"
 #include "src/base/platform/platform.h"
 #include "src/base/platform/time.h"
+#include "src/tracing/trace-event-no-perfetto.h"
 
 namespace v8 {
 namespace platform {
@@ -56,8 +56,9 @@ void TraceObject::Initialize(
     arg_names_[i] = arg_names[i];
     arg_values_[i].as_uint = arg_values[i];
     arg_types_[i] = arg_types[i];
-    if (arg_types[i] == TRACE_VALUE_TYPE_CONVERTABLE)
+    if (arg_types[i] == TRACE_VALUE_TYPE_CONVERTABLE) {
       arg_convertables_[i] = std::move(arg_convertables[i]);
+    }
   }
 
   bool copy = !!(flags & TRACE_EVENT_FLAG_COPY);
@@ -67,8 +68,9 @@ void TraceObject::Initialize(
     alloc_size += GetAllocLength(name) + GetAllocLength(scope);
     for (int i = 0; i < num_args_; ++i) {
       alloc_size += GetAllocLength(arg_names_[i]);
-      if (arg_types_[i] == TRACE_VALUE_TYPE_STRING)
+      if (arg_types_[i] == TRACE_VALUE_TYPE_STRING) {
         arg_types_[i] = TRACE_VALUE_TYPE_COPY_STRING;
+      }
     }
   }
 

@@ -2,12 +2,16 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "src/interpreter/bytecode-decoder.h"
+
+#include <iomanip>
 #include <vector>
 
+#include "src/execution/isolate.h"
+#include "src/heap/factory.h"
 #include "src/init/v8.h"
-
-#include "src/interpreter/bytecode-decoder.h"
 #include "src/objects/contexts.h"
+#include "src/objects/fixed-array.h"
 #include "src/runtime/runtime.h"
 #include "test/unittests/interpreter/bytecode-utils.h"
 #include "test/unittests/test-utils.h"
@@ -18,7 +22,9 @@ namespace interpreter {
 
 #define B(Name) static_cast<uint8_t>(Bytecode::k##Name)
 
-TEST(BytecodeDecoder, DecodeBytecodeAndOperands) {
+using BytecodeDecoderTest = TestWithIsolate;
+
+TEST_F(BytecodeDecoderTest, DecodeBytecodeAndOperands) {
   struct BytecodesAndResult {
     const uint8_t bytecode[32];
     const size_t length;
@@ -38,10 +44,10 @@ TEST(BytecodeDecoder, DecodeBytecodeAndOperands) {
       {{B(Wide), B(Star), R16(136)}, 4, "      Star.Wide r136"},
       {{B(Wide), B(CallAnyReceiver), R16(134), R16(135), U16(10), U16(177)},
        10,
-       "CallAnyReceiver.Wide r134, r135-r144, [177]"},
+       "CallAnyReceiver.Wide r134, r135-r144, FBV[177]"},
       {{B(ForInPrepare), R8(10), U8(11)},
        3,
-       "         ForInPrepare r10-r12, [11]"},
+       "         ForInPrepare r10-r12, FBV[11]"},
       {{B(CallRuntime), U16(Runtime::FunctionId::kIsSmi), R8(0), U8(0)},
        5,
        "   CallRuntime [IsSmi], r0-r0"},
@@ -51,13 +57,20 @@ TEST(BytecodeDecoder, DecodeBytecodeAndOperands) {
        "            Ldar a1"},
       {{B(Wide), B(CreateObjectLiteral), U16(513), U16(1027), U8(165)},
        7,
-       "CreateObjectLiteral.Wide [513], [1027], #165"},
+       "CreateObjectLiteral.Wide [513:0], FBV[1027], #a5"},
       {{B(ExtraWide), B(JumpIfNull), U32(123456789)},
        6,
        "JumpIfNull.ExtraWide [123456789]"},
       {{B(CallJSRuntime), U8(Context::BOOLEAN_FUNCTION_INDEX), R8(0), U8(0)},
        4,
-       "      CallJSRuntime [boolean_function], r0-r0"}};
+       "      CallJSRuntime [boolean_function], r0-r0"},
+      {{B(TestEqualStrict), R8(0), U8(1)},
+       3,
+       "         TestEqualStrict r0, EmbeddedFeedback[1]"},
+  };
+
+  Handle<TrustedFixedArray> constant_pool =
+      factory()->NewTrustedFixedArray(2000);
 
   for (size_t i = 0; i < arraysize(cases); ++i) {
     // Generate reference string by prepending formatted bytes.
@@ -76,7 +89,7 @@ TEST(BytecodeDecoder, DecodeBytecodeAndOperands) {
 
     // Generate decoded byte output.
     std::stringstream actual_ss;
-    BytecodeDecoder::Decode(actual_ss, cases[i].bytecode);
+    BytecodeDecoder::Decode(actual_ss, cases[i].bytecode, *constant_pool);
 
     // Compare.
     CHECK_EQ(actual_ss.str(), expected_ss.str());

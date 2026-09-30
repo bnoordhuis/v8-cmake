@@ -20,14 +20,14 @@ bytecodes: [
   /*   53 S> */ B(LdaSmi), I8(2),
                 B(Star1),
   /*   56 S> */ B(Ldar), R(1),
-  /*   65 E> */ B(Add), R(0), U8(0),
+  /*   65 E> */ B(Add), R(0), EmbeddedFeedback(),
                 B(Star2),
-                B(LdaConstant), U8(0),
-  /*   69 E> */ B(Add), R(2), U8(1),
+                B(LdaConstant), U8(0:"string"),
+  /*   69 E> */ B(Add), R(2), EmbeddedFeedback(),
   /*   80 S> */ B(Return),
 ]
 constant pool: [
-  ONE_BYTE_INTERNALIZED_STRING_TYPE ["string"],
+  INTERNALIZED_ONE_BYTE_STRING_TYPE ["string"],
 ]
 handlers: [
 ]
@@ -46,17 +46,17 @@ bytecodes: [
                 B(Star0),
   /*   53 S> */ B(LdaSmi), I8(2),
                 B(Star1),
-  /*   56 S> */ B(LdaConstant), U8(0),
+  /*   56 S> */ B(LdaConstant), U8(0:"string"),
                 B(Star2),
                 B(Ldar), R(0),
-  /*   72 E> */ B(Add), R(2), U8(0),
+  /*   72 E> */ B(Add), R(2), EmbeddedFeedback(),
                 B(Star2),
                 B(Ldar), R(1),
-  /*   76 E> */ B(Add), R(2), U8(1),
+  /*   76 E> */ B(Add), R(2), EmbeddedFeedback(),
   /*   80 S> */ B(Return),
 ]
 constant pool: [
-  ONE_BYTE_INTERNALIZED_STRING_TYPE ["string"],
+  INTERNALIZED_ONE_BYTE_STRING_TYPE ["string"],
 ]
 handlers: [
 ]
@@ -75,15 +75,15 @@ bytecodes: [
                 B(Star0),
   /*   53 S> */ B(LdaSmi), I8(2),
                 B(Star1),
-  /*   56 S> */ B(LdaConstant), U8(0),
-  /*   65 E> */ B(Add), R(0), U8(0),
+  /*   56 S> */ B(LdaConstant), U8(0:"string"),
+  /*   65 E> */ B(Add), R(0), EmbeddedFeedback(),
                 B(Star2),
                 B(Ldar), R(1),
-  /*   76 E> */ B(Add), R(2), U8(1),
+  /*   76 E> */ B(Add), R(2), EmbeddedFeedback(),
   /*   80 S> */ B(Return),
 ]
 constant pool: [
-  ONE_BYTE_INTERNALIZED_STRING_TYPE ["string"],
+  INTERNALIZED_ONE_BYTE_STRING_TYPE ["string"],
 ]
 handlers: [
 ]
@@ -102,26 +102,26 @@ bytecodes: [
                 B(Star0),
   /*   53 S> */ B(LdaSmi), I8(2),
                 B(Star1),
-  /*   56 S> */ B(LdaConstant), U8(0),
+  /*   56 S> */ B(LdaConstant), U8(0:"foo"),
                 B(Star2),
                 B(Ldar), R(0),
-  /*   69 E> */ B(Add), R(2), U8(0),
+  /*   69 E> */ B(Add), R(2), EmbeddedFeedback(),
                 B(Star2),
-                B(LdaConstant), U8(1),
-  /*   73 E> */ B(Add), R(2), U8(1),
+                B(LdaConstant), U8(1:"bar"),
+  /*   73 E> */ B(Add), R(2), EmbeddedFeedback(),
                 B(Star2),
                 B(Ldar), R(1),
-  /*   81 E> */ B(Add), R(2), U8(2),
+  /*   81 E> */ B(Add), R(2), EmbeddedFeedback(),
                 B(Star2),
-                B(LdaConstant), U8(2),
-  /*   85 E> */ B(Add), R(2), U8(3),
-  /*   93 E> */ B(AddSmi), I8(1), U8(4),
+                B(LdaConstant), U8(2:"baz"),
+  /*   85 E> */ B(Add), R(2), EmbeddedFeedback(),
+  /*   93 E> */ B(AddSmi), I8(1), EmbeddedFeedback(),
   /*   97 S> */ B(Return),
 ]
 constant pool: [
-  ONE_BYTE_INTERNALIZED_STRING_TYPE ["foo"],
-  ONE_BYTE_INTERNALIZED_STRING_TYPE ["bar"],
-  ONE_BYTE_INTERNALIZED_STRING_TYPE ["baz"],
+  INTERNALIZED_ONE_BYTE_STRING_TYPE ["foo"],
+  INTERNALIZED_ONE_BYTE_STRING_TYPE ["bar"],
+  INTERNALIZED_ONE_BYTE_STRING_TYPE ["baz"],
 ]
 handlers: [
 ]
@@ -140,18 +140,18 @@ bytecodes: [
                 B(Star0),
   /*   53 S> */ B(LdaSmi), I8(2),
                 B(Star1),
-  /*   56 S> */ B(LdaConstant), U8(0),
-  /*   66 E> */ B(Add), R(0), U8(0),
+  /*   56 S> */ B(LdaConstant), U8(0:"string"),
+  /*   66 E> */ B(Add), R(0), EmbeddedFeedback(),
                 B(Star2),
-                B(LdaConstant), U8(0),
+                B(LdaConstant), U8(0:"string"),
                 B(Star3),
                 B(Ldar), R(1),
-  /*   90 E> */ B(Add), R(3), U8(1),
-  /*   78 E> */ B(Add), R(2), U8(2),
+  /*   90 E> */ B(Add), R(3), EmbeddedFeedback(),
+  /*   78 E> */ B(Add), R(2), EmbeddedFeedback(),
   /*   95 S> */ B(Return),
 ]
 constant pool: [
-  ONE_BYTE_INTERNALIZED_STRING_TYPE ["string"],
+  INTERNALIZED_ONE_BYTE_STRING_TYPE ["string"],
 ]
 handlers: [
 ]
@@ -167,27 +167,27 @@ frame size: 4
 parameter count: 1
 bytecode array length: 35
 bytecodes: [
-  /*   30 E> */ B(CreateClosure), U8(0), U8(0), U8(2),
+  /*   30 E> */ B(CreateClosure), U8(0:SHARED_FUNCTION_INFO_TYPE), FBV(0), Flag8(0x2),
                 B(Star2),
   /*   42 S> */ B(LdaSmi), I8(1),
                 B(Star0),
   /*   53 S> */ B(LdaSmi), I8(2),
                 B(Star1),
-  /*   80 S> */ B(LdaConstant), U8(1),
+  /*   80 S> */ B(LdaConstant), U8(1:"string"),
                 B(Star3),
-  /*   98 E> */ B(CallUndefinedReceiver2), R(2), R(0), R(1), U8(0),
-  /*   96 E> */ B(Add), R(3), U8(2),
+  /*   98 E> */ B(CallUndefinedReceiver2), R(2), R(0), R(1), FBV(0),
+  /*   96 E> */ B(Add), R(3), EmbeddedFeedback(),
                 B(Star3),
                 B(Ldar), R(0),
-  /*  108 E> */ B(Add), R(3), U8(3),
+  /*  108 E> */ B(Add), R(3), EmbeddedFeedback(),
                 B(Star3),
                 B(Ldar), R(1),
-  /*  112 E> */ B(Add), R(3), U8(4),
+  /*  112 E> */ B(Add), R(3), EmbeddedFeedback(),
   /*  116 S> */ B(Return),
 ]
 constant pool: [
   SHARED_FUNCTION_INFO_TYPE,
-  ONE_BYTE_INTERNALIZED_STRING_TYPE ["string"],
+  INTERNALIZED_ONE_BYTE_STRING_TYPE ["string"],
 ]
 handlers: [
 ]

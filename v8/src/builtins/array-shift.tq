@@ -3,7 +3,10 @@
 // found in the LICENSE file.
 
 namespace array {
-extern builtin ArrayShift(Context, JSFunction, JSAny, int32): JSAny;
+// These are technically all js-implicit parameters, but we don't currently
+// support supplying these in tail calls (where we have to supply them).
+extern javascript builtin ArrayShift(
+    Context, JSFunction, JSAny, int32, DispatchHandle): JSAny;
 
 macro TryFastArrayShift(implicit context: Context)(receiver: JSAny): JSAny
     labels Slow, Runtime {
@@ -20,8 +23,8 @@ macro TryFastArrayShift(implicit context: Context)(receiver: JSAny): JSAny
 
   // Check that we're not supposed to right-trim the backing store, as
   // implemented in elements.cc:ElementsAccessorBase::SetLengthImpl.
-  if ((newLength + newLength + kMinAddedElementsCapacity) <
-      array.elements.length) {
+  if (Convert<intptr>(newLength + newLength + kMinAddedElementsCapacity) <
+      array.elements.length_intptr) {
     goto Runtime;
   }
 
@@ -36,8 +39,8 @@ macro TryFastArrayShift(implicit context: Context)(receiver: JSAny): JSAny
   return result;
 }
 
-transitioning macro GenericArrayShift(implicit context: Context)(
-    receiver: JSAny): JSAny {
+transitioning macro GenericArrayShift(
+    implicit context: Context)(receiver: JSAny): JSAny {
   // 1. Let O be ? ToObject(this value).
   const object: JSReceiver = ToObject_Inline(context, receiver);
 
@@ -93,7 +96,7 @@ transitioning macro GenericArrayShift(implicit context: Context)(
   return first;
 }
 
-// https://tc39.github.io/ecma262/#sec-array.prototype.shift
+// https://tc39.es/ecma262/#sec-array.prototype.shift
 transitioning javascript builtin ArrayPrototypeShift(
     js-implicit context: NativeContext, receiver: JSAny)(...arguments): JSAny {
   try {
@@ -103,7 +106,7 @@ transitioning javascript builtin ArrayPrototypeShift(
   } label Runtime {
     tail ArrayShift(
         context, LoadTargetFromFrame(), Undefined,
-        Convert<int32>(arguments.actual_count));
+        Convert<int32>(arguments.actual_count), kInvalidDispatchHandle);
   }
 }
 }

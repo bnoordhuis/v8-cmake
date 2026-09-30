@@ -5,6 +5,8 @@
 #ifndef V8_TORQUE_TORQUE_COMPILER_H_
 #define V8_TORQUE_TORQUE_COMPILER_H_
 
+#include <optional>
+
 #include "src/base/contextual.h"
 #include "src/torque/ast.h"
 #include "src/torque/kythe-data.h"
@@ -12,15 +14,14 @@
 #include "src/torque/source-positions.h"
 #include "src/torque/utils.h"
 
-namespace v8 {
-namespace internal {
-namespace torque {
+namespace v8::internal::torque {
 
 struct TorqueCompilerOptions {
   std::string output_directory = "";
   std::string v8_root = "";
   bool collect_language_server_data = false;
   bool collect_kythe_data = false;
+  bool output_tsa = false;
 
   // dcheck(...) are only generated for debug builds. To provide
   // language server support for statements inside dchecks, this flag
@@ -38,13 +39,18 @@ struct TorqueCompilerOptions {
 
   // Strips the v8-root in case the source path contains it as a prefix.
   bool strip_v8_root = false;
+
+  // Generates DWARF line info for Torque files.
+  bool torque_dwarf = false;
 };
+
+DECLARE_CONTEXTUAL_VARIABLE(CurrentCompilerOptions, TorqueCompilerOptions);
 
 struct TorqueCompilerResult {
   // Map translating SourceIds to filenames. This field is
   // set on errors, so the SourcePosition of the error can be
   // resolved.
-  base::Optional<SourceFileMap> source_file_map;
+  std::optional<SourceFileMap> source_file_map;
 
   // Eagerly collected data needed for the LanguageServer.
   // Set the corresponding options flag to enable.
@@ -61,14 +67,12 @@ struct TorqueCompilationUnit {
 
 V8_EXPORT_PRIVATE TorqueCompilerResult
 CompileTorque(const std::string& source, TorqueCompilerOptions options);
-TorqueCompilerResult CompileTorque(std::vector<std::string> files,
+TorqueCompilerResult CompileTorque(const std::vector<std::string>& files,
                                    TorqueCompilerOptions options);
 V8_EXPORT_PRIVATE TorqueCompilerResult CompileTorqueForKythe(
     std::vector<TorqueCompilationUnit> units, TorqueCompilerOptions options,
     KytheConsumer* kythe_consumer);
 
-}  // namespace torque
-}  // namespace internal
-}  // namespace v8
+}  // namespace v8::internal::torque
 
 #endif  // V8_TORQUE_TORQUE_COMPILER_H_

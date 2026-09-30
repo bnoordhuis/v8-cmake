@@ -4,10 +4,10 @@
 
 namespace array {
 // Array.from( items [, mapfn [, thisArg ] ] )
-// ES #sec-array.from
-transitioning javascript builtin
-ArrayFrom(js-implicit context: NativeContext, receiver: JSAny)(...arguments):
-    JSReceiver {
+// https://tc39.es/ecma262/#sec-array.from
+transitioning javascript builtin ArrayFrom(
+    js-implicit context: NativeContext, receiver: JSAny)(
+    ...arguments): JSReceiver {
   const c = HasBuiltinSubclassingFlag() ? receiver : GetArrayFunction();
 
   // Use fast path if:
@@ -66,7 +66,7 @@ ArrayFrom(js-implicit context: NativeContext, receiver: JSAny)(...arguments):
     const fastIteratorResultMap = GetIteratorResultMap();
 
     // d. Let k be 0.
-    let k: Smi = 0;
+    let k: Number = 0;
     // e. Repeat,
     while (true) {
       // i. If k ≥ 2^53-1, then
@@ -111,7 +111,7 @@ ArrayFrom(js-implicit context: NativeContext, receiver: JSAny)(...arguments):
           mappedValue =
               Call(context, UnsafeCast<Callable>(mapfn), thisArg, nextValue, k);
         } catch (e, message) {
-          iterator::IteratorCloseOnException(iteratorRecord);
+          iterator::IteratorCloseOnException(iteratorRecord.object);
           ReThrowWithMessage(context, e, message);
         }
       } else {
@@ -124,7 +124,7 @@ ArrayFrom(js-implicit context: NativeContext, receiver: JSAny)(...arguments):
       try {
         FastCreateDataProperty(a, k, mappedValue);
       } catch (e, message) deferred {
-        iterator::IteratorCloseOnException(iteratorRecord);
+        iterator::IteratorCloseOnException(iteratorRecord.object);
         ReThrowWithMessage(context, e, message);
       }
       // x. Set k to k + 1.
@@ -149,8 +149,7 @@ ArrayFrom(js-implicit context: NativeContext, receiver: JSAny)(...arguments):
       const capacity: intptr = Convert<intptr>(len);
       const map: Map = GetFastPackedSmiElementsJSArrayMap();
       a = AllocateJSArray(
-          ElementsKind::PACKED_SMI_ELEMENTS, map, capacity, smiLen,
-          AllocationFlag::kAllowLargeObjectAllocation);
+          ElementsKind::PACKED_SMI_ELEMENTS, map, capacity, smiLen);
     } label CreateWithConstructor {
       typeswitch (c) {
         case (c: Constructor): {
@@ -165,7 +164,7 @@ ArrayFrom(js-implicit context: NativeContext, receiver: JSAny)(...arguments):
     }
 
     // 11. Let k be 0.
-    let k: Smi = 0;
+    let k: Number = 0;
     // 12. Repeat, while k < len
     while (k < len) {
       // a. Let Pk be ! ToString(k).

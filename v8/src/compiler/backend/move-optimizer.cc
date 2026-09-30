@@ -6,6 +6,10 @@
 
 #include "src/codegen/register-configuration.h"
 
+#if V8_TARGET_ARCH_ARM64
+#include "src/codegen/macro-assembler.h"
+#endif
+
 namespace v8 {
 namespace internal {
 namespace compiler {
@@ -15,18 +19,17 @@ namespace {
 struct MoveKey {
   InstructionOperand source;
   InstructionOperand destination;
-};
-
-struct MoveKeyCompare {
-  bool operator()(const MoveKey& a, const MoveKey& b) const {
-    if (a.source.EqualsCanonicalized(b.source)) {
-      return a.destination.CompareCanonicalized(b.destination);
+  bool operator<(const MoveKey& other) const {
+    if (this->source != other.source) {
+      return this->source.Compare(other.source);
     }
-    return a.source.CompareCanonicalized(b.source);
+    return this->destination.Compare(other.destination);
+  }
+  bool operator==(const MoveKey& other) const {
+    return std::tie(this->source, this->destination) ==
+           std::tie(other.source, other.destination);
   }
 };
-
-using MoveMap = ZoneMap<MoveKey, unsigned, MoveKeyCompare>;
 
 class OperandSet {
  public:
@@ -38,8 +41,9 @@ class OperandSet {
   void InsertOp(const InstructionOperand& op) {
     set_->push_back(op);
 
-    if (kFPAliasing == AliasingKind::kCombine && op.IsFPRegister())
+    if (kFPAliasing == AliasingKind::kCombine && op.IsFPRegister()) {
       fp_reps_ |= RepresentationBit(LocationOperand::cast(op).representation());
+    }
   }
 
   bool Contains(const InstructionOperand& op) const {
@@ -241,14 +245,19 @@ void MoveOptimizer::MigrateMoves(Instruction* to, Instruction* from) {
     src_cant_be.InsertOp(move->destination());
   }
 
-  ZoneSet<MoveKey, MoveKeyCompare> move_candidates(local_zone());
+  // This set is usually small, e.g., for JetStream2 it has 16 elements or less
+  // in 99.99% of the cases, hence use inline storage and fast linear search.
+  // It is encoded as a `SmallMap` to `Dummy` values, since we don't have an
+  // equivalent `SmallSet` type.
+  struct Dummy {};
+  SmallZoneMap<MoveKey, Dummy, 16> move_candidates(local_zone());
   // We start with all the moves that don't have conflicting source or
   // destination operands are eligible for being moved down.
   for (MoveOperands* move : *from_moves) {
     if (move->IsRedundant()) continue;
     if (!dst_cant_be.ContainsOpOrAlias(move->destination())) {
       MoveKey key = {move->source(), move->destination()};
-      move_candidates.insert(key);
+      move_candidates.emplace(key, Dummy{});
     }
   }
   if (move_candidates.empty()) return;
@@ -258,13 +267,13 @@ void MoveOptimizer::MigrateMoves(Instruction* to, Instruction* from) {
   do {
     changed = false;
     for (auto iter = move_candidates.begin(); iter != move_candidates.end();) {
-      auto current = iter;
-      ++iter;
-      InstructionOperand src = current->source;
-      if (src_cant_be.ContainsOpOrAlias(src)) {
-        src_cant_be.InsertOp(current->destination);
-        move_candidates.erase(current);
+      auto [move, _] = *iter;
+      if (src_cant_be.ContainsOpOrAlias(move.source)) {
+        src_cant_be.InsertOp(move.destination);
+        iter = move_candidates.erase(iter);
         changed = true;
+      } else {
+        ++iter;
       }
     }
   } while (changed);
@@ -392,8 +401,11 @@ void MoveOptimizer::OptimizeMerge(InstructionBlock* block) {
       if (!op->IsConstant() && !op->IsImmediate()) return;
     }
   }
-  // TODO(dcarney): pass a ZoneStats down for this?
-  MoveMap move_map(local_zone());
+
+  // This map is usually small, e.g., for JetStream2 in 99.5% of the cases it
+  // has 16 elements or less. Hence use a `SmallMap` with inline storage and
+  // fast linear search in the common case.
+  SmallZoneMap<MoveKey, /* count */ size_t, 16> move_map(local_zone());
   size_t correct_counts = 0;
   // Accumulate set of shared moves.
   for (RpoNumber& pred_index : block->predecessors()) {
@@ -408,10 +420,10 @@ void MoveOptimizer::OptimizeMerge(InstructionBlock* block) {
       InstructionOperand src = move->source();
       InstructionOperand dst = move->destination();
       MoveKey key = {src, dst};
-      auto res = move_map.insert(std::make_pair(key, 1));
-      if (!res.second) {
-        res.first->second++;
-        if (res.first->second == block->PredecessorCount()) {
+      auto [it, inserted] = move_map.emplace(key, 1);
+      if (!inserted) {
+        it->second++;
+        if (it->second == block->PredecessorCount()) {
           correct_counts++;
         }
       }
@@ -426,17 +438,17 @@ void MoveOptimizer::OptimizeMerge(InstructionBlock* block) {
     // Moves that are unique to each predecessor won't be pushed to the common
     // successor.
     OperandSet conflicting_srcs(&operand_buffer1);
-    for (auto iter = move_map.begin(), end = move_map.end(); iter != end;) {
-      auto current = iter;
-      ++iter;
-      if (current->second != block->PredecessorCount()) {
-        InstructionOperand dest = current->first.destination;
+    for (auto iter = move_map.begin(); iter != move_map.end();) {
+      auto [move, count] = *iter;
+      if (count != block->PredecessorCount()) {
         // Not all the moves in all the gaps are the same. Maybe some are. If
         // there are such moves, we could move them, but the destination of the
         // moves staying behind can't appear as a source of a common move,
         // because the move staying behind will clobber this destination.
-        conflicting_srcs.InsertOp(dest);
-        move_map.erase(current);
+        conflicting_srcs.InsertOp(move.destination);
+        iter = move_map.erase(iter);
+      } else {
+        ++iter;
       }
     }
 
@@ -445,14 +457,16 @@ void MoveOptimizer::OptimizeMerge(InstructionBlock* block) {
       // If a common move can't be pushed to the common successor, then its
       // destination also can't appear as source to any move being pushed.
       changed = false;
-      for (auto iter = move_map.begin(), end = move_map.end(); iter != end;) {
-        auto current = iter;
-        ++iter;
-        DCHECK_EQ(block->PredecessorCount(), current->second);
-        if (conflicting_srcs.ContainsOpOrAlias(current->first.source)) {
-          conflicting_srcs.InsertOp(current->first.destination);
-          move_map.erase(current);
+      for (auto iter = move_map.begin(); iter != move_map.end();) {
+        auto [move, count] = *iter;
+        DCHECK_EQ(block->PredecessorCount(), count);
+        USE(count);
+        if (conflicting_srcs.ContainsOpOrAlias(move.source)) {
+          conflicting_srcs.InsertOp(move.destination);
+          iter = move_map.erase(iter);
           changed = true;
+        } else {
+          ++iter;
         }
       }
     } while (changed);
@@ -499,6 +513,38 @@ namespace {
 bool IsSlot(const InstructionOperand& op) {
   return op.IsStackSlot() || op.IsFPStackSlot();
 }
+
+#if V8_TARGET_ARCH_ARM64
+// On arm64, a constant that materializes in one MOVZ/MOVN/ORR-immediate
+// instruction costs exactly as much as a register-register copy, so replacing
+// its rematerialization with a copy from the first destination only makes the
+// second move depend on the first. Copies into stack slots still win: STR from
+// the first destination beats materialize-into-scratch + STR.
+bool IsOneInstrConstant(const InstructionSequence* code,
+                        const InstructionOperand& op) {
+  if (!op.IsConstant()) return false;
+  Constant constant =
+      code->GetConstant(ConstantOperand::cast(op).virtual_register());
+  uint64_t imm;
+  unsigned size;
+  switch (constant.type()) {
+    case Constant::kInt32:
+      imm = static_cast<uint32_t>(constant.ToInt32());
+      size = kWRegSizeInBits;
+      break;
+    case Constant::kInt64:
+      imm = static_cast<uint64_t>(constant.ToInt64());
+      size = kXRegSizeInBits;
+      break;
+    default:
+      return false;
+  }
+  unsigned n, imm_s, imm_r;
+  return MacroAssembler::IsImmMovz(imm, size) ||
+         MacroAssembler::IsImmMovn(imm, size) ||
+         Assembler::IsImmLogical(imm, size, &n, &imm_s, &imm_r);
+}
+#endif  // V8_TARGET_ARCH_ARM64
 
 bool Is64BitsWide(const InstructionOperand& op) {
   MachineRepresentation rep = LocationOperand::cast(&op)->representation();
@@ -571,6 +617,14 @@ void MoveOptimizer::FinalizeMoves(Instruction* instr) {
       group_begin = load;
       continue;
     }
+#if V8_TARGET_ARCH_ARM64
+    // Rematerializing a one-instruction constant costs the same as copying it
+    // from {group_begin} and leaves the two moves independent.
+    if (!IsSlot(load->destination()) &&
+        IsOneInstrConstant(code(), load->source())) {
+      continue;
+    }
+#endif
     // Insert new move into slot 1.
     ParallelMove* slot_1 = instr->GetOrCreateParallelMove(
         static_cast<Instruction::GapPosition>(1), code_zone());

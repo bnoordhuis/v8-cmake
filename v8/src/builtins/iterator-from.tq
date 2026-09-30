@@ -4,7 +4,8 @@
 
 namespace iterator {
 
-macro NewJSValidIteratorWrapper(implicit context: Context)(
+macro NewJSValidIteratorWrapper(
+    implicit context: Context)(
     underlying: IteratorRecord): JSValidIteratorWrapper {
   return new JSValidIteratorWrapper{
     map: *NativeContextSlot(ContextSlot::VALID_ITERATOR_WRAPPER_MAP_INDEX),
@@ -14,10 +15,12 @@ macro NewJSValidIteratorWrapper(implicit context: Context)(
   };
 }
 
-// https://tc39.es/proposal-iterator-helpers/#sec-getiteratorflattenable
-transitioning macro GetIteratorFlattenable(implicit context: Context)(
-    obj: JSReceiver): IteratorRecord {
-  // 1. If obj is not an Object, throw a TypeError exception.
+// https://tc39.es/ecma262/#sec-getiteratorflattenable
+transitioning macro GetIteratorFlattenable(
+    implicit context: Context)(obj: JSReceiver|String): IteratorRecord {
+  // 1. If obj is not an Object, then
+  //   a. If stringHandling is reject-strings or obj is not a String, throw a
+  //      TypeError exception.
   // (Done by caller.)
 
   let iterator: JSAny;
@@ -43,15 +46,17 @@ transitioning macro GetIteratorFlattenable(implicit context: Context)(
   return GetIteratorDirect(iteratorObj);
 }
 
-// https://tc39.es/proposal-iterator-helpers/#sec-iterator.from
+// https://tc39.es/ecma262/#sec-iterator.from
 transitioning javascript builtin IteratorFrom(
-    js-implicit context: NativeContext,
-    receiver: JSAny)(objArg: JSAny): JSReceiver {
-  // 1. If O is a String, set O to ! ToObject(O).
-  let obj: JSReceiver;
+    js-implicit context: NativeContext, receiver: JSAny)(
+    objArg: JSAny): JSReceiver {
+  // GetIteratorFlattenable below accepts either Objects or Strings (without
+  // wrapping) with the iterate-strings parameter. The type checking is done by
+  // the caller of GetIteratorFlattenable.
+  let obj: JSReceiver|String;
   typeswitch (objArg) {
     case (o: String): {
-      obj = ToObject_Inline(context, o);
+      obj = o;
     }
     case (o: JSReceiver): {
       obj = o;
@@ -61,28 +66,28 @@ transitioning javascript builtin IteratorFrom(
     }
   }
 
-  // 2. Let iteratorRecord be ? GetIteratorFlattenable(O, sync).
+  // 1. Let iteratorRecord be ? GetIteratorFlattenable(O, iterate-strings).
   const iteratorRecord = GetIteratorFlattenable(obj);
 
-  // 3. Let hasInstance be ? OrdinaryHasInstance(%Iterator%,
+  // 2. Let hasInstance be ? OrdinaryHasInstance(%Iterator%,
   //    iteratorRecord.[[Iterator]]).
   const hasInstance = function::OrdinaryHasInstance(
       context, GetIteratorFunction(), iteratorRecord.object);
 
-  // 4. If hasInstance is true, then
+  // 3. If hasInstance is true, then
   if (hasInstance == True) {
     // a. Return iteratorRecord.[[Iterator]].
     return iteratorRecord.object;
   }
 
-  // 5. Let wrapper be OrdinaryObjectCreate(%WrapForValidIteratorPrototype%, «
+  // 4. Let wrapper be OrdinaryObjectCreate(%WrapForValidIteratorPrototype%, «
   //    [[Iterated]] »).
-  // 6. Set wrapper.[[Iterated]] to iteratorRecord.
-  // 7. Return wrapper.
+  // 5. Set wrapper.[[Iterated]] to iteratorRecord.
+  // 6. Return wrapper.
   return NewJSValidIteratorWrapper(iteratorRecord);
 }
 
-// https://tc39.es/proposal-iterator-helpers/#sec-wrapforvaliditeratorprototype.next
+// https://tc39.es/ecma262/#sec-wrapforvaliditeratorprototype.next
 transitioning javascript builtin WrapForValidIteratorPrototypeNext(
     js-implicit context: NativeContext, receiver: JSAny)(): JSAny {
   // 1. Let O be this value.
@@ -99,7 +104,7 @@ transitioning javascript builtin WrapForValidIteratorPrototypeNext(
   return Call(context, iteratorRecord.next, iteratorRecord.object);
 }
 
-// https://tc39.es/proposal-iterator-helpers/#sec-wrapforvaliditeratorprototype.return
+// https://tc39.es/ecma262/#sec-wrapforvaliditeratorprototype.return
 transitioning javascript builtin WrapForValidIteratorPrototypeReturn(
     js-implicit context: NativeContext, receiver: JSAny)(): JSAny {
   try {

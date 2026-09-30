@@ -1,6 +1,7 @@
 // Copyright 2014 the V8 project authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
 #ifndef V8_COMPILER_JS_GENERIC_LOWERING_H_
 #define V8_COMPILER_JS_GENERIC_LOWERING_H_
 
@@ -44,9 +45,7 @@ class JSGenericLowering final : public AdvancedReducer {
                               Operator::Properties properties);
   void ReplaceWithRuntimeCall(Node* node, Runtime::FunctionId f, int args = -1);
 
-  void ReplaceUnaryOpWithBuiltinCall(Node* node,
-                                     Builtin builtin_without_feedback,
-                                     Builtin builtin_with_feedback);
+  void ReplaceUnaryOpWithBuiltinCall(Node* node, Builtin builtin);
   void ReplaceBinaryOpWithBuiltinCall(Node* node,
                                       Builtin builtin_without_feedback,
                                       Builtin builtin_with_feedback);
@@ -54,7 +53,7 @@ class JSGenericLowering final : public AdvancedReducer {
   Zone* zone() const;
   Isolate* isolate() const;
   JSGraph* jsgraph() const { return jsgraph_; }
-  Graph* graph() const;
+  TFGraph* graph() const;
   CommonOperatorBuilder* common() const;
   MachineOperatorBuilder* machine() const;
   JSHeapBroker* broker() const { return broker_; }

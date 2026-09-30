@@ -27,7 +27,7 @@ class ClassWithName final : public GarbageCollected<ClassWithName>,
                             public NameProvider {
  public:
   explicit ClassWithName(const char* name) : name_(name) {}
-  virtual void Trace(Visitor*) const {}
+  void Trace(Visitor*) const {}
   const char* GetHumanReadableName() const final { return name_; }
 
  private:
@@ -36,7 +36,9 @@ class ClassWithName final : public GarbageCollected<ClassWithName>,
 
 }  // namespace
 
-TEST(NameTraitTest, InternalNamesHiddenInOfficialBuild) {
+class NameTraitTest : public testing::TestWithHeap {};
+
+TEST_F(NameTraitTest, InternalNamesHiddenInOfficialBuild) {
   // Use a runtime test instead of static_assert to allow local builds but block
   // enabling the feature accidentally through the waterfall.
   //
@@ -45,11 +47,15 @@ TEST(NameTraitTest, InternalNamesHiddenInOfficialBuild) {
   // (b) avoid exposing internal types until it has been clarified whether
   //     exposing internals in DevTools is fine.
 #if defined(OFFICIAL_BUILD)
+#if defined(V8_OS_ANDROID) || defined(V8_OS_FUCHSIA)
   EXPECT_FALSE(NameProvider::SupportsCppClassNamesAsObjectNames());
+#else
+  EXPECT_TRUE(NameProvider::SupportsCppClassNamesAsObjectNames());
+#endif
 #endif
 }
 
-TEST(NameTraitTest, DefaultName) {
+TEST_F(NameTraitTest, DefaultName) {
   EXPECT_STREQ(
       NameProvider::SupportsCppClassNamesAsObjectNames()
           ? "cppgc::internal::(anonymous namespace)::NoName"
@@ -76,16 +82,17 @@ TEST(NameTraitTest, DefaultName) {
                    .value);
 }
 
-TEST(NameTraitTest, CustomName) {
-  ClassWithName with_name("CustomName");
+TEST_F(NameTraitTest, CustomName) {
+  ClassWithName* with_name =
+      MakeGarbageCollected<ClassWithName>(GetAllocationHandle(), "CustomName");
   EXPECT_STREQ(
       "CustomName",
       NameTrait<ClassWithName>::GetName(
-          &with_name, HeapObjectNameForUnnamedObject::kUseClassNameIfSupported)
+          with_name, HeapObjectNameForUnnamedObject::kUseClassNameIfSupported)
           .value);
   EXPECT_STREQ("CustomName",
                NameTrait<ClassWithName>::GetName(
-                   &with_name, HeapObjectNameForUnnamedObject::kUseHiddenName)
+                   with_name, HeapObjectNameForUnnamedObject::kUseHiddenName)
                    .value);
 }
 
@@ -99,15 +106,15 @@ class TraitTester : public NameTraitBase {
 
 }  // namespace
 
-TEST(NameTraitTest, NoTypeAvailable) {
+TEST_F(NameTraitTest, NoTypeAvailable) {
   HeapObjectName name = TraitTester::GetNameFromTypeSignature(nullptr);
   EXPECT_STREQ(NameProvider::kNoNameDeducible, name.value);
-  EXPECT_TRUE(name.name_was_hidden);
+  EXPECT_FALSE(name.name_was_hidden);
 }
 
-TEST(NameTraitTest, ParsingPrettyFunction) {
+TEST_F(NameTraitTest, ParsingPrettyFunction) {
   // Test assumes that __PRETTY_FUNCTION__ and friends return a string
-  // containing the the type as [T = <type>].
+  // containing the type as [T = <type>].
   HeapObjectName name = TraitTester::GetNameFromTypeSignature(
       "Some signature of a method [T = ClassNameInSignature]");
   EXPECT_STREQ("ClassNameInSignature", name.value);
@@ -120,16 +127,20 @@ TEST(NameTraitTest, ParsingPrettyFunction) {
 class HeapObjectHeaderNameTest : public testing::TestWithHeap {};
 
 TEST_F(HeapObjectHeaderNameTest, LookupNameThroughGCInfo) {
-  ClassNameAsHeapObjectNameScope class_names_scope(*Heap::From(GetHeap()));
   auto* no_name = MakeGarbageCollected<NoName>(GetAllocationHandle());
   auto no_name_tuple = HeapObjectHeader::FromObject(no_name).GetName();
+  EXPECT_STREQ(NameProvider::kHiddenName, no_name_tuple.value);
+  EXPECT_TRUE(no_name_tuple.name_was_hidden);
+
+  ClassNameAsHeapObjectNameScope class_names_scope(*Heap::From(GetHeap()));
+  no_name_tuple = HeapObjectHeader::FromObject(no_name).GetName();
   if (NameProvider::SupportsCppClassNamesAsObjectNames()) {
     EXPECT_STREQ("cppgc::internal::(anonymous namespace)::NoName",
                  no_name_tuple.value);
     EXPECT_FALSE(no_name_tuple.name_was_hidden);
   } else {
     EXPECT_STREQ(NameProvider::kHiddenName, no_name_tuple.value);
-    EXPECT_TRUE(no_name_tuple.name_was_hidden);
+    EXPECT_FALSE(no_name_tuple.name_was_hidden);
   }
 
   auto* other_no_name =
@@ -141,8 +152,8 @@ TEST_F(HeapObjectHeaderNameTest, LookupNameThroughGCInfo) {
                  other_no_name_tuple.value);
     EXPECT_FALSE(other_no_name_tuple.name_was_hidden);
   } else {
-    EXPECT_STREQ(NameProvider::kHiddenName, no_name_tuple.value);
-    EXPECT_TRUE(no_name_tuple.name_was_hidden);
+    EXPECT_STREQ(NameProvider::kHiddenName, other_no_name_tuple.value);
+    EXPECT_FALSE(other_no_name_tuple.name_was_hidden);
   }
 
   auto* class_with_name =

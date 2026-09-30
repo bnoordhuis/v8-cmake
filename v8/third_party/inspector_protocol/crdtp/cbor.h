@@ -252,7 +252,8 @@ class CBORTokenizer {
   span<uint8_t> GetString8() const;
 
   // Wire representation for STRING16 is low byte first (little endian).
-  // To be called only if ::TokenTag() == CBORTokenTag::STRING16.
+  // To be called only if ::TokenTag() == CBORTokenTag::STRING16. The result is
+  // guaranteed to have even length.
   span<uint8_t> GetString16WireRep() const;
 
   // To be called only if ::TokenTag() == CBORTokenTag::BINARY.
@@ -310,6 +311,18 @@ void ParseCBOR(span<uint8_t> bytes, ParserHandler* out);
 Status AppendString8EntryToCBORMap(span<uint8_t> string8_key,
                                    span<uint8_t> string8_value,
                                    std::vector<uint8_t>* cbor);
+
+// Safely extracts the value for |string8_key| from a CBOR encoded map wrapped
+// in an envelope. This is a shallow parser that skips unknown keys and
+// complex values. If the key is not found, or if it is found more than once,
+// or if it contains nested maps/arrays, returns an empty span.
+// Explicitly rejects duplicate keys and non-STRING8 values.
+span<uint8_t> GetString8ValueFromMap(span<uint8_t> message,
+                                     span<uint8_t> string8_key);
+// Safely checks if |key| exists in the top-level of a CBOR encoded map wrapped
+// in an envelope. Shallow parser that skips nested structures.
+// Returns true as soon as the key is found at the top level.
+bool HasKeyInMap(span<uint8_t> message, span<uint8_t> key);
 
 namespace internals {  // Exposed only for writing tests.
 size_t ReadTokenStart(span<uint8_t> bytes,

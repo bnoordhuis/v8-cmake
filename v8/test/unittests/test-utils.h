@@ -11,6 +11,7 @@
 #include "include/libplatform/libplatform.h"
 #include "include/v8-array-buffer.h"
 #include "include/v8-context.h"
+#include "include/v8-cppgc.h"
 #include "include/v8-extension.h"
 #include "include/v8-local-handle.h"
 #include "include/v8-object.h"
@@ -19,8 +20,10 @@
 #include "src/api/api-inl.h"
 #include "src/base/macros.h"
 #include "src/base/utils/random-number-generator.h"
+#include "src/flags/save-flags.h"
 #include "src/handles/handles.h"
 #include "src/heap/parked-scope.h"
+#include "src/logging/log.h"
 #include "src/objects/objects-inl.h"
 #include "src/objects/objects.h"
 #include "src/zone/accounting-allocator.h"
@@ -28,6 +31,24 @@
 #include "testing/gtest-support.h"
 
 namespace v8 {
+
+// This tag value has been picked arbitrarily between 0 and
+// V8_EXTERNAL_POINTER_TAG_COUNT.
+constexpr v8::ExternalPointerTypeTag kTestConfigTag = 14;
+static_assert(kTestConfigTag < V8_EXTERNAL_POINTER_TAG_COUNT);
+
+// Used for wrapping passing raw pointers to Api callbacks.
+static v8::Local<v8::External> MakeData(v8::Isolate* isolate, void* pointer) {
+  return v8::External::New(isolate, pointer, kTestConfigTag);
+}
+
+// Unwraps raw pointer passed to Api callbacks.
+template <typename T, typename TCallbackInfo>
+static T* GetData(const TCallbackInfo& info) {
+  USE(MakeData);
+  return reinterpret_cast<T*>(
+      v8::External::Cast(*info.Data())->Value(kTestConfigTag));
+}
 
 class ArrayBufferAllocator;
 
@@ -64,6 +85,14 @@ class WithJSSharedMemoryFeatureFlagsMixin : public TMixin {
   WithJSSharedMemoryFeatureFlagsMixin() { i::v8_flags.harmony_struct = true; }
 };
 
+template <typename TMixin>
+class WithShadowRealmFeatureFlagsMixin : public TMixin {
+ public:
+  WithShadowRealmFeatureFlagsMixin() {
+    i::v8_flags.harmony_shadow_realm = true;
+  }
+};
+
 using CounterMap = std::map<std::string, int>;
 
 enum CountersMode { kNoCounters, kEnableCounters };
@@ -74,7 +103,10 @@ enum CountersMode { kNoCounters, kEnableCounters };
 // all client Isolates.
 class IsolateWrapper final {
  public:
-  explicit IsolateWrapper(CountersMode counters_mode);
+  // `use_statically_set_cpp_heap` exists to avoid TSAN issues, see the comment
+  // on `cpp_heap_`.
+  explicit IsolateWrapper(CountersMode counters_mode,
+                          bool use_statically_set_cpp_heap = true);
 
   ~IsolateWrapper();
   IsolateWrapper(const IsolateWrapper&) = delete;
@@ -85,16 +117,29 @@ class IsolateWrapper final {
     return reinterpret_cast<i::Isolate*>(isolate_);
   }
 
+  static void set_cpp_heap_for_next_isolate(std::unique_ptr<CppHeap> cpp_heap) {
+    cpp_heap_ = std::move(cpp_heap);
+  }
+
  private:
   std::unique_ptr<v8::ArrayBuffer::Allocator> array_buffer_allocator_;
   std::unique_ptr<CounterMap> counter_map_;
   v8::Isolate* isolate_;
+
+  // `cpp_heap_` is a side channel to pass a custom CppHeap to isolate creation.
+  // Ideally it could be passes as a parameter to the constructor, but with the
+  // MixIn design pattern, that's not possible. Using a static variable as a
+  // side channel causes problems with TSAN, however, when multiple
+  // IsolateWrapper are used at the same time in different threads. The
+  // parameter `use_statically_set_cpp_heap` of the constructor solves the TSAN
+  // issue by providing a way to avoid using `cpp_heap_`.
+  static std::unique_ptr<CppHeap> cpp_heap_;
 };
 
 class IsolateWithContextWrapper final {
  public:
   IsolateWithContextWrapper()
-      : isolate_wrapper_(kNoCounters),
+      : isolate_wrapper_(kNoCounters, false),
         isolate_scope_(isolate_wrapper_.isolate()),
         handle_scope_(isolate_wrapper_.isolate()),
         context_(v8::Context::New(isolate_wrapper_.isolate())),
@@ -153,7 +198,7 @@ class WithIsolateScopeMixin : public TMixin {
     return reinterpret_cast<v8::internal::Isolate*>(this->v8_isolate());
   }
 
-  i::Handle<i::String> MakeName(const char* str, int suffix) {
+  i::DirectHandle<i::String> MakeName(const char* str, int suffix) {
     v8::base::EmbeddedVector<char, 128> buffer;
     v8::base::SNPrintF(buffer, "%s%d", str, suffix);
     return MakeString(buffer.begin());
@@ -201,7 +246,7 @@ class WithIsolateScopeMixin : public TMixin {
                                   Local<String> origin_url,
                                   bool is_shared_cross_origin) {
     Isolate* isolate = Isolate::GetCurrent();
-    ScriptOrigin origin(isolate, origin_url, 0, 0, is_shared_cross_origin);
+    ScriptOrigin origin(origin_url, 0, 0, is_shared_cross_origin);
     ScriptCompiler::Source script_source(source, origin);
     return ScriptCompiler::Compile(isolate->GetCurrentContext(), &script_source)
         .ToLocalChecked();
@@ -221,6 +266,10 @@ class WithIsolateScopeMixin : public TMixin {
 
   v8::Local<v8::String> NewString(const char* string) {
     return v8::String::NewFromUtf8(this->v8_isolate(), string).ToLocalChecked();
+  }
+
+  v8::Local<v8::Number> NewNumber(double value) {
+    return v8::Number::New(this->v8_isolate(), value);
   }
 
   void EmptyMessageQueues() {
@@ -256,13 +305,20 @@ class WithIsolateScopeMixin : public TMixin {
 template <typename TMixin>
 class WithContextMixin : public TMixin {
  public:
-  WithContextMixin()
-      : context_(Context::New(this->v8_isolate())), context_scope_(context_) {}
+  WithContextMixin() {
+    v8::Local<v8::Context> context = Context::New(this->v8_isolate());
+    context->Enter();
+    context_.Reset(this->v8_isolate(), context);
+  }
+  ~WithContextMixin() {
+    context_.Get(this->v8_isolate())->Exit();
+    context_.Reset();
+  }
   WithContextMixin(const WithContextMixin&) = delete;
   WithContextMixin& operator=(const WithContextMixin&) = delete;
 
-  const Local<Context>& context() const { return v8_context(); }
-  const Local<Context>& v8_context() const { return context_; }
+  Local<Context> context() const { return v8_context(); }
+  Local<Context> v8_context() const { return context_.Get(this->v8_isolate()); }
 
   void SetGlobalProperty(const char* name, v8::Local<v8::Value> value) {
     CHECK(v8_context()
@@ -272,8 +328,7 @@ class WithContextMixin : public TMixin {
   }
 
  private:
-  v8::Local<v8::Context> context_;
-  v8::Context::Scope context_scope_;
+  v8::Global<v8::Context> context_;
 };
 
 using TestWithPlatform =       //
@@ -298,7 +353,8 @@ using TestWithContext =                    //
                     ::testing::Test>>>>;
 
 // Use v8::internal::TestJSSharedMemoryWithNativeContext if you are testing
-// internals, aka. directly work with Handles.
+// internals, aka. directly work with Handles and require --harmony-struct
+// feature.
 //
 // Using this will FATAL when !V8_CAN_CREATE_SHARED_HEAP_BOOL
 using TestJSSharedMemoryWithContext =                     //
@@ -309,9 +365,21 @@ using TestJSSharedMemoryWithContext =                     //
                     WithJSSharedMemoryFeatureFlagsMixin<  //
                         ::testing::Test>>>>>;
 
+// Use v8::internal::TestShadowRealmWithContext if you are testing
+// internals, aka. directly work with Handles and require
+// --harmony-shadow-realm feature.
+using TestShadowRealmWithContext =                     //
+    WithContextMixin<                                  //
+        WithIsolateScopeMixin<                         //
+            WithIsolateMixin<                          //
+                WithDefaultPlatformMixin<              //
+                    WithShadowRealmFeatureFlagsMixin<  //
+                        ::testing::Test>>>>>;
+
 class PrintExtension : public v8::Extension {
  public:
-  PrintExtension() : v8::Extension("v8/print", "native function print();") {}
+  static constexpr const char* kName = "v8/print";
+  PrintExtension() : v8::Extension(kName, "native function print();") {}
   v8::Local<v8::FunctionTemplate> GetNativeFunctionTemplate(
       v8::Isolate* isolate, v8::Local<v8::String> name) override {
     return v8::FunctionTemplate::New(isolate, PrintExtension::Print);
@@ -327,24 +395,6 @@ class PrintExtension : public v8::Extension {
     }
     printf("\n");
   }
-};
-
-template <typename TMixin>
-class WithPrintExtensionMixin : public TMixin {
- public:
-  WithPrintExtensionMixin() = default;
-  ~WithPrintExtensionMixin() override = default;
-  WithPrintExtensionMixin(const WithPrintExtensionMixin&) = delete;
-  WithPrintExtensionMixin& operator=(const WithPrintExtensionMixin&) = delete;
-
-  static void SetUpTestSuite() {
-    v8::RegisterExtension(std::make_unique<PrintExtension>());
-    TMixin::SetUpTestSuite();
-  }
-
-  static void TearDownTestSuite() { TMixin::TearDownTestSuite(); }
-
-  static constexpr const char* kPrintExtensionName = "v8/print";
 };
 
 // Run a ScriptStreamingTask in a separate thread.
@@ -381,22 +431,32 @@ class WithInternalIsolateMixin : public TMixin {
   Factory* factory() const { return isolate()->factory(); }
   Isolate* isolate() const { return TMixin::i_isolate(); }
 
-  Handle<NativeContext> native_context() const {
+  DirectHandle<NativeContext> native_context() const {
     return isolate()->native_context();
   }
 
   template <typename T = Object>
   Handle<T> RunJS(const char* source) {
-    return Handle<T>::cast(RunJSInternal(source));
+    return Cast<T>(RunJSInternal(source));
+  }
+
+  template <typename T = Object>
+  Handle<T> RunJS(v8::Local<v8::Context> context, const char* source) {
+    return Cast<T>(RunJSInternal(context, source));
   }
 
   Handle<Object> RunJSInternal(const char* source) {
     return Utils::OpenHandle(*TMixin::RunJS(source));
   }
 
+  Handle<Object> RunJSInternal(v8::Local<v8::Context> context,
+                               const char* source) {
+    return Utils::OpenHandle(*TMixin::RunJS(context, source));
+  }
+
   template <typename T = Object>
-  Handle<T> RunJS(::v8::String::ExternalOneByteStringResource* source) {
-    return Handle<T>::cast(RunJSInternal(source));
+  DirectHandle<T> RunJS(::v8::String::ExternalOneByteStringResource* source) {
+    return Cast<T>(RunJSInternal(source));
   }
 
   Handle<Object> RunJSInternal(
@@ -412,8 +472,7 @@ class WithInternalIsolateMixin : public TMixin {
 template <typename TMixin>
 class WithZoneMixin : public TMixin {
  public:
-  explicit WithZoneMixin(bool support_zone_compression = false)
-      : zone_(&allocator_, ZONE_NAME, support_zone_compression) {}
+  WithZoneMixin() : zone_(&allocator_, ZONE_NAME) {}
   WithZoneMixin(const WithZoneMixin&) = delete;
   WithZoneMixin& operator=(const WithZoneMixin&) = delete;
 
@@ -496,24 +555,11 @@ using TestJSSharedMemoryWithNativeContext =  //
                 WithIsolateMixin<            //
                     TestJSSharedMemoryWithPlatform>>>>;
 
-class V8_NODISCARD SaveFlags {
- public:
-  SaveFlags();
-  ~SaveFlags();
-  SaveFlags(const SaveFlags&) = delete;
-  SaveFlags& operator=(const SaveFlags&) = delete;
-
- private:
-#define FLAG_MODE_APPLY(ftype, ctype, nam, def, cmt) ctype SAVED_##nam;
-#include "src/flags/flag-definitions.h"
-#undef FLAG_MODE_APPLY
-};
-
 // For GTest.
-inline void PrintTo(Object o, ::std::ostream* os) {
+inline void PrintTo(Tagged<Object> o, ::std::ostream* os) {
   *os << reinterpret_cast<void*>(o.ptr());
 }
-inline void PrintTo(Smi o, ::std::ostream* os) {
+inline void PrintTo(Tagged<Smi> o, ::std::ostream* os) {
   *os << reinterpret_cast<void*>(o.ptr());
 }
 
@@ -526,9 +572,9 @@ static inline uint16_t* AsciiToTwoByteString(const char* source) {
 
 class TestTransitionsAccessor : public TransitionsAccessor {
  public:
-  TestTransitionsAccessor(Isolate* isolate, Map map)
+  TestTransitionsAccessor(Isolate* isolate, Tagged<Map> map)
       : TransitionsAccessor(isolate, map) {}
-  TestTransitionsAccessor(Isolate* isolate, Handle<Map> map)
+  TestTransitionsAccessor(Isolate* isolate, DirectHandle<Map> map)
       : TransitionsAccessor(isolate, *map) {}
 
   // Expose internals for tests.
@@ -541,7 +587,9 @@ class TestTransitionsAccessor : public TransitionsAccessor {
 
   int Capacity() { return TransitionsAccessor::Capacity(); }
 
-  TransitionArray transitions() { return TransitionsAccessor::transitions(); }
+  Tagged<TransitionArray> transitions() {
+    return TransitionsAccessor::transitions();
+  }
 };
 
 // Helper class that allows to write tests in a slot size independent manner.
@@ -550,16 +598,17 @@ class FeedbackVectorHelper {
  public:
   explicit FeedbackVectorHelper(Handle<FeedbackVector> vector)
       : vector_(vector) {
-    int slot_count = vector->length();
+    uint32_t slot_count = vector->length().value();
     slots_.reserve(slot_count);
-    FeedbackMetadataIterator iter(vector->metadata());
+    DisallowGarbageCollection no_gc;
+    FeedbackMetadataIterator iter(vector->metadata(), no_gc);
     while (iter.HasNext()) {
       FeedbackSlot slot = iter.Next();
       slots_.push_back(slot);
     }
   }
 
-  Handle<FeedbackVector> vector() { return vector_; }
+  DirectHandle<FeedbackVector> vector() { return vector_; }
 
   // Returns slot identifier by numerical index.
   FeedbackSlot slot(int index) const { return slots_[index]; }
@@ -576,6 +625,69 @@ template <typename Spec>
 Handle<FeedbackVector> NewFeedbackVector(Isolate* isolate, Spec* spec) {
   return FeedbackVector::NewForTesting(isolate, spec);
 }
+
+class FakeCodeEventLogger : public i::CodeEventLogger {
+ public:
+  explicit FakeCodeEventLogger(i::Isolate* isolate)
+      : CodeEventLogger(isolate) {}
+
+  void CodeMoveEvent(i::Tagged<i::InstructionStream> from,
+                     i::Tagged<i::InstructionStream> to) override {}
+  void BytecodeMoveEvent(i::Tagged<i::BytecodeArray> from,
+                         i::Tagged<i::BytecodeArray> to) override {}
+  void CodeDisableOptEvent(
+      i::DirectHandle<i::AbstractCode> code,
+      i::DirectHandle<i::SharedFunctionInfo> shared) override {}
+
+ private:
+  void LogRecordedBuffer(
+      i::Tagged<i::AbstractCode> code,
+      i::MaybeDirectHandle<i::SharedFunctionInfo> maybe_shared,
+      const char* name, size_t length) override {}
+#if V8_ENABLE_WEBASSEMBLY
+  void LogRecordedBuffer(const i::wasm::WasmCode* code, const char* name,
+                         size_t length) override {}
+#endif  // V8_ENABLE_WEBASSEMBLY
+};
+
+class CrashKeyStore {
+ public:
+  explicit CrashKeyStore(Isolate* isolate) : isolate_(isolate) {
+    InstallCallbacks();
+  }
+
+  CrashKeyStore(const CrashKeyStore&) = delete;
+  CrashKeyStore& operator=(const CrashKeyStore&) = delete;
+
+  ~CrashKeyStore() { isolate_->SetCrashKeyStringCallbacks({}, {}); }
+
+  const std::string& ValueForKey(const std::string& name) const {
+    auto it = entries_.find(name);
+    CHECK(it != entries_.end());
+    CHECK_NOT_NULL(it->second.get());
+    return it->second->value;
+  }
+
+  bool HasKey(const std::string& name) const {
+    return entries_.find(name) != entries_.end();
+  }
+
+  size_t size() const { return entries_.size(); }
+  std::unordered_set<std::string> KeyNames() const;
+
+ private:
+  struct Entry {
+    CrashKeySize size;
+    std::string value;
+  };
+
+  void InstallCallbacks();
+  CrashKey AllocateKey(const char key[], CrashKeySize size);
+  void SetValue(CrashKey crash_key, const std::string_view value);
+
+  Isolate* isolate_;
+  std::unordered_map<std::string, std::unique_ptr<Entry>> entries_;
+};
 
 #ifdef V8_CC_GNU
 
@@ -597,18 +709,15 @@ Handle<FeedbackVector> NewFeedbackVector(Isolate* isolate, Spec* spec) {
 #elif V8_HOST_ARCH_MIPS64
 #define GET_STACK_POINTER_TO(sp_addr) \
   __asm__ __volatile__("sd $sp, %0" : "=g"(sp_addr))
+#elif V8_OS_ZOS
+#define GET_STACK_POINTER_TO(sp_addr) \
+  __asm__ __volatile__(" stg 15,%0" : "=m"(sp_addr))
 #elif defined(__s390x__) || defined(_ARCH_S390X)
 #define GET_STACK_POINTER_TO(sp_addr) \
   __asm__ __volatile__("stg %%r15, %0" : "=m"(sp_addr))
-#elif defined(__s390__) || defined(_ARCH_S390)
-#define GET_STACK_POINTER_TO(sp_addr) \
-  __asm__ __volatile__("st 15, %0" : "=m"(sp_addr))
 #elif defined(__PPC64__) || defined(_ARCH_PPC64)
 #define GET_STACK_POINTER_TO(sp_addr) \
   __asm__ __volatile__("std 1, %0" : "=m"(sp_addr))
-#elif defined(__PPC__) || defined(_ARCH_PPC)
-#define GET_STACK_POINTER_TO(sp_addr) \
-  __asm__ __volatile__("stw 1, %0" : "=m"(sp_addr))
 #elif V8_TARGET_ARCH_RISCV64
 #define GET_STACK_POINTER_TO(sp_addr) \
   __asm__ __volatile__("add %0, sp, x0" : "=r"(sp_addr))

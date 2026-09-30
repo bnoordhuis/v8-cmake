@@ -6,48 +6,27 @@
 #define V8_OBJECTS_HEAP_NUMBER_INL_H_
 
 #include "src/objects/heap-number.h"
-
-#include "src/objects/objects-inl.h"
-#include "src/objects/primitive-heap-object-inl.h"
-
-// Has to be the last include (doesn't have include guards):
-#include "src/objects/object-macros.h"
+// Include the non-inl header before the rest of the headers.
 
 namespace v8 {
 namespace internal {
 
-#include "torque-generated/src/objects/heap-number-tq-inl.inc"
-
-TQ_OBJECT_CONSTRUCTORS_IMPL(HeapNumber)
-
-uint64_t HeapNumber::value_as_bits(RelaxedLoadTag) const {
-  uint64_t value;
-  base::Relaxed_Memcpy(
-      reinterpret_cast<base::Atomic8*>(&value),
-      reinterpret_cast<base::Atomic8*>(field_address(kValueOffset)),
-      sizeof(uint64_t));
-  // Bug(v8:8875): HeapNumber's double may be unaligned.
-  return value;
+double HeapNumber::value() const { return value_.value(); }
+void HeapNumber::set_value(double value) {
+  value_.set_value(value);
 }
 
-void HeapNumber::set_value_as_bits(uint64_t bits, RelaxedStoreTag) {
-  base::Relaxed_Memcpy(
-      reinterpret_cast<base::Atomic8*>(field_address(kValueOffset)),
-      reinterpret_cast<base::Atomic8*>(&bits), sizeof(uint64_t));
+uint64_t HeapNumber::value_as_bits() const { return value_.value_as_bits(); }
+
+void HeapNumber::set_value_as_bits(uint64_t bits) {
+  value_.set_value_as_bits(bits);
 }
 
-int HeapNumber::get_exponent() {
-  return ((ReadField<int>(kExponentOffset) & kExponentMask) >> kExponentShift) -
-         kExponentBias;
-}
-
-int HeapNumber::get_sign() {
-  return ReadField<int>(kExponentOffset) & kSignMask;
+bool HeapNumber::is_the_hole() const {
+  return value_as_bits() == kHoleNanInt64;
 }
 
 }  // namespace internal
 }  // namespace v8
-
-#include "src/objects/object-macros-undef.h"
 
 #endif  // V8_OBJECTS_HEAP_NUMBER_INL_H_

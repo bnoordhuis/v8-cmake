@@ -42,95 +42,139 @@ namespace cppgc {
  */
 class AllocationHandle;
 
+class GarbageCollectedMixin;
+
 namespace internal {
 
-// Similar to C++17 std::align_val_t;
-enum class AlignVal : size_t {};
+using AlignVal = std::align_val_t;
 
-class V8_EXPORT MakeGarbageCollectedTraitInternal {
+class MakeGarbageCollectedTraitInternal {
  protected:
+  enum class CanContainMixins { kNo, kYes };
+
   static inline void MarkObjectAsFullyConstructed(const void* payload) {
     // See api_constants for an explanation of the constants.
-    std::atomic<uint16_t>* atomic_mutable_bitfield =
-        reinterpret_cast<std::atomic<uint16_t>*>(
-            const_cast<uint16_t*>(reinterpret_cast<const uint16_t*>(
-                reinterpret_cast<const uint8_t*>(payload) -
-                api_constants::kFullyConstructedBitFieldOffsetFromPayload)));
+    std::atomic_ref<uint16_t> atomic_mutable_bitfield(
+        *const_cast<uint16_t*>(reinterpret_cast<const uint16_t*>(
+            reinterpret_cast<const uint8_t*>(payload) -
+            api_constants::kFullyConstructedBitFieldOffsetFromPayload)));
     // It's safe to split use load+store here (instead of a read-modify-write
     // operation), since it's guaranteed that this 16-bit bitfield is only
     // modified by a single thread. This is cheaper in terms of code bloat (on
     // ARM) and performance.
-    uint16_t value = atomic_mutable_bitfield->load(std::memory_order_relaxed);
+    uint16_t value = atomic_mutable_bitfield.load(std::memory_order_relaxed);
     value |= api_constants::kFullyConstructedBitMask;
-    atomic_mutable_bitfield->store(value, std::memory_order_release);
+    atomic_mutable_bitfield.store(value, std::memory_order_release);
   }
 
   // Dispatch based on compile-time information.
   //
   // Default implementation is for a custom space with >`kDefaultAlignment` byte
   // alignment.
-  template <typename GCInfoType, typename CustomSpace, size_t alignment>
+  template <typename GCInfoType, typename CustomSpace, size_t alignment,
+            CanContainMixins contain_mixins>
   struct AllocationDispatcher final {
     static void* Invoke(AllocationHandle& handle, size_t size) {
-      static_assert(std::is_base_of<CustomSpaceBase, CustomSpace>::value,
+      static_assert(std::is_base_of_v<CustomSpaceBase, CustomSpace>,
                     "Custom space must inherit from CustomSpaceBase.");
       static_assert(
           !CustomSpace::kSupportsCompaction,
           "Custom spaces that support compaction do not support allocating "
           "objects with non-default (i.e. word-sized) alignment.");
-      return MakeGarbageCollectedTraitInternal::Allocate(
-          handle, size, static_cast<AlignVal>(alignment),
-          internal::GCInfoTrait<GCInfoType>::Index(), CustomSpace::kSpaceIndex);
+      if constexpr (contain_mixins == CanContainMixins::kYes) {
+        return MakeGarbageCollectedTraitInternal::Allocate(
+            handle, size, static_cast<AlignVal>(alignment),
+            internal::GCInfoTrait<GCInfoType>::Index(),
+            CustomSpace::kSpaceIndex, kMixinTag);
+      } else {
+        return MakeGarbageCollectedTraitInternal::Allocate(
+            handle, size, static_cast<AlignVal>(alignment),
+            internal::GCInfoTrait<GCInfoType>::Index(),
+            CustomSpace::kSpaceIndex);
+      }
     }
   };
 
   // Fast path for regular allocations for the default space with
   // `kDefaultAlignment` byte alignment.
-  template <typename GCInfoType>
+  template <typename GCInfoType, CanContainMixins contain_mixins>
   struct AllocationDispatcher<GCInfoType, void,
-                              api_constants::kDefaultAlignment>
+                              api_constants::kDefaultAlignment, contain_mixins>
       final {
     static void* Invoke(AllocationHandle& handle, size_t size) {
-      return MakeGarbageCollectedTraitInternal::Allocate(
-          handle, size, internal::GCInfoTrait<GCInfoType>::Index());
+      if constexpr (contain_mixins == CanContainMixins::kYes) {
+        return MakeGarbageCollectedTraitInternal::Allocate(
+            handle, size, internal::GCInfoTrait<GCInfoType>::Index(),
+            kMixinTag);
+      } else {
+        return MakeGarbageCollectedTraitInternal::Allocate(
+            handle, size, internal::GCInfoTrait<GCInfoType>::Index());
+      }
     }
   };
 
   // Default space with >`kDefaultAlignment` byte alignment.
-  template <typename GCInfoType, size_t alignment>
-  struct AllocationDispatcher<GCInfoType, void, alignment> final {
+  template <typename GCInfoType, size_t alignment,
+            CanContainMixins contain_mixins>
+  struct AllocationDispatcher<GCInfoType, void, alignment, contain_mixins>
+      final {
     static void* Invoke(AllocationHandle& handle, size_t size) {
-      return MakeGarbageCollectedTraitInternal::Allocate(
-          handle, size, static_cast<AlignVal>(alignment),
-          internal::GCInfoTrait<GCInfoType>::Index());
+      if constexpr (contain_mixins == CanContainMixins::kYes) {
+        return MakeGarbageCollectedTraitInternal::Allocate(
+            handle, size, static_cast<AlignVal>(alignment),
+            internal::GCInfoTrait<GCInfoType>::Index(), kMixinTag);
+      } else {
+        return MakeGarbageCollectedTraitInternal::Allocate(
+            handle, size, static_cast<AlignVal>(alignment),
+            internal::GCInfoTrait<GCInfoType>::Index());
+      }
     }
   };
 
   // Custom space with `kDefaultAlignment` byte alignment.
-  template <typename GCInfoType, typename CustomSpace>
+  template <typename GCInfoType, typename CustomSpace,
+            CanContainMixins contain_mixins>
   struct AllocationDispatcher<GCInfoType, CustomSpace,
-                              api_constants::kDefaultAlignment>
+                              api_constants::kDefaultAlignment, contain_mixins>
       final {
     static void* Invoke(AllocationHandle& handle, size_t size) {
-      static_assert(std::is_base_of<CustomSpaceBase, CustomSpace>::value,
+      static_assert(std::is_base_of_v<CustomSpaceBase, CustomSpace>,
                     "Custom space must inherit from CustomSpaceBase.");
-      return MakeGarbageCollectedTraitInternal::Allocate(
-          handle, size, internal::GCInfoTrait<GCInfoType>::Index(),
-          CustomSpace::kSpaceIndex);
+      if constexpr (contain_mixins == CanContainMixins::kYes) {
+        return MakeGarbageCollectedTraitInternal::Allocate(
+            handle, size, internal::GCInfoTrait<GCInfoType>::Index(),
+            CustomSpace::kSpaceIndex, kMixinTag);
+      } else {
+        return MakeGarbageCollectedTraitInternal::Allocate(
+            handle, size, internal::GCInfoTrait<GCInfoType>::Index(),
+            CustomSpace::kSpaceIndex);
+      }
     }
   };
 
  private:
-  static void* CPPGC_DEFAULT_ALIGNED Allocate(cppgc::AllocationHandle&, size_t,
-                                              GCInfoIndex);
-  static void* CPPGC_DOUBLE_WORD_ALIGNED Allocate(cppgc::AllocationHandle&,
-                                                  size_t, AlignVal,
-                                                  GCInfoIndex);
-  static void* CPPGC_DEFAULT_ALIGNED Allocate(cppgc::AllocationHandle&, size_t,
-                                              GCInfoIndex, CustomSpaceIndex);
-  static void* CPPGC_DOUBLE_WORD_ALIGNED Allocate(cppgc::AllocationHandle&,
-                                                  size_t, AlignVal, GCInfoIndex,
-                                                  CustomSpaceIndex);
+  inline const static struct MixinTag {
+  } kMixinTag;
+
+  V8_EXPORT static void* CPPGC_DEFAULT_ALIGNED
+  Allocate(cppgc::AllocationHandle&, size_t, GCInfoIndex);
+  V8_EXPORT static void* CPPGC_DOUBLE_WORD_ALIGNED
+  Allocate(cppgc::AllocationHandle&, size_t, AlignVal, GCInfoIndex);
+  V8_EXPORT static void* CPPGC_DEFAULT_ALIGNED
+  Allocate(cppgc::AllocationHandle&, size_t, GCInfoIndex, CustomSpaceIndex);
+  V8_EXPORT static void* CPPGC_DOUBLE_WORD_ALIGNED
+  Allocate(cppgc::AllocationHandle&, size_t, AlignVal, GCInfoIndex,
+           CustomSpaceIndex);
+  V8_EXPORT static void* CPPGC_DEFAULT_ALIGNED
+  Allocate(cppgc::AllocationHandle&, size_t, GCInfoIndex, MixinTag);
+  V8_EXPORT static void* CPPGC_DOUBLE_WORD_ALIGNED
+  Allocate(cppgc::AllocationHandle&, size_t, AlignVal, GCInfoIndex, MixinTag);
+  V8_EXPORT static void* CPPGC_DEFAULT_ALIGNED
+  Allocate(cppgc::AllocationHandle&, size_t, GCInfoIndex, CustomSpaceIndex,
+           MixinTag);
+  V8_EXPORT static void* CPPGC_DOUBLE_WORD_ALIGNED
+  Allocate(cppgc::AllocationHandle&, size_t, AlignVal, GCInfoIndex,
+           CustomSpaceIndex, MixinTag);
 
   friend class HeapObjectHeader;
 };
@@ -166,13 +210,16 @@ class MakeGarbageCollectedTraitBase
    */
   V8_INLINE static void* Allocate(AllocationHandle& handle, size_t size) {
     static_assert(
-        std::is_base_of<typename T::ParentMostGarbageCollectedType, T>::value,
+        std::is_base_of_v<typename T::ParentMostGarbageCollectedType, T>,
         "U of GarbageCollected<U> must be a base of T. Check "
         "GarbageCollected<T> base class inheritance.");
     static constexpr size_t kWantedAlignment =
         alignof(T) < internal::api_constants::kDefaultAlignment
             ? internal::api_constants::kDefaultAlignment
             : alignof(T);
+    constexpr CanContainMixins kMayContainMixins =
+        std::is_base_of_v<GarbageCollectedMixin, T> ? CanContainMixins::kYes
+                                                    : CanContainMixins::kNo;
     static_assert(
         kWantedAlignment <= internal::api_constants::kMaxSupportedAlignment,
         "Requested alignment larger than alignof(std::max_align_t) bytes. "
@@ -180,7 +227,8 @@ class MakeGarbageCollectedTraitBase
     return AllocationDispatcher<
         typename internal::GCInfoFolding<
             T, typename T::ParentMostGarbageCollectedType>::ResultType,
-        typename SpaceTrait<T>::Space, kWantedAlignment>::Invoke(handle, size);
+        typename SpaceTrait<T>::Space, kWantedAlignment,
+        kMayContainMixins>::Invoke(handle, size);
   }
 
   /**

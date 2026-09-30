@@ -16,6 +16,7 @@ std::string ErrorPrefixFor(TorqueMessage::Kind kind) {
     case TorqueMessage::Kind::kLint:
       return "Lint error";
   }
+  UNREACHABLE();
 }
 
 int WrappedMain(int argc, const char** argv) {
@@ -41,8 +42,14 @@ int WrappedMain(int argc, const char** argv) {
 #endif
     } else if (argument == "-annotate-ir") {
       options.annotate_ir = true;
+    } else if (argument == "-torque-dwarf") {
+      options.torque_dwarf = true;
     } else if (argument == "-strip-v8-root") {
       options.strip_v8_root = true;
+#ifdef V8_ENABLE_EXPERIMENTAL_TQ_TO_TSA
+    } else if (argument == "-output-tsa") {
+      options.output_tsa = true;
+#endif
     } else {
       // Strip the v8-root in case it is a prefix of the file path itself.
       // This is used when building in Google3.

@@ -39,10 +39,10 @@ TEST(PossiblyEmptyBucketsTest, WordsForBuckets) {
 
 TEST(SlotSet, BucketsForSize) {
   EXPECT_EQ(static_cast<size_t>(SlotSet::kBucketsRegularPage),
-            SlotSet::BucketsForSize(Page::kPageSize));
+            SlotSet::BucketsForSize(NormalPage::kPageSize));
 
   EXPECT_EQ(static_cast<size_t>(SlotSet::kBucketsRegularPage) * 2,
-            SlotSet::BucketsForSize(Page::kPageSize * 2));
+            SlotSet::BucketsForSize(NormalPage::kPageSize * 2));
 }
 
 TEST(PossiblyEmptyBuckets, ContainsAndInsert) {

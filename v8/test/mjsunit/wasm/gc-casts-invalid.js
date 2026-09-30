@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Flags: --experimental-wasm-gc
+// Flags: --wasm-staging --wasm-shared
 
 d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
 
@@ -11,6 +11,7 @@ d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
   let struct = 0;
   let array = 1;
   let sig = 2;
+  let sharedArray = 3;
   let types = [
     // source value type |target heap type
     [kWasmI32,            kAnyRefCode],
@@ -22,6 +23,14 @@ d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
     [wasmRefType(sig),    kExternRefCode],
     [kWasmAnyRef,         kExternRefCode],
     [kWasmAnyRef,         kFuncRefCode],
+    [kWasmAnyRef,         kExnRefCode],
+    [wasmRefType(sig),    kExnRefCode],
+    [kWasmNullExternRef,  kExnRefCode],
+    [wasmRefType(array),  kNullExnRefCode],
+    [kWasmNullFuncRef,    kNullExnRefCode],
+    [kWasmAnyRef,         sharedArray],
+    [wasmRefType(sharedArray), array],
+    [wasmRefType(kWasmAnyRef).shared(), kAnyRefCode],
   ];
   let casts = [
     kExprRefTest,
@@ -34,8 +43,9 @@ d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
     for (let cast of casts) {
       let builder = new WasmModuleBuilder();
       assertEquals(struct, builder.addStruct([makeField(kWasmI32, true)]));
-      assertEquals(array, builder.addArray(kWasmI32));
+      assertEquals(array, builder.addArray(kWasmI32, {mutable: false}));
       assertEquals(sig, builder.addType(makeSig([kWasmI32], [])));
+      assertEquals(sharedArray, builder.addArray(kWasmI32, {shared: true}));
       builder.addFunction('refTest', makeSig([source_type], []))
       .addBody([
         kExprLocalGet, 0,
@@ -106,11 +116,11 @@ d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
     kExprDrop,
     kExprReturn,
   ]);
-  // Even though the source is non-nullable, if the br_on_cast is set to produce
-  // a nullable value on cast, the label target must be nullable as well.
-  assertThrows(() => builder.instantiate(),
-    WebAssembly.CompileError,
-    /invalid types for br_on_cast: \(ref null 0\) is not a subtype of \(ref 0\)/);
+  // Relaxed rules in the Custom Descriptors proposal: source and target type
+  // now only need to be in the same type hierarchy.
+  // If we ever un-stage Custom Descriptors, this test will throw a
+  // WebAssembly.CompileError: "(ref null 0) is not a subtype of (ref 0)".
+  builder.instantiate();
 })();
 
 (function TestBrOnCastInvalidFlags() {
@@ -122,7 +132,7 @@ d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
     .addBody([
       kExprBlock, kAnyRefCode,
         kExprLocalGet, 0,
-        kGCPrefix, kExprBrOnCastGeneric,
+        kGCPrefix, kExprBrOnCast,
           ...wasmUnsignedLeb(value), 0, kAnyRefCode, struct,
         kExprDrop,
         kExprReturn,
@@ -192,10 +202,6 @@ d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
   print(arguments.callee.name);
 
   let casts = [
-    [kGCPrefix, kExprBrOnCastFailNull, 0, kI31RefCode],
-    [kGCPrefix, kExprBrOnCastNull, 0, kI31RefCode],
-    [kGCPrefix, kExprBrOnCastFail, 0, kI31RefCode],
-    [kGCPrefix, kExprBrOnCast, 0, kI31RefCode],
     wasmBrOnCastFail(
       0, wasmRefNullType(kWasmAnyRef), wasmRefNullType(kWasmI31Ref)),
     wasmBrOnCast(0, wasmRefNullType(kWasmAnyRef), wasmRefNullType(kWasmI31Ref)),
@@ -211,7 +217,7 @@ d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
     .addBody([
       kExprBlock, kAnyRefCode,
         kExprLocalGet, 0,
-        kGCPrefix, kExprExternInternalize,
+        kGCPrefix, kExprAnyConvertExtern,
         kExprUnreachable,
         ...brOnCast,
         kExprReturn,

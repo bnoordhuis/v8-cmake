@@ -2,14 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Flags: --experimental-wasm-gc --no-liftoff
-
 d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
 
 // Test that comparisons with array length in a loop get optimized away.
 (function ArrayLoopOptimizationTest() {
   var builder = new WasmModuleBuilder();
-  var array_index = builder.addArray(kWasmI32, true);
+  var array_index = builder.addArray(kWasmI32);
 
   // Increase these parameters to measure performance.
   let array_size = 10; // 100000000;
@@ -127,7 +125,7 @@ d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
       // TF should be able to eliminate the second type check, and return the
       // constant 1.
       kExprLocalGet, 0,
-      kGCPrefix, kExprRefTestDeprecated, sig])
+      kGCPrefix, kExprRefTest, sig])
     .exportFunc();
 
   var instance = builder.instantiate({m : { f: function () {} }});

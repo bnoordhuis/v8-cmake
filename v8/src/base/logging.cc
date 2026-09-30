@@ -23,6 +23,8 @@ void (*g_print_stack_trace)() = nullptr;
 
 void (*g_dcheck_function)(const char*, int, const char*) = DefaultDcheckHandler;
 
+void (*g_fatal_function)(const char*, int, const char*) = nullptr;
+
 std::string PrettyPrintChar(int ch) {
   std::ostringstream oss;
   switch (ch) {
@@ -53,10 +55,9 @@ std::string PrettyPrintChar(int ch) {
 }
 
 void DefaultDcheckHandler(const char* file, int line, const char* message) {
-#ifdef DEBUG
+#if V8_LOGGING_LEVEL == 2
   V8_Fatal(file, line, "Debug check failed: %s.", message);
 #else
-  // This case happens only for unit tests.
   V8_Fatal("Debug check failed: %s.", message);
 #endif
 }
@@ -67,8 +68,57 @@ void SetPrintStackTrace(void (*print_stack_trace)()) {
   g_print_stack_trace = print_stack_trace;
 }
 
+void PrintStackTraceIfAvailable() {
+  if (g_print_stack_trace) g_print_stack_trace();
+}
+
 void SetDcheckFunction(void (*dcheck_function)(const char*, int, const char*)) {
   g_dcheck_function = dcheck_function ? dcheck_function : &DefaultDcheckHandler;
+}
+
+void SetFatalFunction(void (*fatal_function)(const char*, int, const char*)) {
+  g_fatal_function = fatal_function;
+}
+
+void FatalOOM(OOMType type, const char* msg) {
+  // Instead of directly aborting here with a message, it could make sense to
+  // call a global callback function that would then in turn call (the
+  // equivalent of) V8::FatalProcessOutOfMemory. This way, calling this
+  // function directly would not bypass any OOM handler installed by the
+  // embedder. We might still want to keep a function like this though that
+  // contains the fallback implementation if no callback has been installed.
+
+  const char* type_str = type == OOMType::kProcess ? "process" : "JavaScript";
+  OS::PrintError("\n\n#\n# Fatal %s out of memory: %s\n#", type_str, msg);
+
+  v8::base::PrintStackTraceIfAvailable();
+
+  fflush(stderr);
+  if (FatalErrorsWithNoSecurityImpactShouldExit()) {
+    OS::ExitProcess(-1);
+  } else {
+    OS::Abort();
+  }
+}
+
+void FatalNoSecurityImpact(const char* format, ...) {
+  OS::PrintError("\n\n#\n# Fatal error with no security impact:\n# ");
+
+  va_list arguments;
+  va_start(arguments, format);
+  v8::base::OS::VPrintError(format, arguments);
+  va_end(arguments);
+
+  OS::PrintError("\n#\n");
+
+  v8::base::PrintStackTraceIfAvailable();
+
+  fflush(stderr);
+  if (FatalErrorsWithNoSecurityImpactShouldExit()) {
+    OS::ExitProcess(-1);
+  } else {
+    OS::Abort();
+  }
 }
 
 // Define specialization to pretty print characters (escaping non-printable
@@ -134,7 +184,7 @@ class FailureMessage {
 
 }  // namespace
 
-#ifdef DEBUG
+#if V8_LOGGING_LEVEL == 2
 void V8_Fatal(const char* file, int line, const char* format, ...) {
 #else
 void V8_Fatal(const char* format, ...) {
@@ -148,25 +198,69 @@ void V8_Fatal(const char* format, ...) {
   FailureMessage message(format, arguments);
   va_end(arguments);
 
+  if (v8::base::g_fatal_function != nullptr) {
+    v8::base::g_fatal_function(file, line, message.message_);
+  }
+
   fflush(stdout);
   fflush(stderr);
+
   // Print the formatted message to stdout without cropping the output.
-  v8::base::OS::PrintError("\n\n#\n# Fatal error in %s, line %d\n# ", file,
-                           line);
+  if (v8::base::ControlledCrashesAreHarmless()) {
+    // In this case, instead of crashing the process will be terminated
+    // normally by OS::Abort. Make this clear in the output printed to stderr.
+#if V8_LOGGING_LEVEL == 2
+    v8::base::OS::PrintError(
+        "\n\n#\n# Safely terminating process due to error in %s, line %d\n# ",
+        file, line);
+#else
+    v8::base::OS::PrintError("\n\n#\n# Safely terminating process\n# ");
+#endif
+    // Also prefix the error message (printed below). This has two purposes:
+    // (1) it makes it clear that this error is deemed "safe" (2) it causes
+    // fuzzers that pattern-match on stderr output to ignore these failures.
+    v8::base::OS::PrintError("The following harmless error was encountered: ");
+  } else {
+#if V8_LOGGING_LEVEL == 2
+    v8::base::OS::PrintError("\n\n#\n# Fatal error in %s, line %d\n# ", file,
+                             line);
+#else
+    v8::base::OS::PrintError("\n\n#\n# Fatal error\n# ");
+#endif
+  }
 
   // Print the error message.
   va_start(arguments, format);
   v8::base::OS::VPrintError(format, arguments);
   va_end(arguments);
+
   // Print the message object's address to force stack allocation.
   v8::base::OS::PrintError("\n#\n#\n#\n#FailureMessage Object: %p", &message);
 
-  if (v8::base::g_print_stack_trace) v8::base::g_print_stack_trace();
+  v8::base::PrintStackTraceIfAvailable();
 
   fflush(stderr);
   v8::base::OS::Abort();
 }
 
+#if V8_LOGGING_LEVEL == 2
 void V8_Dcheck(const char* file, int line, const char* message) {
+#else
+void V8_Dcheck(const char* message) {
+  const char* file = "";
+  int line = 0;
+#endif
+  if (v8::base::DcheckFailuresAreIgnored()) {
+    // In this mode, DCHECK failures don't lead to process termination.
+#if V8_LOGGING_LEVEL == 2
+    v8::base::OS::PrintError(
+        "# Ignoring debug check failure in %s, line %d: %s\n", file, line,
+        message);
+#else
+    v8::base::OS::PrintError("# Ignoring debug check failure: %s\n", message);
+#endif
+    return;
+  }
+
   v8::base::g_dcheck_function(file, line, message);
 }

@@ -23,10 +23,9 @@ namespace bits {
 
 // CountPopulation(value) returns the number of bits set in |value|.
 template <typename T>
-constexpr inline
-    typename std::enable_if<std::is_unsigned<T>::value && sizeof(T) <= 8,
-                            unsigned>::type
-    CountPopulation(T value) {
+constexpr inline unsigned CountPopulation(T value)
+  requires(std::is_unsigned_v<T> && sizeof(T) <= 8)
+{
   static_assert(sizeof(T) <= 8);
 #if V8_HAS_BUILTIN_POPCOUNT
   return sizeof(T) == 8 ? __builtin_popcountll(static_cast<uint64_t>(value))
@@ -98,10 +97,9 @@ inline constexpr std::make_signed_t<T> Signed(T value) {
 // significant 1 bit in |value| if |value| is non-zero, otherwise it returns
 // {sizeof(T) * 8}.
 template <typename T, unsigned bits = sizeof(T) * 8>
-inline constexpr
-    typename std::enable_if<std::is_unsigned<T>::value && sizeof(T) <= 8,
-                            unsigned>::type
-    CountLeadingZeros(T value) {
+inline constexpr unsigned CountLeadingZeros(T value)
+  requires(std::is_unsigned_v<T> && sizeof(T) <= 8)
+{
   static_assert(bits > 0, "invalid instantiation");
 #if V8_HAS_BUILTIN_CLZ
   return value == 0
@@ -143,10 +141,9 @@ constexpr unsigned CountLeadingSignBits(T value) {
 // See CountTrailingZerosNonZero for an optimized version for the case that
 // |value| is guaranteed to be non-zero.
 template <typename T, unsigned bits = sizeof(T) * 8>
-inline constexpr
-    typename std::enable_if<std::is_integral<T>::value && sizeof(T) <= 8,
-                            unsigned>::type
-    CountTrailingZeros(T value) {
+inline constexpr unsigned CountTrailingZeros(T value)
+  requires(std::is_integral_v<T> && sizeof(T) <= 8)
+{
 #if V8_HAS_BUILTIN_CTZ
   return value == 0 ? bits
                     : bits == 64 ? __builtin_ctzll(static_cast<uint64_t>(value))
@@ -155,7 +152,7 @@ inline constexpr
   // Fall back to popcount (see "Hacker's Delight" by Henry S. Warren, Jr.),
   // chapter 5-4. On x64, since is faster than counting in a loop and faster
   // than doing binary search.
-  using U = typename std::make_unsigned<T>::type;
+  using U = typename std::make_unsigned_t<T>;
   U u = value;
   return CountPopulation(static_cast<U>(~u & (u - 1u)));
 #endif
@@ -173,10 +170,9 @@ inline constexpr unsigned CountTrailingZeros64(uint64_t value) {
 // behavior is undefined.
 // See CountTrailingZeros for an alternative version that allows |value| == 0.
 template <typename T, unsigned bits = sizeof(T) * 8>
-inline constexpr
-    typename std::enable_if<std::is_integral<T>::value && sizeof(T) <= 8,
-                            unsigned>::type
-    CountTrailingZerosNonZero(T value) {
+inline constexpr unsigned CountTrailingZerosNonZero(T value)
+  requires(std::is_integral_v<T> && sizeof(T) <= 8)
+{
   DCHECK_NE(0, value);
 #if V8_HAS_BUILTIN_CTZ
   return bits == 64 ? __builtin_ctzll(static_cast<uint64_t>(value))
@@ -187,17 +183,18 @@ inline constexpr
 }
 
 // Returns true iff |value| is a power of 2.
-template <typename T,
-          typename = typename std::enable_if<std::is_integral<T>::value ||
-                                             std::is_enum<T>::value>::type>
-constexpr inline bool IsPowerOfTwo(T value) {
+template <typename T>
+constexpr inline bool IsPowerOfTwo(T value)
+  requires(std::is_integral_v<T> || std::is_enum_v<T>)
+{
   return value > 0 && (value & (value - 1)) == 0;
 }
 
 // Identical to {CountTrailingZeros}, but only works for powers of 2.
-template <typename T,
-          typename = typename std::enable_if<std::is_integral<T>::value>::type>
-inline constexpr int WhichPowerOfTwo(T value) {
+template <typename T>
+inline constexpr int WhichPowerOfTwo(T value)
+  requires std::is_integral_v<T>
+{
   DCHECK(IsPowerOfTwo(value));
 #if V8_HAS_BUILTIN_CTZ
   static_assert(sizeof(T) <= 8);
@@ -207,7 +204,7 @@ inline constexpr int WhichPowerOfTwo(T value) {
   // Fall back to popcount (see "Hacker's Delight" by Henry S. Warren, Jr.),
   // chapter 5-4. On x64, since is faster than counting in a loop and faster
   // than doing binary search.
-  using U = typename std::make_unsigned<T>::type;
+  using U = typename std::make_unsigned_t<T>;
   U u = value;
   return CountPopulation(static_cast<U>(u - 1));
 #endif
@@ -219,11 +216,40 @@ inline constexpr int WhichPowerOfTwo(T value) {
 // 0x80000000u. Uses computation based on leading zeros if we have compiler
 // support for that. Falls back to the implementation from "Hacker's Delight" by
 // Henry S. Warren, Jr., figure 3-3, page 48, where the function is called clp2.
-V8_BASE_EXPORT uint32_t RoundUpToPowerOfTwo32(uint32_t value);
+V8_BASE_EXPORT constexpr uint32_t RoundUpToPowerOfTwo32(uint32_t value) {
+  DCHECK_LE(value, uint32_t{1} << 31);
+  if (value) --value;
+// Use computation based on leading zeros if we have compiler support for that.
+#if V8_HAS_BUILTIN_CLZ || V8_CC_MSVC
+  return 1u << (32 - CountLeadingZeros(value));
+#else
+  value |= value >> 1;
+  value |= value >> 2;
+  value |= value >> 4;
+  value |= value >> 8;
+  value |= value >> 16;
+  return value + 1;
+#endif
+}
 // Same for 64 bit integers. |value| must be <= 2^63
-V8_BASE_EXPORT uint64_t RoundUpToPowerOfTwo64(uint64_t value);
+V8_BASE_EXPORT constexpr uint64_t RoundUpToPowerOfTwo64(uint64_t value) {
+  DCHECK_LE(value, uint64_t{1} << 63);
+  if (value) --value;
+// Use computation based on leading zeros if we have compiler support for that.
+#if V8_HAS_BUILTIN_CLZ
+  return uint64_t{1} << (64 - CountLeadingZeros(value));
+#else
+  value |= value >> 1;
+  value |= value >> 2;
+  value |= value >> 4;
+  value |= value >> 8;
+  value |= value >> 16;
+  value |= value >> 32;
+  return value + 1;
+#endif
+}
 // Same for size_t integers.
-inline size_t RoundUpToPowerOfTwo(size_t value) {
+inline constexpr size_t RoundUpToPowerOfTwo(size_t value) {
   if (sizeof(size_t) == sizeof(uint64_t)) {
     return RoundUpToPowerOfTwo64(value);
   } else {
@@ -236,13 +262,12 @@ inline size_t RoundUpToPowerOfTwo(size_t value) {
 // RoundDownToPowerOfTwo32(value) returns the greatest power of two which is
 // less than or equal to |value|. If you pass in a |value| that is already a
 // power of two, it is returned as is.
-inline uint32_t RoundDownToPowerOfTwo32(uint32_t value) {
+inline constexpr uint32_t RoundDownToPowerOfTwo32(uint32_t value) {
   if (value > 0x80000000u) return 0x80000000u;
   uint32_t result = RoundUpToPowerOfTwo32(value);
   if (result > value) result >>= 1;
   return result;
 }
-
 
 // Precondition: 0 <= shift < 32
 inline constexpr uint32_t RotateRight32(uint32_t value, uint32_t shift) {
@@ -263,6 +288,16 @@ inline constexpr uint64_t RotateRight64(uint64_t value, uint64_t shift) {
 inline constexpr uint64_t RotateLeft64(uint64_t value, uint64_t shift) {
   return (value << shift) | (value >> ((64 - shift) & 63));
 }
+
+// Clear the LSB of a value using Brian Kernighan's method.
+template <typename T>
+inline constexpr int ClearLsb(T value)
+  requires std::is_integral_v<T>
+{
+  return value & (value - T{1});
+}
+static_assert(ClearLsb(0) == 0);
+static_assert(ClearLsb(0b10010) == 0b10000);
 
 // SignedAddOverflow32(lhs,rhs,val) performs a signed summation of |lhs| and
 // |rhs| and stores the result into the variable pointed to by |val| and
@@ -448,6 +483,37 @@ inline int32_t WraparoundNeg32(int32_t x) {
   return static_cast<int32_t>(-static_cast<uint32_t>(x));
 }
 
+inline constexpr uint16_t ByteReverse16(uint16_t value) {
+#if V8_HAS_BUILTIN_BSWAP16
+  return __builtin_bswap16(value);
+#else
+  return value << 8 | (value >> 8 & 0x00FF);
+#endif
+}
+
+inline constexpr uint32_t ByteReverse32(uint32_t value) {
+#if V8_HAS_BUILTIN_BSWAP32
+  return __builtin_bswap32(value);
+#else
+  return value << 24 | ((value << 8) & 0x00FF0000) |
+         ((value >> 8) & 0x0000FF00) | ((value >> 24) & 0x00000FF);
+#endif
+}
+
+inline constexpr uint64_t ByteReverse64(uint64_t value) {
+#if V8_HAS_BUILTIN_BSWAP64
+  return __builtin_bswap64(value);
+#else
+  return value << 56 | ((value << 40) & 0x00FF000000000000) |
+         ((value << 24) & 0x0000FF0000000000) |
+         ((value << 8) & 0x000000FF00000000) |
+         ((value >> 8) & 0x00000000FF000000) |
+         ((value >> 24) & 0x0000000000FF0000) |
+         ((value >> 40) & 0x000000000000FF00) |
+         ((value >> 56) & 0x00000000000000FF);
+#endif
+}
+
 // SignedSaturatedAdd64(lhs, rhs) adds |lhs| and |rhs|,
 // checks and returns the result.
 V8_BASE_EXPORT int64_t SignedSaturatedAdd64(int64_t lhs, int64_t rhs);
@@ -455,6 +521,11 @@ V8_BASE_EXPORT int64_t SignedSaturatedAdd64(int64_t lhs, int64_t rhs);
 // SignedSaturatedSub64(lhs, rhs) subtracts |lhs| by |rhs|,
 // checks and returns the result.
 V8_BASE_EXPORT int64_t SignedSaturatedSub64(int64_t lhs, int64_t rhs);
+
+template <class T>
+V8_BASE_EXPORT constexpr int BitWidth(T x) {
+  return std::numeric_limits<T>::digits - CountLeadingZeros(x);
+}
 
 }  // namespace bits
 }  // namespace base

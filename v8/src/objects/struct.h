@@ -16,27 +16,44 @@ namespace internal {
 
 class StructBodyDescriptor;
 
-#include "torque-generated/src/objects/struct-tq.inc"
-
 // An abstract superclass, a marker class really, for simple structure classes.
 // It doesn't carry any functionality but allows struct classes to be
 // identified in the type system.
-class Struct : public TorqueGeneratedStruct<Struct, HeapObject> {
- public:
-  void BriefPrintDetails(std::ostream& os);
-  static_assert(kHeaderSize == HeapObject::kHeaderSize);
-
-  TQ_OBJECT_CONSTRUCTORS(Struct)
-};
-
-class Tuple2 : public TorqueGeneratedTuple2<Tuple2, Struct> {
+V8_OBJECT class Struct : public HeapObject {
  public:
   void BriefPrintDetails(std::ostream& os);
 
   using BodyDescriptor = StructBodyDescriptor;
+} V8_OBJECT_END;
+static_assert(sizeof(Struct) == sizeof(HeapObject));
 
-  TQ_OBJECT_CONSTRUCTORS(Tuple2)
-};
+V8_OBJECT class Tuple2 : public Struct {
+ public:
+  void BriefPrintDetails(std::ostream& os);
+
+  inline Tagged<Object> value1() const;
+  inline void set_value1(Tagged<Object> value,
+                         WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+  inline Tagged<Object> value1(RelaxedLoadTag) const;
+  inline void set_value1(Tagged<Object> value, RelaxedStoreTag,
+                         WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+
+  inline Tagged<Object> value2() const;
+  inline void set_value2(Tagged<Object> value,
+                         WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+  inline Tagged<Object> value2(RelaxedLoadTag) const;
+  inline void set_value2(Tagged<Object> value, RelaxedStoreTag,
+                         WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+
+  DECL_VERIFIER(Tuple2)
+  DECL_PRINTER(Tuple2)
+
+ private:
+  friend class CodeStubAssembler;
+  friend class TorqueGeneratedTuple2Asserts;
+  TaggedMember<Object> value1_;
+  TaggedMember<Object> value2_;
+} V8_OBJECT_END;
 
 // Support for JavaScript accessors: A pair of a getter and a setter. Each
 // accessor can either be
@@ -44,50 +61,73 @@ class Tuple2 : public TorqueGeneratedTuple2<Tuple2, Struct> {
 //   * a FunctionTemplateInfo: a real (lazy) accessor
 //   * undefined: considered an accessor by the spec, too, strangely enough
 //   * null: an accessor which has not been set
-class AccessorPair : public TorqueGeneratedAccessorPair<AccessorPair, Struct> {
+V8_OBJECT class AccessorPair : public Struct {
  public:
-  NEVER_READ_ONLY_SPACE
-  static Handle<AccessorPair> Copy(Isolate* isolate, Handle<AccessorPair> pair);
+  static DirectHandle<AccessorPair> Copy(Isolate* isolate,
+                                         DirectHandle<AccessorPair> pair);
 
-  inline Object get(AccessorComponent component);
-  inline void set(AccessorComponent component, Object value);
-  inline void set(AccessorComponent component, Object value,
+  inline Tagged<Object> get(AccessorComponent component);
+  inline void set(AccessorComponent component, Tagged<Object> value);
+  inline void set(AccessorComponent component, Tagged<Object> value,
                   ReleaseStoreTag tag);
 
-  using TorqueGeneratedAccessorPair::getter;
-  using TorqueGeneratedAccessorPair::set_getter;
-  DECL_RELEASE_ACQUIRE_ACCESSORS(getter, Object)
+  inline Tagged<Object> getter() const;
+  inline void set_getter(Tagged<Object> value,
+                         WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+  inline Tagged<Object> getter(AcquireLoadTag) const;
+  inline void set_getter(Tagged<Object> value, ReleaseStoreTag,
+                         WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
 
-  using TorqueGeneratedAccessorPair::set_setter;
-  using TorqueGeneratedAccessorPair::setter;
-  DECL_RELEASE_ACQUIRE_ACCESSORS(setter, Object)
+  inline Tagged<Object> setter() const;
+  inline void set_setter(Tagged<Object> value,
+                         WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+  inline Tagged<Object> setter(AcquireLoadTag) const;
+  inline void set_setter(Tagged<Object> value, ReleaseStoreTag,
+                         WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
 
   // Note: Returns undefined if the component is not set.
-  static Handle<Object> GetComponent(Isolate* isolate,
-                                     Handle<NativeContext> native_context,
-                                     Handle<AccessorPair> accessor_pair,
-                                     AccessorComponent component);
+  static Handle<JSAny> GetComponent(Isolate* isolate,
+                                    DirectHandle<NativeContext> native_context,
+                                    DirectHandle<AccessorPair> accessor_pair,
+                                    AccessorComponent component);
 
   // Set both components, skipping arguments which are a JavaScript null.
-  inline void SetComponents(Object getter, Object setter);
+  inline void SetComponents(Tagged<Object> getter, Tagged<Object> setter);
 
-  inline bool Equals(Object getter_value, Object setter_value);
+  inline bool Equals(Tagged<Object> getter_value, Tagged<Object> setter_value);
 
-  using BodyDescriptor = StructBodyDescriptor;
+  DECL_VERIFIER(AccessorPair)
+  DECL_PRINTER(AccessorPair)
 
-  TQ_OBJECT_CONSTRUCTORS(AccessorPair)
-};
+ private:
+  friend class CodeStubAssembler;
+  friend class V8HeapExplorer;
+  friend class TorqueGeneratedAccessorPairAsserts;
 
-class ClassPositions
-    : public TorqueGeneratedClassPositions<ClassPositions, Struct> {
+  TaggedMember<Object> getter_;
+  TaggedMember<Object> setter_;
+} V8_OBJECT_END;
+
+V8_OBJECT class ClassPositions : public Struct {
  public:
+  inline int start() const;
+  inline void set_start(int value);
+
+  inline int end() const;
+  inline void set_end(int value);
+
   // Dispatched behavior.
   void BriefPrintDetails(std::ostream& os);
 
-  using BodyDescriptor = StructBodyDescriptor;
+  DECL_VERIFIER(ClassPositions)
+  DECL_PRINTER(ClassPositions)
 
-  TQ_OBJECT_CONSTRUCTORS(ClassPositions)
-};
+ private:
+  friend class TorqueGeneratedClassPositionsAsserts;
+
+  TaggedMember<Smi> start_;
+  TaggedMember<Smi> end_;
+} V8_OBJECT_END;
 
 }  // namespace internal
 }  // namespace v8

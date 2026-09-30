@@ -27,27 +27,19 @@ PreParserIdentifier GetIdentifierHelper(Scanner* scanner,
                                         const AstRawString* string,
                                         AstValueFactory* avf) {
   // These symbols require slightly different treatement:
-  // - regular keywords (async, await, etc.; treated in 1st switch.)
+  // - regular keywords (async, etc.; treated in 1st switch.)
   // - 'contextual' keywords (and may contain escaped; treated in 2nd switch.)
   // - 'contextual' keywords, but may not be escaped (3rd switch).
   switch (scanner->current_token()) {
-    case Token::AWAIT:
-      return PreParserIdentifier::Await();
-    case Token::ASYNC:
+    case Token::kAsync:
       return PreParserIdentifier::Async();
-    case Token::PRIVATE_NAME:
+    case Token::kPrivateName:
       return PreParserIdentifier::PrivateName();
     default:
       break;
   }
   if (string == avf->constructor_string()) {
     return PreParserIdentifier::Constructor();
-  }
-  if (string == avf->name_string()) {
-    return PreParserIdentifier::Name();
-  }
-  if (scanner->literal_contains_escapes()) {
-    return PreParserIdentifier::Default();
   }
   if (string == avf->eval_string()) {
     return PreParserIdentifier::Eval();
@@ -81,11 +73,12 @@ PreParser::PreParseResult PreParser::PreParseProgram() {
   // the global scope.
   if (flags().is_module()) scope = NewModuleScope(scope);
 
-  FunctionState top_scope(&function_state_, &scope_, scope);
+  FunctionState top_scope(&function_state_, &scope_, scope,
+                          &has_generator_in_scope_chain_);
   original_scope_ = scope_;
   int start_position = peek_position();
   PreParserScopedStatementList body(pointer_buffer());
-  ParseStatementList(&body, Token::EOS);
+  ParseStatementList(&body, Token::kEos);
   CheckConflictingVarDeclarations(scope);
   original_scope_ = nullptr;
   if (stack_overflow()) return kPreParseStackOverflow;
@@ -104,9 +97,10 @@ void PreParserFormalParameters::ValidateStrictMode(PreParser* preparser) const {
 }
 
 PreParser::PreParseResult PreParser::PreParseFunction(
-    const AstRawString* function_name, FunctionKind kind,
-    FunctionSyntaxKind function_syntax_kind, DeclarationScope* function_scope,
-    int* use_counts, ProducedPreparseData** produced_preparse_data) {
+    int function_literal_id, const AstRawString* function_name,
+    FunctionKind kind, FunctionSyntaxKind function_syntax_kind,
+    DeclarationScope* function_scope, int* use_counts,
+    ProducedPreparseData** produced_preparse_data) {
   DCHECK_EQ(FUNCTION_SCOPE, function_scope->scope_type());
   use_counts_ = use_counts;
 #ifdef DEBUG
@@ -115,17 +109,15 @@ PreParser::PreParseResult PreParser::PreParseFunction(
 
   PreParserFormalParameters formals(function_scope);
 
-  // In the preparser, we use the function literal ids to count how many
-  // FunctionLiterals were encountered. The PreParser doesn't actually persist
-  // FunctionLiterals, so there IDs don't matter.
-  ResetFunctionLiteralId();
+  ResetInfoId(function_literal_id);
 
   // The caller passes the function_scope which is not yet inserted into the
   // scope stack. All scopes above the function_scope are ignored by the
   // PreParser.
   DCHECK_NULL(function_state_);
   DCHECK_NULL(scope_);
-  FunctionState function_state(&function_state_, &scope_, function_scope);
+  FunctionState function_state(&function_state_, &scope_, function_scope,
+                               &has_generator_in_scope_chain_);
 
   // Start collecting data for a new function which might contain skippable
   // functions.
@@ -147,7 +139,7 @@ PreParser::PreParseResult PreParser::PreParseFunction(
       BuildParameterInitializationBlock(formals);
     }
 
-    Expect(Token::RPAREN);
+    Expect(Token::kRightParen);
     int formals_end_position = scanner()->location().end_pos;
 
     CheckArityRestrictions(formals.arity, kind, formals.has_rest,
@@ -155,7 +147,7 @@ PreParser::PreParseResult PreParser::PreParseFunction(
                            formals_end_position);
   }
 
-  Expect(Token::LBRACE);
+  Expect(Token::kLeftBrace);
   DeclarationScope* inner_scope = function_scope;
 
   if (!formals.is_simple) {
@@ -165,7 +157,7 @@ PreParser::PreParseResult PreParser::PreParseFunction(
 
   {
     BlockState block_state(&scope_, inner_scope);
-    ParseStatementListAndLogFunction(&formals);
+    ParseStatementListAndLogFunction(function_literal_id, &formals);
   }
 
   bool allow_duplicate_parameters = false;
@@ -189,8 +181,9 @@ PreParser::PreParseResult PreParser::PreParseFunction(
       if (inner_scope->FinalizeBlockScope() != nullptr) {
         const AstRawString* conflict = inner_scope->FindVariableDeclaredIn(
             function_scope, VariableMode::kLastLexicalVariableMode);
-        if (conflict != nullptr)
+        if (conflict != nullptr) {
           ReportVarRedeclarationIn(conflict, inner_scope);
+        }
       }
     }
   }
@@ -204,7 +197,7 @@ PreParser::PreParseResult PreParser::PreParseFunction(
   } else if (has_error()) {
     DCHECK(pending_error_handler()->has_pending_error());
   } else {
-    DCHECK_EQ(Token::RBRACE, scanner()->peek());
+    DCHECK_EQ(Token::kRightBrace, scanner()->peek());
 
     if (!IsArrowFunction(kind)) {
       // Validate parameter names. We can do this only after parsing the
@@ -282,7 +275,10 @@ PreParser::Expression PreParser::ParseFunctionLiteral(
 
   DeclarationScope* function_scope = NewFunctionScope(kind);
   function_scope->SetLanguageMode(language_mode);
-  int func_id = GetNextFunctionLiteralId();
+  if (function_syntax_kind == FunctionSyntaxKind::kDeclaration) {
+    function_scope->set_is_hoisted_in_context(true);
+  }
+  int function_literal_id = GetNextInfoId();
   bool skippable_function = false;
 
   // Start collecting data for a new function which might contain skippable
@@ -295,9 +291,10 @@ PreParser::Expression PreParser::ParseFunctionLiteral(
       preparse_data_builder_scope.Start(function_scope);
     }
 
-    FunctionState function_state(&function_state_, &scope_, function_scope);
+    FunctionState function_state(&function_state_, &scope_, function_scope,
+                                 &has_generator_in_scope_chain_);
 
-    Expect(Token::LPAREN);
+    Expect(Token::kLeftParen);
     int start_position = position();
     function_scope->set_start_position(start_position);
     PreParserFormalParameters formals(function_scope);
@@ -306,13 +303,13 @@ PreParser::Expression PreParser::ParseFunctionLiteral(
       ParseFormalParameterList(&formals);
       if (formals_scope.has_duplicate()) formals.set_has_duplicate();
     }
-    Expect(Token::RPAREN);
+    Expect(Token::kRightParen);
     int formals_end_position = scanner()->location().end_pos;
 
     CheckArityRestrictions(formals.arity, kind, formals.has_rest,
                            start_position, formals_end_position);
 
-    Expect(Token::LBRACE);
+    Expect(Token::kLeftBrace);
 
     // Parse function body.
     PreParserScopedStatementList body(pointer_buffer());
@@ -336,7 +333,7 @@ PreParser::Expression PreParser::ParseFunctionLiteral(
     if (skippable_function) {
       preparse_data_builder_scope.SetSkippableFunction(
           function_scope, formals.function_length,
-          GetLastFunctionLiteralId() - func_id);
+          GetLastInfoId() - function_literal_id);
     }
   }
 
@@ -363,16 +360,17 @@ PreParser::Expression PreParser::ParseFunctionLiteral(
 }
 
 void PreParser::ParseStatementListAndLogFunction(
-    PreParserFormalParameters* formals) {
+    int function_literal_id, PreParserFormalParameters* formals) {
   PreParserScopedStatementList body(pointer_buffer());
-  ParseStatementList(&body, Token::RBRACE);
+  ParseStatementList(&body, Token::kRightBrace);
 
   // Position right after terminal '}'.
-  DCHECK_IMPLIES(!has_error(), scanner()->peek() == Token::RBRACE);
+  DCHECK_IMPLIES(!has_error(), scanner()->peek() == Token::kRightBrace);
   int body_end = scanner()->peek_location().end_pos;
   DCHECK_EQ(this->scope()->is_function_scope(), formals->is_simple);
   log_.LogFunction(body_end, formals->num_parameters(),
-                   formals->function_length, GetLastFunctionLiteralId());
+                   formals->function_length,
+                   GetLastInfoId() - function_literal_id);
 }
 
 PreParserBlock PreParser::BuildParameterInitializationBlock(

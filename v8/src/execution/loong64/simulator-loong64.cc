@@ -26,6 +26,10 @@
 #include "src/runtime/runtime-utils.h"
 #include "src/utils/ostreams.h"
 
+#if V8_ENABLE_WEBASSEMBLY
+#include "src/trap-handler/trap-handler-simulator.h"
+#endif  // V8_ENABLE_WEBASSEMBLY
+
 namespace v8 {
 namespace internal {
 
@@ -284,9 +288,9 @@ void Loong64Debugger::PrintAllRegsIncludingFPU() {
 }
 
 void Loong64Debugger::Debug() {
-  if (v8_flags.correctness_fuzzer_suppressions) {
-    PrintF("Debugger disabled for differential fuzzing.\n");
-    return;
+  if (!v8_flags.simulator_debugger) {
+    // Debugger not enabled; crash instead.
+    UNREACHABLE();
   }
   intptr_t last_pc = -1;
   bool done = false;
@@ -409,10 +413,10 @@ void Loong64Debugger::Debug() {
           int64_t value;
           StdoutStream os;
           if (GetValue(arg1, &value)) {
-            Object obj(value);
+            Tagged<Object> obj(value);
             os << arg1 << ": \n";
 #ifdef DEBUG
-            obj.Print(os);
+            Print(obj, os);
             os << "\n";
 #else
             os << Brief(obj) << "\n";
@@ -455,16 +459,16 @@ void Loong64Debugger::Debug() {
         while (cur < end) {
           PrintF("  0x%012" PRIxPTR " :  0x%016" PRIx64 "  %14" PRId64 " ",
                  reinterpret_cast<intptr_t>(cur), *cur, *cur);
-          Object obj(*cur);
+          Tagged<Object> obj(*cur);
           Heap* current_heap = sim_->isolate_->heap();
           if (!skip_obj_print) {
-            if (obj.IsSmi() ||
-                IsValidHeapObject(current_heap, HeapObject::cast(obj))) {
+            if (IsSmi(obj) ||
+                IsValidHeapObject(current_heap, Cast<HeapObject>(obj))) {
               PrintF(" (");
-              if (obj.IsSmi()) {
+              if (IsSmi(obj)) {
                 PrintF("smi %d", Smi::ToInt(obj));
               } else {
-                obj.ShortPrint();
+                ShortPrint(obj);
               }
               PrintF(")");
             }
@@ -799,8 +803,9 @@ void Simulator::CheckICache(base::CustomMatcherHashMap* i_cache,
 Simulator::Simulator(Isolate* isolate) : isolate_(isolate) {
   // Set up simulator support first. Some of this information is needed to
   // setup the architecture state.
-  stack_size_ = v8_flags.sim_stack_size * KB;
-  stack_ = reinterpret_cast<char*>(base::Malloc(stack_size_));
+  size_t stack_size = AllocatedStackSize();
+  stack_ = reinterpret_cast<uintptr_t>(new uint8_t[stack_size]);
+  stack_limit_ = stack_ + kStackProtectionSize;
   pc_modified_ = false;
   icount_ = 0;
   break_count_ = 0;
@@ -824,18 +829,24 @@ Simulator::Simulator(Isolate* isolate) : isolate_(isolate) {
   // The sp is initialized to point to the bottom (high address) of the
   // allocated stack area. To be safe in potential stack underflows we leave
   // some buffer below.
-  registers_[sp] = reinterpret_cast<int64_t>(stack_) + stack_size_ - 64;
+  registers_[sp] = StackBase();
   // The ra and pc are initialized to a known bad value that will cause an
   // access violation if the simulator ever tries to execute it.
   registers_[pc] = bad_ra;
   registers_[ra] = bad_ra;
 
   last_debugger_input_ = nullptr;
+
+  global_monitor_ = GlobalMonitor::Get();
+  global_monitor_->PrependLinkedAddress(&global_monitor_thread_);
+
+  // Enabling deadlock detection while simulating is too slow.
+  SetMutexDeadlockDetectionMode(absl::OnDeadlockCycle::kIgnore);
 }
 
 Simulator::~Simulator() {
-  GlobalMonitor::Get()->RemoveLinkedAddress(&global_monitor_thread_);
-  base::Free(stack_);
+  global_monitor_->RemoveLinkedAddress(&global_monitor_thread_);
+  delete[] reinterpret_cast<uint8_t*>(stack_);
 }
 
 // Get the active Simulator for the current thread.
@@ -853,7 +864,7 @@ Simulator* Simulator::current(Isolate* isolate) {
   return sim;
 }
 
-#define FloatPoint_Covert_F32(func)                  \
+#define FLOATPOINT_CONVERT_F32(func)                 \
   float Simulator::func(float value) {               \
     float result = std::func(value);                 \
     if (std::isnan(result)) {                        \
@@ -864,8 +875,8 @@ Simulator* Simulator::current(Isolate* isolate) {
     }                                                \
     return result;                                   \
   }
-#define FloatPoint_Covert_F64(func)                  \
-  FloatPoint_Covert_F32(func)                        \
+
+#define FLOATPOINT_CONVERT_F64(func)                 \
   double Simulator::func(double value) {             \
     double result = std::func(value);                \
     if (std::isnan(result)) {                        \
@@ -877,11 +888,52 @@ Simulator* Simulator::current(Isolate* isolate) {
     return result;                                   \
   }
 
-FloatPoint_Covert_F64(ceil)
-FloatPoint_Covert_F64(floor)
-FloatPoint_Covert_F64(trunc)
-#undef FloatPoint_Covert_F32
-#undef FloatPoint_Covert_F64
+FLOATPOINT_CONVERT_F32(ceil)
+FLOATPOINT_CONVERT_F32(floor)
+FLOATPOINT_CONVERT_F32(trunc)
+FLOATPOINT_CONVERT_F64(ceil)
+FLOATPOINT_CONVERT_F64(floor)
+FLOATPOINT_CONVERT_F64(trunc)
+#undef FLOATPOINT_CONVERT_F32
+#undef FLOATPOINT_CONVERT_F64
+
+float Simulator::roundeven(float value) {
+  if (std::isnan(value)) {
+    float result;
+    uint32_t q_nan, nan;
+    nan = *reinterpret_cast<uint32_t*>(&value);
+    q_nan = nan | 0x400000;
+    *reinterpret_cast<uint32_t*>(&result) = q_nan;
+    return result;
+  }
+  float result = std::floor(value);
+  float error = value - result;
+  if ((-0.5 <= value) && (value < 0.0)) {
+    result = -0.0;
+  } else if ((error > 0.5) || ((error == 0.5) && (std::fmod(result, 2) != 0))) {
+    result++;
+  }
+  return result;
+}
+
+double Simulator::roundeven(double value) {
+  if (std::isnan(value)) {
+    double result;
+    uint64_t q_nan, nan;
+    nan = *reinterpret_cast<uint64_t*>(&value);
+    q_nan = nan | 0x8000000000000;
+    *reinterpret_cast<uint64_t*>(&result) = q_nan;
+    return result;
+  }
+  double result = std::floor(value);
+  double error = value - result;
+  if ((-0.5 <= value) && (value < 0.0)) {
+    result = -0.0;
+  } else if ((error > 0.5) || ((error == 0.5) && (std::fmod(result, 2) != 0))) {
+    result++;
+  }
+  return result;
+}
 
 // Sets the register in the architecture state. It will also deal with updating
 // Simulator internal state for special registers such as PC.
@@ -927,12 +979,12 @@ void Simulator::set_fpu_register_hi_word(int fpureg, int32_t value) {
 
 void Simulator::set_fpu_register_float(int fpureg, float value) {
   DCHECK((fpureg >= 0) && (fpureg < kNumFPURegisters));
-  *base::bit_cast<float*>(&FPUregisters_[fpureg]) = value;
+  memcpy(&FPUregisters_[fpureg], &value, sizeof(value));
 }
 
 void Simulator::set_fpu_register_double(int fpureg, double value) {
   DCHECK((fpureg >= 0) && (fpureg < kNumFPURegisters));
-  *base::bit_cast<double*>(&FPUregisters_[fpureg]) = value;
+  memcpy(&FPUregisters_[fpureg], &value, sizeof(value));
 }
 
 void Simulator::set_cf_register(int cfreg, bool value) {
@@ -985,12 +1037,12 @@ int32_t Simulator::get_fpu_register_hi_word(int fpureg) const {
 
 float Simulator::get_fpu_register_float(int fpureg) const {
   DCHECK((fpureg >= 0) && (fpureg < kNumFPURegisters));
-  return *base::bit_cast<float*>(const_cast<int64_t*>(&FPUregisters_[fpureg]));
+  return base::bit_cast<float>(get_fpu_register_word(fpureg));
 }
 
 double Simulator::get_fpu_register_double(int fpureg) const {
   DCHECK((fpureg >= 0) && (fpureg < kNumFPURegisters));
-  return *base::bit_cast<double*>(&FPUregisters_[fpureg]);
+  return base::bit_cast<double>(FPUregisters_[fpureg]);
 }
 
 bool Simulator::get_cf_register(int cfreg) const {
@@ -1272,9 +1324,9 @@ bool Simulator::set_fcsr_round64_error(float original, float rounded) {
 // For ftint instructions only
 void Simulator::round_according_to_fcsr(double toRound, double* rounded,
                                         int32_t* rounded_int) {
-  // 0 RN (round to nearest): Round a result to the nearest
+  // 0 RNE (round to nearest): Round a result to the nearest
   // representable value; if the result is exactly halfway between
-  // two representable values, round to zero.
+  // two representable values, round to even.
 
   // 1 RZ (round toward zero): Round a result to the closest
   // representable value whose absolute value is less than or
@@ -1283,40 +1335,34 @@ void Simulator::round_according_to_fcsr(double toRound, double* rounded,
   // 2 RP (round up, or toward +infinity): Round a result to the
   // next representable value up.
 
-  // 3 RN (round down, or toward −infinity): Round a result to
+  // 3 RM (round down, or toward -infinity): Round a result to
   // the next representable value down.
   // switch ((FCSR_ >> 8) & 3) {
   switch (FCSR_ & kFPURoundingModeMask) {
     case kRoundToNearest:
-      *rounded = floor(toRound + 0.5);
-      *rounded_int = static_cast<int32_t>(*rounded);
-      if ((*rounded_int & 1) != 0 && *rounded_int - toRound == 0.5) {
-        // If the number is halfway between two integers,
-        // round to the even one.
-        *rounded_int -= 1;
-        *rounded -= 1.;
-      }
+      *rounded = roundeven(toRound);
+      *rounded_int = base::saturated_cast<int32_t>(*rounded);
       break;
     case kRoundToZero:
       *rounded = trunc(toRound);
-      *rounded_int = static_cast<int32_t>(*rounded);
+      *rounded_int = base::saturated_cast<int32_t>(*rounded);
       break;
     case kRoundToPlusInf:
       *rounded = ceil(toRound);
-      *rounded_int = static_cast<int32_t>(*rounded);
+      *rounded_int = base::saturated_cast<int32_t>(*rounded);
       break;
     case kRoundToMinusInf:
       *rounded = floor(toRound);
-      *rounded_int = static_cast<int32_t>(*rounded);
+      *rounded_int = base::saturated_cast<int32_t>(*rounded);
       break;
   }
 }
 
 void Simulator::round64_according_to_fcsr(double toRound, double* rounded,
                                           int64_t* rounded_int) {
-  // 0 RN (round to nearest): Round a result to the nearest
+  // 0 RNE (round to nearest): Round a result to the nearest
   // representable value; if the result is exactly halfway between
-  // two representable values, round to zero.
+  // two representable values, round to even.
 
   // 1 RZ (round toward zero): Round a result to the closest
   // representable value whose absolute value is less than or.
@@ -1325,39 +1371,33 @@ void Simulator::round64_according_to_fcsr(double toRound, double* rounded,
   // 2 RP (round up, or toward +infinity): Round a result to the
   // next representable value up.
 
-  // 3 RN (round down, or toward −infinity): Round a result to
+  // 3 RM (round down, or toward -infinity): Round a result to
   // the next representable value down.
   switch (FCSR_ & kFPURoundingModeMask) {
     case kRoundToNearest:
-      *rounded = floor(toRound + 0.5);
-      *rounded_int = static_cast<int64_t>(*rounded);
-      if ((*rounded_int & 1) != 0 && *rounded_int - toRound == 0.5) {
-        // If the number is halfway between two integers,
-        // round to the even one.
-        *rounded_int -= 1;
-        *rounded -= 1.;
-      }
+      *rounded = roundeven(toRound);
+      *rounded_int = base::saturated_cast<int64_t>(*rounded);
       break;
     case kRoundToZero:
       *rounded = trunc(toRound);
-      *rounded_int = static_cast<int64_t>(*rounded);
+      *rounded_int = base::saturated_cast<int64_t>(*rounded);
       break;
     case kRoundToPlusInf:
       *rounded = ceil(toRound);
-      *rounded_int = static_cast<int64_t>(*rounded);
+      *rounded_int = base::saturated_cast<int64_t>(*rounded);
       break;
     case kRoundToMinusInf:
       *rounded = floor(toRound);
-      *rounded_int = static_cast<int64_t>(*rounded);
+      *rounded_int = base::saturated_cast<int64_t>(*rounded);
       break;
   }
 }
 
 void Simulator::round_according_to_fcsr(float toRound, float* rounded,
                                         int32_t* rounded_int) {
-  // 0 RN (round to nearest): Round a result to the nearest
+  // 0 RNE (round to nearest): Round a result to the nearest
   // representable value; if the result is exactly halfway between
-  // two representable values, round to zero.
+  // two representable values, round to even.
 
   // 1 RZ (round toward zero): Round a result to the closest
   // representable value whose absolute value is less than or
@@ -1366,39 +1406,33 @@ void Simulator::round_according_to_fcsr(float toRound, float* rounded,
   // 2 RP (round up, or toward +infinity): Round a result to the
   // next representable value up.
 
-  // 3 RN (round down, or toward −infinity): Round a result to
+  // 3 RM (round down, or toward -infinity): Round a result to
   // the next representable value down.
   switch (FCSR_ & kFPURoundingModeMask) {
     case kRoundToNearest:
-      *rounded = floor(toRound + 0.5);
-      *rounded_int = static_cast<int32_t>(*rounded);
-      if ((*rounded_int & 1) != 0 && *rounded_int - toRound == 0.5) {
-        // If the number is halfway between two integers,
-        // round to the even one.
-        *rounded_int -= 1;
-        *rounded -= 1.f;
-      }
+      *rounded = roundeven(toRound);
+      *rounded_int = base::saturated_cast<int32_t>(*rounded);
       break;
     case kRoundToZero:
       *rounded = trunc(toRound);
-      *rounded_int = static_cast<int32_t>(*rounded);
+      *rounded_int = base::saturated_cast<int32_t>(*rounded);
       break;
     case kRoundToPlusInf:
       *rounded = ceil(toRound);
-      *rounded_int = static_cast<int32_t>(*rounded);
+      *rounded_int = base::saturated_cast<int32_t>(*rounded);
       break;
     case kRoundToMinusInf:
       *rounded = floor(toRound);
-      *rounded_int = static_cast<int32_t>(*rounded);
+      *rounded_int = base::saturated_cast<int32_t>(*rounded);
       break;
   }
 }
 
 void Simulator::round64_according_to_fcsr(float toRound, float* rounded,
                                           int64_t* rounded_int) {
-  // 0 RN (round to nearest): Round a result to the nearest
+  // 0 RNE (round to nearest): Round a result to the nearest
   // representable value; if the result is exactly halfway between
-  // two representable values, round to zero.
+  // two representable values, round to even.
 
   // 1 RZ (round toward zero): Round a result to the closest
   // representable value whose absolute value is less than or.
@@ -1407,30 +1441,24 @@ void Simulator::round64_according_to_fcsr(float toRound, float* rounded,
   // 2 RP (round up, or toward +infinity): Round a result to the
   // next representable value up.
 
-  // 3 RN (round down, or toward −infinity): Round a result to
+  // 3 RM (round down, or toward -infinity): Round a result to
   // the next representable value down.
   switch (FCSR_ & kFPURoundingModeMask) {
     case kRoundToNearest:
-      *rounded = floor(toRound + 0.5);
-      *rounded_int = static_cast<int64_t>(*rounded);
-      if ((*rounded_int & 1) != 0 && *rounded_int - toRound == 0.5) {
-        // If the number is halfway between two integers,
-        // round to the even one.
-        *rounded_int -= 1;
-        *rounded -= 1.f;
-      }
+      *rounded = roundeven(toRound);
+      *rounded_int = base::saturated_cast<int64_t>(*rounded);
       break;
     case kRoundToZero:
       *rounded = trunc(toRound);
-      *rounded_int = static_cast<int64_t>(*rounded);
+      *rounded_int = base::saturated_cast<int64_t>(*rounded);
       break;
     case kRoundToPlusInf:
       *rounded = ceil(toRound);
-      *rounded_int = static_cast<int64_t>(*rounded);
+      *rounded_int = base::saturated_cast<int64_t>(*rounded);
       break;
     case kRoundToMinusInf:
       *rounded = floor(toRound);
-      *rounded_int = static_cast<int64_t>(*rounded);
+      *rounded_int = base::saturated_cast<int64_t>(*rounded);
       break;
   }
 }
@@ -1661,8 +1689,21 @@ void Simulator::TraceMemWr(int64_t addr, T value) {
   }
 }
 
-// TODO(plind): sign-extend and zero-extend not implmented properly
-// on all the ReadXX functions, I don't think re-interpret cast does it.
+bool Simulator::ProbeMemory(uintptr_t address, uintptr_t access_size) {
+#if V8_ENABLE_WEBASSEMBLY && V8_TRAP_HANDLER_SUPPORTED
+  uintptr_t last_accessed_byte = address + access_size - 1;
+  uintptr_t current_pc = registers_[pc];
+  uintptr_t landing_pad =
+      trap_handler::ProbeMemory(last_accessed_byte, current_pc);
+  if (!landing_pad) return true;
+  set_pc(landing_pad);
+  set_register(kWasmTrapHandlerFaultAddressRegister.code(), current_pc);
+  return false;
+#else
+  return true;
+#endif
+}
+
 int32_t Simulator::ReadW(int64_t addr, Instruction* instr, TraceType t) {
   if (addr >= 0 && addr < 0x400) {
     // This has to be a nullptr-dereference, drop into debugger.
@@ -1671,17 +1712,13 @@ int32_t Simulator::ReadW(int64_t addr, Instruction* instr, TraceType t) {
            addr, reinterpret_cast<intptr_t>(instr));
     DieOrDebug();
   }
-  /* if ((addr & 0x3) == 0)*/ {
+
+  {
     local_monitor_.NotifyLoad();
     int32_t* ptr = reinterpret_cast<int32_t*>(addr);
     TraceMemRd(addr, static_cast<int64_t>(*ptr), t);
     return *ptr;
   }
-  //  PrintF("Unaligned read at 0x%08" PRIx64 " , pc=0x%08" V8PRIxPTR "\n",
-  //  addr,
-  //         reinterpret_cast<intptr_t>(instr));
-  //  DieOrDebug();
-  //  return 0;
 }
 
 uint32_t Simulator::ReadWU(int64_t addr, Instruction* instr) {
@@ -1692,16 +1729,13 @@ uint32_t Simulator::ReadWU(int64_t addr, Instruction* instr) {
            addr, reinterpret_cast<intptr_t>(instr));
     DieOrDebug();
   }
-  // if ((addr & 0x3) == 0) {
-  local_monitor_.NotifyLoad();
-  uint32_t* ptr = reinterpret_cast<uint32_t*>(addr);
-  TraceMemRd(addr, static_cast<int64_t>(*ptr), WORD);
-  return *ptr;
-  // }
-  // PrintF("Unaligned read at 0x%08" PRIx64 " , pc=0x%08" V8PRIxPTR "\n", addr,
-  //        reinterpret_cast<intptr_t>(instr));
-  // DieOrDebug();
-  // return 0;
+
+  {
+    local_monitor_.NotifyLoad();
+    uint32_t* ptr = reinterpret_cast<uint32_t*>(addr);
+    TraceMemRd(addr, static_cast<int64_t>(*ptr), WORD);
+    return *ptr;
+  }
 }
 
 void Simulator::WriteW(int64_t addr, int32_t value, Instruction* instr) {
@@ -1712,19 +1746,16 @@ void Simulator::WriteW(int64_t addr, int32_t value, Instruction* instr) {
            addr, reinterpret_cast<intptr_t>(instr));
     DieOrDebug();
   }
-  /*if ((addr & 0x3) == 0)*/ {
+
+  {
     local_monitor_.NotifyStore();
-    base::MutexGuard lock_guard(&GlobalMonitor::Get()->mutex);
-    GlobalMonitor::Get()->NotifyStore_Locked(&global_monitor_thread_);
+    GlobalMonitor::SimulatorMutex lock_guard(global_monitor_);
+    global_monitor_->NotifyStore_Locked(&global_monitor_thread_);
     TraceMemWr(addr, value, WORD);
     int* ptr = reinterpret_cast<int*>(addr);
     *ptr = value;
     return;
   }
-  //  PrintF("Unaligned write at 0x%08" PRIx64 " , pc=0x%08" V8PRIxPTR "\n",
-  //  addr,
-  //         reinterpret_cast<intptr_t>(instr));
-  //  DieOrDebug();
 }
 
 void Simulator::WriteConditionalW(int64_t addr, int32_t value,
@@ -1736,13 +1767,14 @@ void Simulator::WriteConditionalW(int64_t addr, int32_t value,
            addr, reinterpret_cast<intptr_t>(instr));
     DieOrDebug();
   }
+
   if ((addr & 0x3) == 0) {
-    base::MutexGuard lock_guard(&GlobalMonitor::Get()->mutex);
+    GlobalMonitor::SimulatorMutex lock_guard(global_monitor_);
     if (local_monitor_.NotifyStoreConditional(addr, TransactionSize::Word) &&
-        GlobalMonitor::Get()->NotifyStoreConditional_Locked(
+        global_monitor_->NotifyStoreConditional_Locked(
             addr, &global_monitor_thread_)) {
       local_monitor_.NotifyStore();
-      GlobalMonitor::Get()->NotifyStore_Locked(&global_monitor_thread_);
+      global_monitor_->NotifyStore_Locked(&global_monitor_thread_);
       TraceMemWr(addr, value, WORD);
       int* ptr = reinterpret_cast<int*>(addr);
       *ptr = value;
@@ -1765,17 +1797,13 @@ int64_t Simulator::Read2W(int64_t addr, Instruction* instr) {
            addr, reinterpret_cast<intptr_t>(instr));
     DieOrDebug();
   }
-  /*  if ((addr & kPointerAlignmentMask) == 0)*/ {
+
+  {
     local_monitor_.NotifyLoad();
     int64_t* ptr = reinterpret_cast<int64_t*>(addr);
     TraceMemRd(addr, *ptr);
     return *ptr;
   }
-  //  PrintF("Unaligned read at 0x%08" PRIx64 " , pc=0x%08" V8PRIxPTR "\n",
-  //  addr,
-  //         reinterpret_cast<intptr_t>(instr));
-  //  DieOrDebug();
-  //  return 0;
 }
 
 void Simulator::Write2W(int64_t addr, int64_t value, Instruction* instr) {
@@ -1786,19 +1814,16 @@ void Simulator::Write2W(int64_t addr, int64_t value, Instruction* instr) {
            addr, reinterpret_cast<intptr_t>(instr));
     DieOrDebug();
   }
-  /*if ((addr & kPointerAlignmentMask) == 0)*/ {
+
+  {
     local_monitor_.NotifyStore();
-    base::MutexGuard lock_guard(&GlobalMonitor::Get()->mutex);
-    GlobalMonitor::Get()->NotifyStore_Locked(&global_monitor_thread_);
+    GlobalMonitor::SimulatorMutex lock_guard(global_monitor_);
+    global_monitor_->NotifyStore_Locked(&global_monitor_thread_);
     TraceMemWr(addr, value, DWORD);
     int64_t* ptr = reinterpret_cast<int64_t*>(addr);
     *ptr = value;
     return;
   }
-  //  PrintF("Unaligned write at 0x%08" PRIx64 " , pc=0x%08" V8PRIxPTR "\n",
-  //  addr,
-  //         reinterpret_cast<intptr_t>(instr));
-  //  DieOrDebug();
 }
 
 void Simulator::WriteConditional2W(int64_t addr, int64_t value,
@@ -1810,14 +1835,15 @@ void Simulator::WriteConditional2W(int64_t addr, int64_t value,
            addr, reinterpret_cast<intptr_t>(instr));
     DieOrDebug();
   }
+
   if ((addr & kPointerAlignmentMask) == 0) {
-    base::MutexGuard lock_guard(&GlobalMonitor::Get()->mutex);
+    GlobalMonitor::SimulatorMutex lock_guard(global_monitor_);
     if (local_monitor_.NotifyStoreConditional(addr,
                                               TransactionSize::DoubleWord) &&
-        GlobalMonitor::Get()->NotifyStoreConditional_Locked(
+        global_monitor_->NotifyStoreConditional_Locked(
             addr, &global_monitor_thread_)) {
       local_monitor_.NotifyStore();
-      GlobalMonitor::Get()->NotifyStore_Locked(&global_monitor_thread_);
+      global_monitor_->NotifyStore_Locked(&global_monitor_thread_);
       TraceMemWr(addr, value, DWORD);
       int64_t* ptr = reinterpret_cast<int64_t*>(addr);
       *ptr = value;
@@ -1833,91 +1859,52 @@ void Simulator::WriteConditional2W(int64_t addr, int64_t value,
 }
 
 double Simulator::ReadD(int64_t addr, Instruction* instr) {
-  /*if ((addr & kDoubleAlignmentMask) == 0)*/ {
-    local_monitor_.NotifyLoad();
-    double* ptr = reinterpret_cast<double*>(addr);
-    return *ptr;
-  }
-  // PrintF("Unaligned (double) read at 0x%08" PRIx64 " , pc=0x%08" V8PRIxPTR
-  // "\n",
-  //       addr, reinterpret_cast<intptr_t>(instr));
-  // base::OS::Abort();
-  // return 0;
+  local_monitor_.NotifyLoad();
+  double* ptr = reinterpret_cast<double*>(addr);
+  return *ptr;
 }
 
 void Simulator::WriteD(int64_t addr, double value, Instruction* instr) {
-  /*if ((addr & kDoubleAlignmentMask) == 0)*/ {
-    local_monitor_.NotifyStore();
-    base::MutexGuard lock_guard(&GlobalMonitor::Get()->mutex);
-    GlobalMonitor::Get()->NotifyStore_Locked(&global_monitor_thread_);
-    double* ptr = reinterpret_cast<double*>(addr);
-    *ptr = value;
-    return;
-  }
-  // PrintF("Unaligned (double) write at 0x%08" PRIx64 " , pc=0x%08" V8PRIxPTR
-  //       "\n",
-  //       addr, reinterpret_cast<intptr_t>(instr));
-  // DieOrDebug();
+  local_monitor_.NotifyStore();
+  GlobalMonitor::SimulatorMutex lock_guard(global_monitor_);
+  global_monitor_->NotifyStore_Locked(&global_monitor_thread_);
+  double* ptr = reinterpret_cast<double*>(addr);
+  *ptr = value;
+  return;
 }
 
 uint16_t Simulator::ReadHU(int64_t addr, Instruction* instr) {
-  // if ((addr & 1) == 0) {
   local_monitor_.NotifyLoad();
   uint16_t* ptr = reinterpret_cast<uint16_t*>(addr);
   TraceMemRd(addr, static_cast<int64_t>(*ptr));
   return *ptr;
-  // }
-  // PrintF("Unaligned unsigned halfword read at 0x%08" PRIx64
-  //        " , pc=0x%08" V8PRIxPTR "\n",
-  //        addr, reinterpret_cast<intptr_t>(instr));
-  // DieOrDebug();
-  // return 0;
 }
 
 int16_t Simulator::ReadH(int64_t addr, Instruction* instr) {
-  // if ((addr & 1) == 0) {
   local_monitor_.NotifyLoad();
   int16_t* ptr = reinterpret_cast<int16_t*>(addr);
   TraceMemRd(addr, static_cast<int64_t>(*ptr));
   return *ptr;
-  // }
-  // PrintF("Unaligned signed halfword read at 0x%08" PRIx64
-  //        " , pc=0x%08" V8PRIxPTR "\n",
-  //        addr, reinterpret_cast<intptr_t>(instr));
-  // DieOrDebug();
-  // return 0;
 }
 
 void Simulator::WriteH(int64_t addr, uint16_t value, Instruction* instr) {
-  // if ((addr & 1) == 0) {
   local_monitor_.NotifyStore();
-  base::MutexGuard lock_guard(&GlobalMonitor::Get()->mutex);
-  GlobalMonitor::Get()->NotifyStore_Locked(&global_monitor_thread_);
+  GlobalMonitor::SimulatorMutex lock_guard(global_monitor_);
+  global_monitor_->NotifyStore_Locked(&global_monitor_thread_);
   TraceMemWr(addr, value, HALF);
   uint16_t* ptr = reinterpret_cast<uint16_t*>(addr);
   *ptr = value;
   return;
-  // }
-  // PrintF("Unaligned unsigned halfword write at 0x%08" PRIx64
-  //        " , pc=0x%08" V8PRIxPTR "\n",
-  //        addr, reinterpret_cast<intptr_t>(instr));
-  // DieOrDebug();
 }
 
 void Simulator::WriteH(int64_t addr, int16_t value, Instruction* instr) {
-  // if ((addr & 1) == 0) {
   local_monitor_.NotifyStore();
-  base::MutexGuard lock_guard(&GlobalMonitor::Get()->mutex);
-  GlobalMonitor::Get()->NotifyStore_Locked(&global_monitor_thread_);
+  GlobalMonitor::SimulatorMutex lock_guard(global_monitor_);
+  global_monitor_->NotifyStore_Locked(&global_monitor_thread_);
   TraceMemWr(addr, value, HALF);
   int16_t* ptr = reinterpret_cast<int16_t*>(addr);
   *ptr = value;
   return;
-  // }
-  // PrintF("Unaligned halfword write at 0x%08" PRIx64 " , pc=0x%08" V8PRIxPTR
-  //        "\n",
-  //        addr, reinterpret_cast<intptr_t>(instr));
-  // DieOrDebug();
 }
 
 uint32_t Simulator::ReadBU(int64_t addr) {
@@ -1936,8 +1923,8 @@ int32_t Simulator::ReadB(int64_t addr) {
 
 void Simulator::WriteB(int64_t addr, uint8_t value) {
   local_monitor_.NotifyStore();
-  base::MutexGuard lock_guard(&GlobalMonitor::Get()->mutex);
-  GlobalMonitor::Get()->NotifyStore_Locked(&global_monitor_thread_);
+  GlobalMonitor::SimulatorMutex lock_guard(global_monitor_);
+  global_monitor_->NotifyStore_Locked(&global_monitor_thread_);
   TraceMemWr(addr, value, BYTE);
   uint8_t* ptr = reinterpret_cast<uint8_t*>(addr);
   *ptr = value;
@@ -1945,8 +1932,8 @@ void Simulator::WriteB(int64_t addr, uint8_t value) {
 
 void Simulator::WriteB(int64_t addr, int8_t value) {
   local_monitor_.NotifyStore();
-  base::MutexGuard lock_guard(&GlobalMonitor::Get()->mutex);
-  GlobalMonitor::Get()->NotifyStore_Locked(&global_monitor_thread_);
+  GlobalMonitor::SimulatorMutex lock_guard(global_monitor_);
+  global_monitor_->NotifyStore_Locked(&global_monitor_thread_);
   TraceMemWr(addr, value, BYTE);
   int8_t* ptr = reinterpret_cast<int8_t*>(addr);
   *ptr = value;
@@ -1973,8 +1960,8 @@ void Simulator::WriteMem(int64_t addr, T value, Instruction* instr) {
   int alignment_mask = (1 << sizeof(T)) - 1;
   if ((addr & alignment_mask) == 0) {
     local_monitor_.NotifyStore();
-    base::MutexGuard lock_guard(&GlobalMonitor::Get()->mutex);
-    GlobalMonitor::Get()->NotifyStore_Locked(&global_monitor_thread_);
+    GlobalMonitor::SimulatorMutex lock_guard(global_monitor_);
+    global_monitor_->NotifyStore_Locked(&global_monitor_thread_);
     T* ptr = reinterpret_cast<T*>(addr);
     *ptr = value;
     TraceMemWr(addr, value);
@@ -1991,12 +1978,43 @@ uintptr_t Simulator::StackLimit(uintptr_t c_limit) const {
   // The simulator uses a separate JS stack. If we have exhausted the C stack,
   // we also drop down the JS limit to reflect the exhaustion on the JS stack.
   if (base::Stack::GetCurrentStackPosition() < c_limit) {
-    return reinterpret_cast<uintptr_t>(get_sp());
+    return get_sp();
   }
 
-  // Otherwise the limit is the JS stack. Leave a safety margin of 1024 bytes
+  // Otherwise the limit is the JS stack. Leave a safety margin
   // to prevent overrunning the stack when pushing values.
-  return reinterpret_cast<uintptr_t>(stack_) + 1024;
+  return stack_limit_ + kAdditionalStackMargin;
+}
+
+uintptr_t Simulator::StackBase() const {
+  return reinterpret_cast<uintptr_t>(stack_) + UsableStackSize();
+}
+
+base::Vector<uint8_t> Simulator::GetCentralStackView() const {
+  // We do not add an additional safety margin as above in
+  // Simulator::StackLimit, as users of this method are expected to add their
+  // own margin.
+  return base::VectorOf(
+      reinterpret_cast<uint8_t*>(stack_) + kStackProtectionSize,
+      UsableStackSize());
+}
+
+// We touch the stack, which may or may not have been initialized properly. Msan
+// reports here are not interesting.
+DISABLE_MSAN void Simulator::IterateRegistersAndStack(
+    ::heap::base::StackVisitor* visitor) {
+  for (int i = 0; i < kNumSimuRegisters; ++i) {
+    visitor->VisitPointer(reinterpret_cast<const void*>(get_register(i)));
+  }
+  for (const void* const* current =
+           reinterpret_cast<const void* const*>(get_sp());
+       current < reinterpret_cast<const void* const*>(StackBase()); ++current) {
+    const void* address = *current;
+    if (address == nullptr) {
+      continue;
+    }
+    visitor->VisitPointer(address);
+  }
 }
 
 // Unsupported instructions use Format to print an error and stop execution.
@@ -2024,6 +2042,7 @@ using SimulatorRuntimeCompareCall = int64_t (*)(double darg0, double darg1);
 using SimulatorRuntimeFPFPCall = double (*)(double darg0, double darg1);
 using SimulatorRuntimeFPCall = double (*)(double darg0);
 using SimulatorRuntimeFPIntCall = double (*)(double darg0, int32_t arg0);
+using SimulatorRuntimeIntFPCall = int32_t (*)(double darg0);
 // Define four args for future flexibility; at the time of this writing only
 // one is ever used.
 using SimulatorRuntimeFPTaggedCall = double (*)(int64_t arg0, int64_t arg1,
@@ -2033,8 +2052,18 @@ using SimulatorRuntimeFPTaggedCall = double (*)(int64_t arg0, int64_t arg1,
 // (refer to InvocationCallback in v8.h).
 using SimulatorRuntimeDirectApiCall = void (*)(int64_t arg0);
 
-// This signature supports direct call to accessor getter callback.
-using SimulatorRuntimeDirectGetterCall = void (*)(int64_t arg0, int64_t arg1);
+// This signature supports direct call to accessor/interceptor getter callback.
+// Using v8::Local<v8::Name> instead of int64_t as a first argument type fixes
+// MSAN false positive report when using the value in the callback.
+using SimulatorRuntimeDirectGetterCall = int64_t (*)(v8::Local<v8::Name> arg0,
+                                                     int64_t arg1);
+
+// This signature supports direct call to accessor/interceptor setter callback.
+// Using v8::Local<v8::Name/Value> instead of int64_t as first two argument
+// types fixes MSAN false positive report when using the value in the callback.
+using SimulatorRuntimeDirectSetterCall = int64_t (*)(v8::Local<v8::Name> arg0,
+                                                     v8::Local<v8::Value> arg1,
+                                                     int64_t arg2);
 
 using MixedRuntimeCall_0 = AnyCType (*)();
 
@@ -2219,34 +2248,8 @@ void Simulator::SoftwareInterrupt() {
         (redirection->type() == ExternalReference::BUILTIN_FP_FP_CALL) ||
         (redirection->type() == ExternalReference::BUILTIN_COMPARE_CALL) ||
         (redirection->type() == ExternalReference::BUILTIN_FP_CALL) ||
-        (redirection->type() == ExternalReference::BUILTIN_FP_INT_CALL);
-
-    {
-      // With the hard floating point calling convention, double
-      // arguments are passed in FPU registers. Fetch the arguments
-      // from there and call the builtin using soft floating point
-      // convention.
-      switch (redirection->type()) {
-        case ExternalReference::BUILTIN_FP_FP_CALL:
-        case ExternalReference::BUILTIN_COMPARE_CALL:
-          arg0 = get_fpu_register(f0);
-          arg1 = get_fpu_register(f1);
-          arg2 = get_fpu_register(f2);
-          arg3 = get_fpu_register(f3);
-          break;
-        case ExternalReference::BUILTIN_FP_CALL:
-          arg0 = get_fpu_register(f0);
-          arg1 = get_fpu_register(f1);
-          break;
-        case ExternalReference::BUILTIN_FP_INT_CALL:
-          arg0 = get_fpu_register(f0);
-          arg1 = get_fpu_register(f1);
-          arg2 = get_register(a2);
-          break;
-        default:
-          break;
-      }
-    }
+        (redirection->type() == ExternalReference::BUILTIN_FP_INT_CALL) ||
+        (redirection->type() == ExternalReference::BUILTIN_INT_FP_CALL);
 
     // Based on CpuFeatures::IsSupported(FPU), Loong64 will use either hardware
     // FPU, or gcc soft-float routines. Hardware FPU is simulated in this
@@ -2277,6 +2280,11 @@ void Simulator::SoftwareInterrupt() {
             PrintF("Call to host function at %p with args %f, %d",
                    reinterpret_cast<void*>(FUNCTION_ADDR(generic_target)),
                    dval0, ival);
+            break;
+          case ExternalReference::BUILTIN_INT_FP_CALL:
+            PrintF("Call to host function at %p with args %f",
+                   reinterpret_cast<void*>(FUNCTION_ADDR(generic_target)),
+                   dval0);
             break;
           default:
             UNREACHABLE();
@@ -2312,12 +2320,20 @@ void Simulator::SoftwareInterrupt() {
           SetFpResult(dresult);
           break;
         }
+        case ExternalReference::BUILTIN_INT_FP_CALL: {
+          SimulatorRuntimeIntFPCall target =
+              reinterpret_cast<SimulatorRuntimeIntFPCall>(external);
+          iresult = target(dval0);
+          set_register(a0, static_cast<int64_t>(iresult));
+          break;
+        }
         default:
           UNREACHABLE();
       }
       if (v8_flags.trace_sim) {
         switch (redirection->type()) {
           case ExternalReference::BUILTIN_COMPARE_CALL:
+          case ExternalReference::BUILTIN_INT_FP_CALL:
             PrintF("Returned %08x\n", static_cast<int32_t>(iresult));
             break;
           case ExternalReference::BUILTIN_FP_FP_CALL:
@@ -2358,7 +2374,24 @@ void Simulator::SoftwareInterrupt() {
       }
       SimulatorRuntimeDirectGetterCall target =
           reinterpret_cast<SimulatorRuntimeDirectGetterCall>(external);
-      target(arg0, arg1);
+      int64_t iresult = target(base::bit_cast<v8::Local<v8::Name>>(arg0), arg1);
+      set_register(v0, static_cast<int64_t>(iresult));
+    } else if (redirection->type() == ExternalReference::DIRECT_SETTER_CALL) {
+      // void f(v8::Local<Name>, v8::Local<v8::Value>,
+      //        v8::PropertyCallbackInfo&);
+      // v8::Intercepted f(v8::Local<Name>, v8::Local<v8::Value>,
+      //                   v8::PropertyCallbackInfo&);
+      if (v8_flags.trace_sim) {
+        PrintF("Call to host function at %p args %08" PRIx64 "  %08" PRIx64
+               "  %08" PRIx64 " \n",
+               reinterpret_cast<void*>(external), arg0, arg1, arg2);
+      }
+      SimulatorRuntimeDirectSetterCall target =
+          reinterpret_cast<SimulatorRuntimeDirectSetterCall>(external);
+      int64_t iresult =
+          target(base::bit_cast<v8::Local<v8::Name>>(arg0),
+                 base::bit_cast<v8::Local<v8::Value>>(arg1), arg2);
+      set_register(v0, static_cast<int64_t>(iresult));
     } else {
       DCHECK(redirection->type() == ExternalReference::BUILTIN_CALL ||
              redirection->type() == ExternalReference::BUILTIN_CALL_PAIR);
@@ -2578,8 +2611,8 @@ static T FPUMaxA(T a, T b) {
 
 enum class KeepSign : bool { no = false, yes };
 
-template <typename T, typename std::enable_if<std::is_floating_point<T>::value,
-                                              int>::type = 0>
+template <typename T,
+          typename std::enable_if_t<std::is_floating_point_v<T>, int> = 0>
 T FPUCanonalizeNaNArg(T result, T arg, KeepSign keepSign = KeepSign::no) {
   DCHECK(std::isnan(arg));
   T qNaN = std::numeric_limits<T>::quiet_NaN();
@@ -2617,6 +2650,28 @@ T FPUCanonalizeOperation(Func f, KeepSign keepSign, T first, Args... args) {
     result = FPUCanonalizeNaNArgs(result, keepSign, first, args...);
   }
   return result;
+}
+
+template <typename T>
+T FPProcessNaNBinop(T fp_lhs, T fp_rhs,
+                    const std::function<T(T, T)>& op_for_non_nan) {
+  DCHECK(sizeof(T) == 4 || sizeof(T) == 8);
+  typedef
+      typename std::conditional<sizeof(T) == 4, Float32, Float64>::type FloatT;
+  typedef
+      typename std::conditional<sizeof(T) == 4, uint32_t, uint64_t>::type UintT;
+
+  FloatT lhs = FloatT::FromBits(base::bit_cast<UintT>(fp_lhs));
+  FloatT rhs = FloatT::FromBits(base::bit_cast<UintT>(fp_rhs));
+  if (lhs.is_nan() && !lhs.is_quiet_nan())
+    return lhs.to_quiet_nan().get_scalar();
+  if (rhs.is_nan() && !rhs.is_quiet_nan())
+    return rhs.to_quiet_nan().get_scalar();
+
+  if (lhs.is_nan()) return lhs.get_scalar();
+  if (rhs.is_nan()) return rhs.get_scalar();
+
+  return op_for_non_nan(fp_lhs, fp_rhs);
 }
 
 // Handle execution based on instruction types.
@@ -2830,36 +2885,42 @@ void Simulator::DecodeTypeOp8() {
       printf_instr("LDPTR_W\t %s: %016lx, %s: %016lx, si14: %016lx\n",
                    Registers::Name(rd_reg()), rd(), Registers::Name(rj_reg()),
                    rj(), si14_se);
+      if (!ProbeMemory(rj() + si14_se, sizeof(int32_t))) return;
       set_register(rd_reg(), ReadW(rj() + si14_se, instr_.instr()));
       break;
     case STPTR_W:
       printf_instr("STPTR_W\t %s: %016lx, %s: %016lx, si14: %016lx\n",
                    Registers::Name(rd_reg()), rd(), Registers::Name(rj_reg()),
                    rj(), si14_se);
+      if (!ProbeMemory(rj() + si14_se, sizeof(int32_t))) return;
       WriteW(rj() + si14_se, static_cast<int32_t>(rd()), instr_.instr());
       break;
     case LDPTR_D:
       printf_instr("LDPTR_D\t %s: %016lx, %s: %016lx, si14: %016lx\n",
                    Registers::Name(rd_reg()), rd(), Registers::Name(rj_reg()),
                    rj(), si14_se);
+      if (!ProbeMemory(rj() + si14_se, sizeof(int64_t))) return;
       set_register(rd_reg(), Read2W(rj() + si14_se, instr_.instr()));
       break;
     case STPTR_D:
       printf_instr("STPTR_D\t %s: %016lx, %s: %016lx, si14: %016lx\n",
                    Registers::Name(rd_reg()), rd(), Registers::Name(rj_reg()),
                    rj(), si14_se);
+      if (!ProbeMemory(rj() + si14_se, sizeof(int64_t))) return;
       Write2W(rj() + si14_se, rd(), instr_.instr());
       break;
     case LL_W: {
       printf_instr("LL_W\t %s: %016lx, %s: %016lx, si14: %016lx\n",
                    Registers::Name(rd_reg()), rd(), Registers::Name(rj_reg()),
                    rj(), si14_se);
-      base::MutexGuard lock_guard(&GlobalMonitor::Get()->mutex);
       addr = si14_se + rj();
-      set_register(rd_reg(), ReadW(addr, instr_.instr()));
-      local_monitor_.NotifyLoadLinked(addr, TransactionSize::Word);
-      GlobalMonitor::Get()->NotifyLoadLinked_Locked(addr,
-                                                    &global_monitor_thread_);
+      if (!ProbeMemory(addr, sizeof(int32_t))) return;
+      {
+        GlobalMonitor::SimulatorMutex lock_guard(global_monitor_);
+        set_register(rd_reg(), ReadW(addr, instr_.instr()));
+        local_monitor_.NotifyLoadLinked(addr, TransactionSize::Word);
+        global_monitor_->NotifyLoadLinked_Locked(addr, &global_monitor_thread_);
+      }
       break;
     }
     case SC_W: {
@@ -2867,6 +2928,7 @@ void Simulator::DecodeTypeOp8() {
                    Registers::Name(rd_reg()), rd(), Registers::Name(rj_reg()),
                    rj(), si14_se);
       addr = si14_se + rj();
+      if (!ProbeMemory(addr, sizeof(int32_t))) return;
       int32_t LLbit = 0;
       WriteConditionalW(addr, static_cast<int32_t>(rd()), instr_.instr(),
                         &LLbit);
@@ -2877,12 +2939,14 @@ void Simulator::DecodeTypeOp8() {
       printf_instr("LL_D\t %s: %016lx, %s: %016lx, si14: %016lx\n",
                    Registers::Name(rd_reg()), rd(), Registers::Name(rj_reg()),
                    rj(), si14_se);
-      base::MutexGuard lock_guard(&GlobalMonitor::Get()->mutex);
       addr = si14_se + rj();
-      set_register(rd_reg(), Read2W(addr, instr_.instr()));
-      local_monitor_.NotifyLoadLinked(addr, TransactionSize::DoubleWord);
-      GlobalMonitor::Get()->NotifyLoadLinked_Locked(addr,
-                                                    &global_monitor_thread_);
+      if (!ProbeMemory(addr, sizeof(int64_t))) return;
+      {
+        GlobalMonitor::SimulatorMutex lock_guard(global_monitor_);
+        set_register(rd_reg(), Read2W(addr, instr_.instr()));
+        local_monitor_.NotifyLoadLinked(addr, TransactionSize::DoubleWord);
+        global_monitor_->NotifyLoadLinked_Locked(addr, &global_monitor_thread_);
+      }
       break;
     }
     case SC_D: {
@@ -2890,6 +2954,7 @@ void Simulator::DecodeTypeOp8() {
                    Registers::Name(rd_reg()), rd(), Registers::Name(rj_reg()),
                    rj(), si14_se);
       addr = si14_se + rj();
+      if (!ProbeMemory(addr, sizeof(int64_t))) return;
       int32_t LLbit = 0;
       WriteConditional2W(addr, rd(), instr_.instr(), &LLbit);
       set_register(rd_reg(), LLbit);
@@ -3027,72 +3092,84 @@ void Simulator::DecodeTypeOp10() {
       printf_instr("LD_B\t %s: %016lx, %s: %016lx, si12: %016lx\n",
                    Registers::Name(rd_reg()), rd(), Registers::Name(rj_reg()),
                    rj(), si12_ze);
+      if (!ProbeMemory(rj() + si12_se, sizeof(int8_t))) return;
       set_register(rd_reg(), ReadB(rj() + si12_se));
       break;
     case LD_H:
       printf_instr("LD_H\t %s: %016lx, %s: %016lx, si12: %016lx\n",
                    Registers::Name(rd_reg()), rd(), Registers::Name(rj_reg()),
                    rj(), si12_ze);
+      if (!ProbeMemory(rj() + si12_se, sizeof(int16_t))) return;
       set_register(rd_reg(), ReadH(rj() + si12_se, instr_.instr()));
       break;
     case LD_W:
       printf_instr("LD_W\t %s: %016lx, %s: %016lx, si12: %016lx\n",
                    Registers::Name(rd_reg()), rd(), Registers::Name(rj_reg()),
                    rj(), si12_ze);
+      if (!ProbeMemory(rj() + si12_se, sizeof(int32_t))) return;
       set_register(rd_reg(), ReadW(rj() + si12_se, instr_.instr()));
       break;
     case LD_D:
       printf_instr("LD_D\t %s: %016lx, %s: %016lx, si12: %016lx\n",
                    Registers::Name(rd_reg()), rd(), Registers::Name(rj_reg()),
                    rj(), si12_ze);
+      if (!ProbeMemory(rj() + si12_se, sizeof(int64_t))) return;
       set_register(rd_reg(), Read2W(rj() + si12_se, instr_.instr()));
       break;
     case ST_B:
       printf_instr("ST_B\t %s: %016lx, %s: %016lx, si12: %016lx\n",
                    Registers::Name(rd_reg()), rd(), Registers::Name(rj_reg()),
                    rj(), si12_ze);
+      if (!ProbeMemory(rj() + si12_se, sizeof(int8_t))) return;
       WriteB(rj() + si12_se, static_cast<int8_t>(rd()));
       break;
     case ST_H:
       printf_instr("ST_H\t %s: %016lx, %s: %016lx, si12: %016lx\n",
                    Registers::Name(rd_reg()), rd(), Registers::Name(rj_reg()),
                    rj(), si12_ze);
+      if (!ProbeMemory(rj() + si12_se, sizeof(int16_t))) return;
       WriteH(rj() + si12_se, static_cast<int16_t>(rd()), instr_.instr());
       break;
     case ST_W:
       printf_instr("ST_W\t %s: %016lx, %s: %016lx, si12: %016lx\n",
                    Registers::Name(rd_reg()), rd(), Registers::Name(rj_reg()),
                    rj(), si12_ze);
+      if (!ProbeMemory(rj() + si12_se, sizeof(int32_t))) return;
       WriteW(rj() + si12_se, static_cast<int32_t>(rd()), instr_.instr());
       break;
     case ST_D:
       printf_instr("ST_D\t %s: %016lx, %s: %016lx, si12: %016lx\n",
                    Registers::Name(rd_reg()), rd(), Registers::Name(rj_reg()),
                    rj(), si12_ze);
+      if (!ProbeMemory(rj() + si12_se, sizeof(int64_t))) return;
       Write2W(rj() + si12_se, rd(), instr_.instr());
       break;
     case LD_BU:
       printf_instr("LD_BU\t %s: %016lx, %s: %016lx, si12: %016lx\n",
                    Registers::Name(rd_reg()), rd(), Registers::Name(rj_reg()),
                    rj(), si12_ze);
+      if (!ProbeMemory(rj() + si12_se, sizeof(uint8_t))) return;
       set_register(rd_reg(), ReadBU(rj() + si12_se));
       break;
     case LD_HU:
       printf_instr("LD_HU\t %s: %016lx, %s: %016lx, si12: %016lx\n",
                    Registers::Name(rd_reg()), rd(), Registers::Name(rj_reg()),
                    rj(), si12_ze);
+      if (!ProbeMemory(rj() + si12_se, sizeof(uint16_t))) return;
       set_register(rd_reg(), ReadHU(rj() + si12_se, instr_.instr()));
       break;
     case LD_WU:
       printf_instr("LD_WU\t %s: %016lx, %s: %016lx, si12: %016lx\n",
                    Registers::Name(rd_reg()), rd(), Registers::Name(rj_reg()),
                    rj(), si12_ze);
+      if (!ProbeMemory(rj() + si12_se, sizeof(uint32_t))) return;
       set_register(rd_reg(), ReadWU(rj() + si12_se, instr_.instr()));
       break;
     case FLD_S: {
       printf_instr("FLD_S\t %s: %016f, %s: %016lx, si12: %016lx\n",
                    FPURegisters::Name(fd_reg()), fd_float(),
                    Registers::Name(rj_reg()), rj(), si12_ze);
+      if (!ProbeMemory(rj() + si12_se, sizeof(float))) return;
       set_fpu_register(fd_reg(), kFPUInvalidResult);  // Trash upper 32 bits.
       set_fpu_register_word(
           fd_reg(), ReadW(rj() + si12_se, instr_.instr(), FLOAT_DOUBLE));
@@ -3102,6 +3179,7 @@ void Simulator::DecodeTypeOp10() {
       printf_instr("FST_S\t %s: %016f, %s: %016lx, si12: %016lx\n",
                    FPURegisters::Name(fd_reg()), fd_float(),
                    Registers::Name(rj_reg()), rj(), si12_ze);
+      if (!ProbeMemory(rj() + si12_se, sizeof(float))) return;
       int32_t alu_out_32 = static_cast<int32_t>(get_fpu_register(fd_reg()));
       WriteW(rj() + si12_se, alu_out_32, instr_.instr());
       break;
@@ -3110,6 +3188,7 @@ void Simulator::DecodeTypeOp10() {
       printf_instr("FLD_D\t %s: %016f, %s: %016lx, si12: %016lx\n",
                    FPURegisters::Name(fd_reg()), fd_double(),
                    Registers::Name(rj_reg()), rj(), si12_ze);
+      if (!ProbeMemory(rj() + si12_se, sizeof(double))) return;
       set_fpu_register_double(fd_reg(), ReadD(rj() + si12_se, instr_.instr()));
       TraceMemRd(rj() + si12_se, get_fpu_register(fd_reg()), DOUBLE);
       break;
@@ -3118,6 +3197,7 @@ void Simulator::DecodeTypeOp10() {
       printf_instr("FST_D\t %s: %016f, %s: %016lx, si12: %016lx\n",
                    FPURegisters::Name(fd_reg()), fd_double(),
                    Registers::Name(rj_reg()), rj(), si12_ze);
+      if (!ProbeMemory(rj() + si12_se, sizeof(double))) return;
       WriteD(rj() + si12_se, get_fpu_register_double(fd_reg()), instr_.instr());
       TraceMemWr(rj() + si12_se, get_fpu_register(fd_reg()), DWORD);
       break;
@@ -3884,10 +3964,15 @@ void Simulator::DecodeTypeOp17() {
                    FPURegisters::Name(fd_reg()), fd_float(),
                    FPURegisters::Name(fj_reg()), fj_float(),
                    FPURegisters::Name(fk_reg()), fk_float());
+      typedef float FloatT;
       SetFPUFloatResult(
           fd_reg(),
-          FPUCanonalizeOperation([](float lhs, float rhs) { return lhs + rhs; },
-                                 fj_float(), fk_float()));
+          FPProcessNaNBinop<FloatT>(
+              fj_float(), fk_float(), [](FloatT lhs, FloatT rhs) {
+                if (std::isinf(lhs) && std::isinf(rhs) && (lhs != rhs))
+                  return std::numeric_limits<FloatT>::quiet_NaN();
+                return lhs + rhs;
+              }));
       break;
     }
     case FADD_D: {
@@ -3895,10 +3980,15 @@ void Simulator::DecodeTypeOp17() {
                    FPURegisters::Name(fd_reg()), fd_double(),
                    FPURegisters::Name(fj_reg()), fj_double(),
                    FPURegisters::Name(fk_reg()), fk_double());
-      SetFPUDoubleResult(fd_reg(),
-                         FPUCanonalizeOperation(
-                             [](double lhs, double rhs) { return lhs + rhs; },
-                             fj_double(), fk_double()));
+      typedef double FloatT;
+      SetFPUDoubleResult(
+          fd_reg(),
+          FPProcessNaNBinop<FloatT>(
+              fj_double(), fk_double(), [](FloatT lhs, FloatT rhs) {
+                if (std::isinf(lhs) && std::isinf(rhs) && (lhs != rhs))
+                  return std::numeric_limits<FloatT>::quiet_NaN();
+                return lhs + rhs;
+              }));
       break;
     }
     case FSUB_S: {
@@ -3906,10 +3996,15 @@ void Simulator::DecodeTypeOp17() {
                    FPURegisters::Name(fd_reg()), fd_float(),
                    FPURegisters::Name(fj_reg()), fj_float(),
                    FPURegisters::Name(fk_reg()), fk_float());
+      typedef float FloatT;
       SetFPUFloatResult(
           fd_reg(),
-          FPUCanonalizeOperation([](float lhs, float rhs) { return lhs - rhs; },
-                                 fj_float(), fk_float()));
+          FPProcessNaNBinop<FloatT>(
+              fj_float(), fk_float(), [](FloatT lhs, FloatT rhs) {
+                if (std::isinf(lhs) && std::isinf(rhs) && (lhs == rhs))
+                  return std::numeric_limits<FloatT>::quiet_NaN();
+                return lhs - rhs;
+              }));
       break;
     }
     case FSUB_D: {
@@ -3917,10 +4012,15 @@ void Simulator::DecodeTypeOp17() {
                    FPURegisters::Name(fd_reg()), fd_double(),
                    FPURegisters::Name(fj_reg()), fj_double(),
                    FPURegisters::Name(fk_reg()), fk_double());
-      SetFPUDoubleResult(fd_reg(),
-                         FPUCanonalizeOperation(
-                             [](double lhs, double rhs) { return lhs - rhs; },
-                             fj_double(), fk_double()));
+      typedef double FloatT;
+      SetFPUDoubleResult(
+          fd_reg(),
+          FPProcessNaNBinop<FloatT>(
+              fj_double(), fk_double(), [](FloatT lhs, FloatT rhs) {
+                if (std::isinf(lhs) && std::isinf(rhs) && (lhs == rhs))
+                  return std::numeric_limits<FloatT>::quiet_NaN();
+                return lhs - rhs;
+              }));
       break;
     }
     case FMUL_S: {
@@ -3928,10 +4028,15 @@ void Simulator::DecodeTypeOp17() {
                    FPURegisters::Name(fd_reg()), fd_float(),
                    FPURegisters::Name(fj_reg()), fj_float(),
                    FPURegisters::Name(fk_reg()), fk_float());
-      SetFPUFloatResult(
-          fd_reg(),
-          FPUCanonalizeOperation([](float lhs, float rhs) { return lhs * rhs; },
-                                 fj_float(), fk_float()));
+      typedef float FloatT;
+      SetFPUFloatResult(fd_reg(),
+                        FPProcessNaNBinop<FloatT>(
+                            fj_float(), fk_float(), [](FloatT lhs, FloatT rhs) {
+                              if ((lhs == 0.0 && std::isinf(rhs)) ||
+                                  (rhs == 0.0 && std::isinf(lhs)))
+                                return std::numeric_limits<FloatT>::quiet_NaN();
+                              return lhs * rhs;
+                            }));
       break;
     }
     case FMUL_D: {
@@ -3939,10 +4044,15 @@ void Simulator::DecodeTypeOp17() {
                    FPURegisters::Name(fd_reg()), fd_double(),
                    FPURegisters::Name(fj_reg()), fj_double(),
                    FPURegisters::Name(fk_reg()), fk_double());
-      SetFPUDoubleResult(fd_reg(),
-                         FPUCanonalizeOperation(
-                             [](double lhs, double rhs) { return lhs * rhs; },
-                             fj_double(), fk_double()));
+      typedef double FloatT;
+      SetFPUDoubleResult(
+          fd_reg(), FPProcessNaNBinop<FloatT>(
+                        fj_double(), fk_double(), [](FloatT lhs, FloatT rhs) {
+                          if ((lhs == 0.0 && std::isinf(rhs)) ||
+                              (rhs == 0.0 && std::isinf(lhs)))
+                            return std::numeric_limits<FloatT>::quiet_NaN();
+                          return lhs * rhs;
+                        }));
       break;
     }
     case FDIV_S: {
@@ -3950,10 +4060,15 @@ void Simulator::DecodeTypeOp17() {
                    FPURegisters::Name(fd_reg()), fd_float(),
                    FPURegisters::Name(fj_reg()), fj_float(),
                    FPURegisters::Name(fk_reg()), fk_float());
-      SetFPUFloatResult(
-          fd_reg(),
-          FPUCanonalizeOperation([](float lhs, float rhs) { return lhs / rhs; },
-                                 fj_float(), fk_float()));
+      typedef float FloatT;
+      SetFPUFloatResult(fd_reg(),
+                        FPProcessNaNBinop<FloatT>(
+                            fj_float(), fk_float(), [](FloatT lhs, FloatT rhs) {
+                              if ((std::isinf(lhs) && std::isinf(rhs)) ||
+                                  (rhs == 0.0 && lhs == 0.0))
+                                return std::numeric_limits<FloatT>::quiet_NaN();
+                              return lhs / rhs;
+                            }));
       break;
     }
     case FDIV_D: {
@@ -3961,10 +4076,15 @@ void Simulator::DecodeTypeOp17() {
                    FPURegisters::Name(fd_reg()), fd_double(),
                    FPURegisters::Name(fj_reg()), fj_double(),
                    FPURegisters::Name(fk_reg()), fk_double());
-      SetFPUDoubleResult(fd_reg(),
-                         FPUCanonalizeOperation(
-                             [](double lhs, double rhs) { return lhs / rhs; },
-                             fj_double(), fk_double()));
+      typedef double FloatT;
+      SetFPUDoubleResult(
+          fd_reg(), FPProcessNaNBinop<FloatT>(
+                        fj_double(), fk_double(), [](FloatT lhs, FloatT rhs) {
+                          if ((std::isinf(lhs) && std::isinf(rhs)) ||
+                              (rhs == 0.0 && lhs == 0.0))
+                            return std::numeric_limits<FloatT>::quiet_NaN();
+                          return lhs / rhs;
+                        }));
       break;
     }
     case FMAX_S:
@@ -4027,66 +4147,77 @@ void Simulator::DecodeTypeOp17() {
       printf_instr("LDX_B\t %s: %016lx, %s, %016lx, %s, %016lx\n",
                    Registers::Name(rd_reg()), rd(), Registers::Name(rj_reg()),
                    rj(), Registers::Name(rk_reg()), rk());
+      if (!ProbeMemory(rj() + rk(), sizeof(int8_t))) return;
       set_register(rd_reg(), ReadB(rj() + rk()));
       break;
     case LDX_H:
       printf_instr("LDX_H\t %s: %016lx, %s, %016lx, %s, %016lx\n",
                    Registers::Name(rd_reg()), rd(), Registers::Name(rj_reg()),
                    rj(), Registers::Name(rk_reg()), rk());
+      if (!ProbeMemory(rj() + rk(), sizeof(int16_t))) return;
       set_register(rd_reg(), ReadH(rj() + rk(), instr_.instr()));
       break;
     case LDX_W:
       printf_instr("LDX_W\t %s: %016lx, %s, %016lx, %s, %016lx\n",
                    Registers::Name(rd_reg()), rd(), Registers::Name(rj_reg()),
                    rj(), Registers::Name(rk_reg()), rk());
+      if (!ProbeMemory(rj() + rk(), sizeof(int32_t))) return;
       set_register(rd_reg(), ReadW(rj() + rk(), instr_.instr()));
       break;
     case LDX_D:
       printf_instr("LDX_D\t %s: %016lx, %s, %016lx, %s, %016lx\n",
                    Registers::Name(rd_reg()), rd(), Registers::Name(rj_reg()),
                    rj(), Registers::Name(rk_reg()), rk());
+      if (!ProbeMemory(rj() + rk(), sizeof(int64_t))) return;
       set_register(rd_reg(), Read2W(rj() + rk(), instr_.instr()));
       break;
     case STX_B:
       printf_instr("STX_B\t %s: %016lx, %s, %016lx, %s, %016lx\n",
                    Registers::Name(rd_reg()), rd(), Registers::Name(rj_reg()),
                    rj(), Registers::Name(rk_reg()), rk());
+      if (!ProbeMemory(rj() + rk(), sizeof(int8_t))) return;
       WriteB(rj() + rk(), static_cast<int8_t>(rd()));
       break;
     case STX_H:
       printf_instr("STX_H\t %s: %016lx, %s, %016lx, %s, %016lx\n",
                    Registers::Name(rd_reg()), rd(), Registers::Name(rj_reg()),
                    rj(), Registers::Name(rk_reg()), rk());
+      if (!ProbeMemory(rj() + rk(), sizeof(int16_t))) return;
       WriteH(rj() + rk(), static_cast<int16_t>(rd()), instr_.instr());
       break;
     case STX_W:
       printf_instr("STX_W\t %s: %016lx, %s, %016lx, %s, %016lx\n",
                    Registers::Name(rd_reg()), rd(), Registers::Name(rj_reg()),
                    rj(), Registers::Name(rk_reg()), rk());
+      if (!ProbeMemory(rj() + rk(), sizeof(int32_t))) return;
       WriteW(rj() + rk(), static_cast<int32_t>(rd()), instr_.instr());
       break;
     case STX_D:
       printf_instr("STX_D\t %s: %016lx, %s, %016lx, %s, %016lx\n",
                    Registers::Name(rd_reg()), rd(), Registers::Name(rj_reg()),
                    rj(), Registers::Name(rk_reg()), rk());
+      if (!ProbeMemory(rj() + rk(), sizeof(int64_t))) return;
       Write2W(rj() + rk(), rd(), instr_.instr());
       break;
     case LDX_BU:
       printf_instr("LDX_BU\t %s: %016lx, %s, %016lx, %s, %016lx\n",
                    Registers::Name(rd_reg()), rd(), Registers::Name(rj_reg()),
                    rj(), Registers::Name(rk_reg()), rk());
+      if (!ProbeMemory(rj() + rk(), sizeof(uint8_t))) return;
       set_register(rd_reg(), ReadBU(rj() + rk()));
       break;
     case LDX_HU:
       printf_instr("LDX_HU\t %s: %016lx, %s, %016lx, %s, %016lx\n",
                    Registers::Name(rd_reg()), rd(), Registers::Name(rj_reg()),
                    rj(), Registers::Name(rk_reg()), rk());
+      if (!ProbeMemory(rj() + rk(), sizeof(uint16_t))) return;
       set_register(rd_reg(), ReadHU(rj() + rk(), instr_.instr()));
       break;
     case LDX_WU:
       printf_instr("LDX_WU\t %s: %016lx, %s, %016lx, %s, %016lx\n",
                    Registers::Name(rd_reg()), rd(), Registers::Name(rj_reg()),
                    rj(), Registers::Name(rk_reg()), rk());
+      if (!ProbeMemory(rj() + rk(), sizeof(uint32_t))) return;
       set_register(rd_reg(), ReadWU(rj() + rk(), instr_.instr()));
       break;
     case FLDX_S:
@@ -4094,6 +4225,7 @@ void Simulator::DecodeTypeOp17() {
                    FPURegisters::Name(fd_reg()), fd_float(),
                    Registers::Name(rj_reg()), rj(), Registers::Name(rk_reg()),
                    rk());
+      if (!ProbeMemory(rj() + rk(), sizeof(float))) return;
       set_fpu_register(fd_reg(), kFPUInvalidResult);  // Trash upper 32 bits.
       set_fpu_register_word(fd_reg(),
                             ReadW(rj() + rk(), instr_.instr(), FLOAT_DOUBLE));
@@ -4103,6 +4235,7 @@ void Simulator::DecodeTypeOp17() {
                    FPURegisters::Name(fd_reg()), fd_double(),
                    Registers::Name(rj_reg()), rj(), Registers::Name(rk_reg()),
                    rk());
+      if (!ProbeMemory(rj() + rk(), sizeof(double))) return;
       set_fpu_register_double(fd_reg(), ReadD(rj() + rk(), instr_.instr()));
       break;
     case FSTX_S:
@@ -4110,6 +4243,7 @@ void Simulator::DecodeTypeOp17() {
                    FPURegisters::Name(fd_reg()), fd_float(),
                    Registers::Name(rj_reg()), rj(), Registers::Name(rk_reg()),
                    rk());
+      if (!ProbeMemory(rj() + rk(), sizeof(float))) return;
       WriteW(rj() + rk(), static_cast<int32_t>(get_fpu_register(fd_reg())),
              instr_.instr());
       break;
@@ -4118,6 +4252,7 @@ void Simulator::DecodeTypeOp17() {
                    FPURegisters::Name(fd_reg()), fd_double(),
                    Registers::Name(rj_reg()), rj(), Registers::Name(rk_reg()),
                    rk());
+      if (!ProbeMemory(rj() + rk(), sizeof(double))) return;
       WriteD(rj() + rk(), get_fpu_register_double(fd_reg()), instr_.instr());
       break;
     case AMSWAP_W:
@@ -4178,14 +4313,15 @@ void Simulator::DecodeTypeOp17() {
       printf_instr("AMSWAP_DB_W:\t %s: %016lx, %s, %016lx, %s, %016lx\n",
                    Registers::Name(rd_reg()), rd(), Registers::Name(rk_reg()),
                    rk(), Registers::Name(rj_reg()), rj());
+      if (!ProbeMemory(rj(), sizeof(int32_t))) return;
       int32_t success = 0;
       do {
         {
-          base::MutexGuard lock_guard(&GlobalMonitor::Get()->mutex);
+          GlobalMonitor::SimulatorMutex lock_guard(global_monitor_);
           set_register(rd_reg(), ReadW(rj(), instr_.instr()));
           local_monitor_.NotifyLoadLinked(rj(), TransactionSize::Word);
-          GlobalMonitor::Get()->NotifyLoadLinked_Locked(
-              rj(), &global_monitor_thread_);
+          global_monitor_->NotifyLoadLinked_Locked(rj(),
+                                                   &global_monitor_thread_);
         }
         WriteConditionalW(rj(), static_cast<int32_t>(rk()), instr_.instr(),
                           &success);
@@ -4195,14 +4331,15 @@ void Simulator::DecodeTypeOp17() {
       printf_instr("AMSWAP_DB_D:\t %s: %016lx, %s, %016lx, %s, %016lx\n",
                    Registers::Name(rd_reg()), rd(), Registers::Name(rk_reg()),
                    rk(), Registers::Name(rj_reg()), rj());
+      if (!ProbeMemory(rj(), sizeof(int64_t))) return;
       int32_t success = 0;
       do {
         {
-          base::MutexGuard lock_guard(&GlobalMonitor::Get()->mutex);
+          GlobalMonitor::SimulatorMutex lock_guard(global_monitor_);
           set_register(rd_reg(), Read2W(rj(), instr_.instr()));
           local_monitor_.NotifyLoadLinked(rj(), TransactionSize::DoubleWord);
-          GlobalMonitor::Get()->NotifyLoadLinked_Locked(
-              rj(), &global_monitor_thread_);
+          global_monitor_->NotifyLoadLinked_Locked(rj(),
+                                                   &global_monitor_thread_);
         }
         WriteConditional2W(rj(), rk(), instr_.instr(), &success);
       } while (!success);
@@ -4211,14 +4348,15 @@ void Simulator::DecodeTypeOp17() {
       printf_instr("AMADD_DB_W:\t %s: %016lx, %s, %016lx, %s, %016lx\n",
                    Registers::Name(rd_reg()), rd(), Registers::Name(rk_reg()),
                    rk(), Registers::Name(rj_reg()), rj());
+      if (!ProbeMemory(rj(), sizeof(int32_t))) return;
       int32_t success = 0;
       do {
         {
-          base::MutexGuard lock_guard(&GlobalMonitor::Get()->mutex);
+          GlobalMonitor::SimulatorMutex lock_guard(global_monitor_);
           set_register(rd_reg(), ReadW(rj(), instr_.instr()));
           local_monitor_.NotifyLoadLinked(rj(), TransactionSize::Word);
-          GlobalMonitor::Get()->NotifyLoadLinked_Locked(
-              rj(), &global_monitor_thread_);
+          global_monitor_->NotifyLoadLinked_Locked(rj(),
+                                                   &global_monitor_thread_);
         }
         WriteConditionalW(rj(),
                           static_cast<int32_t>(static_cast<int32_t>(rk()) +
@@ -4230,14 +4368,15 @@ void Simulator::DecodeTypeOp17() {
       printf_instr("AMADD_DB_D:\t %s: %016lx, %s, %016lx, %s, %016lx\n",
                    Registers::Name(rd_reg()), rd(), Registers::Name(rk_reg()),
                    rk(), Registers::Name(rj_reg()), rj());
+      if (!ProbeMemory(rj(), sizeof(int64_t))) return;
       int32_t success = 0;
       do {
         {
-          base::MutexGuard lock_guard(&GlobalMonitor::Get()->mutex);
+          GlobalMonitor::SimulatorMutex lock_guard(global_monitor_);
           set_register(rd_reg(), Read2W(rj(), instr_.instr()));
           local_monitor_.NotifyLoadLinked(rj(), TransactionSize::DoubleWord);
-          GlobalMonitor::Get()->NotifyLoadLinked_Locked(
-              rj(), &global_monitor_thread_);
+          global_monitor_->NotifyLoadLinked_Locked(rj(),
+                                                   &global_monitor_thread_);
         }
         WriteConditional2W(rj(), rk() + rd(), instr_.instr(), &success);
       } while (!success);
@@ -4246,14 +4385,15 @@ void Simulator::DecodeTypeOp17() {
       printf_instr("AMAND_DB_W:\t %s: %016lx, %s, %016lx, %s, %016lx\n",
                    Registers::Name(rd_reg()), rd(), Registers::Name(rk_reg()),
                    rk(), Registers::Name(rj_reg()), rj());
+      if (!ProbeMemory(rj(), sizeof(int32_t))) return;
       int32_t success = 0;
       do {
         {
-          base::MutexGuard lock_guard(&GlobalMonitor::Get()->mutex);
+          GlobalMonitor::SimulatorMutex lock_guard(global_monitor_);
           set_register(rd_reg(), ReadW(rj(), instr_.instr()));
           local_monitor_.NotifyLoadLinked(rj(), TransactionSize::Word);
-          GlobalMonitor::Get()->NotifyLoadLinked_Locked(
-              rj(), &global_monitor_thread_);
+          global_monitor_->NotifyLoadLinked_Locked(rj(),
+                                                   &global_monitor_thread_);
         }
         WriteConditionalW(rj(),
                           static_cast<int32_t>(static_cast<int32_t>(rk()) &
@@ -4265,14 +4405,15 @@ void Simulator::DecodeTypeOp17() {
       printf_instr("AMAND_DB_D:\t %s: %016lx, %s, %016lx, %s, %016lx\n",
                    Registers::Name(rd_reg()), rd(), Registers::Name(rk_reg()),
                    rk(), Registers::Name(rj_reg()), rj());
+      if (!ProbeMemory(rj(), sizeof(int64_t))) return;
       int32_t success = 0;
       do {
         {
-          base::MutexGuard lock_guard(&GlobalMonitor::Get()->mutex);
+          GlobalMonitor::SimulatorMutex lock_guard(global_monitor_);
           set_register(rd_reg(), Read2W(rj(), instr_.instr()));
           local_monitor_.NotifyLoadLinked(rj(), TransactionSize::DoubleWord);
-          GlobalMonitor::Get()->NotifyLoadLinked_Locked(
-              rj(), &global_monitor_thread_);
+          global_monitor_->NotifyLoadLinked_Locked(rj(),
+                                                   &global_monitor_thread_);
         }
         WriteConditional2W(rj(), rk() & rd(), instr_.instr(), &success);
       } while (!success);
@@ -4281,14 +4422,15 @@ void Simulator::DecodeTypeOp17() {
       printf_instr("AMOR_DB_W:\t %s: %016lx, %s, %016lx, %s, %016lx\n",
                    Registers::Name(rd_reg()), rd(), Registers::Name(rk_reg()),
                    rk(), Registers::Name(rj_reg()), rj());
+      if (!ProbeMemory(rj(), sizeof(int32_t))) return;
       int32_t success = 0;
       do {
         {
-          base::MutexGuard lock_guard(&GlobalMonitor::Get()->mutex);
+          GlobalMonitor::SimulatorMutex lock_guard(global_monitor_);
           set_register(rd_reg(), ReadW(rj(), instr_.instr()));
           local_monitor_.NotifyLoadLinked(rj(), TransactionSize::Word);
-          GlobalMonitor::Get()->NotifyLoadLinked_Locked(
-              rj(), &global_monitor_thread_);
+          global_monitor_->NotifyLoadLinked_Locked(rj(),
+                                                   &global_monitor_thread_);
         }
         WriteConditionalW(rj(),
                           static_cast<int32_t>(static_cast<int32_t>(rk()) |
@@ -4300,14 +4442,15 @@ void Simulator::DecodeTypeOp17() {
       printf_instr("AMOR_DB_D:\t %s: %016lx, %s, %016lx, %s, %016lx\n",
                    Registers::Name(rd_reg()), rd(), Registers::Name(rk_reg()),
                    rk(), Registers::Name(rj_reg()), rj());
+      if (!ProbeMemory(rj(), sizeof(int64_t))) return;
       int32_t success = 0;
       do {
         {
-          base::MutexGuard lock_guard(&GlobalMonitor::Get()->mutex);
+          GlobalMonitor::SimulatorMutex lock_guard(global_monitor_);
           set_register(rd_reg(), Read2W(rj(), instr_.instr()));
           local_monitor_.NotifyLoadLinked(rj(), TransactionSize::DoubleWord);
-          GlobalMonitor::Get()->NotifyLoadLinked_Locked(
-              rj(), &global_monitor_thread_);
+          global_monitor_->NotifyLoadLinked_Locked(rj(),
+                                                   &global_monitor_thread_);
         }
         WriteConditional2W(rj(), rk() | rd(), instr_.instr(), &success);
       } while (!success);
@@ -4316,14 +4459,15 @@ void Simulator::DecodeTypeOp17() {
       printf_instr("AMXOR_DB_W:\t %s: %016lx, %s, %016lx, %s, %016lx\n",
                    Registers::Name(rd_reg()), rd(), Registers::Name(rk_reg()),
                    rk(), Registers::Name(rj_reg()), rj());
+      if (!ProbeMemory(rj(), sizeof(int32_t))) return;
       int32_t success = 0;
       do {
         {
-          base::MutexGuard lock_guard(&GlobalMonitor::Get()->mutex);
+          GlobalMonitor::SimulatorMutex lock_guard(global_monitor_);
           set_register(rd_reg(), ReadW(rj(), instr_.instr()));
           local_monitor_.NotifyLoadLinked(rj(), TransactionSize::Word);
-          GlobalMonitor::Get()->NotifyLoadLinked_Locked(
-              rj(), &global_monitor_thread_);
+          global_monitor_->NotifyLoadLinked_Locked(rj(),
+                                                   &global_monitor_thread_);
         }
         WriteConditionalW(rj(),
                           static_cast<int32_t>(static_cast<int32_t>(rk()) ^
@@ -4335,14 +4479,15 @@ void Simulator::DecodeTypeOp17() {
       printf_instr("AMXOR_DB_D:\t %s: %016lx, %s, %016lx, %s, %016lx\n",
                    Registers::Name(rd_reg()), rd(), Registers::Name(rk_reg()),
                    rk(), Registers::Name(rj_reg()), rj());
+      if (!ProbeMemory(rj(), sizeof(int64_t))) return;
       int32_t success = 0;
       do {
         {
-          base::MutexGuard lock_guard(&GlobalMonitor::Get()->mutex);
+          GlobalMonitor::SimulatorMutex lock_guard(global_monitor_);
           set_register(rd_reg(), Read2W(rj(), instr_.instr()));
           local_monitor_.NotifyLoadLinked(rj(), TransactionSize::DoubleWord);
-          GlobalMonitor::Get()->NotifyLoadLinked_Locked(
-              rj(), &global_monitor_thread_);
+          global_monitor_->NotifyLoadLinked_Locked(rj(),
+                                                   &global_monitor_thread_);
         }
         WriteConditional2W(rj(), rk() ^ rd(), instr_.instr(), &success);
       } while (!success);
@@ -4375,8 +4520,8 @@ void Simulator::DecodeTypeOp17() {
       printf_instr("DBAR\n");
       break;
     case IBAR:
-      printf("Sim UNIMPLEMENTED: IBAR\n");
-      UNIMPLEMENTED();
+      printf_instr("IBAR\n");
+      break;
     case FSCALEB_S:
       printf("Sim UNIMPLEMENTED: FSCALEB_S\n");
       UNIMPLEMENTED();
@@ -4809,7 +4954,7 @@ void Simulator::DecodeTypeOp22() {
                    FPURegisters::Name(fj_reg()), fj_float());
       float fj = fj_float();
       float rounded = floor(fj);
-      int32_t result = static_cast<int32_t>(rounded);
+      int32_t result = base::saturated_cast<int32_t>(rounded);
       SetFPUWordResult(fd_reg(), result);
       if (set_fcsr_round_error(fj, rounded)) {
         set_fpu_register_word_invalid_result(fj, rounded);
@@ -4822,7 +4967,7 @@ void Simulator::DecodeTypeOp22() {
                    FPURegisters::Name(fj_reg()), fj_double());
       double fj = fj_double();
       double rounded = floor(fj);
-      int32_t result = static_cast<int32_t>(rounded);
+      int32_t result = base::saturated_cast<int32_t>(rounded);
       SetFPUWordResult(fd_reg(), result);
       if (set_fcsr_round_error(fj, rounded)) {
         set_fpu_register_invalid_result(fj, rounded);
@@ -4835,7 +4980,7 @@ void Simulator::DecodeTypeOp22() {
                    FPURegisters::Name(fj_reg()), fj_float());
       float fj = fj_float();
       float rounded = floor(fj);
-      int64_t result = static_cast<int64_t>(rounded);
+      int64_t result = base::saturated_cast<int64_t>(rounded);
       SetFPUResult(fd_reg(), result);
       if (set_fcsr_round64_error(fj, rounded)) {
         set_fpu_register_invalid_result64(fj, rounded);
@@ -4848,7 +4993,7 @@ void Simulator::DecodeTypeOp22() {
                    FPURegisters::Name(fj_reg()), fj_double());
       double fj = fj_double();
       double rounded = floor(fj);
-      int64_t result = static_cast<int64_t>(rounded);
+      int64_t result = base::saturated_cast<int64_t>(rounded);
       SetFPUResult(fd_reg(), result);
       if (set_fcsr_round64_error(fj, rounded)) {
         set_fpu_register_invalid_result64(fj, rounded);
@@ -4861,7 +5006,7 @@ void Simulator::DecodeTypeOp22() {
                    FPURegisters::Name(fj_reg()), fj_float());
       float fj = fj_float();
       float rounded = ceil(fj);
-      int32_t result = static_cast<int32_t>(rounded);
+      int32_t result = base::saturated_cast<int32_t>(rounded);
       SetFPUWordResult(fd_reg(), result);
       if (set_fcsr_round_error(fj, rounded)) {
         set_fpu_register_word_invalid_result(fj, rounded);
@@ -4874,7 +5019,7 @@ void Simulator::DecodeTypeOp22() {
                    FPURegisters::Name(fj_reg()), fj_double());
       double fj = fj_double();
       double rounded = ceil(fj);
-      int32_t result = static_cast<int32_t>(rounded);
+      int32_t result = base::saturated_cast<int32_t>(rounded);
       SetFPUWordResult(fd_reg(), result);
       if (set_fcsr_round_error(fj, rounded)) {
         set_fpu_register_invalid_result(fj, rounded);
@@ -4887,7 +5032,7 @@ void Simulator::DecodeTypeOp22() {
                    FPURegisters::Name(fj_reg()), fj_float());
       float fj = fj_float();
       float rounded = ceil(fj);
-      int64_t result = static_cast<int64_t>(rounded);
+      int64_t result = base::saturated_cast<int64_t>(rounded);
       SetFPUResult(fd_reg(), result);
       if (set_fcsr_round64_error(fj, rounded)) {
         set_fpu_register_invalid_result64(fj, rounded);
@@ -4900,7 +5045,7 @@ void Simulator::DecodeTypeOp22() {
                    FPURegisters::Name(fj_reg()), fj_double());
       double fj = fj_double();
       double rounded = ceil(fj);
-      int64_t result = static_cast<int64_t>(rounded);
+      int64_t result = base::saturated_cast<int64_t>(rounded);
       SetFPUResult(fd_reg(), result);
       if (set_fcsr_round64_error(fj, rounded)) {
         set_fpu_register_invalid_result64(fj, rounded);
@@ -4913,7 +5058,7 @@ void Simulator::DecodeTypeOp22() {
                    FPURegisters::Name(fj_reg()), fj_float());
       float fj = fj_float();
       float rounded = trunc(fj);
-      int32_t result = static_cast<int32_t>(rounded);
+      int32_t result = base::saturated_cast<int32_t>(rounded);
       SetFPUWordResult(fd_reg(), result);
       if (set_fcsr_round_error(fj, rounded)) {
         set_fpu_register_word_invalid_result(fj, rounded);
@@ -4926,7 +5071,7 @@ void Simulator::DecodeTypeOp22() {
                    FPURegisters::Name(fj_reg()), fj_double());
       double fj = fj_double();
       double rounded = trunc(fj);
-      int32_t result = static_cast<int32_t>(rounded);
+      int32_t result = base::saturated_cast<int32_t>(rounded);
       SetFPUWordResult(fd_reg(), result);
       if (set_fcsr_round_error(fj, rounded)) {
         set_fpu_register_invalid_result(fj, rounded);
@@ -4939,7 +5084,7 @@ void Simulator::DecodeTypeOp22() {
                    FPURegisters::Name(fj_reg()), fj_float());
       float fj = fj_float();
       float rounded = trunc(fj);
-      int64_t result = static_cast<int64_t>(rounded);
+      int64_t result = base::saturated_cast<int64_t>(rounded);
       SetFPUResult(fd_reg(), result);
       if (set_fcsr_round64_error(fj, rounded)) {
         set_fpu_register_invalid_result64(fj, rounded);
@@ -4952,7 +5097,7 @@ void Simulator::DecodeTypeOp22() {
                    FPURegisters::Name(fj_reg()), fj_double());
       double fj = fj_double();
       double rounded = trunc(fj);
-      int64_t result = static_cast<int64_t>(rounded);
+      int64_t result = base::saturated_cast<int64_t>(rounded);
       SetFPUResult(fd_reg(), result);
       if (set_fcsr_round64_error(fj, rounded)) {
         set_fpu_register_invalid_result64(fj, rounded);
@@ -4964,13 +5109,8 @@ void Simulator::DecodeTypeOp22() {
                    FPURegisters::Name(fd_reg()), fd_double(),
                    FPURegisters::Name(fj_reg()), fj_float());
       float fj = fj_float();
-      float rounded = floor(fj + 0.5);
-      int32_t result = static_cast<int32_t>(rounded);
-      if ((result & 1) != 0 && result - fj == 0.5) {
-        // If the number is halfway between two integers,
-        // round to the even one.
-        result--;
-      }
+      float rounded = roundeven(fj);
+      int32_t result = base::saturated_cast<int32_t>(rounded);
       SetFPUWordResult(fd_reg(), result);
       if (set_fcsr_round_error(fj, rounded)) {
         set_fpu_register_word_invalid_result(fj, rounded);
@@ -4982,13 +5122,8 @@ void Simulator::DecodeTypeOp22() {
                    FPURegisters::Name(fd_reg()), fd_double(),
                    FPURegisters::Name(fj_reg()), fj_double());
       double fj = fj_double();
-      double rounded = floor(fj + 0.5);
-      int32_t result = static_cast<int32_t>(rounded);
-      if ((result & 1) != 0 && result - fj == 0.5) {
-        // If the number is halfway between two integers,
-        // round to the even one.
-        result--;
-      }
+      double rounded = roundeven(fj);
+      int32_t result = base::saturated_cast<int32_t>(rounded);
       SetFPUWordResult(fd_reg(), result);
       if (set_fcsr_round_error(fj, rounded)) {
         set_fpu_register_invalid_result(fj, rounded);
@@ -5000,13 +5135,8 @@ void Simulator::DecodeTypeOp22() {
                    FPURegisters::Name(fd_reg()), fd_double(),
                    FPURegisters::Name(fj_reg()), fj_float());
       float fj = fj_float();
-      float rounded = floor(fj + 0.5);
-      int64_t result = static_cast<int64_t>(rounded);
-      if ((result & 1) != 0 && result - fj == 0.5) {
-        // If the number is halfway between two integers,
-        // round to the even one.
-        result--;
-      }
+      float rounded = roundeven(fj);
+      int64_t result = base::saturated_cast<int64_t>(rounded);
       SetFPUResult(fd_reg(), result);
       if (set_fcsr_round64_error(fj, rounded)) {
         set_fpu_register_invalid_result64(fj, rounded);
@@ -5018,13 +5148,8 @@ void Simulator::DecodeTypeOp22() {
                    FPURegisters::Name(fd_reg()), fd_double(),
                    FPURegisters::Name(fj_reg()), fj_double());
       double fj = fj_double();
-      double rounded = floor(fj + 0.5);
-      int64_t result = static_cast<int64_t>(rounded);
-      if ((result & 1) != 0 && result - fj == 0.5) {
-        // If the number is halfway between two integers,
-        // round to the even one.
-        result--;
-      }
+      double rounded = roundeven(fj);
+      int64_t result = base::saturated_cast<int64_t>(rounded);
       SetFPUResult(fd_reg(), result);
       if (set_fcsr_round64_error(fj, rounded)) {
         set_fpu_register_invalid_result64(fj, rounded);
@@ -5606,7 +5731,6 @@ bool Simulator::GlobalMonitor::LinkedAddress::NotifyStoreConditional_Locked(
 void Simulator::GlobalMonitor::NotifyLoadLinked_Locked(
     uintptr_t addr, LinkedAddress* linked_address) {
   linked_address->NotifyLoadLinked_Locked(addr);
-  PrependProcessor_Locked(linked_address);
 }
 
 void Simulator::GlobalMonitor::NotifyStore_Locked(
@@ -5619,7 +5743,6 @@ void Simulator::GlobalMonitor::NotifyStore_Locked(
 
 bool Simulator::GlobalMonitor::NotifyStoreConditional_Locked(
     uintptr_t addr, LinkedAddress* linked_address) {
-  DCHECK(IsProcessorInLinkedList_Locked(linked_address));
   if (linked_address->NotifyStoreConditional_Locked(addr, true)) {
     // Notify the other processors that this StoreConditional succeeded.
     for (LinkedAddress* iter = head_; iter; iter = iter->next_) {
@@ -5633,32 +5756,21 @@ bool Simulator::GlobalMonitor::NotifyStoreConditional_Locked(
   }
 }
 
-bool Simulator::GlobalMonitor::IsProcessorInLinkedList_Locked(
-    LinkedAddress* linked_address) const {
-  return head_ == linked_address || linked_address->next_ ||
-         linked_address->prev_;
-}
-
-void Simulator::GlobalMonitor::PrependProcessor_Locked(
+void Simulator::GlobalMonitor::PrependLinkedAddress(
     LinkedAddress* linked_address) {
-  if (IsProcessorInLinkedList_Locked(linked_address)) {
-    return;
-  }
-
+  base::MutexGuard lock_guard(&mutex_);
   if (head_) {
     head_->prev_ = linked_address;
   }
   linked_address->prev_ = nullptr;
   linked_address->next_ = head_;
   head_ = linked_address;
+  num_linked_address_++;
 }
 
 void Simulator::GlobalMonitor::RemoveLinkedAddress(
     LinkedAddress* linked_address) {
-  base::MutexGuard lock_guard(&mutex);
-  if (!IsProcessorInLinkedList_Locked(linked_address)) {
-    return;
-  }
+  base::MutexGuard lock_guard(&mutex_);
 
   if (linked_address->prev_) {
     linked_address->prev_->next_ = linked_address->next_;
@@ -5670,6 +5782,7 @@ void Simulator::GlobalMonitor::RemoveLinkedAddress(
   }
   linked_address->prev_ = nullptr;
   linked_address->next_ = nullptr;
+  num_linked_address_--;
 }
 
 #undef SScanF

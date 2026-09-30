@@ -18,15 +18,15 @@ frame size: 1
 parameter count: 1
 bytecode array length: 9
 bytecodes: [
-  /*   39 S> */ B(LdaGlobal), U8(0), U8(0),
+  /*   39 S> */ B(LdaGlobal), U8(0:"a"), FBV(0),
                 B(Star0),
-                B(LdaConstant), U8(1),
+                B(LdaConstant), U8(1:"x"),
                 B(DeletePropertySloppy), R(0),
   /*   57 S> */ B(Return),
 ]
 constant pool: [
-  ONE_BYTE_INTERNALIZED_STRING_TYPE ["a"],
-  ONE_BYTE_INTERNALIZED_STRING_TYPE ["x"],
+  INTERNALIZED_ONE_BYTE_STRING_TYPE ["a"],
+  INTERNALIZED_ONE_BYTE_STRING_TYPE ["x"],
 ]
 handlers: [
 ]
@@ -44,14 +44,14 @@ frame size: 1
 parameter count: 1
 bytecode array length: 9
 bytecodes: [
-  /*   51 S> */ B(LdaGlobal), U8(0), U8(0),
+  /*   51 S> */ B(LdaGlobal), U8(0:"a"), FBV(0),
                 B(Star0),
                 B(LdaSmi), I8(1),
                 B(DeletePropertyStrict), R(0),
   /*   70 S> */ B(Return),
 ]
 constant pool: [
-  ONE_BYTE_INTERNALIZED_STRING_TYPE ["a"],
+  INTERNALIZED_ONE_BYTE_STRING_TYPE ["a"],
 ]
 handlers: [
 ]
@@ -68,13 +68,13 @@ frame size: 1
 parameter count: 1
 bytecode array length: 9
 bytecodes: [
-  /*   39 S> */ B(LdaConstant), U8(0),
+  /*   39 S> */ B(LdaConstant), U8(0:"a"),
                 B(Star0),
-                B(CallRuntime), U16(Runtime::kDeleteLookupSlot), R(0), U8(1),
+                B(CallRuntime), U16(Runtime::kDeleteLookupSlot), R(0), RegCount8(1),
   /*   55 S> */ B(Return),
 ]
 constant pool: [
-  ONE_BYTE_INTERNALIZED_STRING_TYPE ["a"],
+  INTERNALIZED_ONE_BYTE_STRING_TYPE ["a"],
 ]
 handlers: [
 ]
@@ -91,13 +91,13 @@ frame size: 1
 parameter count: 1
 bytecode array length: 9
 bytecodes: [
-  /*   25 S> */ B(LdaConstant), U8(0),
+  /*   25 S> */ B(LdaConstant), U8(0:"b"),
                 B(Star0),
-                B(CallRuntime), U16(Runtime::kDeleteLookupSlot), R(0), U8(1),
+                B(CallRuntime), U16(Runtime::kDeleteLookupSlot), R(0), RegCount8(1),
   /*   41 S> */ B(Return),
 ]
 constant pool: [
-  ONE_BYTE_INTERNALIZED_STRING_TYPE ["b"],
+  INTERNALIZED_ONE_BYTE_STRING_TYPE ["b"],
 ]
 handlers: [
 ]

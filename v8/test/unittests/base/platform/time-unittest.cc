@@ -13,8 +13,6 @@
 
 #if V8_OS_WIN
 #include <windows.h>
-
-#include "src/base/win32-headers.h"
 #endif
 
 #include <vector>
@@ -385,7 +383,7 @@ void Sleep(TimeDelta wait_time) {
 
 TEST(ElapsedTimer, StartStop) {
   TimeDelta wait_time = TimeDelta::FromMilliseconds(100);
-  TimeDelta noise = TimeDelta::FromMilliseconds(100);
+  TimeDelta noise = TimeDelta::FromMilliseconds(200);
   ElapsedTimer timer;
   DCHECK(!timer.IsStarted());
 

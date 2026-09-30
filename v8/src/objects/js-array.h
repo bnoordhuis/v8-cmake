@@ -7,6 +7,7 @@
 
 #include "src/objects/allocation-site.h"
 #include "src/objects/fixed-array.h"
+#include "src/objects/js-function.h"
 #include "src/objects/js-objects.h"
 
 // Has to be the last include (doesn't have include guards):
@@ -15,41 +16,47 @@
 namespace v8 {
 namespace internal {
 
-#include "torque-generated/src/objects/js-array-tq.inc"
-
 // The JSArray describes JavaScript Arrays
 //  Such an array can be in one of two modes:
 //    - fast, backing storage is a FixedArray and length <= elements.length();
 //       Please note: push and pop can be used to grow and shrink the array.
 //    - slow, backing storage is a HashTable with numbers as keys.
-class JSArray : public TorqueGeneratedJSArray<JSArray, JSObject> {
+V8_OBJECT class JSArray : public JSObject {
  public:
   // [length]: The length property.
-  DECL_ACCESSORS(length, Object)
-  DECL_RELAXED_GETTER(length, Object)
+  inline Tagged<Number> length() const;
+  inline Tagged<Number> length(RelaxedLoadTag) const;
+  inline void set_length(Tagged<Number> value,
+                         WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
 
   // Acquire/release semantics on this field are explicitly forbidden to avoid
   // confusion, since the default setter uses relaxed semantics. If
   // acquire/release semantics ever become necessary, the default setter should
   // be reverted to non-atomic behavior, and setters with explicit tags
   // introduced and used when required.
-  Object length(PtrComprCageBase cage_base, AcquireLoadTag tag) const = delete;
-  void set_length(Object value, ReleaseStoreTag tag,
+  Tagged<Number> length(PtrComprCageBase cage_base,
+                        AcquireLoadTag) const = delete;
+  void set_length(Tagged<Number> value, ReleaseStoreTag tag,
                   WriteBarrierMode mode = UPDATE_WRITE_BARRIER) = delete;
 
   // Overload the length setter to skip write barrier when the length
   // is set to a smi. This matches the set function on FixedArray.
-  inline void set_length(Smi length);
+  inline void set_length(Tagged<Smi> length);
 
-  static bool MayHaveReadOnlyLength(Map js_array_map);
-  static bool HasReadOnlyLength(Handle<JSArray> array);
-  static bool WouldChangeReadOnlyLength(Handle<JSArray> array, uint32_t index);
+  static inline bool MayHaveReadOnlyLength(Tagged<Map> js_array_map);
+  static inline bool HasReadOnlyLength(DirectHandle<JSArray> array);
+  V8_NOINLINE V8_PRESERVE_MOST static bool HasReadOnlyLengthSlowPath(
+      DirectHandle<JSArray> array);
+  static bool WouldChangeReadOnlyLength(DirectHandle<JSArray> array,
+                                        uint32_t index);
 
   // Initialize the array with the given capacity. The function may
   // fail due to out-of-memory situations, but only if the requested
   // capacity is non-zero.
-  V8_EXPORT_PRIVATE static void Initialize(Handle<JSArray> array, int capacity,
-                                           int length = 0);
+  V8_EXPORT_PRIVATE static void Initialize(Isolate* isolate,
+                                           DirectHandle<JSArray> array,
+                                           uint32_t capacity,
+                                           uint32_t length = 0);
 
   // If the JSArray has fast elements, and new_length would result in
   // normalization, returns true.
@@ -57,41 +64,44 @@ class JSArray : public TorqueGeneratedJSArray<JSArray, JSObject> {
   static inline bool SetLengthWouldNormalize(Heap* heap, uint32_t new_length);
 
   // Initializes the array to a certain length.
-  V8_EXPORT_PRIVATE static Maybe<bool> SetLength(Handle<JSArray> array,
+  V8_EXPORT_PRIVATE static Maybe<bool> SetLength(Isolate* isolate,
+                                                 DirectHandle<JSArray> array,
                                                  uint32_t length);
 
   // Set the content of the array to the content of storage.
-  static inline void SetContent(Handle<JSArray> array,
-                                Handle<FixedArrayBase> storage);
+  static inline void SetContent(Isolate* isolate, DirectHandle<JSArray> array,
+                                DirectHandle<FixedArrayBase> storage);
 
   // ES6 9.4.2.1
   V8_WARN_UNUSED_RESULT static Maybe<bool> DefineOwnProperty(
-      Isolate* isolate, Handle<JSArray> o, Handle<Object> name,
+      Isolate* isolate, DirectHandle<JSArray> o, DirectHandle<Object> name,
       PropertyDescriptor* desc, Maybe<ShouldThrow> should_throw);
 
   static bool AnythingToArrayLength(Isolate* isolate,
-                                    Handle<Object> length_object,
+                                    DirectHandle<Object> length_object,
                                     uint32_t* output);
   V8_WARN_UNUSED_RESULT static Maybe<bool> ArraySetLength(
-      Isolate* isolate, Handle<JSArray> a, PropertyDescriptor* desc,
+      Isolate* isolate, DirectHandle<JSArray> a, PropertyDescriptor* desc,
       Maybe<ShouldThrow> should_throw);
 
   // Support for Array.prototype.join().
-  // Writes a fixed array of strings and separators to a single destination
-  // string. This helpers assumes the fixed array encodes separators in two
-  // ways:
+  // Writes a linked list of chunks of strings and separators to a single
+  // destination string. This helpers assumes the chynk encodes separators in
+  // two ways:
   //   1) Explicitly with a smi, whos value represents the number of repeated
   //      separators.
   //   2) Implicitly between two consecutive strings a single separator.
+  // The 0-th element stores a link to the next chunk (FixedArray or undefined).
   //
   // In addition repeated strings are represented by a negative smi, indicating
   // how many times the previously written string has to be repeated.
   //
   // Here are some input/output examples given the separator string is ',':
   //
-  //   [1, 'hello', 2, 'world', 1] => ',hello,,world,'
-  //   ['hello', 'world']          => 'hello,world'
-  //   ['hello', -2, 'world']      => 'hello,hello,hello,world'
+  //   [undefined, 1, 'hello', 2, 'world', 1] => ',hello,,world,'
+  //   [undefined, 'hello', 'world']          => 'hello,world'
+  //   [undefined, 'hello', -2, 'world']      => 'hello,hello,hello,world'
+  //   [[undefined, 'a', 'b'], 'c', 'd']      => 'a,b,c,d'
   //
   // To avoid any allocations, this helper assumes the destination string is the
   // exact length necessary to write the strings and separators from the fixed
@@ -100,11 +110,9 @@ class JSArray : public TorqueGeneratedJSArray<JSArray, JSObject> {
   // - {raw_fixed_array} is a tagged FixedArray pointer.
   // - {raw_separator} and {raw_dest} are tagged String pointers.
   // - Returns a tagged String pointer.
-  static Address ArrayJoinConcatToSequentialString(Isolate* isolate,
-                                                   Address raw_fixed_array,
-                                                   intptr_t length,
-                                                   Address raw_separator,
-                                                   Address raw_dest);
+  static Address ArrayJoinConcatToSequentialString(
+      Isolate* isolate, Address raw_list_head, uintptr_t raw_last_chunk_length,
+      Address raw_separator, Address raw_dest);
 
   // Checks whether the Array has the current realm's Array.prototype as its
   // prototype. This function is best-effort and only gives a conservative
@@ -124,6 +132,11 @@ class JSArray : public TorqueGeneratedJSArray<JSArray, JSObject> {
   // Max. number of elements being copied in Array builtins.
   static const int kMaxCopyElements = 100;
 
+  // Maximum array length for which Maglev/TurboFan inline an insertion sort
+  // instead of calling the generic PowerSort builtin.  PowerSort itself uses
+  // BinaryInsertionSort below this threshold too.
+  static constexpr int kMaxInlineSortLength = 16;
+
   // Valid array indices range from +0 <= i < 2^32 - 1 (kMaxUInt32).
   static constexpr uint32_t kMaxArrayLength = JSObject::kMaxElementCount;
   static constexpr uint32_t kMaxArrayIndex = JSObject::kMaxElementIndex;
@@ -131,25 +144,39 @@ class JSArray : public TorqueGeneratedJSArray<JSArray, JSObject> {
   static_assert(kMaxArrayIndex == kMaxUInt32 - 1);
 
   // This constant is somewhat arbitrary. Any large enough value would work.
-  static constexpr uint32_t kMaxFastArrayLength = 32 * 1024 * 1024;
+  static constexpr uint32_t kMaxFastArrayLength =
+      V8_LOWER_LIMITS_MODE_BOOL ? (1 * 1024 * 1024) : (32 * 1024 * 1024);
   static_assert(kMaxFastArrayLength <= kMaxArrayLength);
+  static_assert(kMaxFastArrayLength <= kMaxFixedArrayCapacity);
 
   // Min. stack size for detecting an Array.prototype.join() call cycle.
   static const uint32_t kMinJoinStackSize = 2;
 
-  static const int kInitialMaxFastElementArray =
-      (kMaxRegularHeapObjectSize - FixedArray::kHeaderSize - kHeaderSize -
-       AllocationMemento::kSize) >>
-      kDoubleSizeLog2;
+  static const int kHeaderSize;
+  static const int kInitialMaxFastElementArray;
 
-  TQ_OBJECT_CONSTRUCTORS(JSArray)
-};
+ public:
+  TaggedMember<Number> length_;
+} V8_OBJECT_END;
+
+inline constexpr int JSArray::kHeaderSize = sizeof(JSArray);
+inline constexpr int JSArray::kInitialMaxFastElementArray =
+    (kMaxRegularHeapObjectSize - static_cast<int>(sizeof(FixedArray)) -
+     JSArray::kHeaderSize - static_cast<int>(sizeof(AllocationMemento))) >>
+    kDoubleSizeLog2;
 
 // The JSArrayIterator describes JavaScript Array Iterators Objects, as
-// defined in ES section #sec-array-iterator-objects.
-class JSArrayIterator
-    : public TorqueGeneratedJSArrayIterator<JSArrayIterator, JSObject> {
+// defined in https://tc39.es/ecma262/#sec-array-iterator-objects.
+V8_OBJECT class JSArrayIterator : public JSObject {
  public:
+  inline Tagged<JSReceiver> iterated_object() const;
+  inline void set_iterated_object(Tagged<JSReceiver> value,
+                                  WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+
+  inline Tagged<Number> next_index() const;
+  inline void set_next_index(Tagged<Number> value,
+                             WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+
   DECL_PRINTER(JSArrayIterator)
   DECL_VERIFIER(JSArrayIterator)
 
@@ -158,21 +185,42 @@ class JSArrayIterator
   inline void set_kind(IterationKind kind);
 
  private:
-  DECL_INT_ACCESSORS(raw_kind)
+  inline int raw_kind() const;
+  inline void set_raw_kind(int value);
 
-  TQ_OBJECT_CONSTRUCTORS(JSArrayIterator)
-};
+ public:
+  TaggedMember<JSReceiver> iterated_object_;
+  TaggedMember<Number> next_index_;
+  // SmiTagged<IterationKind>.
+  TaggedMember<Smi> kind_;
+} V8_OBJECT_END;
 
 // Helper class for JSArrays that are template literal objects
-class TemplateLiteralObject
-    : public TorqueGeneratedTemplateLiteralObject<TemplateLiteralObject,
-                                                  JSArray> {
+V8_OBJECT class TemplateLiteralObject : public JSArray {
  public:
-  DECL_CAST(TemplateLiteralObject)
+  inline Tagged<JSArray> raw() const;
+  inline void set_raw(Tagged<JSArray> value,
+                      WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
 
- private:
-  TQ_OBJECT_CONSTRUCTORS(TemplateLiteralObject)
-};
+  inline int function_literal_id() const;
+  inline void set_function_literal_id(int value);
+
+  inline int slot_id() const;
+  inline void set_slot_id(int value);
+
+  static const int kHeaderSize;
+
+ public:
+  TaggedMember<JSArray> raw_;
+  TaggedMember<Smi> function_literal_id_;
+  TaggedMember<Smi> slot_id_;
+} V8_OBJECT_END;
+
+inline constexpr int TemplateLiteralObject::kHeaderSize =
+    sizeof(TemplateLiteralObject);
+
+V8_OBJECT class JSArrayConstructor : public JSFunctionWithPrototype {
+} V8_OBJECT_END;
 
 }  // namespace internal
 }  // namespace v8

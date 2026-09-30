@@ -9,21 +9,24 @@
 #include "src/execution/isolate-inl.h"
 #include "src/interpreter/bytecode-array-iterator.h"
 #include "src/interpreter/bytecode-decoder.h"
-#include "src/interpreter/bytecode-flags.h"
+#include "src/interpreter/bytecode-flags-and-tokens.h"
 #include "src/interpreter/bytecode-register.h"
 #include "src/interpreter/bytecodes.h"
 #include "src/interpreter/interpreter.h"
 #include "src/logging/counters.h"
 #include "src/runtime/runtime-utils.h"
 #include "src/snapshot/snapshot.h"
+#ifdef V8_DUMPLING
+#include "src/dumpling/dumpling-manager.h"
+#endif
 #include "src/utils/ostreams.h"
 
 namespace v8 {
 namespace internal {
 
-#ifdef V8_TRACE_UNOPTIMIZED
-
 namespace {
+
+#if defined(V8_TRACE_UNOPTIMIZED) || defined(V8_DUMPLING)
 
 void AdvanceToOffsetForTracing(
     interpreter::BytecodeArrayIterator& bytecode_iterator, int offset) {
@@ -38,21 +41,25 @@ void AdvanceToOffsetForTracing(
               interpreter::OperandScale::kSingle));
 }
 
-void PrintRegisterRange(UnoptimizedFrame* frame, std::ostream& os,
+#endif  // V8_TRACE_UNOPTIMIZED || V8_DUMPLING
+
+#ifdef V8_TRACE_UNOPTIMIZED
+
+void PrintRegisterRange(UnoptimizedJSFrame* frame, std::ostream& os,
                         interpreter::BytecodeArrayIterator& bytecode_iterator,
                         const int& reg_field_width, const char* arrow_direction,
                         interpreter::Register first_reg, int range) {
   for (int reg_index = first_reg.index(); reg_index < first_reg.index() + range;
        reg_index++) {
-    Object reg_object = frame->ReadInterpreterRegister(reg_index);
+    Tagged<Object> reg_object = frame->ReadInterpreterRegister(reg_index);
     os << "      [ " << std::setw(reg_field_width)
        << interpreter::Register(reg_index).ToString() << arrow_direction;
-    reg_object.ShortPrint(os);
+    ShortPrint(reg_object, os);
     os << " ]" << std::endl;
   }
 }
 
-void PrintRegisters(UnoptimizedFrame* frame, std::ostream& os, bool is_input,
+void PrintRegisters(UnoptimizedJSFrame* frame, std::ostream& os, bool is_input,
                     interpreter::BytecodeArrayIterator& bytecode_iterator,
                     Handle<Object> accumulator) {
   static const char kAccumulator[] = "accumulator";
@@ -72,7 +79,7 @@ void PrintRegisters(UnoptimizedFrame* frame, std::ostream& os, bool is_input,
       (!is_input &&
        interpreter::Bytecodes::WritesOrClobbersAccumulator(bytecode))) {
     os << "      [ " << kAccumulator << kArrowDirection;
-    accumulator->ShortPrint(os);
+    ShortPrint(*accumulator, os);
     os << " ]" << std::endl;
   }
 
@@ -103,7 +110,11 @@ void PrintRegisters(UnoptimizedFrame* frame, std::ostream& os, bool is_input,
   }
 }
 
+#endif  // V8_TRACE_UNOPTIMIZED
+
 }  // namespace
+
+#ifdef V8_TRACE_UNOPTIMIZED
 
 RUNTIME_FUNCTION(Runtime_TraceUnoptimizedBytecodeEntry) {
   if (!v8_flags.trace_ignition && !v8_flags.trace_baseline_exec) {
@@ -111,8 +122,8 @@ RUNTIME_FUNCTION(Runtime_TraceUnoptimizedBytecodeEntry) {
   }
 
   JavaScriptStackFrameIterator frame_iterator(isolate);
-  UnoptimizedFrame* frame =
-      reinterpret_cast<UnoptimizedFrame*>(frame_iterator.frame());
+  UnoptimizedJSFrame* frame =
+      reinterpret_cast<UnoptimizedJSFrame*>(frame_iterator.frame());
 
   if (frame->is_interpreted() && !v8_flags.trace_ignition) {
     return ReadOnlyRoots(isolate).undefined_value();
@@ -123,7 +134,7 @@ RUNTIME_FUNCTION(Runtime_TraceUnoptimizedBytecodeEntry) {
 
   SealHandleScope shs(isolate);
   DCHECK_EQ(3, args.length());
-  Handle<BytecodeArray> bytecode_array = args.at<BytecodeArray>(0);
+  Handle<BytecodeArray> bytecode_array = CheckedCast<BytecodeArray>(args.at(0));
   int bytecode_offset = args.smi_value_at(1);
   Handle<Object> accumulator = args.at(2);
 
@@ -134,9 +145,7 @@ RUNTIME_FUNCTION(Runtime_TraceUnoptimizedBytecodeEntry) {
     StdoutStream os;
 
     // Print bytecode.
-    const uint8_t* base_address = reinterpret_cast<const uint8_t*>(
-        bytecode_array->GetFirstBytecodeAddress());
-    const uint8_t* bytecode_address = base_address + offset;
+    const uint8_t* bytecode_address = bytecode_iterator.current_address();
 
     if (frame->is_baseline()) {
       os << "B-> ";
@@ -145,7 +154,7 @@ RUNTIME_FUNCTION(Runtime_TraceUnoptimizedBytecodeEntry) {
     }
     os << static_cast<const void*>(bytecode_address) << " @ " << std::setw(4)
        << offset << " : ";
-    interpreter::BytecodeDecoder::Decode(os, bytecode_address);
+    bytecode_iterator.PrintCurrentBytecodeTo(os);
     os << std::endl;
     // Print all input registers and accumulator.
     PrintRegisters(frame, os, true, bytecode_iterator, accumulator);
@@ -161,8 +170,8 @@ RUNTIME_FUNCTION(Runtime_TraceUnoptimizedBytecodeExit) {
   }
 
   JavaScriptStackFrameIterator frame_iterator(isolate);
-  UnoptimizedFrame* frame =
-      reinterpret_cast<UnoptimizedFrame*>(frame_iterator.frame());
+  UnoptimizedJSFrame* frame =
+      reinterpret_cast<UnoptimizedJSFrame*>(frame_iterator.frame());
 
   if (frame->is_interpreted() && !v8_flags.trace_ignition) {
     return ReadOnlyRoots(isolate).undefined_value();
@@ -173,7 +182,7 @@ RUNTIME_FUNCTION(Runtime_TraceUnoptimizedBytecodeExit) {
 
   SealHandleScope shs(isolate);
   DCHECK_EQ(3, args.length());
-  Handle<BytecodeArray> bytecode_array = args.at<BytecodeArray>(0);
+  Handle<BytecodeArray> bytecode_array = CheckedCast<BytecodeArray>(args.at(0));
   int bytecode_offset = args.smi_value_at(1);
   Handle<Object> accumulator = args.at(2);
 
@@ -195,7 +204,7 @@ RUNTIME_FUNCTION(Runtime_TraceUnoptimizedBytecodeExit) {
   return ReadOnlyRoots(isolate).undefined_value();
 }
 
-#endif
+#endif  // V8_TRACE_UNOPTIMIZED
 
 #ifdef V8_TRACE_FEEDBACK_UPDATES
 
@@ -206,31 +215,67 @@ RUNTIME_FUNCTION(Runtime_TraceUpdateFeedback) {
 
   SealHandleScope shs(isolate);
   DCHECK_EQ(3, args.length());
-  Handle<JSFunction> function = args.at<JSFunction>(0);
+  Handle<FeedbackVector> vector = args.at<FeedbackVector>(0);
   int slot = args.smi_value_at(1);
-  auto reason = String::cast(args[2]);
+  auto reason = Cast<String>(args[2]);
 
-  int slot_count = function->feedback_vector().metadata().slot_count();
-
-  StdoutStream os;
-  os << "[Feedback slot " << slot << "/" << slot_count << " in ";
-  function->shared().ShortPrint(os);
-  os << " updated to ";
-  function->feedback_vector().FeedbackSlotPrint(os, FeedbackSlot(slot));
-  os << " - ";
-
-  StringCharacterStream stream(reason);
-  while (stream.HasMore()) {
-    uint16_t character = stream.GetNext();
-    PrintF("%c", character);
-  }
-
-  os << "]" << std::endl;
+  FeedbackVector::TraceFeedbackChange(isolate, *vector, FeedbackSlot(slot),
+                                      reason->ToCString().get());
 
   return ReadOnlyRoots(isolate).undefined_value();
 }
 
-#endif
+#endif  // V8_TRACE_FEEDBACK_UPDATES
+
+#ifdef V8_DUMPLING
+
+RUNTIME_FUNCTION(Runtime_DumpExecutionFrame) {
+  if (!isolate->dumpling_manager()->IsDumpingEnabled()) {
+    return ReadOnlyRoots(isolate).undefined_value();
+  }
+  DCHECK_EQ(3, args.length());
+
+  SealHandleScope shs(isolate);
+
+  DisallowGarbageCollection no_gc;
+
+  JavaScriptStackFrameIterator frame_iterator(isolate);
+  UnoptimizedJSFrame* frame =
+      reinterpret_cast<UnoptimizedJSFrame*>(frame_iterator.frame());
+
+  Tagged<JSFunction> function = frame->function();
+  bool is_sparkplug = frame->is_baseline();
+  bool is_interpreter = !is_sparkplug;
+
+  if ((is_sparkplug && !v8_flags.sparkplug_dumping) ||
+      (is_interpreter && !v8_flags.interpreter_dumping)) {
+    return ReadOnlyRoots(isolate).undefined_value();
+  }
+
+  Handle<BytecodeArray> bytecode_array = CheckedCast<BytecodeArray>(args.at(0));
+  int bytecode_offset = args.smi_value_at(1);
+
+  Handle<Object> accumulator = args.at(2);
+
+  int offset = bytecode_offset - BytecodeArray::kHeaderSize + kHeapObjectTag;
+  interpreter::BytecodeArrayIterator bytecode_iterator(bytecode_array);
+  AdvanceToOffsetForTracing(bytecode_iterator, offset);
+
+  if (offset == bytecode_iterator.current_offset()) {
+    int function_local_bytecode_offset = bytecode_iterator.current_offset();
+    DCHECK_GE(function_local_bytecode_offset, 0);
+    DumpFrameType frame_dump_type =
+        is_sparkplug ? kSparkplugFrame : kInterpreterFrame;
+    DumplingUnoptimizedJSFrame frame_view(frame);
+    isolate->dumpling_manager()->DoPrint(
+        &frame_view, function, function_local_bytecode_offset, frame_dump_type,
+        bytecode_array, *accumulator);
+  }
+
+  return ReadOnlyRoots(isolate).undefined_value();
+}
+
+#endif  //  V8_DUMPLING
 
 }  // namespace internal
 }  // namespace v8

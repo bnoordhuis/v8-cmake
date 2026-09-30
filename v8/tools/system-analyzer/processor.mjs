@@ -69,14 +69,14 @@ export class Processor extends LogReader {
 
   MAJOR_VERSION = 7;
   MINOR_VERSION = 6;
-  constructor(useBigInt = false) {
-    super(false, false, useBigInt);
-    this.useBigInt = useBigInt;
-    this.kZero = useBigInt ? 0n : 0;
-    this.parseAddress = useBigInt ? BigInt : parseInt;
+  constructor(useBigIntAddresses = false) {
+    super(false, false, useBigIntAddresses);
+    this.useBigIntAddresses = useBigIntAddresses;
+    this.kZero = useBigIntAddresses ? 0n : 0;
+    this.parseAddress = useBigIntAddresses ? BigInt : parseInt;
     this._chunkConsumer =
         new AsyncConsumer((chunk) => this._processChunk(chunk));
-    this._profile = new Profile(useBigInt);
+    this._profile = new Profile(useBigIntAddresses);
     const propertyICParser = [
       this.parseAddress, parseInt, parseInt, parseInt, parseString, parseString,
       parseString, parseString, parseString, parseString
@@ -115,8 +115,6 @@ export class Processor extends LogReader {
         parsers: [this.parseAddress, this.parseAddress],
         processor: this.processCodeMove
       },
-      'code-delete':
-          {parsers: [this.parseAddress], processor: this.processCodeDelete},
       'code-source-info': {
         parsers: [
           this.parseAddress, parseInt, parseInt, parseInt, parseString,
@@ -210,8 +208,12 @@ export class Processor extends LogReader {
   }
 
   printError(str) {
-    console.error(str);
+    this.error(str);
     throw str
+  }
+
+  error(...args) {
+    console.error(...args);
   }
 
   processChunk(chunk) {
@@ -257,7 +259,7 @@ export class Processor extends LogReader {
       }
       this._updateProgress();
     } catch (e) {
-      console.error(`Could not parse log line ${
+      this.error(`Could not parse log line ${
           this._lineNumber}, trying to continue: ${e}`);
     }
   }
@@ -273,7 +275,7 @@ export class Processor extends LogReader {
         i++;
       }
     } catch (e) {
-      console.error(
+      this.error(
           `Error occurred during parsing line ${i}` +
           ', trying to continue: ' + e);
     }
@@ -283,13 +285,13 @@ export class Processor extends LogReader {
   async finalize() {
     await this._chunkConsumer.consumeAll();
     if (this._profile.warnings.size > 0) {
-      console.warn('Found profiler warnings:', this._profile.warnings);
+      this.warn('Found profiler warnings:', this._profile.warnings);
     }
     // TODO(cbruni): print stats;
     this._mapTimeline.transitions = new Map();
     let id = 0;
     this._mapTimeline.forEach(map => {
-      if (map.isRoot()) id = map.finalizeRootMap(id + 1);
+      if (map.isRoot()) id = map.finalizeRootMap(id + 1, this);
       if (map.edge && map.edge.name) {
         const edge = map.edge;
         const list = this._mapTimeline.transitions.get(edge.name);
@@ -306,7 +308,7 @@ export class Processor extends LogReader {
     if ((majorVersion == this.MAJOR_VERSION &&
          minorVersion <= this.MINOR_VERSION) ||
         (majorVersion < this.MAJOR_VERSION)) {
-      window.alert(
+      this.warn(
           `Unsupported version ${majorVersion}.${minorVersion}. \n` +
           `Please use the matching tool for given the V8 version.`);
     }
@@ -320,8 +322,9 @@ export class Processor extends LogReader {
     this._profile.addScriptSource(-1, name, '');
 
     if (this._cppEntriesProvider == undefined) {
-      await this._setupCppEntriesProvider();
+      await this._setupRemoteCppEntriesProvider();
     }
+    if (this._cppEntriesProvider == undefined) return;
 
     await this._cppEntriesProvider.parseVmSymbols(
         name, startAddr, endAddr, aslrSlide, (fName, fStart, fEnd) => {
@@ -330,7 +333,10 @@ export class Processor extends LogReader {
         });
   }
 
-  async _setupCppEntriesProvider() {
+  async _setupRemoteCppEntriesProvider() {
+    if (typeof fetch !== 'function') {
+      return;
+    }
     // Probe the local symbol server for the platform:
     const url = new URL('http://localhost:8000/v8/info/platform')
     let platform = {name: 'linux'};
@@ -342,8 +348,8 @@ export class Processor extends LogReader {
       }
       platform = await response.json();
     } catch (e) {
-      console.warn(`Local symbol server is not running on ${url}`);
-      console.warn(e);
+      this.warn(`Local symbol server is not running on ${url}`);
+      this.warn(e);
     }
     let CppEntriesProvider = RemoteLinuxCppEntriesProvider;
     if (platform.name === 'darwin') {
@@ -359,15 +365,15 @@ export class Processor extends LogReader {
     this._lastTimestamp = timestamp;
     let profilerEntry;
     let stateName = '';
-    if (maybe_func.length) {
-      const funcAddr = this.parseAddress(maybe_func[0]);
+    if (type != 'RegExp' && maybe_func.length) {
+      const sfiAddr = this.parseAddress(maybe_func[0]);
       stateName = maybe_func[1] ?? '';
       const state = Profile.parseState(maybe_func[1]);
       profilerEntry = this._profile.addFuncCode(
-          type, nameAndPosition, timestamp, start, size, funcAddr, state);
+          type, nameAndPosition, timestamp, start, size, sfiAddr, state);
     } else {
-      profilerEntry = this._profile.addAnyCode(
-          type, nameAndPosition, timestamp, start, size);
+      profilerEntry =
+          this._profile.addCode(type, nameAndPosition, timestamp, start, size);
     }
     const name = nameAndPosition.slice(0, nameAndPosition.indexOf(' '));
     this._lastCodeLogEntry = new CodeLogEntry(
@@ -412,7 +418,7 @@ export class Processor extends LogReader {
       optimization_tier, invocation_count, profiler_ticks, fbv_string) {
     const profCodeEntry = this._profile.findEntry(instructionStart);
     if (!profCodeEntry) {
-      console.warn('Didn\'t find code for FBV', {fbv_string, instructionStart});
+      this.warn('Didn\'t find code for FBV', {fbv_string, instructionStart});
       return;
     }
     const fbv = new FeedbackVectorEntry(
@@ -514,6 +520,7 @@ export class Processor extends LogReader {
   formatProfileEntry(profileEntry, line, column) {
     if (!profileEntry) return '<unknown>';
     if (profileEntry.type === 'Builtin') return profileEntry.name;
+    if (!profileEntry.sfi) return profileEntry.name || '<unknown>';
     const name = profileEntry.sfi.getName();
     const array = this._formatPCRegexp.exec(name);
     const formatted =
@@ -570,10 +577,10 @@ export class Processor extends LogReader {
     let edge = new Edge(type, name, reason, time, from_, to_);
     if (to_.parent !== undefined && to_.parent === from_) {
       // Fix bug where we double log transitions.
-      console.warn('Fixing up double transition');
+      this.warn('Fixing up double transition');
       to_.edge.updateFrom(edge);
     } else {
-      edge.finishSetup();
+      edge.finishSetup(this);
     }
   }
 
@@ -606,7 +613,7 @@ export class Processor extends LogReader {
     if (id === '0x000000000000') return undefined;
     const map = MapLogEntry.get(id, time);
     if (map !== undefined) return map;
-    console.warn(`No map details provided: id=${id}`);
+    this.warn(`No map details provided: id=${id}`);
     // Manually patch in a map to continue running.
     return this.createMapEntry(id, time);
   }
@@ -615,7 +622,7 @@ export class Processor extends LogReader {
     const script = this._profile.getScript(url);
     // TODO create placeholder script for empty urls.
     if (script === undefined) {
-      console.error(`Could not find script for url: '${url}'`)
+      this.error(`Could not find script for url: '${url}'`)
     }
     return script;
   }
@@ -639,7 +646,7 @@ export class Processor extends LogReader {
         return;
       }
     }
-    console.error('Couldn\'t find matching timer event start', {type, time});
+    this.error('Couldn\'t find matching timer event start', {type, time});
   }
 
   get icTimeline() {

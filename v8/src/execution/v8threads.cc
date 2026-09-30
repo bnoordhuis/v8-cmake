@@ -5,11 +5,11 @@
 #include "src/execution/v8threads.h"
 
 #include "include/v8-locker.h"
-#include "src/api/api.h"
 #include "src/debug/debug.h"
 #include "src/execution/execution.h"
 #include "src/execution/isolate-inl.h"
 #include "src/execution/stack-guard.h"
+#include "src/handles/handle-scope-implementer.h"
 #include "src/init/bootstrapper.h"
 #include "src/objects/visitors.h"
 #include "src/regexp/regexp-stack.h"
@@ -124,6 +124,10 @@ bool ThreadManager::RestoreThread() {
     InitThread(access);
     return false;
   }
+  // In case multi-cage pointer compression mode is enabled ensure that
+  // current thread's cage base values are properly initialized.
+  PtrComprCageAccessScope ptr_compr_cage_access_scope(isolate_);
+
   ThreadState* state = per_thread->thread_state();
   char* from = state->data();
   from = isolate_->handle_scope_implementer()->RestoreThread(from);
@@ -157,7 +161,7 @@ static int ArchiveSpacePerThread() {
   return HandleScopeImplementer::ArchiveSpacePerThread() +
          Isolate::ArchiveSpacePerThread() + Debug::ArchiveSpacePerThread() +
          StackGuard::ArchiveSpacePerThread() +
-         RegExpStack::ArchiveSpacePerThread() +
+         regexp::Stack::ArchiveSpacePerThread() +
          Bootstrapper::ArchiveSpacePerThread() +
          Relocatable::ArchiveSpacePerThread();
 }
@@ -274,8 +278,12 @@ void ThreadManager::EagerlyArchiveThread() {
 }
 
 void ThreadManager::FreeThreadResources() {
-  DCHECK(!isolate_->has_pending_exception());
-  DCHECK(!isolate_->external_caught_exception());
+  // This method might be called on a thread that's not bound to any Isolate
+  // and thus pointer compression schemes might have cage base value unset.
+  // So, allow heap access here to let the checks work.
+  PtrComprCageAccessScope ptr_compr_cage_access_scope(isolate_);
+
+  DCHECK(!isolate_->has_exception());
   DCHECK_NULL(isolate_->try_catch_handler());
   isolate_->handle_scope_implementer()->FreeThreadResources();
   isolate_->FreeThreadResources();

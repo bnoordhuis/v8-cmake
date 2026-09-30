@@ -28,23 +28,30 @@ class WeakMemberTag;
 class UntracedMemberTag;
 
 struct DijkstraWriteBarrierPolicy {
-  V8_INLINE static void InitializingBarrier(const void*, const void*) {
     // Since in initializing writes the source object is always white, having no
     // barrier doesn't break the tri-color invariant.
-  }
+    V8_INLINE static void InitializingBarrier(const void*, const void*) {}
+    V8_INLINE static void InitializingBarrier(const void*, RawPointer storage) {
+    }
+#if defined(CPPGC_POINTER_COMPRESSION)
+    V8_INLINE static void InitializingBarrier(const void*,
+                                              CompressedPointer storage) {}
+#endif
 
-  template <WriteBarrierSlotType SlotType>
-  V8_INLINE static void AssigningBarrier(const void* slot, const void* value) {
+    template <WriteBarrierSlotType SlotType>
+    V8_INLINE static void AssigningBarrier(const void* slot,
+                                           const void* value) {
 #ifdef CPPGC_SLIM_WRITE_BARRIER
-    if (V8_UNLIKELY(WriteBarrier::IsEnabled()))
-      WriteBarrier::CombinedWriteBarrierSlow<SlotType>(slot);
+      if (V8_UNLIKELY(WriteBarrier::IsEnabled())) {
+        WriteBarrier::CombinedWriteBarrierSlow<SlotType>(slot);
+      }
 #else   // !CPPGC_SLIM_WRITE_BARRIER
     WriteBarrier::Params params;
     const WriteBarrier::Type type =
         WriteBarrier::GetWriteBarrierType(slot, value, params);
     WriteBarrier(type, params, slot, value);
 #endif  // !CPPGC_SLIM_WRITE_BARRIER
-  }
+    }
 
   template <WriteBarrierSlotType SlotType>
   V8_INLINE static void AssigningBarrier(const void* slot, RawPointer storage) {
@@ -52,8 +59,9 @@ struct DijkstraWriteBarrierPolicy {
         SlotType == WriteBarrierSlotType::kUncompressed,
         "Assigning storages of Member and UncompressedMember is not supported");
 #ifdef CPPGC_SLIM_WRITE_BARRIER
-    if (V8_UNLIKELY(WriteBarrier::IsEnabled()))
+    if (V8_UNLIKELY(WriteBarrier::IsEnabled())) {
       WriteBarrier::CombinedWriteBarrierSlow<SlotType>(slot);
+    }
 #else   // !CPPGC_SLIM_WRITE_BARRIER
     WriteBarrier::Params params;
     const WriteBarrier::Type type =
@@ -70,8 +78,9 @@ struct DijkstraWriteBarrierPolicy {
         SlotType == WriteBarrierSlotType::kCompressed,
         "Assigning storages of Member and UncompressedMember is not supported");
 #ifdef CPPGC_SLIM_WRITE_BARRIER
-    if (V8_UNLIKELY(WriteBarrier::IsEnabled()))
+    if (WriteBarrier::IsEnabled()) [[unlikely]] {
       WriteBarrier::CombinedWriteBarrierSlow<SlotType>(slot);
+    }
 #else   // !CPPGC_SLIM_WRITE_BARRIER
     WriteBarrier::Params params;
     const WriteBarrier::Type type =
@@ -101,6 +110,11 @@ struct DijkstraWriteBarrierPolicy {
 
 struct NoWriteBarrierPolicy {
   V8_INLINE static void InitializingBarrier(const void*, const void*) {}
+  V8_INLINE static void InitializingBarrier(const void*, RawPointer storage) {}
+#if defined(CPPGC_POINTER_COMPRESSION)
+  V8_INLINE static void InitializingBarrier(const void*,
+                                            CompressedPointer storage) {}
+#endif
   template <WriteBarrierSlotType>
   V8_INLINE static void AssigningBarrier(const void*, const void*) {}
   template <WriteBarrierSlotType, typename MemberStorage>
@@ -120,9 +134,28 @@ class V8_EXPORT SameThreadEnabledCheckingPolicy
     : private SameThreadEnabledCheckingPolicyBase {
  protected:
   template <typename T>
+  V8_INLINE void CheckPointer(RawPointer raw_pointer) {
+    if (raw_pointer.IsCleared() || raw_pointer.IsSentinel()) {
+      return;
+    }
+    CheckPointersImplTrampoline<T>::Call(
+        this, static_cast<const T*>(raw_pointer.Load()));
+  }
+#if defined(CPPGC_POINTER_COMPRESSION)
+  template <typename T>
+  V8_INLINE void CheckPointer(CompressedPointer compressed_pointer) {
+    if (compressed_pointer.IsCleared() || compressed_pointer.IsSentinel()) {
+      return;
+    }
+    CheckPointersImplTrampoline<T>::Call(
+        this, static_cast<const T*>(compressed_pointer.Load()));
+  }
+#endif
+  template <typename T>
   void CheckPointer(const T* ptr) {
-    if (!ptr || (kSentinelPointer == ptr)) return;
-
+    if (!ptr || (kSentinelPointer == ptr)) {
+      return;
+    }
     CheckPointersImplTrampoline<T>::Call(this, ptr);
   }
 
@@ -145,20 +178,27 @@ class V8_EXPORT SameThreadEnabledCheckingPolicy
 
 class DisabledCheckingPolicy {
  protected:
-  V8_INLINE void CheckPointer(const void*) {}
+  template <typename T>
+  V8_INLINE void CheckPointer(T*) {}
+  template <typename T>
+  V8_INLINE void CheckPointer(RawPointer) {}
+#if defined(CPPGC_POINTER_COMPRESSION)
+  template <typename T>
+  V8_INLINE void CheckPointer(CompressedPointer) {}
+#endif
 };
 
-#ifdef DEBUG
+#ifdef CPPGC_ENABLE_SLOW_API_CHECKS
 // Off heap members are not connected to object graph and thus cannot ressurect
 // dead objects.
 using DefaultMemberCheckingPolicy =
     SameThreadEnabledCheckingPolicy<false /* kCheckOffHeapAssignments*/>;
 using DefaultPersistentCheckingPolicy =
     SameThreadEnabledCheckingPolicy<true /* kCheckOffHeapAssignments*/>;
-#else   // !DEBUG
+#else   // !CPPGC_ENABLE_SLOW_API_CHECKS
 using DefaultMemberCheckingPolicy = DisabledCheckingPolicy;
 using DefaultPersistentCheckingPolicy = DisabledCheckingPolicy;
-#endif  // !DEBUG
+#endif  // !CPPGC_ENABLE_SLOW_API_CHECKS
 // For CT(W)P neither marking information (for value), nor objectstart bitmap
 // (for slot) are guaranteed to be present because there's no synchronization
 // between heaps after marking.
@@ -166,12 +206,19 @@ using DefaultCrossThreadPersistentCheckingPolicy = DisabledCheckingPolicy;
 
 class KeepLocationPolicy {
  public:
-  constexpr const SourceLocation& Location() const { return location_; }
+  constexpr SourceLocation Location() const { return location_; }
 
  protected:
   constexpr KeepLocationPolicy() = default;
-  constexpr explicit KeepLocationPolicy(const SourceLocation& location)
+  constexpr explicit KeepLocationPolicy(SourceLocation location)
       : location_(location) {}
+
+  // When used in a CrossThreadPersistent the object could already be poisoned
+  // (e.g. when stored on a remote heap). In that case we would get an ASAN
+  // error when the local heap invokes this method before the remote heap runs
+  // the destructor.
+  V8_CLANG_NO_SANITIZE("address")
+  constexpr SourceLocation LocationFromGC() const { return location_; }
 
   // KeepLocationPolicy must not copy underlying source locations.
   KeepLocationPolicy(const KeepLocationPolicy&) = delete;
@@ -191,7 +238,8 @@ class IgnoreLocationPolicy {
 
  protected:
   constexpr IgnoreLocationPolicy() = default;
-  constexpr explicit IgnoreLocationPolicy(const SourceLocation&) {}
+  constexpr explicit IgnoreLocationPolicy(SourceLocation) {}
+  constexpr SourceLocation LocationFromGC() const { return {}; }
 };
 
 #if CPPGC_SUPPORTS_OBJECT_NAMES

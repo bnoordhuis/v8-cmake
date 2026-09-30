@@ -8,6 +8,10 @@
 #include <stdint.h>
 
 #include <memory>
+#include <optional>
+#include <span>
+#include <utility>
+#include <vector>
 
 #include "../../third_party/inspector_protocol/crdtp/protocol_core.h"
 #include "include/v8-inspector.h"
@@ -44,14 +48,18 @@ class StringUtil {
 // A read-only sequence of uninterpreted bytes with reference-counted storage.
 class V8_EXPORT Binary {
  public:
-  Binary() = default;
+  Binary() : bytes_(std::make_shared<std::vector<uint8_t>>()) {}
 
   const uint8_t* data() const { return bytes_->data(); }
   size_t size() const { return bytes_->size(); }
   String toBase64() const;
   static Binary fromBase64(const String& base64, bool* success);
-  static Binary fromSpan(const uint8_t* data, size_t size) {
-    return Binary(std::make_shared<std::vector<uint8_t>>(data, data + size));
+  static Binary fromSpan(std::span<const uint8_t> span) {
+    return Binary(
+        std::make_shared<std::vector<uint8_t>>(span.begin(), span.end()));
+  }
+  static Binary fromBytes(std::vector<uint8_t> bytes) {
+    return Binary(std::make_shared<std::vector<uint8_t>>(std::move(bytes)));
   }
 
  private:
@@ -108,18 +116,10 @@ struct ProtocolTypeTraits<v8_inspector::protocol::Binary> {
                         std::vector<uint8_t>* bytes);
 };
 
-namespace detail {
-template <>
-struct MaybeTypedef<v8_inspector::String16> {
-  typedef ValueMaybe<v8_inspector::String16> type;
-};
-
-template <>
-struct MaybeTypedef<v8_inspector::protocol::Binary> {
-  typedef ValueMaybe<v8_inspector::protocol::Binary> type;
-};
-
-}  // namespace detail
+template <typename T>
+v8_inspector::String16 ConvertAssociatedData(std::string_view data) {
+  return v8_inspector::String16(data);
+}
 
 }  // namespace v8_crdtp
 

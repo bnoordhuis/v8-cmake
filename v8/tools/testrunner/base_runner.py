@@ -3,8 +3,9 @@
 # found in the LICENSE file.
 
 from collections import OrderedDict, namedtuple
+from functools import cached_property
 from functools import reduce
-from os.path import dirname as up
+from pathlib import Path
 
 import json
 import logging
@@ -27,7 +28,7 @@ from testrunner.testproc.sigproc import SignalProc
 from testrunner.utils.augmented_options import AugmentedOptions
 
 
-DEFAULT_OUT_GN = 'out.gn'
+DEFAULT_OUT_GN = Path('out.gn')
 
 # Map of test name synonyms to lists of test suites. Should be ordered by
 # expected runtimes (suites with slow test cases first). These groups are
@@ -35,57 +36,68 @@ DEFAULT_OUT_GN = 'out.gn'
 # The mapping from names used here to GN targets (which must stay in sync)
 # is defined in infra/mb/gn_isolate_map.pyl.
 TEST_MAP = {
-  # This needs to stay in sync with group("v8_bot_default") in test/BUILD.gn.
-  "bot_default": [
-    "debugger",
-    "mjsunit",
-    "cctest",
-    "wasm-spec-tests",
-    "inspector",
-    "webkit",
-    "mkgrokdump",
-    "wasm-js",
-    "fuzzer",
-    "message",
-    "intl",
-    "unittests",
-    "wasm-api-tests",
-  ],
-  # This needs to stay in sync with group("v8_default") in test/BUILD.gn.
-  "default": [
-    "debugger",
-    "mjsunit",
-    "cctest",
-    "wasm-spec-tests",
-    "inspector",
-    "mkgrokdump",
-    "wasm-js",
-    "fuzzer",
-    "message",
-    "intl",
-    "unittests",
-    "wasm-api-tests",
-  ],
-  # This needs to stay in sync with group("v8_d8_default") in test/BUILD.gn.
-  "d8_default": [
-    "debugger",
-    "mjsunit",
-    "webkit",
-    "message",
-    "intl",
-  ],
-  # This needs to stay in sync with "v8_optimize_for_size" in test/BUILD.gn.
-  "optimize_for_size": [
-    "debugger",
-    "mjsunit",
-    "cctest",
-    "inspector",
-    "webkit",
-    "intl",
-  ],
-  "unittests": [
-    "unittests",
-  ],
+    # This needs to stay in sync with group("v8_bot_default") in test/BUILD.gn.
+    "bot_default": [
+        "debugger",
+        "mjsunit",
+        "cctest",
+        "wasm-spec-tests",
+        "inspector",
+        "webkit",
+        "bigint",
+        "mkgrokdump",
+        "wasm-js",
+        "fuzzer",
+        "message",
+        "intl",
+        "unittests",
+        "wasm-api-tests",
+        "filecheck",
+    ],
+    # This needs to stay in sync with group("v8_default") in test/BUILD.gn.
+    "default": [
+        "debugger",
+        "mjsunit",
+        "cctest",
+        "wasm-spec-tests",
+        "inspector",
+        "mkgrokdump",
+        "wasm-js",
+        "fuzzer",
+        "message",
+        "intl",
+        "unittests",
+        "wasm-api-tests",
+        "filecheck",
+    ],
+    # This needs to stay in sync with group("v8_d8_default") in test/BUILD.gn.
+    "d8_default": [
+        "debugger",
+        "mjsunit",
+        "webkit",
+        "message",
+        "intl",
+        "filecheck",
+    ],
+    # This needs to stay in sync with "v8_optimize_for_size" in test/BUILD.gn.
+    "optimize_for_size": [
+        "debugger",
+        "mjsunit",
+        "cctest",
+        "inspector",
+        "webkit",
+        "intl",
+    ],
+    "unittests": ["unittests",],
+}
+
+DEFAULT_FLAGS = {
+    'standard_runner': [],
+    'num_fuzzer': [
+        '--fuzzing',
+        '--flag-processing-mode=ignore-contradictions',
+        '--no-fail',
+    ],
 }
 
 ModeConfig = namedtuple(
@@ -110,6 +122,28 @@ TRY_RELEASE_MODE = ModeConfig(
     status_mode="debug",
 )
 
+# Environment variables set by AI coding agents. Duplicated from depot_tools'
+# gclient_utils.AI_AGENT_ENV_VARS rather than imported, because the swarming
+# isolate ships tools/testrunner/ without depot_tools (see v8_testrunner in
+# tools/BUILD.gn). Keep both lists in sync.
+AI_AGENT_ENV_VARS = (
+    "GEMINI_CLI",
+    "CLAUDECODE",
+    "ANTIGRAVITY_AGENT",
+    "CODEX_SANDBOX",
+    "CURSOR_AGENT",
+    "AI_AGENT",
+)
+
+
+def detected_ai_agent_env_vars():
+  """Returns the names of the AI agent environment variables that are set."""
+  return [
+      name for name in AI_AGENT_ENV_VARS
+      if os.environ.get(name, '').lower() not in ('', '0', 'false')
+  ]
+
+
 # Set up logging. No need to log a date in timestamps as we can get that from
 # test run start times.
 logging.basicConfig(
@@ -123,8 +157,8 @@ class TestRunnerError(Exception):
 
 class BaseTestRunner(object):
   def __init__(self, basedir=None):
-    self.v8_root = up(up(up(__file__)))
-    self.basedir = basedir or self.v8_root
+    self.v8_root = Path(__file__).absolute().parent.parent.parent
+    self.basedir = Path(basedir or self.v8_root)
     self.outdir = None
     self.build_config = None
     self.mode_options = None
@@ -133,9 +167,18 @@ class BaseTestRunner(object):
     self.options = None
 
   @property
-  def framework_name(self):
-    """String name of the base-runner subclass, used in test results."""
+  def default_framework_name(self):
+    """Default value for framework_name if not provided on the command line."""
     raise NotImplementedError() # pragma: no cover
+
+  @cached_property
+  def framework_name(self):
+    """String name of the framework flavor that tweaks runner behavior."""
+    assert self.options
+    if self.options.framework != 'default':
+      return self.options.framework
+    else:
+      return self.default_framework_name
 
   def execute(self, sys_args=None):
     if sys_args is None:  # pragma: no cover
@@ -170,17 +213,13 @@ class BaseTestRunner(object):
       args = self._parse_test_args(args)
 
       with os_context(self.target_os, self.options) as ctx:
+        self._setup_env()
         names = self._args_to_suite_names(args)
         tests = self._load_testsuite_generators(ctx, names)
-        self._setup_env()
-        print(">>> Running tests for %s.%s" % (self.build_config.arch,
-                                               self.mode_options.label))
-        exit_code = self._do_execute(tests, args, ctx)
-        if exit_code == utils.EXIT_CODE_FAILURES and self.options.json_test_results:
-          print("Force exit code 0 after failures. Json test results file "
-                "generated with failure information.")
-          exit_code = utils.EXIT_CODE_PASS
-      return exit_code
+        if not self.options.quiet:
+          print(">>> Running tests for %s.%s" %
+                (self.build_config.arch, self.mode_options.label))
+        return self._do_execute(tests, args, ctx)
     except TestRunnerError:
       traceback.print_exc()
       return utils.EXIT_CODE_INTERNAL_ERROR
@@ -200,6 +239,12 @@ class BaseTestRunner(object):
     return parser
 
   def _add_parser_default_options(self, parser):
+    framework_choices = ('default', 'standard_runner', 'num_fuzzer')
+    parser.add_option('--framework',
+                      type='choice',
+                      choices=framework_choices,
+                      default='default',
+                      help=f'Choose framework from: {framework_choices}')
     parser.add_option("--gn", help="Scan out.gn for the last built"
                       " configuration",
                       default=False, action="store_true")
@@ -210,7 +255,7 @@ class BaseTestRunner(object):
     parser.add_option("--shell-dir", help="DEPRECATED! Executables from build "
                       "directory will be used")
     parser.add_option("--test-root", help="Root directory of the test suites",
-                      default=os.path.join(self.basedir, 'test'))
+                      default=self.basedir / 'test')
     parser.add_option("--total-timeout-sec", default=0, type="int",
                       help="How long should fuzzer run")
     parser.add_option("--swarming", default=False, action="store_true",
@@ -236,12 +281,31 @@ class BaseTestRunner(object):
                       help="Run this shard from the split up tests.")
 
     # Progress
-    parser.add_option("-p", "--progress",
-                      choices=list(PROGRESS_INDICATORS.keys()), default="mono",
-                      help="The style of progress indicator (verbose, dots, "
-                           "color, mono)")
+    parser.add_option(
+        "-p",
+        "--progress",
+        choices=list(PROGRESS_INDICATORS.keys()),
+        default=None,
+        help="The style of progress indicator (verbose, dots, "
+        "color, mono, none). Defaults to mono, or to none in quiet mode.")
+    parser.add_option(
+        "--quiet",
+        default=None,
+        action="store_true",
+        help="Suppress the build, status file and progress headers, "
+        "keeping failures and the number of tests that ran. Enabled by "
+        "default when an AI agent environment variable is set.")
+    parser.add_option(
+        "--no-quiet",
+        dest="quiet",
+        action="store_false",
+        help="Print the usual output even in an AI agent environment.")
     parser.add_option("--json-test-results",
                       help="Path to a file for storing json results.")
+    parser.add_option("--log-system-memory",
+                      help="Path to a file for storing system memory stats.")
+    parser.add_option("--log-test-schedule",
+                      help="Path to a file for streaming the test schedule to.")
     parser.add_option('--slow-tests-cutoff', type="int", default=100,
                       help='Collect N slowest tests')
     parser.add_option("--exit-after-n-failures", type="int", default=100,
@@ -292,6 +356,12 @@ class BaseTestRunner(object):
     parser.add_option("--buildername", default='',
                       help="Buildername property from infrastructure. Not "
                            "setting this option indicates manual usage.")
+    parser.add_option(
+        "--test-list",
+        help="Path to a file with one test name per line. "
+        "Lines are appended to the positional test args. "
+        "Blank lines and lines starting with '#' are "
+        "ignored.")
 
   def _add_parser_options(self, parser):
     pass # pragma: no cover
@@ -299,9 +369,34 @@ class BaseTestRunner(object):
   def _parse_args(self, parser, sys_args):
     options, args = parser.parse_args(sys_args)
 
+    options.test_root = Path(options.test_root)
+    options.outdir = Path(options.outdir)
+
+    if options.quiet is None:
+      detected = detected_ai_agent_env_vars()
+      options.quiet = bool(detected)
+      if options.quiet:
+        # Spell out what was suppressed, so that the missing output isn't
+        # mistaken for a broken run.
+        print(f"Detected AI agent env ({', '.join(detected)}). Prepending"
+              " --quiet --progress=none to suppress the status file variables"
+              " and the progress display. Failures and the number of tests"
+              " that ran are still printed. Pass --no-quiet to opt out.")
+    if options.progress is None:
+      options.progress = 'none' if options.quiet else 'mono'
+
     if options.arch and ',' in options.arch:  # pragma: no cover
       print('Multiple architectures are deprecated')
       raise TestRunnerError()
+
+    # We write a test schedule and the system memory stats by default
+    # alongside json test results on bots.
+    if options.json_test_results:
+      result_dir = Path(options.json_test_results).parent
+      if not options.log_test_schedule:
+        options.log_test_schedule = result_dir / 'test_schedule.log'
+      if not options.log_system_memory:
+        options.log_system_memory = result_dir / 'memory_stats.log'
 
     return AugmentedOptions.augment(options), args
 
@@ -321,10 +416,8 @@ class BaseTestRunner(object):
       print('Failed to load build config')
       raise TestRunnerError
 
-    print('Build found: %s' % self.outdir)
-    if str(self.build_config):
-      print('>>> Autodetected:')
-      print(self.build_config)
+    if not self.options.quiet:
+      print('Build found: %s' % self.outdir)
 
     # Represents the OS where tests are run on. Same as host OS except for
     # Android and iOS, which are determined by build output.
@@ -339,8 +432,8 @@ class BaseTestRunner(object):
     self.build_config.ensure_vars(REQUIRED_BUILD_VARIABLES)
 
   def _do_load_build_config(self, outdir):
-    build_config_path = os.path.join(outdir, "v8_build_config.json")
-    if not os.path.exists(build_config_path):
+    build_config_path = outdir / "v8_build_config.json"
+    if not build_config_path.exists():
       if self.options.verbose:
         print("Didn't find build config: %s" % build_config_path)
       raise TestRunnerError()
@@ -367,26 +460,25 @@ class BaseTestRunner(object):
 
       yield self.options.outdir
 
-      if os.path.basename(self.options.outdir) != 'build':
-        yield os.path.join(self.options.outdir, 'build')
+      if self.options.outdir.name != 'build':
+        yield self.options.outdir / 'build'
 
     for outdir in outdirs():
-      yield os.path.join(self.basedir, outdir)
+      yield self.basedir / outdir
 
   def _get_gn_outdir(self):
-    gn_out_dir = os.path.join(self.basedir, DEFAULT_OUT_GN)
+    gn_out_dir = self.basedir / DEFAULT_OUT_GN
     latest_timestamp = -1
     latest_config = None
-    for gn_config in os.listdir(gn_out_dir):
-      gn_config_dir = os.path.join(gn_out_dir, gn_config)
-      if not os.path.isdir(gn_config_dir):
+    for gn_config_dir in gn_out_dir.iterdir():
+      if not gn_config_dir.is_dir():
         continue
-      if os.path.getmtime(gn_config_dir) > latest_timestamp:
-        latest_timestamp = os.path.getmtime(gn_config_dir)
-        latest_config = gn_config
+      if gn_config_dir.stat().st_mtime > latest_timestamp:
+        latest_timestamp = gn_config_dir.stat().st_mtime
+        latest_config = gn_config_dir.name
     if latest_config:
       print(">>> Latest GN build found: %s" % latest_config)
-      return os.path.join(DEFAULT_OUT_GN, latest_config)
+      return DEFAULT_OUT_GN / latest_config
 
   def _custom_debug_mode(self):
     custom_debug_flags = ["--nohard-abort"]
@@ -427,6 +519,7 @@ class BaseTestRunner(object):
 
     self.options.command_prefix = shlex.split(self.options.command_prefix)
     self.options.extra_flags = sum(list(map(shlex.split, self.options.extra_flags)), [])
+    self.options.extra_d8_flags = []
 
   def _process_options(self):
     pass # pragma: no cover
@@ -446,11 +539,18 @@ class BaseTestRunner(object):
           'allow_user_segv_handler=1',
           'allocator_may_return_null=1',
       ]
-      if not utils.GuessOS() in ['macos', 'windows']:
-        # LSAN is not available on mac and windows.
-        asan_options.append('detect_leaks=1')
-      else:
+      if self.build_config.component_build:
+        # Some abseil symbols are observed as defined more than once in
+        # component builds.
+        asan_options += ['detect_odr_violation=0']
+      if any((
+          # LSan is not available on mac and windows.
+          utils.GuessOS() in ['macos', 'windows'],
+          # LSan conflicts with hardware-based watchpoints (using ptrace).
+          self.build_config.memory_corruption_api)):
         asan_options.append('detect_leaks=0')
+      else:
+        asan_options.append('detect_leaks=1')
       if utils.GuessOS() == 'windows':
         # https://crbug.com/967663
         asan_options.append('detect_stack_use_after_return=0')
@@ -474,11 +574,8 @@ class BaseTestRunner(object):
       os.environ['MSAN_OPTIONS'] = symbolizer_option
 
     if self.build_config.tsan:
-      suppressions_file = os.path.join(
-          self.basedir,
-          'tools',
-          'sanitizers',
-          'tsan_suppressions.txt')
+      suppressions_file = (
+          self.basedir / 'tools' / 'sanitizers' / 'tsan_suppressions.txt')
       os.environ['TSAN_OPTIONS'] = " ".join([
         symbolizer_option,
         'suppressions=%s' % suppressions_file,
@@ -488,23 +585,40 @@ class BaseTestRunner(object):
         'report_destroy_locked=0',
       ])
 
+    if self.build_config.sandbox_hardware_support:
+      os.environ['LD_BIND_NOW'] = '1'
+      os.environ['GLIBC_TUNABLES'] = 'glibc.pthread.rseq=0'
+
   def _get_external_symbolizer_option(self):
-    external_symbolizer_path = os.path.join(
-        self.basedir,
-        'third_party',
-        'llvm-build',
-        'Release+Asserts',
-        'bin',
-        'llvm-symbolizer',
-    )
+    # TODO(https://crbug.com/396446140): Switch to the symbolizer from our
+    # bundled toolchain as soon as one is available for linux-arm64.
+    if (utils.GuessOS() == 'linux' and self.build_config.arch == 'arm64' and
+        not self.build_config.simulator_run):
+      external_symbolizer_path = (
+          self.basedir / 'tools' / 'sanitizers' / 'linux' / 'arm64' /
+          'llvm-symbolizer')
+    else:
+      external_symbolizer_path = (
+          self.basedir / 'third_party' / 'llvm-build' / 'Release+Asserts' /
+          'bin' / 'llvm-symbolizer')
 
     if utils.IsWindows():
-      # Quote, because sanitizers might confuse colon as option separator.
-      external_symbolizer_path = '"%s.exe"' % external_symbolizer_path
+      external_symbolizer_path = external_symbolizer_path.with_suffix('.exe')
 
-    return 'external_symbolizer_path=%s' % external_symbolizer_path
+      # Quote, because sanitizers might confuse colon as option separator.
+      external_symbolizer_path = f'"{external_symbolizer_path}"'
+
+    return f'external_symbolizer_path={external_symbolizer_path}'
 
   def _parse_test_args(self, args):
+    if self.options.test_list:
+      path = Path(self.options.test_list)
+      with path.open() as f:
+        for line in f:
+          line = line.split('#', 1)[0].strip()
+          if line:
+            args.append(line)
+
     if not args:
       args = self._get_default_suite_names()
 
@@ -526,15 +640,18 @@ class BaseTestRunner(object):
 
   def _load_testsuite_generators(self, ctx, names):
     test_config = self._create_test_config()
-    variables = self._get_statusfile_variables()
+    variables = self._get_statusfile_variables(ctx)
+    if not self.options.quiet:
+      print('>>> Statusfile variables:')
+      print(', '.join(f'{k}={v}' for k, v in sorted(variables.items())))
 
     # Head generator with no elements
-    test_chain = testsuite.TestGenerator(0, [], [])
+    test_chain = testsuite.TestGenerator(0, [], [], [])
     for name in names:
       if self.options.verbose:
         print('>>> Loading test suite: %s' % name)
       suite = testsuite.TestSuite.Load(
-          ctx, os.path.join(self.options.test_root, name), test_config)
+          ctx, self.options.test_root / name, test_config)
 
       if self._is_testsuite_supported(suite):
         tests = suite.load_tests_from_disk(variables)
@@ -562,7 +679,10 @@ class BaseTestRunner(object):
         not self.build_config.simd_mips):
       return True
 
-    if self.build_config.arch == 'loong64':
+    # LoongArch64 simulator or hosts without LSX do not support Simd.
+    if (self.build_config.arch == 'loong64' and
+        (self.build_config.simulator_run or
+         not utils.IsLoongArchLSXSupported())):
       return True
 
     # S390 hosts without VEF1 do not support Simd.
@@ -579,7 +699,7 @@ class BaseTestRunner(object):
 
     return False
 
-  def _get_statusfile_variables(self):
+  def _get_statusfile_variables(self, context):
     """Returns all attributes accessible in status files.
 
     All build-time flags from V8's BUILD.gn file as defined by the action
@@ -587,27 +707,47 @@ class BaseTestRunner(object):
     """
     variables = dict(self.build_config.items())
     variables.update({
-        "byteorder": sys.byteorder,
-        "deopt_fuzzer": False,
-        "endurance_fuzzer": False,
-        "gc_fuzzer": False,
-        "gc_stress": False,
-        "isolates": self.options.isolates,
-        "interrupt_fuzzer": False,
-        "mode": self.mode_options.status_mode,
-        "no_harness": self.options.no_harness,
-        "no_simd_hardware": self._no_simd_hardware,
-        "novfp3": False,
-        "optimize_for_size": "--optimize-for-size" in self.options.extra_flags,
-        "simulator_run": variables["simulator_run"]
-                         and not self.options.dont_skip_simulator_slow_tests,
-        "system": self.target_os,
+        "all_arm64_features":
+            '--sim-arm64-optional-features=all' in self.options.extra_flags,
+        "byteorder":
+            sys.byteorder,
+        "num_fuzzer":
+            False,
+        "deopt_fuzzer":
+            False,
+        "device_type":
+            context.device_type,
+        "endurance_fuzzer":
+            False,
+        "gc_fuzzer":
+            False,
+        "gc_stress":
+            False,
+        "isolates":
+            self.options.isolates,
+        "interrupt_fuzzer":
+            False,
+        "mode":
+            self.mode_options.status_mode,
+        "no_harness":
+            self.options.no_harness,
+        "no_simd_hardware":
+            self._no_simd_hardware,
+        "novfp3":
+            False,
+        "optimize_for_size":
+            "--optimize-for-size" in self.options.extra_flags,
+        "simulator_run":
+            variables["simulator_run"]
+            and not self.options.dont_skip_simulator_slow_tests,
+        "system":
+            self.target_os,
     })
     return variables
 
   def _runner_flags(self):
     """Extra default flags specific to the test runner implementation."""
-    return [] # pragma: no cover
+    return DEFAULT_FLAGS[self.framework_name]
 
   def _create_test_config(self):
     shard_id, shard_count = self.options.shard_info
@@ -616,8 +756,10 @@ class BaseTestRunner(object):
     return TestConfig(
         command_prefix=self.options.command_prefix,
         extra_flags=self.options.extra_flags,
+        extra_d8_flags=self.options.extra_d8_flags,
         framework_name=self.framework_name,
         isolates=self.options.isolates,
+        log_process_stats=self.options.json_test_results,
         mode_flags=self.mode_options.flags + self._runner_flags(),
         no_harness=self.options.no_harness,
         noi18n=not self.build_config.i18n,

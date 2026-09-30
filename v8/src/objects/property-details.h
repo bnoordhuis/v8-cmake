@@ -50,8 +50,7 @@ enum PropertyFilter {
   ONLY_CONFIGURABLE = 4,
   SKIP_STRINGS = 8,
   SKIP_SYMBOLS = 16,
-  ONLY_ALL_CAN_READ = 32,
-  PRIVATE_NAMES_ONLY = 64,
+  PRIVATE_NAMES_ONLY = 32,
   ENUMERABLE_STRINGS = ONLY_ENUMERABLE | SKIP_SYMBOLS,
 };
 // Enable fast comparisons of PropertyAttributes against PropertyFilters.
@@ -59,8 +58,7 @@ static_assert(ALL_PROPERTIES == static_cast<PropertyFilter>(NONE));
 static_assert(ONLY_WRITABLE == static_cast<PropertyFilter>(READ_ONLY));
 static_assert(ONLY_ENUMERABLE == static_cast<PropertyFilter>(DONT_ENUM));
 static_assert(ONLY_CONFIGURABLE == static_cast<PropertyFilter>(DONT_DELETE));
-static_assert(((SKIP_STRINGS | SKIP_SYMBOLS | ONLY_ALL_CAN_READ) &
-               ALL_ATTRIBUTES_MASK) == 0);
+static_assert(((SKIP_STRINGS | SKIP_SYMBOLS) & ALL_ATTRIBUTES_MASK) == 0);
 static_assert(ALL_PROPERTIES ==
               static_cast<PropertyFilter>(v8::PropertyFilter::ALL_PROPERTIES));
 static_assert(ONLY_WRITABLE ==
@@ -228,6 +226,10 @@ class Representation {
     UNREACHABLE();
   }
 
+  bool operator==(const Representation& other) const {
+    return kind_ == other.kind_;
+  }
+
  private:
   explicit constexpr Representation(Kind k) : kind_(k) {}
 
@@ -238,7 +240,9 @@ class Representation {
 };
 
 static const int kDescriptorIndexBitCount = 10;
-static const int kFirstInobjectPropertyOffsetBitCount = 7;
+// The maximum bits to describe the first offset of the first field in an
+// object. Limits the space available for the header and the embedder fields.
+static const int kFirstInobjectPropertyOffsetBitCount = 8;
 // The maximum number of descriptors we want in a descriptor array.  It should
 // fit in a page and also the following should hold:
 // kMaxNumberOfDescriptors + kFieldsAdded <= PropertyArray::kMaxLength.
@@ -258,6 +262,48 @@ enum class PropertyCellType {
   kInTransition,
   // Value for dictionaries not holding cells, must be 0:
   kNoCell = kMutable,
+};
+
+struct FieldStorageLocation {
+  // We don't have OFFSET_OF_DATA_START(PropertyArray) here so hard-code
+  // the value 2 (map + length). This is asserted elsewhere.
+  static constexpr uint16_t kFirstOutOfObjectOffsetInWords = 2;
+
+  // Offset from the start of the field storage, whether it's the JSObject for
+  // in-object properties or the PropertyArray for out-of-object properties.
+  uint16_t offset_in_words;
+  bool is_in_object;
+
+  bool operator==(const FieldStorageLocation& other) const {
+    return offset_in_words == other.offset_in_words &&
+           is_in_object == other.is_in_object;
+  }
+
+  static FieldStorageLocation First(uint8_t in_object_start_in_words,
+                                    int instance_size_in_words) {
+    // If there is any room in the object, the first field is an in-object
+    // field, otherwise it's out-of-object.
+    if (in_object_start_in_words < instance_size_in_words) {
+      return {in_object_start_in_words, true};
+    } else {
+      return {kFirstOutOfObjectOffsetInWords, false};
+    }
+  }
+
+  FieldStorageLocation Next(int instance_size_in_words,
+                            int field_width_in_words) const {
+    uint16_t next_offset_in_words = offset_in_words + field_width_in_words;
+
+    if (!is_in_object) {
+      return {next_offset_in_words, false};
+    }
+    if (next_offset_in_words == instance_size_in_words) {
+      // The next property would overflow the in-object fields so it has to
+      // move out-of-object.
+      return {kFirstOutOfObjectOffsetInWords, false};
+    }
+    return {next_offset_in_words, true};
+  }
 };
 
 // PropertyDetails captures type and attributes for a property.
@@ -293,13 +339,30 @@ class PropertyDetails {
   constexpr PropertyDetails(PropertyKind kind, PropertyAttributes attributes,
                             PropertyLocation location,
                             PropertyConstness constness,
-                            Representation representation, int field_index = 0)
+                            Representation representation, int field_offset,
+                            bool in_object)
       : value_(
             KindField::encode(kind) | AttributesField::encode(attributes) |
             LocationField::encode(location) |
             ConstnessField::encode(constness) |
             RepresentationField::encode(EncodeRepresentation(representation)) |
-            FieldIndexField::encode(field_index)) {}
+            OffsetInWordsField::encode(field_offset / kTaggedSize) |
+            InObjectField::encode(in_object)) {
+    DCHECK(IsAligned(field_offset, kTaggedSize));
+  }
+
+  // Property details describing a fast mode property without specifying its
+  // actual index.
+  constexpr PropertyDetails(PropertyKind kind, PropertyAttributes attributes,
+                            PropertyLocation location,
+                            PropertyConstness constness,
+                            Representation representation)
+      : value_(
+            KindField::encode(kind) | AttributesField::encode(attributes) |
+            LocationField::encode(location) |
+            ConstnessField::encode(constness) |
+            RepresentationField::encode(EncodeRepresentation(representation))) {
+  }
 
   static constexpr PropertyDetails Empty(
       PropertyCellType cell_type = PropertyCellType::kNoCell) {
@@ -316,37 +379,45 @@ class PropertyDetails {
 
   int pointer() const { return DescriptorPointer::decode(value_); }
 
-  PropertyDetails set_pointer(int i) const {
+  V8_WARN_UNUSED_RESULT PropertyDetails set_pointer(int i) const {
     return PropertyDetails(value_, i);
   }
 
-  PropertyDetails set_cell_type(PropertyCellType type) const {
+  V8_WARN_UNUSED_RESULT PropertyDetails
+  set_cell_type(PropertyCellType type) const {
     PropertyDetails details = *this;
     details.value_ = PropertyCellTypeField::update(details.value_, type);
     return details;
   }
 
-  PropertyDetails set_index(int index) const {
+  V8_WARN_UNUSED_RESULT PropertyDetails set_index(int index) const {
     PropertyDetails details = *this;
     details.value_ = DictionaryStorageField::update(details.value_, index);
     return details;
   }
 
-  PropertyDetails CopyWithRepresentation(Representation representation) const {
+  static bool CanSetIndex(int index) {
+    return DictionaryStorageField::is_valid(index);
+  }
+
+  V8_WARN_UNUSED_RESULT PropertyDetails
+  CopyWithRepresentation(Representation representation) const {
     return PropertyDetails(value_, representation);
   }
-  PropertyDetails CopyWithConstness(PropertyConstness constness) const {
+  V8_WARN_UNUSED_RESULT PropertyDetails
+  CopyWithConstness(PropertyConstness constness) const {
     return PropertyDetails(value_, constness);
   }
-  PropertyDetails CopyAddAttributes(PropertyAttributes new_attributes) const {
+  V8_WARN_UNUSED_RESULT PropertyDetails
+  CopyAddAttributes(PropertyAttributes new_attributes) const {
     new_attributes =
         static_cast<PropertyAttributes>(attributes() | new_attributes);
     return PropertyDetails(value_, new_attributes);
   }
 
   // Conversion for storing details as Object.
-  explicit inline PropertyDetails(Smi smi);
-  inline Smi AsSmi() const;
+  explicit inline PropertyDetails(Tagged<Smi> smi);
+  inline Tagged<Smi> AsSmi() const;
 
   static constexpr uint8_t EncodeRepresentation(Representation representation) {
     return representation.kind();
@@ -377,7 +448,7 @@ class PropertyDetails {
     return DecodeRepresentation(RepresentationField::decode(value_));
   }
 
-  int field_index() const { return FieldIndexField::decode(value_); }
+  uint16_t field_offset() const { return OffsetInWordsField::decode(value_); }
 
   inline int field_width_in_words() const;
 
@@ -391,6 +462,12 @@ class PropertyDetails {
   bool IsEnumerable() const { return !IsDontEnum(); }
   PropertyCellType cell_type() const {
     return PropertyCellTypeField::decode(value_);
+  }
+
+  bool is_in_object() const { return InObjectField::decode(value_); }
+
+  FieldStorageLocation storage_location() const {
+    return {field_offset(), is_in_object()};
   }
 
   // Bit fields in value_ (type, shift, size). Must be public so the
@@ -414,12 +491,14 @@ class PropertyDetails {
   using RepresentationField = LocationField::Next<uint32_t, 3>;
   using DescriptorPointer =
       RepresentationField::Next<uint32_t, kDescriptorIndexBitCount>;
-  using FieldIndexField =
-      DescriptorPointer::Next<uint32_t, kDescriptorIndexBitCount>;
+  // Add an extra bit to account for the storage header included in the offset.
+  using OffsetInWordsField =
+      DescriptorPointer::Next<uint16_t, kDescriptorIndexBitCount + 1>;
+  using InObjectField = OffsetInWordsField::Next<bool, 1>;
 
   // All bits for both fast and slow objects must fit in a smi.
   static_assert(DictionaryStorageField::kLastUsedBit < 31);
-  static_assert(FieldIndexField::kLastUsedBit < 31);
+  static_assert(InObjectField::kLastUsedBit < 31);
 
   // DictionaryStorageField must be the last field, so that overflowing it
   // doesn't overwrite other fields.
@@ -444,11 +523,11 @@ class PropertyDetails {
 
   enum PrintMode {
     kPrintAttributes = 1 << 0,
-    kPrintFieldIndex = 1 << 1,
+    kPrintOffsetInWords = 1 << 1,
     kPrintRepresentation = 1 << 2,
     kPrintPointer = 1 << 3,
 
-    kForProperties = kPrintFieldIndex,
+    kForProperties = kPrintOffsetInWords | kPrintAttributes,
     kForTransitions = kPrintAttributes,
     kPrintFull = -1,
   };

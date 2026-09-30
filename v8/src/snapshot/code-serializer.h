@@ -6,6 +6,7 @@
 #define V8_SNAPSHOT_CODE_SERIALIZER_H_
 
 #include "src/base/macros.h"
+#include "src/codegen/script-details.h"
 #include "src/snapshot/serializer.h"
 #include "src/snapshot/snapshot-data.h"
 
@@ -49,28 +50,24 @@ class V8_EXPORT_PRIVATE AlignedCachedData {
   int length_;
 };
 
-enum class SerializedCodeSanityCheckResult {
-  kSuccess = 0,
-  kMagicNumberMismatch = 1,
-  kVersionMismatch = 2,
-  kSourceMismatch = 3,
-  kFlagsMismatch = 5,
-  kChecksumMismatch = 6,
-  kInvalidHeader = 7,
-  kLengthMismatch = 8
-};
+typedef v8::ScriptCompiler::CachedData::CompatibilityCheckResult
+    SerializedCodeSanityCheckResult;
+
+// If this fails, update the static_assert AND the code_cache_reject_reason
+// histogram definition.
+static_assert(static_cast<int>(SerializedCodeSanityCheckResult::kLast) == 9);
 
 class CodeSerializer : public Serializer {
  public:
   struct OffThreadDeserializeData {
    public:
     bool HasResult() const { return !maybe_result.is_null(); }
-    Handle<Script> GetOnlyScript(LocalHeap* heap);
+    DirectHandle<Script> GetOnlyScript(LocalHeap* heap);
 
    private:
     friend class CodeSerializer;
-    MaybeHandle<SharedFunctionInfo> maybe_result;
-    std::vector<Handle<Script>> scripts;
+    MaybeIndirectHandle<SharedFunctionInfo> maybe_result;
+    std::vector<IndirectHandle<Script>> scripts;
     std::unique_ptr<PersistentHandles> persistent_handles;
     SerializedCodeSanityCheckResult sanity_check_result;
   };
@@ -83,20 +80,20 @@ class CodeSerializer : public Serializer {
   AlignedCachedData* SerializeSharedFunctionInfo(
       Handle<SharedFunctionInfo> info);
 
-  V8_WARN_UNUSED_RESULT static MaybeHandle<SharedFunctionInfo> Deserialize(
-      Isolate* isolate, AlignedCachedData* cached_data, Handle<String> source,
-      ScriptOriginOptions origin_options,
-      MaybeHandle<Script> maybe_cached_script = {});
+  V8_WARN_UNUSED_RESULT static MaybeDirectHandle<SharedFunctionInfo>
+  Deserialize(Isolate* isolate, AlignedCachedData* cached_data,
+              DirectHandle<String> source, const ScriptDetails& script_details,
+              MaybeDirectHandle<Script> maybe_cached_script = {});
 
   V8_WARN_UNUSED_RESULT static OffThreadDeserializeData
   StartDeserializeOffThread(LocalIsolate* isolate,
                             AlignedCachedData* cached_data);
 
-  V8_WARN_UNUSED_RESULT static MaybeHandle<SharedFunctionInfo>
+  V8_WARN_UNUSED_RESULT static MaybeDirectHandle<SharedFunctionInfo>
   FinishOffThreadDeserialize(
       Isolate* isolate, OffThreadDeserializeData&& data,
-      AlignedCachedData* cached_data, Handle<String> source,
-      ScriptOriginOptions origin_options,
+      AlignedCachedData* cached_data, DirectHandle<String> source,
+      const ScriptDetails& script_details,
       BackgroundMergeTask* background_merge_task = nullptr);
 
   uint32_t source_hash() const { return source_hash_; }
@@ -118,29 +115,26 @@ class CodeSerializer : public Serializer {
 class SerializedCodeData : public SerializedData {
  public:
   // The data header consists of uint32_t-sized entries:
-  // [0] magic number and (internally provided) external reference count
-  // [1] version hash
-  // [2] source hash
-  // [3] flag hash
-  // [4] payload length
-  // [5] payload checksum
-  // ...  serialized payload
   static const uint32_t kVersionHashOffset = kMagicNumberOffset + kUInt32Size;
   static const uint32_t kSourceHashOffset = kVersionHashOffset + kUInt32Size;
   static const uint32_t kFlagHashOffset = kSourceHashOffset + kUInt32Size;
-  static const uint32_t kPayloadLengthOffset = kFlagHashOffset + kUInt32Size;
+  static const uint32_t kReadOnlySnapshotChecksumOffset =
+      kFlagHashOffset + kUInt32Size;
+  static const uint32_t kPayloadLengthOffset =
+      kReadOnlySnapshotChecksumOffset + kUInt32Size;
   static const uint32_t kChecksumOffset = kPayloadLengthOffset + kUInt32Size;
   static const uint32_t kUnalignedHeaderSize = kChecksumOffset + kUInt32Size;
   static const uint32_t kHeaderSize = POINTER_SIZE_ALIGN(kUnalignedHeaderSize);
 
   // Used when consuming.
   static SerializedCodeData FromCachedData(
-      AlignedCachedData* cached_data, uint32_t expected_source_hash,
+      Isolate* isolate, AlignedCachedData* cached_data,
+      uint32_t expected_source_hash,
       SerializedCodeSanityCheckResult* rejection_result);
   // For cached data which is consumed before the source is available (e.g.
   // off-thread).
   static SerializedCodeData FromCachedDataWithoutSource(
-      AlignedCachedData* cached_data,
+      LocalIsolate* local_isolate, AlignedCachedData* cached_data,
       SerializedCodeSanityCheckResult* rejection_result);
   // For cached data which was previously already sanity checked by
   // FromCachedDataWithoutSource. The rejection result from that call should be
@@ -158,7 +152,8 @@ class SerializedCodeData : public SerializedData {
 
   base::Vector<const uint8_t> Payload() const;
 
-  static uint32_t SourceHash(Handle<String> source,
+  static uint32_t SourceHash(DirectHandle<String> source,
+                             DirectHandle<FixedArray> wrapped_arguments,
                              ScriptOriginOptions origin_options);
 
  private:
@@ -172,10 +167,12 @@ class SerializedCodeData : public SerializedData {
   }
 
   SerializedCodeSanityCheckResult SanityCheck(
+      uint32_t expected_ro_snapshot_checksum,
       uint32_t expected_source_hash) const;
   SerializedCodeSanityCheckResult SanityCheckJustSource(
       uint32_t expected_source_hash) const;
-  SerializedCodeSanityCheckResult SanityCheckWithoutSource() const;
+  SerializedCodeSanityCheckResult SanityCheckWithoutSource(
+      uint32_t expected_ro_snapshot_checksum) const;
 };
 
 }  // namespace internal

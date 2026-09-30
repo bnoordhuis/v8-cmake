@@ -4,6 +4,10 @@
 
 #include "src/base/virtual-address-space.h"
 
+#include <algorithm>
+#include <cstring>
+#include <optional>
+
 #include "include/v8-platform.h"
 #include "src/base/bits.h"
 #include "src/base/platform/platform.h"
@@ -11,42 +15,32 @@
 namespace v8 {
 namespace base {
 
-#define STATIC_ASSERT_ENUM(a, b)                            \
-  static_assert(static_cast<int>(a) == static_cast<int>(b), \
-                "mismatching enum: " #a)
-
-STATIC_ASSERT_ENUM(PagePermissions::kNoAccess, OS::MemoryPermission::kNoAccess);
-STATIC_ASSERT_ENUM(PagePermissions::kReadWrite,
-                   OS::MemoryPermission::kReadWrite);
-STATIC_ASSERT_ENUM(PagePermissions::kReadWriteExecute,
-                   OS::MemoryPermission::kReadWriteExecute);
-STATIC_ASSERT_ENUM(PagePermissions::kReadExecute,
-                   OS::MemoryPermission::kReadExecute);
-
-#undef STATIC_ASSERT_ENUM
-
 namespace {
-uint8_t PagePermissionsToBitset(PagePermissions permissions) {
+
+OS::MemoryPermission ToMemoryPermission(PagePermissions permissions) {
   switch (permissions) {
     case PagePermissions::kNoAccess:
-      return 0b000;
+      return OS::MemoryPermission::kNoAccess;
     case PagePermissions::kRead:
-      return 0b100;
+      return OS::MemoryPermission::kRead;
     case PagePermissions::kReadWrite:
-      return 0b110;
+      return OS::MemoryPermission::kReadWrite;
     case PagePermissions::kReadWriteExecute:
-      return 0b111;
+      return OS::MemoryPermission::kReadWriteExecute;
     case PagePermissions::kReadExecute:
-      return 0b101;
+      return OS::MemoryPermission::kReadExecute;
+    default:
+      // Other combinations are currently not supported.
+      UNREACHABLE();
   }
 }
-}  // namespace
 
-bool IsSubset(PagePermissions lhs, PagePermissions rhs) {
-  uint8_t lhs_bits = PagePermissionsToBitset(lhs);
-  uint8_t rhs_bits = PagePermissionsToBitset(rhs);
-  return (lhs_bits & rhs_bits) == lhs_bits;
+bool IsValidMappingName(const std::string& name) {
+  return std::all_of(name.begin(), name.end(), [](char c) {
+    return std::isalnum(static_cast<unsigned char>(c)) || c == '-';
+  });
 }
+}  // namespace
 
 VirtualAddressSpace::VirtualAddressSpace()
     : VirtualAddressSpaceBase(OS::CommitPageSize(), OS::AllocatePageSize(),
@@ -81,7 +75,7 @@ Address VirtualAddressSpace::AllocatePages(Address hint, size_t size,
 
   return reinterpret_cast<Address>(
       OS::Allocate(reinterpret_cast<void*>(hint), size, alignment,
-                   static_cast<OS::MemoryPermission>(permissions)));
+                   ToMemoryPermission(permissions)));
 }
 
 void VirtualAddressSpace::FreePages(Address address, size_t size) {
@@ -97,7 +91,7 @@ bool VirtualAddressSpace::SetPagePermissions(Address address, size_t size,
   DCHECK(IsAligned(size, page_size()));
 
   return OS::SetPermissions(reinterpret_cast<void*>(address), size,
-                            static_cast<OS::MemoryPermission>(permissions));
+                            ToMemoryPermission(permissions));
 }
 
 bool VirtualAddressSpace::AllocateGuardRegion(Address address, size_t size) {
@@ -124,16 +118,17 @@ bool VirtualAddressSpace::CanAllocateSubspaces() {
   return OS::CanReserveAddressSpace();
 }
 
-Address VirtualAddressSpace::AllocateSharedPages(
-    Address hint, size_t size, PagePermissions permissions,
-    PlatformSharedMemoryHandle handle, uint64_t offset) {
+Address VirtualAddressSpace::AllocateSharedPages(Address hint, size_t size,
+                                                 PagePermissions permissions,
+                                                 SharedMemoryHandle handle,
+                                                 uint64_t offset) {
   DCHECK(IsAligned(hint, allocation_granularity()));
   DCHECK(IsAligned(size, allocation_granularity()));
   DCHECK(IsAligned(offset, allocation_granularity()));
 
-  return reinterpret_cast<Address>(OS::AllocateShared(
-      reinterpret_cast<void*>(hint), size,
-      static_cast<OS::MemoryPermission>(permissions), handle, offset));
+  return reinterpret_cast<Address>(
+      OS::AllocateShared(reinterpret_cast<void*>(hint), size,
+                         ToMemoryPermission(permissions), handle, offset));
 }
 
 void VirtualAddressSpace::FreeSharedPages(Address address, size_t size) {
@@ -145,19 +140,27 @@ void VirtualAddressSpace::FreeSharedPages(Address address, size_t size) {
 
 std::unique_ptr<v8::VirtualAddressSpace> VirtualAddressSpace::AllocateSubspace(
     Address hint, size_t size, size_t alignment,
-    PagePermissions max_page_permissions) {
+    PagePermissions max_page_permissions,
+    std::optional<MemoryProtectionKeyId> key,
+    std::optional<SharedMemoryHandle> handle) {
   DCHECK(IsAligned(alignment, allocation_granularity()));
   DCHECK(IsAligned(hint, alignment));
   DCHECK(IsAligned(size, allocation_granularity()));
 
-  base::Optional<AddressSpaceReservation> reservation =
+  std::optional<AddressSpaceReservation> reservation =
       OS::CreateAddressSpaceReservation(
           reinterpret_cast<void*>(hint), size, alignment,
-          static_cast<OS::MemoryPermission>(max_page_permissions));
-  if (!reservation.has_value())
+          ToMemoryPermission(max_page_permissions), handle);
+  if (!reservation.has_value()) {
     return std::unique_ptr<v8::VirtualAddressSpace>();
-  return std::unique_ptr<v8::VirtualAddressSpace>(
-      new VirtualAddressSubspace(*reservation, this, max_page_permissions));
+  }
+  return std::unique_ptr<v8::VirtualAddressSpace>(new VirtualAddressSubspace(
+      *reservation, this, max_page_permissions, key));
+}
+
+std::optional<VirtualAddressSpace::MemoryProtectionKeyId>
+VirtualAddressSpace::ActiveMemoryProtectionKey() {
+  return std::nullopt;
 }
 
 bool VirtualAddressSpace::RecommitPages(Address address, size_t size,
@@ -166,7 +169,7 @@ bool VirtualAddressSpace::RecommitPages(Address address, size_t size,
   DCHECK(IsAligned(size, page_size()));
 
   return OS::RecommitPages(reinterpret_cast<void*>(address), size,
-                           static_cast<OS::MemoryPermission>(permissions));
+                           ToMemoryPermission(permissions));
 }
 
 bool VirtualAddressSpace::DiscardSystemPages(Address address, size_t size) {
@@ -189,7 +192,8 @@ void VirtualAddressSpace::FreeSubspace(VirtualAddressSubspace* subspace) {
 
 VirtualAddressSubspace::VirtualAddressSubspace(
     AddressSpaceReservation reservation, VirtualAddressSpaceBase* parent_space,
-    PagePermissions max_page_permissions)
+    PagePermissions max_page_permissions,
+    std::optional<MemoryProtectionKeyId> key)
     : VirtualAddressSpaceBase(parent_space->page_size(),
                               parent_space->allocation_granularity(),
                               reinterpret_cast<Address>(reservation.base()),
@@ -198,7 +202,8 @@ VirtualAddressSubspace::VirtualAddressSubspace(
       region_allocator_(reinterpret_cast<Address>(reservation.base()),
                         reservation.size(),
                         parent_space->allocation_granularity()),
-      parent_space_(parent_space) {
+      parent_space_(parent_space),
+      pkey_(key) {
 #if V8_OS_WIN
   // On Windows, the address space reservation needs to be split and merged at
   // the OS level as well.
@@ -211,9 +216,25 @@ VirtualAddressSubspace::VirtualAddressSubspace(
     CHECK(reservation_.MergePlaceholders(reinterpret_cast<void*>(start), size));
   });
 #endif  // V8_OS_WIN
+
+  if (pkey_) {
+#if V8_HAS_PKU_SUPPORT
+    // Here we assume that the initial page permissions are kNoAccess, which is
+    // currently always the case.
+    CHECK(base::MemoryProtectionKey::HasMemoryProtectionKeyAPIs());
+    base::MemoryProtectionKey::SetPermissionsAndKey(
+        {base(), size()}, PagePermissions::kNoAccess, *pkey_);
+#else
+    UNREACHABLE();
+#endif  // V8_HAS_PKU_SUPPORT
+  }
 }
 
 VirtualAddressSubspace::~VirtualAddressSubspace() {
+  // TODO(chromium:1218005) here or in the RegionAllocator destructor we should
+  // assert that all allocations have been freed. Otherwise we may end up
+  // leaking memory on Windows because VirtualFree(subspace_base, 0) will then
+  // only free the first allocation in the subspace, not the entire subspace.
   parent_space_->FreeSubspace(this);
 }
 
@@ -244,7 +265,7 @@ Address VirtualAddressSubspace::AllocatePages(Address hint, size_t size,
   if (address == RegionAllocator::kAllocationFailure) return kNullAddress;
 
   if (!reservation_.Allocate(reinterpret_cast<void*>(address), size,
-                             static_cast<OS::MemoryPermission>(permissions))) {
+                             ToMemoryPermission(permissions))) {
     // This most likely means that we ran out of memory.
     CHECK_EQ(size, region_allocator_.FreeRegion(address));
     return kNullAddress;
@@ -261,8 +282,32 @@ void VirtualAddressSubspace::FreePages(Address address, size_t size) {
   // The order here is important: on Windows, the allocation first has to be
   // freed to a placeholder before the placeholder can be merged (during the
   // merge_callback) with any surrounding placeholder mappings.
-  CHECK(reservation_.Free(reinterpret_cast<void*>(address), size));
+  if (!reservation_.Free(reinterpret_cast<void*>(address), size)) {
+    // This can happen due to an out-of-memory condition, such as running out
+    // of available VMAs for the process.
+    FatalOOM(OOMType::kProcess, "VirtualAddressSubspace::FreePages");
+  }
   CHECK_EQ(size, region_allocator_.FreeRegion(address));
+
+  if (!name_.empty()) {
+    // Freeing pages (via MAP_FIXED) resets the name of the mapping.
+    // So we need to set it again here.
+    CHECK(OS::SetMemoryRegionName(reinterpret_cast<void*>(address), size,
+                                  name_.c_str()));
+  }
+
+#if V8_HAS_PKU_SUPPORT
+  if (pkey_) {
+    // Freeing pages in a subspace effectively means replacing them with fresh
+    // pages. As such, we need to re-set the protection key on the new pages.
+    //
+    // TODO(saelo): consider making AddressSpaceReservation aware of memory
+    // protection keys to move this logic closer to where the pages are
+    // replaced to make this more clear.
+    CHECK(base::MemoryProtectionKey::SetPermissionsAndKey(
+        {address, size}, PagePermissions::kNoAccess, *pkey_));
+  }
+#endif  // V8_HAS_PKU_SUPPORT
 }
 
 bool VirtualAddressSubspace::SetPagePermissions(Address address, size_t size,
@@ -271,9 +316,8 @@ bool VirtualAddressSubspace::SetPagePermissions(Address address, size_t size,
   DCHECK(IsAligned(size, page_size()));
   DCHECK(IsSubset(permissions, max_page_permissions()));
 
-  return reservation_.SetPermissions(
-      reinterpret_cast<void*>(address), size,
-      static_cast<OS::MemoryPermission>(permissions));
+  return reservation_.SetPermissions(reinterpret_cast<void*>(address), size,
+                                     ToMemoryPermission(permissions));
 }
 
 bool VirtualAddressSubspace::AllocateGuardRegion(Address address, size_t size) {
@@ -295,9 +339,10 @@ void VirtualAddressSubspace::FreeGuardRegion(Address address, size_t size) {
   CHECK_EQ(size, region_allocator_.FreeRegion(address));
 }
 
-Address VirtualAddressSubspace::AllocateSharedPages(
-    Address hint, size_t size, PagePermissions permissions,
-    PlatformSharedMemoryHandle handle, uint64_t offset) {
+Address VirtualAddressSubspace::AllocateSharedPages(Address hint, size_t size,
+                                                    PagePermissions permissions,
+                                                    SharedMemoryHandle handle,
+                                                    uint64_t offset) {
   DCHECK(IsAligned(hint, allocation_granularity()));
   DCHECK(IsAligned(size, allocation_granularity()));
   DCHECK(IsAligned(offset, allocation_granularity()));
@@ -308,9 +353,9 @@ Address VirtualAddressSubspace::AllocateSharedPages(
       region_allocator_.AllocateRegion(hint, size, allocation_granularity());
   if (address == RegionAllocator::kAllocationFailure) return kNullAddress;
 
-  if (!reservation_.AllocateShared(
-          reinterpret_cast<void*>(address), size,
-          static_cast<OS::MemoryPermission>(permissions), handle, offset)) {
+  if (!reservation_.AllocateShared(reinterpret_cast<void*>(address), size,
+                                   ToMemoryPermission(permissions), handle,
+                                   offset)) {
     CHECK_EQ(size, region_allocator_.FreeRegion(address));
     return kNullAddress;
   }
@@ -328,12 +373,31 @@ void VirtualAddressSubspace::FreeSharedPages(Address address, size_t size) {
   // merge_callback) with any surrounding placeholder mappings.
   CHECK(reservation_.FreeShared(reinterpret_cast<void*>(address), size));
   CHECK_EQ(size, region_allocator_.FreeRegion(address));
+
+  if (!name_.empty()) {
+    // Freeing pages (via MAP_FIXED) resets the name of the mapping.
+    // So we need to set it again here.
+    CHECK(OS::SetMemoryRegionName(reinterpret_cast<void*>(address), size,
+                                  name_.c_str()));
+  }
 }
 
 std::unique_ptr<v8::VirtualAddressSpace>
-VirtualAddressSubspace::AllocateSubspace(Address hint, size_t size,
-                                         size_t alignment,
-                                         PagePermissions max_page_permissions) {
+VirtualAddressSubspace::AllocateSubspace(
+    Address hint, size_t size, size_t alignment,
+    PagePermissions max_page_permissions,
+    std::optional<MemoryProtectionKeyId> key,
+    std::optional<SharedMemoryHandle> handle) {
+  // File backed mapping isn't supported for subspaces.
+  DCHECK(!handle.has_value());
+#if V8_HAS_PKU_SUPPORT
+  // We don't allow subspaces with different keys as that could be unexpected.
+  // If we ever want to support this, we should probably require specifying
+  // some flag like kSubspacesMayUseDifferentMemoryProtectionKey when creating
+  // the initial subspace and checking that flag here.
+  CHECK_IMPLIES(pkey_, pkey_ == key);
+#endif  // V8_HAS_PKU_SUPPORT
+
   DCHECK(IsAligned(alignment, allocation_granularity()));
   DCHECK(IsAligned(hint, alignment));
   DCHECK(IsAligned(size, allocation_granularity()));
@@ -346,16 +410,21 @@ VirtualAddressSubspace::AllocateSubspace(Address hint, size_t size,
     return std::unique_ptr<v8::VirtualAddressSpace>();
   }
 
-  base::Optional<AddressSpaceReservation> reservation =
+  std::optional<AddressSpaceReservation> reservation =
       reservation_.CreateSubReservation(
           reinterpret_cast<void*>(address), size,
-          static_cast<OS::MemoryPermission>(max_page_permissions));
+          ToMemoryPermission(max_page_permissions));
   if (!reservation.has_value()) {
     CHECK_EQ(size, region_allocator_.FreeRegion(address));
     return nullptr;
   }
-  return std::unique_ptr<v8::VirtualAddressSpace>(
-      new VirtualAddressSubspace(*reservation, this, max_page_permissions));
+  return std::unique_ptr<v8::VirtualAddressSpace>(new VirtualAddressSubspace(
+      *reservation, this, max_page_permissions, key));
+}
+
+std::optional<VirtualAddressSpace::MemoryProtectionKeyId>
+VirtualAddressSubspace::ActiveMemoryProtectionKey() {
+  return pkey_;
 }
 
 bool VirtualAddressSubspace::RecommitPages(Address address, size_t size,
@@ -364,9 +433,8 @@ bool VirtualAddressSubspace::RecommitPages(Address address, size_t size,
   DCHECK(IsAligned(size, page_size()));
   DCHECK(IsSubset(permissions, max_page_permissions()));
 
-  return reservation_.RecommitPages(
-      reinterpret_cast<void*>(address), size,
-      static_cast<OS::MemoryPermission>(permissions));
+  return reservation_.RecommitPages(reinterpret_cast<void*>(address), size,
+                                    ToMemoryPermission(permissions));
 }
 
 bool VirtualAddressSubspace::DiscardSystemPages(Address address, size_t size) {
@@ -381,7 +449,31 @@ bool VirtualAddressSubspace::DecommitPages(Address address, size_t size) {
   DCHECK(IsAligned(address, page_size()));
   DCHECK(IsAligned(size, page_size()));
 
-  return reservation_.DecommitPages(reinterpret_cast<void*>(address), size);
+  bool success =
+      reservation_.DecommitPages(reinterpret_cast<void*>(address), size);
+
+  if (success && !name_.empty()) {
+    // Decommitting pages (via MAP_FIXED) resets the name of the mapping.
+    // So we need to set it again here.
+    CHECK(OS::SetMemoryRegionName(reinterpret_cast<void*>(address), size,
+                                  name_.c_str()));
+  }
+
+#if V8_HAS_PKU_SUPPORT
+  if (success && pkey_) {
+    // Decommitting pages in a subspace effectively means replacing them with
+    // fresh pages. As such, we need to re-set the protection key on the new
+    // pages.
+    //
+    // TODO(saelo): consider making AddressSpaceReservation aware of memory
+    // protection keys to move this logic closer to where the pages are
+    // replaced to make this more clear.
+    CHECK(base::MemoryProtectionKey::SetPermissionsAndKey(
+        {address, size}, PagePermissions::kNoAccess, *pkey_));
+  }
+#endif  // V8_HAS_PKU_SUPPORT
+
+  return success;
 }
 
 void VirtualAddressSubspace::FreeSubspace(VirtualAddressSubspace* subspace) {
@@ -391,6 +483,17 @@ void VirtualAddressSubspace::FreeSubspace(VirtualAddressSubspace* subspace) {
   Address base = reinterpret_cast<Address>(reservation.base());
   CHECK_EQ(reservation.size(), region_allocator_.FreeRegion(base));
   CHECK(reservation_.FreeSubReservation(reservation));
+}
+
+bool VirtualAddressSubspace::SetName(const std::string& name) {
+  CHECK(IsValidMappingName(name));
+
+  if (reservation_.SetName(name.c_str())) {
+    name_ = name;
+    return true;
+  }
+
+  return false;
 }
 
 }  // namespace base

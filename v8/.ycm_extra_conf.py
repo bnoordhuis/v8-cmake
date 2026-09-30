@@ -63,14 +63,12 @@ def FindV8SrcFromFilename(filename):
     (String) Path of 'v8/', or None if unable to find.
   """
   curdir = os.path.normpath(os.path.dirname(filename))
-  while not (PathExists(curdir, 'v8') and PathExists(curdir, 'v8', 'DEPS')
-             and (PathExists(curdir, '.gclient')
-                  or PathExists(curdir, 'v8', '.git'))):
+  while not PathExists(curdir, '.git'):
     nextdir = os.path.normpath(os.path.join(curdir, '..'))
     if nextdir == curdir:
       return None
     curdir = nextdir
-  return os.path.join(curdir, 'v8')
+  return curdir
 
 
 def GetClangCommandFromNinjaForFilename(v8_root, filename):
@@ -132,7 +130,11 @@ def GetClangCommandFromNinjaForFilename(v8_root, filename):
   # Ninja might execute several commands to build something. We want the last
   # clang command.
   clang_line = None
-  for line in reversed(stdout.decode('utf-8').splitlines()):
+  for line in reversed(stdout.splitlines()):
+    try:
+      line = line.decode('utf-8')
+    except UnicodeDecodeError:
+      continue
     if 'clang' in line:
       clang_line = line
       break
@@ -145,9 +147,14 @@ def GetClangCommandFromNinjaForFilename(v8_root, filename):
       v8_flags.append(MakeIncludePathAbsolute(flag, "-I", out_dir))
     elif flag.startswith('-isystem'):
       v8_flags.append(MakeIncludePathAbsolute(flag, "-isystem", out_dir))
-    elif flag.startswith('-std') or flag.startswith(
-        '-pthread') or flag.startswith('-no'):
+    elif any([flag.startswith(p) for p in ['-std', '-pthread', '-no']]):
       v8_flags.append(flag)
+    elif any([
+        flag.startswith(p) for p in ['-fmodule-map-file=', '-fmodule-file=']
+    ]) or flag == '-fbuiltin-module-map':
+      # Modules don't play well together with clang/clangd, see
+      # https://crrev.com/c/6887510.
+      continue
     elif flag.startswith('-') and flag[1] in 'DWFfmgOX':
       v8_flags.append(flag)
   return v8_flags

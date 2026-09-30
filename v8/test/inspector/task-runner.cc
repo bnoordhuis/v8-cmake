@@ -8,13 +8,14 @@
 #include "include/v8-local-handle.h"
 #include "include/v8-primitive.h"
 #include "src/flags/flags.h"
+#include "src/heap/local-heap-inl.h"
 #include "src/init/v8.h"
 #include "src/libplatform/default-platform.h"
 #include "src/utils/locked-queue-inl.h"
 
-#if !defined(_WIN32) && !defined(_WIN64)
+#if !defined(V8_OS_WIN)
 #include <unistd.h>
-#endif  // !defined(_WIN32) && !defined(_WIN64)
+#endif  // !defined(V8_OS_WIN)
 
 namespace v8 {
 namespace internal {
@@ -67,19 +68,19 @@ void TaskRunner::Run() {
 }
 
 void TaskRunner::RunMessageLoop(bool only_protocol) {
+  v8::Isolate::Scope isolate_scope(isolate());
   int loop_number = ++nested_loop_count_;
   while (nested_loop_count_ == loop_number && !is_terminated_ &&
          !isolate()->IsExecutionTerminating()) {
     std::unique_ptr<TaskRunner::Task> task = GetNext(only_protocol);
     if (!task) return;
-    v8::Isolate::Scope isolate_scope(isolate());
     v8::TryCatch try_catch(isolate());
     if (catch_exceptions_ == kStandardPropagateUncaughtExceptions) {
       try_catch.SetVerbose(true);
     }
     task->Run(data_.get());
     if (catch_exceptions_ == kFailOnUncaughtExceptions &&
-        try_catch.HasCaught()) {
+        try_catch.HasCaught() && !try_catch.HasTerminated()) {
       ReportUncaughtException(isolate(), try_catch);
       base::OS::ExitProcess(0);
     }
@@ -140,7 +141,9 @@ std::unique_ptr<TaskRunner::Task> TaskRunner::GetNext(bool only_protocol) {
       if (deferred_queue_.Dequeue(&task)) return task;
       if (queue_.Dequeue(&task)) return task;
     }
-    process_queue_semaphore_.Wait();
+    reinterpret_cast<Isolate*>(isolate())
+        ->main_thread_local_heap()
+        ->ExecuteWhileParked([this]() { process_queue_semaphore_.Wait(); });
   }
 }
 

@@ -2,72 +2,26 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#ifndef V8_WASM_WASM_VALUE_H_
+#define V8_WASM_WASM_VALUE_H_
+
 #if !V8_ENABLE_WEBASSEMBLY
 #error This header should only be included if WebAssembly is enabled.
 #endif  // !V8_ENABLE_WEBASSEMBLY
 
-#ifndef V8_WASM_WASM_VALUE_H_
-#define V8_WASM_WASM_VALUE_H_
-
+#include "src/base/logging.h"
 #include "src/base/memory.h"
+#include "src/common/simd128.h"
 #include "src/handles/handles.h"
 #include "src/utils/boxed-float.h"
 #include "src/wasm/value-type.h"
+#include "third_party/fp16/src/include/fp16.h"
 
 namespace v8 {
 namespace internal {
 namespace wasm {
 
-#define FOREACH_SIMD_TYPE(V)  \
-  V(double, float2, f64x2, 2) \
-  V(float, float4, f32x4, 4)  \
-  V(int64_t, int2, i64x2, 2)  \
-  V(int32_t, int4, i32x4, 4)  \
-  V(int16_t, int8, i16x8, 8)  \
-  V(int8_t, int16, i8x16, 16)
-
-#define DEFINE_SIMD_TYPE(cType, sType, name, kSize) \
-  struct sType {                                    \
-    cType val[kSize];                               \
-  };
-FOREACH_SIMD_TYPE(DEFINE_SIMD_TYPE)
-#undef DEFINE_SIMD_TYPE
-
-class Simd128 {
- public:
-  Simd128() = default;
-
-#define DEFINE_SIMD_TYPE_SPECIFIC_METHODS(cType, sType, name, size)          \
-  explicit Simd128(sType val) {                                              \
-    base::WriteUnalignedValue<sType>(reinterpret_cast<Address>(val_), val);  \
-  }                                                                          \
-  sType to_##name() const {                                                  \
-    return base::ReadUnalignedValue<sType>(reinterpret_cast<Address>(val_)); \
-  }
-  FOREACH_SIMD_TYPE(DEFINE_SIMD_TYPE_SPECIFIC_METHODS)
-#undef DEFINE_SIMD_TYPE_SPECIFIC_METHODS
-
-  explicit Simd128(uint8_t* bytes) {
-    memcpy(static_cast<void*>(val_), reinterpret_cast<void*>(bytes),
-           kSimd128Size);
-  }
-
-  const uint8_t* bytes() { return val_; }
-
-  template <typename T>
-  inline T to() const;
-
- private:
-  uint8_t val_[16] = {0};
-};
-
-#define DECLARE_CAST(cType, sType, name, size) \
-  template <>                                  \
-  inline sType Simd128::to() const {           \
-    return to_##name();                        \
-  }
-FOREACH_SIMD_TYPE(DECLARE_CAST)
-#undef DECLARE_CAST
+struct WasmModule;
 
 // Macro for defining WasmValue methods for different types.
 // Elements:
@@ -81,13 +35,19 @@ FOREACH_SIMD_TYPE(DECLARE_CAST)
   V(u32, kWasmI32, uint32_t)              \
   V(i64, kWasmI64, int64_t)               \
   V(u64, kWasmI64, uint64_t)              \
+  V(f16, kWasmF16, uint16_t)              \
   V(f32, kWasmF32, float)                 \
   V(f32_boxed, kWasmF32, Float32)         \
   V(f64, kWasmF64, double)                \
   V(f64_boxed, kWasmF64, Float64)         \
   V(s128, kWasmS128, Simd128)
 
-ASSERT_TRIVIALLY_COPYABLE(Handle<Object>);
+// Storing DirectHandle in {bit_pattern_} would be unsafe: WasmValue is copied
+// into Zone-allocated storage (e.g. the constant-expression decoder's
+// FastZoneVector<Value> stack) which conservative stack scanning does not visit
+// so the raw address goes stale on a compacting GC. Store an IndirectHandle for
+// now, matching PropertyDescriptor.
+ASSERT_TRIVIALLY_COPYABLE(IndirectHandle<Object>);
 
 // A wasm value with type information.
 class WasmValue {
@@ -113,34 +73,35 @@ class WasmValue {
   FOREACH_PRIMITIVE_WASMVAL_TYPE(DEFINE_TYPE_SPECIFIC_METHODS)
 #undef DEFINE_TYPE_SPECIFIC_METHODS
 
-  WasmValue(const uint8_t* raw_bytes, ValueType type)
+  WasmValue(const uint8_t* raw_bytes, CanonicalValueType type)
       : type_(type), bit_pattern_{} {
     DCHECK(type_.is_numeric());
     memcpy(bit_pattern_, raw_bytes, type.value_kind_size());
   }
 
-  WasmValue(Handle<Object> ref, ValueType type) : type_(type), bit_pattern_{} {
-    static_assert(sizeof(Handle<Object>) <= sizeof(bit_pattern_),
+  WasmValue(DirectHandle<Object> ref, CanonicalValueType type)
+      : type_(type), bit_pattern_{} {
+    static_assert(sizeof(IndirectHandle<Object>) <= sizeof(bit_pattern_),
                   "bit_pattern_ must be large enough to fit a Handle");
-    DCHECK(type.is_reference());
-    base::WriteUnalignedValue<Handle<Object>>(
-        reinterpret_cast<Address>(bit_pattern_), ref);
+    DCHECK(type.is_ref());
+    base::WriteUnalignedValue<IndirectHandle<Object>>(
+        reinterpret_cast<Address>(bit_pattern_), indirect_handle(ref));
   }
 
-  Handle<Object> to_ref() const {
-    DCHECK(type_.is_reference());
-    return base::ReadUnalignedValue<Handle<Object>>(
+  DirectHandle<Object> to_ref() const {
+    DCHECK(type_.is_ref());
+    return base::ReadUnalignedValue<IndirectHandle<Object>>(
         reinterpret_cast<Address>(bit_pattern_));
   }
 
-  ValueType type() const { return type_; }
+  CanonicalValueType type() const { return type_; }
 
   // Checks equality of type and bit pattern (also for float and double values).
   bool operator==(const WasmValue& other) const {
     return type_ == other.type_ &&
            !memcmp(bit_pattern_, other.bit_pattern_,
-                   type_.is_reference() ? sizeof(Handle<Object>)
-                                        : type_.value_kind_size());
+                   type_.is_ref() ? sizeof(IndirectHandle<Object>)
+                                  : type_.value_kind_size());
   }
 
   void CopyTo(uint8_t* to) const {
@@ -150,7 +111,7 @@ class WasmValue {
     memcpy(to, bit_pattern_, type_.value_kind_size());
   }
 
-  // If {packed_type.is_packed()}, create a new value of {packed_type()}.
+  // If {packed_type.is_packed()}, create a new value of {packed_type}.
   // Otherwise, return this object.
   WasmValue Packed(ValueType packed_type) const {
     if (packed_type == kWasmI8) {
@@ -172,7 +133,7 @@ class WasmValue {
 
   static WasmValue ForUintPtr(uintptr_t value) {
     using type =
-        std::conditional<kSystemPointerSize == 8, uint64_t, uint32_t>::type;
+        std::conditional_t<kSystemPointerSize == 8, uint64_t, uint32_t>;
     return WasmValue{type{value}};
   }
 
@@ -186,6 +147,8 @@ class WasmValue {
         return std::to_string(to_i32());
       case kI64:
         return std::to_string(to_i64());
+      case kF16:
+        return std::to_string(fp16_ieee_to_fp32_value(to_f16()));
       case kF32:
         return std::to_string(to_f32());
       case kF64:
@@ -193,20 +156,26 @@ class WasmValue {
       case kS128: {
         std::stringstream stream;
         stream << "0x" << std::hex;
-        for (int8_t uint8_t : bit_pattern_) {
-          if (!(uint8_t & 0xf0)) stream << '0';
-          stream << uint8_t;
+        std::vector<uint8_t> native_pattern(
+            bit_pattern_, bit_pattern_ + arraysize(bit_pattern_));
+#if V8_TARGET_LITTLE_ENDIAN
+        std::reverse(native_pattern.begin(), native_pattern.end());
+#endif
+        for (uint8_t byte : native_pattern) {
+          if (!(byte & 0xf0)) stream << '0';
+          stream << static_cast<uint32_t>(byte);
         }
         return stream.str();
       }
       case kRefNull:
       case kRef:
-      case kRtt:
-        return "Handle [" + std::to_string(to_ref().address()) + "]";
+        return "DirectHandle [" + std::to_string(to_ref().address()) + "]";
       case kVoid:
+      case kTop:
       case kBottom:
         UNREACHABLE();
     }
+    UNREACHABLE();
   }
 
   bool zero_byte_representation() {
@@ -217,7 +186,7 @@ class WasmValue {
   }
 
  private:
-  ValueType type_;
+  CanonicalValueType type_;
   uint8_t bit_pattern_[16];
 };
 

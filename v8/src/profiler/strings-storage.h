@@ -11,6 +11,7 @@
 #include "src/base/hashmap.h"
 #include "src/base/platform/mutex.h"
 #include "src/common/globals.h"
+#include "src/flags/flags.h"
 
 namespace v8 {
 namespace internal {
@@ -22,7 +23,8 @@ class Symbol;
 // forever, even if they disappear from JS heap or external storage.
 class V8_EXPORT_PRIVATE StringsStorage {
  public:
-  StringsStorage();
+  explicit StringsStorage(
+      uint32_t string_limit = v8_flags.heap_snapshot_string_limit.value());
   ~StringsStorage();
   StringsStorage(const StringsStorage&) = delete;
   StringsStorage& operator=(const StringsStorage&) = delete;
@@ -33,12 +35,16 @@ class V8_EXPORT_PRIVATE StringsStorage {
   // Returns a formatted string, de-duplicated via the storage.
   PRINTF_FORMAT(2, 3) const char* GetFormatted(const char* format, ...);
   // Returns a stored string resulting from name, or "<symbol>" for a symbol.
-  const char* GetName(Name name);
+  const char* GetName(Tagged<Name> name);
+  // Returns a stored string resulting from string without truncation.
+  const char* GetUntruncated(Tagged<String> string);
   // Returns the string representation of the int from the store.
   const char* GetName(int index);
   // Appends string resulting from name to prefix, then returns the stored
   // result.
-  const char* GetConsName(const char* prefix, Name name);
+  const char* GetConsName(const char* prefix, Tagged<Name> name);
+  // Returns true if the string has to be truncated in the store.
+  bool NeedsTruncation(uint32_t length) const;
   // Reduces the refcount of the given string, freeing it if no other
   // references are made to it. Returns true if the string was successfully
   // unref'd, or false if the string was not present in the table.
@@ -57,15 +63,17 @@ class V8_EXPORT_PRIVATE StringsStorage {
   static bool StringsMatch(void* key1, void* key2);
   // Adds the string to storage and returns it, or if a matching string exists
   // in the storage, deletes str and returns the matching string instead.
-  const char* AddOrDisposeString(char* str, int len);
-  base::CustomMatcherHashMap::Entry* GetEntry(const char* str, int len);
+  const char* AddOrDisposeString(char* str, size_t len);
+  base::CustomMatcherHashMap::Entry* GetEntry(const char* str, size_t len);
   PRINTF_FORMAT(2, 0)
   const char* GetVFormatted(const char* format, va_list args);
-  const char* GetSymbol(Symbol sym);
+  const char* GetSymbol(Tagged<Symbol> sym);
+  uint32_t GetTrimmedLength(uint32_t length) const;
 
   base::CustomMatcherHashMap names_;
   base::Mutex mutex_;
   size_t string_size_ = 0;
+  uint32_t string_limit_;
 };
 
 }  // namespace internal

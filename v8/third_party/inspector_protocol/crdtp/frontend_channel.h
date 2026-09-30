@@ -24,19 +24,11 @@ class FrontendChannel {
   // responses may be sent from an untrusted source to a trusted process (e.g.
   // from Chromium's renderer (blink) to the browser process), which needs
   // to be able to match the response to an earlier request without parsing the
-  // messsage.
+  // message.
   virtual void SendProtocolResponse(int call_id,
                                     std::unique_ptr<Serializable> message) = 0;
   virtual void SendProtocolNotification(
       std::unique_ptr<Serializable> message) = 0;
-
-  // FallThrough indicates that |message| should be handled in another layer.
-  // Usually this means the layer responding to the message didn't handle it,
-  // but in some cases messages are handled by multiple layers (e.g. both
-  // the embedder and the content layer in Chromium).
-  virtual void FallThrough(int call_id,
-                           span<uint8_t> method,
-                           span<uint8_t> message) = 0;
 
   // Session implementations may queue notifications for performance or
   // other considerations; this is a hook for domain handlers to manually flush.

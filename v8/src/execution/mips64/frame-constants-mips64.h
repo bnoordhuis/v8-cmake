@@ -18,6 +18,12 @@ class EntryFrameConstants : public AllStatic {
   // This is the offset to where JSEntry pushes the current value of
   // Isolate::c_entry_fp onto the stack.
   static constexpr int kNextExitFrameFPOffset = -3 * kSystemPointerSize;
+
+  // The offsets for storing the FP and PC of fast API calls.
+  static constexpr int kNextFastCallFrameFPOffset =
+      kNextExitFrameFPOffset - kSystemPointerSize;
+  static constexpr int kNextFastCallFramePCOffset =
+      kNextFastCallFrameFPOffset - kSystemPointerSize;
 };
 
 class WasmLiftoffSetupFrameConstants : public TypedFrameConstants {
@@ -31,19 +37,31 @@ class WasmLiftoffSetupFrameConstants : public TypedFrameConstants {
   // We spill:
   //   a2, a3, a4, a5, a6, a7: param1, param2, ..., param6
   // in the following FP-relative order: [a7, a6, a5, a4, a3, a2].
-  // The instance slot is in position '6', the first spill slot is at '0'.
+  // The instance slot is in position '0', the first spill slot is at '1'.
+  // See wasm::kGpParamRegisters and Builtins::Generate_WasmCompileLazy.
   static constexpr int kInstanceSpillOffset =
-      TYPED_FRAME_PUSHED_VALUE_OFFSET(6);
+      TYPED_FRAME_PUSHED_VALUE_OFFSET(0);
+
+  // We then spill floating-point param regs and finally ra. Offset computation:
+  // 1 for the instance, and counting each floating-point reg as two slots.
+  static constexpr int kCallingPCOffset = TYPED_FRAME_PUSHED_VALUE_OFFSET(
+      1 + kNumberOfSavedGpParamRegs + 2 * kNumberOfSavedFpParamRegs);
 
   static constexpr int kParameterSpillsOffset[] = {
-      TYPED_FRAME_PUSHED_VALUE_OFFSET(5), TYPED_FRAME_PUSHED_VALUE_OFFSET(4),
-      TYPED_FRAME_PUSHED_VALUE_OFFSET(3), TYPED_FRAME_PUSHED_VALUE_OFFSET(2),
-      TYPED_FRAME_PUSHED_VALUE_OFFSET(1), TYPED_FRAME_PUSHED_VALUE_OFFSET(0)};
+      TYPED_FRAME_PUSHED_VALUE_OFFSET(6), TYPED_FRAME_PUSHED_VALUE_OFFSET(5),
+      TYPED_FRAME_PUSHED_VALUE_OFFSET(4), TYPED_FRAME_PUSHED_VALUE_OFFSET(3),
+      TYPED_FRAME_PUSHED_VALUE_OFFSET(2), TYPED_FRAME_PUSHED_VALUE_OFFSET(1)};
 
   // SP-relative.
-  static constexpr int kWasmInstanceOffset = 2 * kSystemPointerSize;
+  static constexpr int kWasmInstanceDataOffset = 2 * kSystemPointerSize;
   static constexpr int kDeclaredFunctionIndexOffset = 1 * kSystemPointerSize;
   static constexpr int kNativeModuleOffset = 0;
+};
+
+class WasmLiftoffFrameConstants : public TypedFrameConstants {
+ public:
+  static constexpr int kFeedbackVectorOffset = 3 * kSystemPointerSize;
+  static constexpr int kInstanceDataOffset = 2 * kSystemPointerSize;
 };
 
 // Frame constructed by the {WasmDebugBreak} builtin.
@@ -64,7 +82,7 @@ class WasmDebugBreakFrameConstants : public TypedFrameConstants {
   static constexpr int kLastPushedGpRegisterOffset =
       -kFixedFrameSizeFromFp - kNumPushedGpRegisters * kSystemPointerSize;
   static constexpr int kLastPushedFpRegisterOffset =
-      kLastPushedGpRegisterOffset - kNumPushedFpRegisters * kDoubleSize;
+      kLastPushedGpRegisterOffset - kNumPushedFpRegisters * kSimd128Size;
 
   // Offsets are fp-relative.
   static int GetPushedGpRegisterOffset(int reg_code) {
@@ -80,7 +98,7 @@ class WasmDebugBreakFrameConstants : public TypedFrameConstants {
     uint32_t lower_regs =
         kPushedFpRegs.bits() & ((uint32_t{1} << reg_code) - 1);
     return kLastPushedFpRegisterOffset +
-           base::bits::CountPopulation(lower_regs) * kDoubleSize;
+           base::bits::CountPopulation(lower_regs) * kSimd128Size;
   }
 };
 

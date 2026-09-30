@@ -29,15 +29,17 @@ constexpr size_t size_to_shift(size_t size) {
 }
 }  // namespace
 
-constexpr uint8_t kTypedArrayAndRabGsabTypedArrayElementsKindShifts[] = {
+constexpr uint8_t kTypedArrayAndRabGsabTypedArrayElementsKindShifts
+    [TypedArrayAndRabGsabTypedArrayElementsKindTableSize()] = {
 #define SHIFT(Type, type, TYPE, ctype) size_to_shift(sizeof(ctype)),
-    TYPED_ARRAYS(SHIFT) RAB_GSAB_TYPED_ARRAYS(SHIFT)
+        TYPED_ARRAYS(SHIFT) RAB_GSAB_TYPED_ARRAYS(SHIFT)
 #undef SHIFT
 };
 
-constexpr uint8_t kTypedArrayAndRabGsabTypedArrayElementsKindSizes[] = {
+constexpr uint8_t kTypedArrayAndRabGsabTypedArrayElementsKindSizes
+    [TypedArrayAndRabGsabTypedArrayElementsKindTableSize()] = {
 #define SIZE(Type, type, TYPE, ctype) sizeof(ctype),
-    TYPED_ARRAYS(SIZE) RAB_GSAB_TYPED_ARRAYS(SIZE)
+        TYPED_ARRAYS(SIZE) RAB_GSAB_TYPED_ARRAYS(SIZE)
 #undef SIZE
 };
 
@@ -74,12 +76,13 @@ const uint8_t* TypedArrayAndRabGsabTypedArrayElementsKindSizes() {
 }
 
 int GetDefaultHeaderSizeForElementsKind(ElementsKind elements_kind) {
-  static_assert(FixedArray::kHeaderSize == FixedDoubleArray::kHeaderSize);
+  static_assert(OFFSET_OF_DATA_START(FixedArray) ==
+                OFFSET_OF_DATA_START(FixedDoubleArray));
 
   if (IsTypedArrayOrRabGsabTypedArrayElementsKind(elements_kind)) {
     return 0;
   } else {
-    return FixedArray::kHeaderSize - kHeapObjectTag;
+    return OFFSET_OF_DATA_START(FixedArray) - kHeapObjectTag;
   }
 }
 
@@ -134,6 +137,7 @@ const char* ElementsKindToString(ElementsKind kind) {
     case NO_ELEMENTS:
       return "NO_ELEMENTS";
   }
+  UNREACHABLE();
 }
 
 const ElementsKind kFastElementsKindSequence[kFastElementsKindCount] = {
@@ -284,6 +288,10 @@ bool UnionElementsKindUptoSize(ElementsKind* a_out, ElementsKind b) {
       break;
   }
   return false;
+}
+
+std::ostream& operator<<(std::ostream& os, ElementsKind kind) {
+  return os << ElementsKindToString(kind);
 }
 
 }  // namespace internal

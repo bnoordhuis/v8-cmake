@@ -13,7 +13,7 @@ namespace v8 {
 namespace internal {
 
 class Assembler;
-class ByteArray;
+class TrustedByteArray;
 class BytecodeArray;
 class InstructionStream;
 class Code;
@@ -24,10 +24,10 @@ class WasmCode;
 
 // HandlerTable is a byte array containing entries for exception handlers in
 // the code object it is associated with. The tables come in two flavors:
-// 1) Based on ranges: Used for unoptimized code. Stored in a {ByteArray} that
-//    is attached to each {BytecodeArray}. Contains one entry per exception
-//    handler and a range representing the try-block covered by that handler.
-//    Layout looks as follows:
+// 1) Based on ranges: Used for unoptimized code. Stored in a
+//   {TrustedByteArray} that is attached to each {BytecodeArray}. Contains one
+//   entry per exception handler and a range representing the try-block covered
+//   by that handler. Layout looks as follows:
 //      [ range-start , range-end , handler-offset , handler-data ]
 // 2) Based on return addresses: Used for turbofanned code. Stored directly in
 //    the instruction stream of the {InstructionStream} object. Contains one
@@ -55,30 +55,30 @@ class V8_EXPORT_PRIVATE HandlerTable {
   enum EncodingMode { kRangeBasedEncoding, kReturnAddressBasedEncoding };
 
   // Constructors for the various encodings.
-  explicit HandlerTable(InstructionStream code);
-  explicit HandlerTable(Code code);
-  explicit HandlerTable(ByteArray byte_array);
+  explicit HandlerTable(Tagged<InstructionStream> code);
+  explicit HandlerTable(Tagged<Code> code);
+  explicit HandlerTable(Tagged<TrustedByteArray> byte_array);
 #if V8_ENABLE_WEBASSEMBLY
   explicit HandlerTable(const wasm::WasmCode* code);
 #endif  // V8_ENABLE_WEBASSEMBLY
-  explicit HandlerTable(BytecodeArray bytecode_array);
-  HandlerTable(Address handler_table, int handler_table_size,
+  explicit HandlerTable(Tagged<BytecodeArray> bytecode_array);
+  HandlerTable(Address handler_table, uint32_t handler_table_size,
                EncodingMode encoding_mode);
 
   // Getters for handler table based on ranges.
-  int GetRangeStart(int index) const;
-  int GetRangeEnd(int index) const;
-  int GetRangeHandler(int index) const;
-  int GetRangeData(int index) const;
+  int GetRangeStart(uint32_t index) const;
+  int GetRangeEnd(uint32_t index) const;
+  int GetRangeHandler(uint32_t index) const;
+  int GetRangeData(uint32_t index) const;
 
   // Setters for handler table based on ranges.
-  void SetRangeStart(int index, int value);
-  void SetRangeEnd(int index, int value);
-  void SetRangeHandler(int index, int offset, CatchPrediction pred);
-  void SetRangeData(int index, int value);
+  void SetRangeStart(uint32_t index, int value);
+  void SetRangeEnd(uint32_t index, int value);
+  void SetRangeHandler(uint32_t index, int offset, CatchPrediction pred);
+  void SetRangeData(uint32_t index, int value);
 
   // Returns the required length of the underlying byte array.
-  static int LengthForRange(int entries);
+  static uint32_t LengthForRange(uint32_t entries);
 
   // Emitters for handler table based on return addresses.
   static int EmitReturnTableStart(Assembler* masm);
@@ -87,33 +87,38 @@ class V8_EXPORT_PRIVATE HandlerTable {
   // Lookup handler in a table based on ranges. The {pc_offset} is an offset to
   // the start of the potentially throwing instruction (using return addresses
   // for this value would be invalid).
-  int LookupRange(int pc_offset, int* data, CatchPrediction* prediction);
+  int LookupHandlerIndexForRange(int pc_offset) const;
 
   // Lookup handler in a table based on return addresses.
   int LookupReturn(int pc_offset);
 
   // Returns the number of entries in the table.
-  int NumberOfRangeEntries() const;
-  int NumberOfReturnEntries() const;
+  uint32_t NumberOfRangeEntries() const;
+  uint32_t NumberOfReturnEntries() const;
 
 #ifdef ENABLE_DISASSEMBLER
   void HandlerTableRangePrint(std::ostream& os);
   void HandlerTableReturnPrint(std::ostream& os);
 #endif
 
- private:
+  bool HandlerWasUsed(uint32_t index) const;
+  void MarkHandlerUsed(uint32_t index);
   // Getters for handler table based on ranges.
-  CatchPrediction GetRangePrediction(int index) const;
+  CatchPrediction GetRangePrediction(uint32_t index) const;
 
+  static const int kNoHandlerFound = -1;
+
+ private:
   // Gets entry size based on mode.
   static int EntrySizeFromMode(EncodingMode mode);
+  int GetRangeHandlerBitfield(uint32_t index) const;
 
   // Getters for handler table based on return addresses.
-  int GetReturnOffset(int index) const;
-  int GetReturnHandler(int index) const;
+  int GetReturnOffset(uint32_t index) const;
+  int GetReturnHandler(uint32_t index) const;
 
   // Number of entries in the loaded handler table.
-  const int number_of_entries_;
+  const uint32_t number_of_entries_;
 
 #ifdef DEBUG
   // The encoding mode of the table. Mostly useful for debugging to check that
@@ -122,8 +127,9 @@ class V8_EXPORT_PRIVATE HandlerTable {
 #endif
 
   // Direct pointer into the encoded data. This pointer potentially points into
-  // objects on the GC heap (either {ByteArray} or {InstructionStream}) and
-  // could become stale during a collection. Hence we disallow any allocation.
+  // objects on the GC heap (either {TrustedByteArray} or {InstructionStream})
+  // and could become stale during a collection. Hence we disallow any
+  // allocation.
   const Address raw_encoded_data_;
   DISALLOW_GARBAGE_COLLECTION(no_gc_)
 
@@ -141,7 +147,11 @@ class V8_EXPORT_PRIVATE HandlerTable {
 
   // Encoding of the {handler} field.
   using HandlerPredictionField = base::BitField<CatchPrediction, 0, 3>;
-  using HandlerOffsetField = base::BitField<int, 3, 29>;
+  using HandlerWasUsedField = HandlerPredictionField::Next<bool, 1>;
+  using HandlerOffsetField = HandlerWasUsedField::Next<int, 28>;
+
+ public:
+  static const int kLazyDeopt = HandlerOffsetField::kMax;
 };
 
 }  // namespace internal

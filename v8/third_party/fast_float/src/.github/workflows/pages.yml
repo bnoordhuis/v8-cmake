@@ -1,0 +1,64 @@
+name: Deploy GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - ".github/workflows/pages.yml"
+      - "CMakeLists.txt"
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write      # Changed: need write to push to gh-pages
+  pages: read          # No longer needed for deploy-pages
+  id-token: none
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to gh-pages
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Resolve latest release version
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="$(gh release view --repo ${{ github.repository }} --json tagName --jq .tagName 2>/dev/null || true)"
+          if [ -z "${tag:-}" ]; then
+            tag="$(git tag --sort=-v:refname | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)"
+          fi
+          if [ -z "${tag:-}" ]; then
+            tag="v$(grep -E 'project\(fast_float VERSION' CMakeLists.txt | sed -E 's/.*VERSION ([0-9.]+).*/\1/')"
+          fi
+          version="${tag#v}"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: ${version}"
+
+      - name: Substitute version into HTML
+        run: |
+          version='${{ steps.version.outputs.version }}'
+          find docs -type f \( -name '*.html' -o -name '*.md' -o -name '*.css' -o -name '*.js' \) \
+            -exec sed -i "s/{{VERSION}}/${version}/g" {} +
+
+      - name: Deploy to gh-pages branch
+        uses: JamesIves/github-pages-deploy-action@v4
+        with:
+          branch: gh-pages
+          folder: docs
+          clean: true
+          commit-message: "Deploy docs for version ${{ steps.version.outputs.version }}"

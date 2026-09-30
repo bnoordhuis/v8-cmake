@@ -12,9 +12,9 @@
 #include "include/cppgc/heap-consistency.h"
 #include "include/cppgc/internal/caged-heap-local-data.h"
 #include "include/cppgc/persistent.h"
-#include "src/heap/cppgc/heap-object-header.h"
-#include "src/heap/cppgc/heap-visitor.h"
-#include "src/heap/cppgc/heap.h"
+#include "src/heap/cppgc-internal/heap-object-header.h"
+#include "src/heap/cppgc-internal/heap-visitor.h"
+#include "src/heap/cppgc-internal/heap.h"
 #include "test/unittests/heap/cppgc/tests.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
@@ -412,7 +412,7 @@ TYPED_TEST(MinorGCTestForType, InterGenerationalPointerForDifferentPageTypes) {
 TYPED_TEST(MinorGCTestForType, OmitGenerationalBarrierForOnStackObject) {
   using Type = typename TestFixture::Type;
 
-  class StackAllocated : GarbageCollected<StackAllocated> {
+  class StackAllocated {
     CPPGC_STACK_ALLOCATED();
 
    public:
@@ -540,7 +540,9 @@ namespace {
 
 template <typename Value>
 struct InlinedObject {
+  CPPGC_DISALLOW_NEW();
   struct Inner {
+    CPPGC_DISALLOW_NEW();
     Inner() = default;
     explicit Inner(AllocationHandle& handle)
         : ref(MakeGarbageCollected<Value>(handle)) {}
@@ -581,8 +583,9 @@ class GCedWithInlinedArray
     DCHECK_GT(to, from);
     DCHECK_GT(kNumObjects, from);
 
-    for (; from != to; ++from)
+    for (; from != to; ++from) {
       new (&objects[from]) InlinedObject<Value>(alloc_handle_);
+    }
 
     GenerationalBarrierForSourceObject(&objects[from]);
   }

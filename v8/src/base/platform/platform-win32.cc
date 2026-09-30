@@ -4,6 +4,8 @@
 
 // Platform-specific code for Win32.
 
+#include "src/base/platform/platform-win32.h"
+
 // Secure API functions are not available using MinGW with msvcrt.dll
 // on Windows XP. Make sure MINGW_HAS_SECURE_API is not defined to
 // disable definition of secure API functions in standard headers that
@@ -19,22 +21,24 @@
 
 // This has to come after windows.h.
 #include <VersionHelpers.h>
-#include <dbghelp.h>  // For SymLoadModule64 and al.
-#include <malloc.h>   // For _msize()
-#include <mmsystem.h>  // For timeGetTime().
-#include <tlhelp32.h>  // For Module32First and al.
+#include <dbghelp.h>            // For SymLoadModule64 and al.
+#include <malloc.h>             // For _msize()
+#include <mmsystem.h>           // For timeGetTime().
+#include <processthreadsapi.h>  // For GetProcessMitigationPolicy().
+#include <psapi.h>              // For GetProcessMemoryInfo().
+#include <tlhelp32.h>           // For Module32First and al.
 
 #include <limits>
+#include <optional>
 
 #include "src/base/bits.h"
 #include "src/base/lazy-instance.h"
 #include "src/base/macros.h"
-#include "src/base/platform/platform-win32.h"
+#include "src/base/platform/mutex.h"
 #include "src/base/platform/platform.h"
 #include "src/base/platform/time.h"
 #include "src/base/timezone-cache.h"
 #include "src/base/utils/random-number-generator.h"
-#include "src/base/win32-headers.h"
 
 #if defined(_MSC_VER)
 #include <crtdbg.h>
@@ -134,12 +138,6 @@ int strncpy_s(char* dest, size_t dest_size, const char* source, size_t count) {
 
 namespace v8 {
 namespace base {
-
-namespace {
-
-bool g_hard_abort = false;
-
-}  // namespace
 
 class WindowsTimezoneCache : public TimezoneCache {
  public:
@@ -487,6 +485,18 @@ int OS::GetUserTime(uint32_t* secs,  uint32_t* usecs) {
   return 0;
 }
 
+int OS::GetPeakMemoryUsageKb() {
+  constexpr int KB = 1024;
+
+  PROCESS_MEMORY_COUNTERS mem_counters;
+  int ret;
+
+  ret = GetProcessMemoryInfo(GetCurrentProcess(), &mem_counters,
+                             sizeof(mem_counters));
+  if (ret == 0) return -1;
+
+  return static_cast<int>(mem_counters.PeakWorkingSetSize / KB);
+}
 
 // Returns current time as the number of milliseconds since
 // 00:00:00 UTC, January 1, 1970.
@@ -530,8 +540,7 @@ int OS::GetCurrentProcessId() {
   return static_cast<int>(::GetCurrentProcessId());
 }
 
-
-int OS::GetCurrentThreadId() {
+int OS::GetCurrentThreadIdInternal() {
   return static_cast<int>(::GetCurrentThreadId());
 }
 
@@ -555,7 +564,7 @@ void OS::ExitProcess(int exit_code) {
 // for output. However, if the application is linked as a GUI application,
 // the process doesn't have a console, and therefore (debugging) output is lost.
 // This is the case if we are embedded in a windows program (like a browser).
-// In order to be able to get debug output in this case the the debugging
+// In order to be able to get debug output in this case the debugging
 // facility using OutputDebugString. This output goes to the active debugger
 // for the process (if any). Else the output can be monitored using DBMON.EXE.
 
@@ -601,7 +610,7 @@ static void VPrintHelper(FILE* stream, const char* format, va_list args) {
 }
 
 // Convert utf-8 encoded string to utf-16 encoded.
-static std::wstring ConvertUtf8StringToUtf16(const char* str) {
+std::wstring OS::ConvertUtf8StringToUtf16(const char* str) {
   // On Windows wchar_t must be a 16-bit value.
   static_assert(sizeof(wchar_t) == 2, "wrong wchar_t size");
   std::wstring utf16_str;
@@ -691,6 +700,7 @@ void OS::PrintError(const char* format, ...) {
   va_start(args, format);
   VPrintError(format, args);
   va_end(args);
+  fflush(stderr);
 }
 
 
@@ -740,8 +750,40 @@ DEFINE_LAZY_LEAKY_OBJECT_GETTER(RandomNumberGenerator,
                                 GetPlatformRandomNumberGenerator)
 static LazyMutex rng_mutex = LAZY_MUTEX_INITIALIZER;
 
-void OS::Initialize(bool hard_abort, const char* const gc_fake_mmap) {
-  g_hard_abort = hard_abort;
+namespace {
+
+bool UserShadowStackEnabled() {
+  auto is_user_cet_available_in_environment =
+      reinterpret_cast<decltype(&IsUserCetAvailableInEnvironment)>(
+          ::GetProcAddress(::GetModuleHandleW(L"kernel32.dll"),
+                           "IsUserCetAvailableInEnvironment"));
+  auto get_process_mitigation_policy =
+      reinterpret_cast<decltype(&GetProcessMitigationPolicy)>(::GetProcAddress(
+          ::GetModuleHandle(L"Kernel32.dll"), "GetProcessMitigationPolicy"));
+
+  if (!is_user_cet_available_in_environment || !get_process_mitigation_policy) {
+    return false;
+  }
+
+  if (!is_user_cet_available_in_environment(
+          USER_CET_ENVIRONMENT_WIN32_PROCESS)) {
+    return false;
+  }
+
+  PROCESS_MITIGATION_USER_SHADOW_STACK_POLICY uss_policy;
+  if (!get_process_mitigation_policy(GetCurrentProcess(),
+                                     ProcessUserShadowStackPolicy, &uss_policy,
+                                     sizeof(uss_policy))) {
+    return false;
+  }
+
+  return uss_policy.EnableUserShadowStack;
+}
+
+}  // namespace
+
+void OS::Initialize(const char* const gc_fake_mmap) {
+  // This is only used on Posix, we don't need to use it for anything.
 }
 
 typedef PVOID(__stdcall* VirtualAlloc2_t)(HANDLE, PVOID, SIZE_T, ULONG, ULONG,
@@ -770,6 +812,18 @@ void OS::EnsureWin32MemoryAPILoaded() {
 
     loaded = true;
   }
+}
+
+// static
+bool OS::IsHardwareEnforcedShadowStacksEnabled() {
+  static bool cet_enabled = UserShadowStackEnabled();
+  return cet_enabled;
+}
+
+// static
+void OS::EnsureAlternativeSignalStackIsAvailableForCurrentThread() {
+  // Not supported on Windows.
+  UNREACHABLE();
 }
 
 // static
@@ -932,7 +986,7 @@ void* AllocateInternal(void* hint, size_t size, size_t alignment,
 
 void CheckIsOOMError(int error) {
   // We expect one of ERROR_NOT_ENOUGH_MEMORY or ERROR_COMMITMENT_LIMIT. We'd
-  // still like to get the actual error code when its not one of the expected
+  // still like to get the actual error code when it's not one of the expected
   // errors, so use the construct below to achieve that.
   if (error != ERROR_NOT_ENOUGH_MEMORY) CHECK_EQ(ERROR_COMMITMENT_LIMIT, error);
 }
@@ -941,7 +995,11 @@ void CheckIsOOMError(int error) {
 
 // static
 void* OS::Allocate(void* hint, size_t size, size_t alignment,
-                   MemoryPermission access) {
+                   MemoryPermission access,
+                   std::optional<SharedMemoryHandle> handle) {
+  // File handles aren't supported.
+  DCHECK(!handle.has_value());
+
   size_t page_size = AllocatePageSize();
   DCHECK_EQ(0, size % page_size);
   DCHECK_EQ(0, alignment % page_size);
@@ -966,7 +1024,7 @@ void OS::Free(void* address, size_t size) {
 
 // static
 void* OS::AllocateShared(void* hint, size_t size, MemoryPermission permission,
-                         PlatformSharedMemoryHandle handle, uint64_t offset) {
+                         SharedMemoryHandle handle, uint64_t offset) {
   DCHECK_EQ(0, reinterpret_cast<uintptr_t>(hint) % AllocatePageSize());
   DCHECK_EQ(0, size % AllocatePageSize());
   DCHECK_EQ(0, offset % AllocatePageSize());
@@ -975,7 +1033,7 @@ void* OS::AllocateShared(void* hint, size_t size, MemoryPermission permission,
   DWORD off_lo = static_cast<DWORD>(offset);
   DWORD access = GetFileViewAccessFromMemoryPermission(permission);
 
-  HANDLE file_mapping = FileMappingFromSharedMemoryHandle(handle);
+  HANDLE file_mapping = handle.GetPlatformHandle();
   void* result =
       MapViewOfFileEx(file_mapping, access, off_hi, off_lo, size, hint);
 
@@ -1026,6 +1084,12 @@ void OS::SetDataReadOnly(void* address, size_t size) {
   CHECK(old_protection == PAGE_READWRITE || old_protection == PAGE_WRITECOPY);
 }
 
+bool OS::SetMemoryRegionName(const void* address, size_t size,
+                             const char* name) {
+  // Not implemented on Windows.
+  return false;
+}
+
 // static
 bool OS::RecommitPages(void* address, size_t size, MemoryPermission access) {
   return SetPermissions(address, size, access);
@@ -1074,15 +1138,20 @@ bool OS::DecommitPages(void* address, size_t size) {
 }
 
 // static
+bool OS::SealPages(void* address, size_t size) { return false; }
+
+// static
 bool OS::CanReserveAddressSpace() {
   return VirtualAlloc2 != nullptr && MapViewOfFile3 != nullptr &&
          UnmapViewOfFile2 != nullptr;
 }
 
 // static
-Optional<AddressSpaceReservation> OS::CreateAddressSpaceReservation(
-    void* hint, size_t size, size_t alignment,
-    MemoryPermission max_permission) {
+std::optional<AddressSpaceReservation> OS::CreateAddressSpaceReservation(
+    void* hint, size_t size, size_t alignment, MemoryPermission max_permission,
+    std::optional<SharedMemoryHandle> handle) {
+  // File handles aren't supported.
+  DCHECK(!handle.has_value());
   CHECK(CanReserveAddressSpace());
 
   size_t page_size = AllocatePageSize();
@@ -1106,17 +1175,17 @@ void OS::FreeAddressSpaceReservation(AddressSpaceReservation reservation) {
 }
 
 // static
-PlatformSharedMemoryHandle OS::CreateSharedMemoryHandleForTesting(size_t size) {
+std::optional<SharedMemoryHandle> OS::CreateSharedMemoryHandleForTesting(
+    size_t size) {
   HANDLE handle = CreateFileMapping(INVALID_HANDLE_VALUE, nullptr,
                                     PAGE_READWRITE, 0, size, nullptr);
-  if (!handle) return kInvalidSharedMemoryHandle;
-  return SharedMemoryHandleFromFileMapping(handle);
+  if (!handle) return std::nullopt;
+  return SharedMemoryHandle::FromPlatformHandle(handle);
 }
 
 // static
-void OS::DestroySharedMemoryHandle(PlatformSharedMemoryHandle handle) {
-  DCHECK_NE(kInvalidSharedMemoryHandle, handle);
-  HANDLE file_mapping = FileMappingFromSharedMemoryHandle(handle);
+void OS::DestroySharedMemoryHandle(SharedMemoryHandle handle) {
+  HANDLE file_mapping = handle.GetPlatformHandle();
   CHECK(CloseHandle(file_mapping));
 }
 
@@ -1192,14 +1261,20 @@ void OS::Abort() {
   fflush(stdout);
   fflush(stderr);
 
-  if (g_hard_abort) {
-    IMMEDIATE_CRASH();
+  switch (g_abort_mode) {
+    case AbortMode::kExitWithSuccessAndIgnoreDcheckFailures:
+      ExitProcess(0);
+    case AbortMode::kExitWithFailureAndIgnoreDcheckFailures:
+      ExitProcess(-1);
+    case AbortMode::kImmediateCrash:
+      IMMEDIATE_CRASH();
+    case AbortMode::kExitIfNoSecurityImpact:
+    case AbortMode::kDefault:
+      break;
   }
-  // Make the MSVCRT do a silent abort.
-  raise(SIGABRT);
 
   // Make sure function doesn't return.
-  abort();
+  ExitProcess(3);
 }
 
 
@@ -1294,7 +1369,8 @@ Win32MemoryMappedFile::~Win32MemoryMappedFile() {
   CloseHandle(file_);
 }
 
-Optional<AddressSpaceReservation> AddressSpaceReservation::CreateSubReservation(
+std::optional<AddressSpaceReservation>
+AddressSpaceReservation::CreateSubReservation(
     void* address, size_t size, OS::MemoryPermission max_permission) {
   // Nothing to do, the sub reservation must already have been split by now.
   DCHECK(Contains(address, size));
@@ -1340,13 +1416,13 @@ bool AddressSpaceReservation::Free(void* address, size_t size) {
 
 bool AddressSpaceReservation::AllocateShared(void* address, size_t size,
                                              OS::MemoryPermission access,
-                                             PlatformSharedMemoryHandle handle,
+                                             SharedMemoryHandle handle,
                                              uint64_t offset) {
   DCHECK(Contains(address, size));
   CHECK(MapViewOfFile3);
 
   DWORD protect = GetProtectionFromMemoryPermission(access);
-  HANDLE file_mapping = FileMappingFromSharedMemoryHandle(handle);
+  HANDLE file_mapping = handle.GetPlatformHandle();
   return MapViewOfFile3(file_mapping, GetCurrentProcess(), address, offset,
                         size, MEM_REPLACE_PLACEHOLDER, protect, nullptr, 0);
 }
@@ -1641,7 +1717,7 @@ int OS::ActivationFrameAlignment() {
 #endif
 }
 
-#if (defined(_WIN32) || defined(_WIN64))
+#if defined(V8_OS_WIN)
 void EnsureConsoleOutputWin32() {
   UINT new_flags =
       SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX;
@@ -1657,7 +1733,7 @@ void EnsureConsoleOutputWin32() {
   _set_error_mode(_OUT_TO_STDERR);
 #endif  // defined(_MSC_VER)
 }
-#endif  // (defined(_WIN32) || defined(_WIN64))
+#endif  // defined(V8_OS_WIN)
 
 // ----------------------------------------------------------------------------
 // Win32 thread support.
@@ -1671,7 +1747,7 @@ static const HANDLE kNoThread = INVALID_HANDLE_VALUE;
 // convention.
 static unsigned int __stdcall ThreadEntry(void* arg) {
   Thread* thread = reinterpret_cast<Thread*>(arg);
-  thread->NotifyStartedAndRun();
+  thread->NotifyStartedAndDispatch();
   return 0;
 }
 
@@ -1752,11 +1828,9 @@ void Thread::SetThreadLocal(LocalStorageKey key, void* value) {
 
 void OS::AdjustSchedulingParams() {}
 
-std::vector<OS::MemoryRange> OS::GetFreeMemoryRangesWithin(
+std::optional<OS::MemoryRange> OS::GetFirstFreeMemoryRangeWithin(
     OS::Address boundary_start, OS::Address boundary_end, size_t minimum_size,
     size_t alignment) {
-  std::vector<OS::MemoryRange> result = {};
-
   // Search for the virtual memory (vm) ranges within the boundary.
   // If a range is free and larger than {minimum_size}, then push it to the
   // returned vector.
@@ -1780,14 +1854,14 @@ std::vector<OS::MemoryRange> OS::GetFreeMemoryRangesWithin(
           RoundDown(std::min(vm_end, boundary_end), alignment);
       if (overlap_start < overlap_end &&
           overlap_end - overlap_start >= minimum_size) {
-        result.push_back({overlap_start, overlap_end});
+        return OS::MemoryRange{overlap_start, overlap_end};
       }
     }
     // Continue to visit the next virtual memory range.
     vm_start = vm_end;
   }
 
-  return result;
+  return {};
 }
 
 // static
@@ -1806,6 +1880,57 @@ Stack::StackSlot Stack::ObtainCurrentThreadStackStart() {
   return reinterpret_cast<void*>(highLimit);
 #else
 #error Unsupported ObtainCurrentThreadStackStart.
+#endif
+}
+
+// static
+Stack::StackSlot Stack::GetCommittedStackLimit() {
+#if defined(V8_TARGET_ARCH_X64)
+  return reinterpret_cast<void*>(
+      reinterpret_cast<NT_TIB64*>(NtCurrentTeb())->StackLimit);
+#elif defined(V8_TARGET_ARCH_32_BIT)
+  return reinterpret_cast<void*>(
+      reinterpret_cast<NT_TIB*>(NtCurrentTeb())->StackLimit);
+#elif defined(V8_TARGET_ARCH_ARM64)
+  ULONG_PTR lowLimit, highLimit;
+  ::GetCurrentThreadStackLimits(&lowLimit, &highLimit);
+  return reinterpret_cast<void*>(lowLimit);
+#else
+#error Unsupported GetCommittedStackLimit.
+#endif
+}
+
+// static
+Stack::StackSlot Stack::ObtainCurrentThreadStackReservedLimit() {
+  // On Windows, "StackLimit" (see function above) is the limit of the stack
+  // pages committed so far and grows dynamically. The absolute limit of the
+  // reserved stack memory is called "DeallocationStack". It does not have an
+  // associated symbol in the struct, and its offset is not very well
+  // documented, but it has been stable for a long time.
+  // Sources for the offsets:
+  // https://en.wikipedia.org/wiki/Win32_Thread_Information_Block
+  // https://www.geoffchappell.com/studies/windows/km/ntoskrnl/inc/api/pebteb/teb/index.htm
+#ifdef V8_TARGET_ARCH_64_BIT
+  constexpr unsigned kDeallocationStackOffset = 0x1478;
+#else
+  constexpr unsigned kDeallocationStackOffset = 0xe0c;
+#endif
+  return *reinterpret_cast<void**>(reinterpret_cast<char*>(NtCurrentTeb()) +
+                                   kDeallocationStackOffset);
+}
+
+// static
+void Stack::SetCurrentThreadStackBounds(uintptr_t limit, uintptr_t base) {
+#if defined(V8_TARGET_ARCH_X64) || defined(V8_TARGET_ARCH_ARM64)
+  reinterpret_cast<NT_TIB64*>(NtCurrentTeb())->StackBase = base;
+  reinterpret_cast<NT_TIB64*>(NtCurrentTeb())->StackLimit = limit;
+#elif defined(V8_TARGET_ARCH_32_BIT)
+  reinterpret_cast<NT_TIB*>(NtCurrentTeb())->StackBase =
+      reinterpret_cast<void*>(base);
+  reinterpret_cast<NT_TIB*>(NtCurrentTeb())->StackLimit =
+      reinterpret_cast<void*>(limit);
+#else
+#error Unsupported SetCurrentThreadStackBounds.
 #endif
 }
 

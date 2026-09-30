@@ -16,6 +16,7 @@
 #include "src/logging/counters.h"
 #include "src/objects/objects-inl.h"
 #include "src/tracing/tracing-category-observer.h"
+#include "test/unittests/heap/heap-utils.h"
 #include "test/unittests/test-utils.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
@@ -48,6 +49,7 @@ class RuntimeCallStatsTest : public TestWithNativeContext {
     // Disable RuntimeCallStats before tearing down the isolate to prevent
     // printing the tests table. Comment the following line for debugging
     // purposes.
+    isolate()->AbortConcurrentOptimization(BlockingBehavior::kBlock);
     TracingFlags::runtime_stats.store(0, std::memory_order_relaxed);
   }
 
@@ -647,6 +649,7 @@ TEST_F(RuntimeCallStatsTest, GarbageCollection) {
   v8_flags.single_threaded_gc = true;
 
   FlagList::EnforceFlagImplications();
+  ManualGCScope manual_gc_scope(i_isolate());
   v8::Isolate* isolate = v8_isolate();
   RunJS(
       "let root = [];"

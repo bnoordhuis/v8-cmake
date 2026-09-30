@@ -6,7 +6,10 @@
 #define V8_OBJECTS_JS_COLLECTION_ITERATOR_INL_H_
 
 #include "src/objects/js-collection-iterator.h"
+// Include the non-inl header before the rest of the headers.
+
 #include "src/objects/objects-inl.h"
+#include "src/objects/tagged-field-inl.h"
 
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
@@ -14,9 +17,17 @@
 namespace v8 {
 namespace internal {
 
-#include "torque-generated/src/objects/js-collection-iterator-tq-inl.inc"
+Tagged<Object> JSCollectionIterator::table() const { return table_.load(); }
+void JSCollectionIterator::set_table(Tagged<Object> value,
+                                     WriteBarrierMode mode) {
+  table_.store(this, value, mode);
+}
 
-TQ_OBJECT_CONSTRUCTORS_IMPL(JSCollectionIterator)
+Tagged<Object> JSCollectionIterator::index() const { return index_.load(); }
+void JSCollectionIterator::set_index(Tagged<Object> value,
+                                     WriteBarrierMode mode) {
+  index_.store(this, value, mode);
+}
 
 }  // namespace internal
 }  // namespace v8

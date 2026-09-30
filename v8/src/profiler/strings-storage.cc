@@ -19,7 +19,8 @@ bool StringsStorage::StringsMatch(void* key1, void* key2) {
          0;
 }
 
-StringsStorage::StringsStorage() : names_(StringsMatch) {}
+StringsStorage::StringsStorage(uint32_t string_limit)
+    : names_(StringsMatch), string_limit_(string_limit) {}
 
 StringsStorage::~StringsStorage() {
   for (base::HashMap::Entry* p = names_.Start(); p != nullptr;
@@ -52,7 +53,7 @@ const char* StringsStorage::GetFormatted(const char* format, ...) {
   return result;
 }
 
-const char* StringsStorage::AddOrDisposeString(char* str, int len) {
+const char* StringsStorage::AddOrDisposeString(char* str, size_t len) {
   base::MutexGuard guard(&mutex_);
   base::HashMap::Entry* entry = GetEntry(str, len);
   if (entry->value == nullptr) {
@@ -68,77 +69,88 @@ const char* StringsStorage::AddOrDisposeString(char* str, int len) {
 }
 
 const char* StringsStorage::GetVFormatted(const char* format, va_list args) {
-  base::Vector<char> str = base::Vector<char>::New(1024);
+  base::Vector<char> str = base::Vector<char>::New(4096);
   int len = base::VSNPrintF(str, format, args);
   if (len == -1) {
-    DeleteArray(str.begin());
-    return GetCopy(format);
+    return AddOrDisposeString(str.begin(), strlen(str.begin()));
   }
   return AddOrDisposeString(str.begin(), len);
 }
 
-const char* StringsStorage::GetSymbol(Symbol sym) {
-  if (!sym.description().IsString()) {
+const char* StringsStorage::GetSymbol(Tagged<Symbol> sym) {
+  if (!IsString(sym->description())) {
     return "<symbol>";
   }
-  String description = String::cast(sym.description());
-  int length = std::min(v8_flags.heap_snapshot_string_limit.value(),
-                        description.length());
-  auto data = description.ToCString(DISALLOW_NULLS, ROBUST_STRING_TRAVERSAL, 0,
-                                    length, &length);
-  if (sym.is_private_name()) {
-    return AddOrDisposeString(data.release(), length);
+  Tagged<String> description = Cast<String>(sym->description());
+  uint32_t length = GetTrimmedLength(description->length());
+  size_t data_length = 0;
+  auto data = description->ToCString(0, length, &data_length);
+  if (sym->is_any_private_name()) {
+    return AddOrDisposeString(data.release(), data_length);
   }
-  auto str_length = 8 + length + 1 + 1;
+  auto str_length = 8 + data_length + 1 + 1;
   auto str_result = NewArray<char>(str_length);
   snprintf(str_result, str_length, "<symbol %s>", data.get());
   return AddOrDisposeString(str_result, str_length - 1);
 }
 
-const char* StringsStorage::GetName(Name name) {
-  if (name.IsString()) {
-    String str = String::cast(name);
-    int length =
-        std::min(v8_flags.heap_snapshot_string_limit.value(), str.length());
-    int actual_length = 0;
-    std::unique_ptr<char[]> data = str.ToCString(
-        DISALLOW_NULLS, ROBUST_STRING_TRAVERSAL, 0, length, &actual_length);
-    return AddOrDisposeString(data.release(), actual_length);
-  } else if (name.IsSymbol()) {
-    return GetSymbol(Symbol::cast(name));
+const char* StringsStorage::GetName(Tagged<Name> name) {
+  if (IsString(name)) {
+    Tagged<String> str = Cast<String>(name);
+    uint32_t length = GetTrimmedLength(str->length());
+    size_t data_length = 0;
+    std::unique_ptr<char[]> data = str->ToCString(0, length, &data_length);
+    return AddOrDisposeString(data.release(), data_length);
+  } else if (IsSymbol(name)) {
+    return GetSymbol(Cast<Symbol>(name));
   }
   return "";
+}
+
+const char* StringsStorage::GetUntruncated(Tagged<String> string) {
+  size_t data_length = 0;
+  std::unique_ptr<char[]> data = string->ToCString(&data_length);
+  return AddOrDisposeString(data.release(), data_length);
 }
 
 const char* StringsStorage::GetName(int index) {
   return GetFormatted("%d", index);
 }
 
-const char* StringsStorage::GetConsName(const char* prefix, Name name) {
-  if (name.IsString()) {
-    String str = String::cast(name);
-    int length =
-        std::min(v8_flags.heap_snapshot_string_limit.value(), str.length());
-    int actual_length = 0;
-    std::unique_ptr<char[]> data = str.ToCString(
-        DISALLOW_NULLS, ROBUST_STRING_TRAVERSAL, 0, length, &actual_length);
+const char* StringsStorage::GetConsName(const char* prefix, Tagged<Name> name) {
+  if (IsString(name)) {
+    Tagged<String> str = Cast<String>(name);
+    uint32_t length = GetTrimmedLength(str->length());
+    size_t data_length = 0;
+    std::unique_ptr<char[]> data = str->ToCString(0, length, &data_length);
 
-    int cons_length = actual_length + static_cast<int>(strlen(prefix)) + 1;
+    size_t cons_length = data_length + strlen(prefix) + 1;
     char* cons_result = NewArray<char>(cons_length);
     snprintf(cons_result, cons_length, "%s%s", prefix, data.get());
 
     return AddOrDisposeString(cons_result, cons_length - 1);
-  } else if (name.IsSymbol()) {
-    return GetSymbol(Symbol::cast(name));
+  } else if (IsSymbol(name)) {
+    return GetSymbol(Cast<Symbol>(name));
   }
   return "";
 }
 
+bool StringsStorage::NeedsTruncation(uint32_t length) const {
+  return length > GetTrimmedLength(length);
+}
+
+uint32_t StringsStorage::GetTrimmedLength(uint32_t length) const {
+  if (string_limit_ == 0) return length;
+  return std::min(string_limit_, length);
+}
+
 namespace {
 
-inline uint32_t ComputeStringHash(const char* str, int len) {
+inline uint32_t ComputeStringHash(const char* str, size_t len) {
   uint32_t raw_hash_field = base::bits::RotateLeft32(
-      StringHasher::HashSequentialString(str, len, kZeroHashSeed), 2);
+      StringHasher::HashSequentialString(str, base::checked_cast<uint32_t>(len),
+                                         HashSeed::Default()),
+      2);
   return Name::HashBits::decode(raw_hash_field);
 }
 
@@ -146,7 +158,7 @@ inline uint32_t ComputeStringHash(const char* str, int len) {
 
 bool StringsStorage::Release(const char* str) {
   base::MutexGuard guard(&mutex_);
-  int len = static_cast<int>(strlen(str));
+  size_t len = strlen(str);
   uint32_t hash = ComputeStringHash(str, len);
   base::HashMap::Entry* entry = names_.Lookup(const_cast<char*>(str), hash);
 
@@ -178,7 +190,7 @@ size_t StringsStorage::GetStringSize() {
   return string_size_;
 }
 
-base::HashMap::Entry* StringsStorage::GetEntry(const char* str, int len) {
+base::HashMap::Entry* StringsStorage::GetEntry(const char* str, size_t len) {
   uint32_t hash = ComputeStringHash(str, len);
   return names_.LookupOrInsert(const_cast<char*>(str), hash);
 }

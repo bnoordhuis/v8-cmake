@@ -2,8 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Flags: --expose-wasm
-
 d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
 
 function dummy_func(val) {
@@ -90,7 +88,7 @@ function testGrowInternalAnyFuncTable(table_index) {
     .exportFunc();
 
   const instance = builder.instantiate();
-  assertTraps(kTrapFuncSigMismatch, () => instance.exports.call(size - 2));
+  assertTraps(kTrapNullFunc, () => instance.exports.call(size - 2));
   function growAndCheck(element, grow_by) {
     assertEquals(size, instance.exports.size());
     assertTraps(kTrapTableOutOfBounds, () => instance.exports.call(size));
@@ -104,7 +102,7 @@ function testGrowInternalAnyFuncTable(table_index) {
   growAndCheck(12, 4);
 
   assertEquals(size, instance.exports.grow(null, 1));
-  assertTraps(kTrapFuncSigMismatch, () => instance.exports.call(size));
+  assertTraps(kTrapNullFunc, () => instance.exports.call(size));
 }
 
 testGrowInternalAnyFuncTable(0);

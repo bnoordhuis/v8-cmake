@@ -2,15 +2,16 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/heap/cppgc/free-list.h"
+#include "src/heap/cppgc-internal/free-list.h"
 
 #include <memory>
 #include <numeric>
 #include <vector>
 
 #include "src/base/bits.h"
-#include "src/heap/cppgc/globals.h"
-#include "src/heap/cppgc/heap-object-header.h"
+#include "src/base/iterator.h"
+#include "src/heap/cppgc-internal/globals.h"
+#include "src/heap/cppgc-internal/heap-object-header.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 namespace cppgc {
@@ -146,6 +147,15 @@ TEST(FreeListTest, Append) {
   EXPECT_TRUE(list1.IsEmpty());
 }
 
+#ifdef DEBUG
+TEST(FreeListTest, AppendSelf) {
+  auto blocks = CreateEntries();
+  FreeList list = CreatePopulatedFreeList(blocks);
+  // Appending a free list to itself should fail in debug builds.
+  EXPECT_DEATH_IF_SUPPORTED({ list.Append(std::move(list)); }, "");
+}
+#endif
+
 TEST(FreeListTest, Contains) {
   auto blocks = CreateEntries();
   FreeList list = CreatePopulatedFreeList(blocks);
@@ -168,10 +178,10 @@ TEST(FreeListTest, Allocate) {
   FreeList list = CreatePopulatedFreeList(blocks);
 
   // Try allocate from the biggest block.
-  for (auto it = blocks.rbegin(); it < blocks.rend(); ++it) {
-    const auto result = list.Allocate(it->Size());
-    EXPECT_EQ(it->Address(), result.address);
-    EXPECT_EQ(it->Size(), result.size);
+  for (const auto& block : v8::base::Reversed(blocks)) {
+    const auto result = list.Allocate(block.Size());
+    EXPECT_EQ(block.Address(), result.address);
+    EXPECT_EQ(block.Size(), result.size);
   }
 
   EXPECT_EQ(0u, list.Size());

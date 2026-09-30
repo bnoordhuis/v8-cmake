@@ -4,6 +4,10 @@
 
 #include "src/interpreter/bytecode-array-builder.h"
 
+#include <optional>
+
+#include "src/ast/scopes.h"
+#include "src/ast/variables.h"
 #include "src/common/assert-scope.h"
 #include "src/common/globals.h"
 #include "src/interpreter/bytecode-array-writer.h"
@@ -50,12 +54,15 @@ BytecodeArrayBuilder::BytecodeArrayBuilder(
       constant_array_builder_(zone),
       handler_table_builder_(zone),
       parameter_count_(parameter_count),
+      max_arguments_(0),
       local_register_count_(locals_count),
       register_allocator_(fixed_register_count()),
       bytecode_array_writer_(zone, &constant_array_builder_,
                              source_position_mode),
-      register_optimizer_(nullptr) {
-  DCHECK_GE(parameter_count_, 0);
+      register_optimizer_(nullptr),
+      potentially_throwing_bytecode_count_(0) {
+  DCHECK_GE(parameter_count_, kJSArgcReceiverSlots);
+  DCHECK_LE(parameter_count_, std::numeric_limits<uint16_t>::max());
   DCHECK_GE(local_register_count_, 0);
 
   if (v8_flags.ignition_reo) {
@@ -94,10 +101,11 @@ Handle<BytecodeArray> BytecodeArrayBuilder::ToBytecodeArray(IsolateT* isolate) {
     register_count = register_optimizer_->maxiumum_register_index() + 1;
   }
 
-  Handle<ByteArray> handler_table =
+  DirectHandle<TrustedByteArray> handler_table =
       handler_table_builder()->ToHandlerTable(isolate);
-  return bytecode_array_writer_.ToBytecodeArray(
-      isolate, register_count, parameter_count(), handler_table);
+  return bytecode_array_writer_.ToBytecodeArray(isolate, register_count,
+                                                parameter_count(),
+                                                max_arguments(), handler_table);
 }
 
 template EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE)
@@ -108,14 +116,14 @@ template EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE)
         LocalIsolate* isolate);
 
 #ifdef DEBUG
-int BytecodeArrayBuilder::CheckBytecodeMatches(BytecodeArray bytecode) {
+int BytecodeArrayBuilder::CheckBytecodeMatches(Handle<BytecodeArray> bytecode) {
   DisallowGarbageCollection no_gc;
   return bytecode_array_writer_.CheckBytecodeMatches(bytecode);
 }
 #endif
 
 template <typename IsolateT>
-Handle<ByteArray> BytecodeArrayBuilder::ToSourcePositionTable(
+DirectHandle<TrustedByteArray> BytecodeArrayBuilder::ToSourcePositionTable(
     IsolateT* isolate) {
   DCHECK(RemainderOfBlockIsDead());
 
@@ -123,10 +131,10 @@ Handle<ByteArray> BytecodeArrayBuilder::ToSourcePositionTable(
 }
 
 template EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE)
-    Handle<ByteArray> BytecodeArrayBuilder::ToSourcePositionTable(
+    DirectHandle<TrustedByteArray> BytecodeArrayBuilder::ToSourcePositionTable(
         Isolate* isolate);
 template EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE)
-    Handle<ByteArray> BytecodeArrayBuilder::ToSourcePositionTable(
+    DirectHandle<TrustedByteArray> BytecodeArrayBuilder::ToSourcePositionTable(
         LocalIsolate* isolate);
 
 BytecodeSourceInfo BytecodeArrayBuilder::CurrentSourcePosition(
@@ -139,7 +147,8 @@ BytecodeSourceInfo BytecodeArrayBuilder::CurrentSourcePosition(
     // invalidate the existing source position information if it is used.
     if (latest_source_info_.is_statement() ||
         !v8_flags.ignition_filter_expression_positions ||
-        !Bytecodes::IsWithoutExternalSideEffects(bytecode)) {
+        !Bytecodes::IsWithoutExternalSideEffects(bytecode) ||
+        Bytecodes::IsJumpIfToBoolean(bytecode)) {
       source_position = latest_source_info_;
       latest_source_info_.set_invalid();
     }
@@ -168,23 +177,31 @@ void BytecodeArrayBuilder::AttachOrEmitDeferredSourceInfo(BytecodeNode* node) {
 
 void BytecodeArrayBuilder::Write(BytecodeNode* node) {
   AttachOrEmitDeferredSourceInfo(node);
+  if (!Bytecodes::IsWithoutExternalSideEffects(node->bytecode())) {
+    potentially_throwing_bytecode_count_++;
+  }
   bytecode_array_writer_.Write(node);
 }
 
 void BytecodeArrayBuilder::WriteJump(BytecodeNode* node, BytecodeLabel* label) {
   AttachOrEmitDeferredSourceInfo(node);
+  DCHECK(Bytecodes::IsWithoutExternalSideEffects(node->bytecode()) ||
+         Bytecodes::IsJumpIfToBoolean(node->bytecode()));
   bytecode_array_writer_.WriteJump(node, label);
 }
 
 void BytecodeArrayBuilder::WriteJumpLoop(BytecodeNode* node,
                                          BytecodeLoopHeader* loop_header) {
   AttachOrEmitDeferredSourceInfo(node);
+  // JumpLoop can throw due to interrupt checks (stack overflow, termination).
+  potentially_throwing_bytecode_count_++;
   bytecode_array_writer_.WriteJumpLoop(node, loop_header);
 }
 
 void BytecodeArrayBuilder::WriteSwitch(BytecodeNode* node,
                                        BytecodeJumpTable* jump_table) {
   AttachOrEmitDeferredSourceInfo(node);
+  DCHECK(Bytecodes::IsWithoutExternalSideEffects(node->bytecode()));
   bytecode_array_writer_.WriteSwitch(node, jump_table);
 }
 
@@ -196,7 +213,7 @@ void BytecodeArrayBuilder::OutputLdarRaw(Register reg) {
 
 void BytecodeArrayBuilder::OutputStarRaw(Register reg) {
   uint32_t operand = static_cast<uint32_t>(reg.ToOperand());
-  base::Optional<Bytecode> short_code = reg.TryToShortStar();
+  std::optional<Bytecode> short_code = reg.TryToShortStar();
   BytecodeNode node = short_code
                           ? BytecodeNode(*short_code)
                           : BytecodeNode::Star(BytecodeSourceInfo(), operand);
@@ -327,6 +344,15 @@ class OperandHelper<OperandType::kRegOutTriple> {
   }
 };
 
+template <>
+class OperandHelper<OperandType::kRegInOut> {
+ public:
+  V8_INLINE static uint32_t Convert(BytecodeArrayBuilder* builder,
+                                    Register reg) {
+    return builder->GetInputOutputRegisterOperand(reg);
+  }
+};
+
 }  // namespace
 
 template <Bytecode bytecode, ImplicitRegisterUse implicit_register_use,
@@ -374,7 +400,7 @@ class BytecodeNodeBuilder {
     BytecodeNode node(Create##name##Node(operands...));               \
     WriteJump(&node, label);                                          \
   }
-BYTECODE_LIST(DEFINE_BYTECODE_OUTPUT)
+BYTECODE_LIST(DEFINE_BYTECODE_OUTPUT, DEFINE_BYTECODE_OUTPUT)
 #undef DEFINE_BYTECODE_OUTPUT
 
 void BytecodeArrayBuilder::OutputJumpLoop(BytecodeLoopHeader* loop_header,
@@ -394,42 +420,44 @@ void BytecodeArrayBuilder::OutputSwitchOnSmiNoFeedback(
 BytecodeArrayBuilder& BytecodeArrayBuilder::BinaryOperation(Token::Value op,
                                                             Register reg,
                                                             int feedback_slot) {
+  // feedback is embedded into bytecode array for binary operations
+  DCHECK_EQ(feedback_slot, kFeedbackIsEmbedded);
   switch (op) {
-    case Token::Value::ADD:
-      OutputAdd(reg, feedback_slot);
+    case Token::kAdd:
+      OutputAdd(reg, kUninitializedEmbeddedFeedback);
       break;
-    case Token::Value::SUB:
-      OutputSub(reg, feedback_slot);
+    case Token::kSub:
+      OutputSub(reg, kUninitializedEmbeddedFeedback);
       break;
-    case Token::Value::MUL:
-      OutputMul(reg, feedback_slot);
+    case Token::kMul:
+      OutputMul(reg, kUninitializedEmbeddedFeedback);
       break;
-    case Token::Value::DIV:
-      OutputDiv(reg, feedback_slot);
+    case Token::kDiv:
+      OutputDiv(reg, kUninitializedEmbeddedFeedback);
       break;
-    case Token::Value::MOD:
-      OutputMod(reg, feedback_slot);
+    case Token::kMod:
+      OutputMod(reg, kUninitializedEmbeddedFeedback);
       break;
-    case Token::Value::EXP:
-      OutputExp(reg, feedback_slot);
+    case Token::kExp:
+      OutputExp(reg, kUninitializedEmbeddedFeedback);
       break;
-    case Token::Value::BIT_OR:
-      OutputBitwiseOr(reg, feedback_slot);
+    case Token::kBitOr:
+      OutputBitwiseOr(reg, kUninitializedEmbeddedFeedback);
       break;
-    case Token::Value::BIT_XOR:
-      OutputBitwiseXor(reg, feedback_slot);
+    case Token::kBitXor:
+      OutputBitwiseXor(reg, kUninitializedEmbeddedFeedback);
       break;
-    case Token::Value::BIT_AND:
-      OutputBitwiseAnd(reg, feedback_slot);
+    case Token::kBitAnd:
+      OutputBitwiseAnd(reg, kUninitializedEmbeddedFeedback);
       break;
-    case Token::Value::SHL:
-      OutputShiftLeft(reg, feedback_slot);
+    case Token::kShl:
+      OutputShiftLeft(reg, kUninitializedEmbeddedFeedback);
       break;
-    case Token::Value::SAR:
-      OutputShiftRight(reg, feedback_slot);
+    case Token::kSar:
+      OutputShiftRight(reg, kUninitializedEmbeddedFeedback);
       break;
-    case Token::Value::SHR:
-      OutputShiftRightLogical(reg, feedback_slot);
+    case Token::kShr:
+      OutputShiftRightLogical(reg, kUninitializedEmbeddedFeedback);
       break;
     default:
       UNREACHABLE();
@@ -437,44 +465,60 @@ BytecodeArrayBuilder& BytecodeArrayBuilder::BinaryOperation(Token::Value op,
   return *this;
 }
 
+BytecodeArrayBuilder& BytecodeArrayBuilder::Add_StringConstant_Internalize(
+    Token::Value op, Register reg, int feedback_slot,
+    AddStringConstantAndInternalizeVariant as_variant) {
+  DCHECK_EQ(op, Token::kAdd);
+#ifdef DEBUG
+  using ASVariant = AddStringConstantAndInternalizeVariant;
+  DCHECK(as_variant == ASVariant::kLhsIsStringConstant ||
+         as_variant == ASVariant::kRhsIsStringConstant);
+#endif  // DEBUG
+  OutputAdd_StringConstant_Internalize(reg, feedback_slot,
+                                       static_cast<uint8_t>(as_variant));
+  return *this;
+}
+
 BytecodeArrayBuilder& BytecodeArrayBuilder::BinaryOperationSmiLiteral(
-    Token::Value op, Smi literal, int feedback_slot) {
+    Token::Value op, Tagged<Smi> literal, int feedback_slot) {
+  DCHECK_EQ(feedback_slot, kFeedbackIsEmbedded);
   switch (op) {
-    case Token::Value::ADD:
-      OutputAddSmi(literal.value(), feedback_slot);
+    case Token::kAdd:
+      OutputAddSmi(literal.value(), kUninitializedEmbeddedFeedback);
       break;
-    case Token::Value::SUB:
-      OutputSubSmi(literal.value(), feedback_slot);
+    case Token::kSub:
+      OutputSubSmi(literal.value(), kUninitializedEmbeddedFeedback);
       break;
-    case Token::Value::MUL:
-      OutputMulSmi(literal.value(), feedback_slot);
+    case Token::kMul:
+      OutputMulSmi(literal.value(), kUninitializedEmbeddedFeedback);
       break;
-    case Token::Value::DIV:
-      OutputDivSmi(literal.value(), feedback_slot);
+    case Token::kDiv:
+      OutputDivSmi(literal.value(), kUninitializedEmbeddedFeedback);
       break;
-    case Token::Value::MOD:
-      OutputModSmi(literal.value(), feedback_slot);
+    case Token::kMod:
+      OutputModSmi(literal.value(), kUninitializedEmbeddedFeedback);
       break;
-    case Token::Value::EXP:
-      OutputExpSmi(literal.value(), feedback_slot);
+    case Token::kExp:
+      OutputExpSmi(literal.value(), kUninitializedEmbeddedFeedback);
       break;
-    case Token::Value::BIT_OR:
-      OutputBitwiseOrSmi(literal.value(), feedback_slot);
+    case Token::kBitOr:
+      OutputBitwiseOrSmi(literal.value(), kUninitializedEmbeddedFeedback);
       break;
-    case Token::Value::BIT_XOR:
-      OutputBitwiseXorSmi(literal.value(), feedback_slot);
+    case Token::kBitXor:
+      OutputBitwiseXorSmi(literal.value(), kUninitializedEmbeddedFeedback);
       break;
-    case Token::Value::BIT_AND:
-      OutputBitwiseAndSmi(literal.value(), feedback_slot);
+    case Token::kBitAnd:
+      OutputBitwiseAndSmi(literal.value(), kUninitializedEmbeddedFeedback);
       break;
-    case Token::Value::SHL:
-      OutputShiftLeftSmi(literal.value(), feedback_slot);
+    case Token::kShl:
+      OutputShiftLeftSmi(literal.value(), kUninitializedEmbeddedFeedback);
       break;
-    case Token::Value::SAR:
-      OutputShiftRightSmi(literal.value(), feedback_slot);
+    case Token::kSar:
+      OutputShiftRightSmi(literal.value(), kUninitializedEmbeddedFeedback);
       break;
-    case Token::Value::SHR:
-      OutputShiftRightLogicalSmi(literal.value(), feedback_slot);
+    case Token::kShr:
+      OutputShiftRightLogicalSmi(literal.value(),
+                                 kUninitializedEmbeddedFeedback);
       break;
     default:
       UNREACHABLE();
@@ -485,20 +529,24 @@ BytecodeArrayBuilder& BytecodeArrayBuilder::BinaryOperationSmiLiteral(
 BytecodeArrayBuilder& BytecodeArrayBuilder::UnaryOperation(Token::Value op,
                                                            int feedback_slot) {
   switch (op) {
-    case Token::Value::INC:
-      OutputInc(feedback_slot);
+    case Token::kInc:
+      DCHECK_EQ(feedback_slot, kFeedbackIsEmbedded);
+      OutputInc(kUninitializedEmbeddedFeedback);
       break;
-    case Token::Value::DEC:
-      OutputDec(feedback_slot);
+    case Token::kDec:
+      DCHECK_EQ(feedback_slot, kFeedbackIsEmbedded);
+      OutputDec(kUninitializedEmbeddedFeedback);
       break;
-    case Token::Value::ADD:
+    case Token::kAdd:
       OutputToNumber(feedback_slot);
       break;
-    case Token::Value::SUB:
-      OutputNegate(feedback_slot);
+    case Token::kSub:
+      DCHECK_EQ(feedback_slot, kFeedbackIsEmbedded);
+      OutputNegate(kUninitializedEmbeddedFeedback);
       break;
-    case Token::Value::BIT_NOT:
-      OutputBitwiseNot(feedback_slot);
+    case Token::kBitNot:
+      DCHECK_EQ(feedback_slot, kFeedbackIsEmbedded);
+      OutputBitwiseNot(kUninitializedEmbeddedFeedback);
       break;
     default:
       UNREACHABLE();
@@ -516,8 +564,8 @@ BytecodeArrayBuilder& BytecodeArrayBuilder::LogicalNot(ToBooleanMode mode) {
   return *this;
 }
 
-BytecodeArrayBuilder& BytecodeArrayBuilder::TypeOf() {
-  OutputTypeOf();
+BytecodeArrayBuilder& BytecodeArrayBuilder::TypeOf(int feedback_slot) {
+  OutputTypeOf(feedback_slot);
   return *this;
 }
 
@@ -536,28 +584,35 @@ BytecodeArrayBuilder::FindNonDefaultConstructorOrConstruct(
 BytecodeArrayBuilder& BytecodeArrayBuilder::CompareOperation(
     Token::Value op, Register reg, int feedback_slot) {
   switch (op) {
-    case Token::Value::EQ:
-      OutputTestEqual(reg, feedback_slot);
+    case Token::kEq:
+      DCHECK_EQ(feedback_slot, kFeedbackIsEmbedded);
+      OutputTestEqual(reg, kUninitializedEmbeddedFeedback);
       break;
-    case Token::Value::EQ_STRICT:
-      OutputTestEqualStrict(reg, feedback_slot);
+    case Token::kEqStrict:
+      // feedback is embedded into bytecode array for strict equal
+      DCHECK_EQ(feedback_slot, kFeedbackIsEmbedded);
+      OutputTestEqualStrict(reg, kUninitializedEmbeddedFeedback);
       break;
-    case Token::Value::LT:
-      OutputTestLessThan(reg, feedback_slot);
+    case Token::kLessThan:
+      DCHECK_EQ(feedback_slot, kFeedbackIsEmbedded);
+      OutputTestLessThan(reg, kUninitializedEmbeddedFeedback);
       break;
-    case Token::Value::GT:
-      OutputTestGreaterThan(reg, feedback_slot);
+    case Token::kGreaterThan:
+      DCHECK_EQ(feedback_slot, kFeedbackIsEmbedded);
+      OutputTestGreaterThan(reg, kUninitializedEmbeddedFeedback);
       break;
-    case Token::Value::LTE:
-      OutputTestLessThanOrEqual(reg, feedback_slot);
+    case Token::kLessThanEq:
+      DCHECK_EQ(feedback_slot, kFeedbackIsEmbedded);
+      OutputTestLessThanOrEqual(reg, kUninitializedEmbeddedFeedback);
       break;
-    case Token::Value::GTE:
-      OutputTestGreaterThanOrEqual(reg, feedback_slot);
+    case Token::kGreaterThanEq:
+      DCHECK_EQ(feedback_slot, kFeedbackIsEmbedded);
+      OutputTestGreaterThanOrEqual(reg, kUninitializedEmbeddedFeedback);
       break;
-    case Token::Value::INSTANCEOF:
+    case Token::kInstanceOf:
       OutputTestInstanceOf(reg, feedback_slot);
       break;
-    case Token::Value::IN:
+    case Token::kIn:
       OutputTestIn(reg, feedback_slot);
       break;
     default:
@@ -588,10 +643,10 @@ BytecodeArrayBuilder& BytecodeArrayBuilder::CompareNull() {
 
 BytecodeArrayBuilder& BytecodeArrayBuilder::CompareNil(Token::Value op,
                                                        NilValue nil) {
-  if (op == Token::EQ) {
+  if (op == Token::kEq) {
     return CompareUndetectable();
   } else {
-    DCHECK_EQ(Token::EQ_STRICT, op);
+    DCHECK_EQ(Token::kEqStrict, op);
     if (nil == kUndefinedValue) {
       return CompareUndefined();
     } else {
@@ -614,7 +669,7 @@ BytecodeArrayBuilder& BytecodeArrayBuilder::LoadConstantPoolEntry(
   return *this;
 }
 
-BytecodeArrayBuilder& BytecodeArrayBuilder::LoadLiteral(Smi smi) {
+BytecodeArrayBuilder& BytecodeArrayBuilder::LoadLiteral(Tagged<Smi> smi) {
   int32_t raw_smi = smi.value();
   if (raw_smi == 0) {
     OutputLdaZero();
@@ -639,6 +694,13 @@ BytecodeArrayBuilder& BytecodeArrayBuilder::LoadLiteral(double value) {
 BytecodeArrayBuilder& BytecodeArrayBuilder::LoadLiteral(
     const AstRawString* raw_string) {
   size_t entry = GetConstantPoolEntry(raw_string);
+  OutputLdaConstant(entry);
+  return *this;
+}
+
+BytecodeArrayBuilder& BytecodeArrayBuilder::LoadLiteral(
+    const AstConsString* cons_string) {
+  size_t entry = GetConstantPoolEntry(cons_string);
   OutputLdaConstant(entry);
   return *this;
 }
@@ -724,6 +786,12 @@ BytecodeArrayBuilder& BytecodeArrayBuilder::MoveRegister(Register from,
   return *this;
 }
 
+BytecodeArrayBuilder& BytecodeArrayBuilder::SetPrototypeProperties(
+    size_t index_obj, size_t slot) {
+  OutputSetPrototypeProperties(index_obj, slot);
+  return *this;
+}
+
 BytecodeArrayBuilder& BytecodeArrayBuilder::LoadGlobal(const AstRawString* name,
                                                        int feedback_slot,
                                                        TypeofMode typeof_mode) {
@@ -750,32 +818,53 @@ BytecodeArrayBuilder& BytecodeArrayBuilder::StoreGlobal(
   return *this;
 }
 
-BytecodeArrayBuilder& BytecodeArrayBuilder::LoadContextSlot(
-    Register context, int slot_index, int depth,
-    ContextSlotMutability mutability) {
-  if (context.is_current_context() && depth == 0) {
-    if (mutability == kImmutableSlot) {
+BytecodeArrayBuilder& BytecodeArrayBuilder::LoadContextSlot(Register context,
+                                                            Variable* variable,
+                                                            int depth) {
+  int slot_index = variable->index();
+  if (variable->maybe_assigned() == kNotAssigned) {
+    if (context.is_current_context() && depth == 0) {
       OutputLdaImmutableCurrentContextSlot(slot_index);
     } else {
-      DCHECK_EQ(kMutableSlot, mutability);
-      OutputLdaCurrentContextSlot(slot_index);
+      OutputLdaImmutableContextSlot(context, slot_index, depth);
     }
-  } else if (mutability == kImmutableSlot) {
-    OutputLdaImmutableContextSlot(context, slot_index, depth);
   } else {
-    DCHECK_EQ(mutability, kMutableSlot);
-    OutputLdaContextSlot(context, slot_index, depth);
+    DCHECK_NE(VariableMode::kConst, variable->mode());
+    if (variable->scope()->has_context_cells()) {
+      if (context.is_current_context() && depth == 0) {
+        OutputLdaCurrentContextSlot(slot_index);
+      } else {
+        OutputLdaContextSlot(context, slot_index, depth);
+      }
+    } else {
+      if (context.is_current_context() && depth == 0) {
+        OutputLdaCurrentContextSlotNoCell(slot_index);
+      } else {
+        OutputLdaContextSlotNoCell(context, slot_index, depth);
+      }
+    }
   }
   return *this;
 }
 
 BytecodeArrayBuilder& BytecodeArrayBuilder::StoreContextSlot(Register context,
-                                                             int slot_index,
+                                                             Variable* variable,
                                                              int depth) {
-  if (context.is_current_context() && depth == 0) {
-    OutputStaCurrentContextSlot(slot_index);
+  int slot_index = variable->index();
+  if (variable->maybe_assigned() != kNotAssigned &&
+      variable->scope()->has_context_cells()) {
+    DCHECK_NE(VariableMode::kConst, variable->mode());
+    if (context.is_current_context() && depth == 0) {
+      OutputStaCurrentContextSlot(slot_index);
+    } else {
+      OutputStaContextSlot(context, slot_index, depth);
+    }
   } else {
-    OutputStaContextSlot(context, slot_index, depth);
+    if (context.is_current_context() && depth == 0) {
+      OutputStaCurrentContextSlotNoCell(slot_index);
+    } else {
+      OutputStaContextSlotNoCell(context, slot_index, depth);
+    }
   }
   return *this;
 }
@@ -795,15 +884,24 @@ BytecodeArrayBuilder& BytecodeArrayBuilder::LoadLookupSlot(
 }
 
 BytecodeArrayBuilder& BytecodeArrayBuilder::LoadLookupContextSlot(
-    const AstRawString* name, TypeofMode typeof_mode, int slot_index,
-    int depth) {
+    const AstRawString* name, TypeofMode typeof_mode, ContextMode context_mode,
+    int slot_index, int depth) {
   size_t name_index = GetConstantPoolEntry(name);
   switch (typeof_mode) {
     case TypeofMode::kInside:
-      OutputLdaLookupContextSlotInsideTypeof(name_index, slot_index, depth);
+      if (context_mode == ContextMode::kHasContextCells) {
+        OutputLdaLookupContextSlotInsideTypeof(name_index, slot_index, depth);
+      } else {
+        OutputLdaLookupContextSlotNoCellInsideTypeof(name_index, slot_index,
+                                                     depth);
+      }
       break;
     case TypeofMode::kNotInside:
-      OutputLdaLookupContextSlot(name_index, slot_index, depth);
+      if (context_mode == ContextMode::kHasContextCells) {
+        OutputLdaLookupContextSlot(name_index, slot_index, depth);
+      } else {
+        OutputLdaLookupContextSlotNoCell(name_index, slot_index, depth);
+      }
       break;
   }
   return *this;
@@ -854,6 +952,32 @@ BytecodeArrayBuilder& BytecodeArrayBuilder::LoadKeyedProperty(
   return *this;
 }
 
+BytecodeArrayBuilder& BytecodeArrayBuilder::LoadEnumeratedKeyedProperty(
+    Register object, Register enum_index, Register cache_type,
+    int feedback_slot) {
+  OutputGetEnumeratedKeyedProperty(object, enum_index, cache_type,
+                                   feedback_slot);
+  return *this;
+}
+
+BytecodeArrayBuilder& BytecodeArrayBuilder::GetPrivateField(Register context,
+                                                            int slot_index,
+                                                            int depth,
+                                                            Register object,
+                                                            int feedback_slot) {
+  OutputGetPrivateField(context, slot_index, depth, object, feedback_slot);
+  return *this;
+}
+
+BytecodeArrayBuilder& BytecodeArrayBuilder::SetPrivateField(Register context,
+                                                            int slot_index,
+                                                            int depth,
+                                                            Register object,
+                                                            int feedback_slot) {
+  OutputSetPrivateField(context, slot_index, depth, object, feedback_slot);
+  return *this;
+}
+
 BytecodeArrayBuilder& BytecodeArrayBuilder::LoadIteratorProperty(
     Register object, int feedback_slot) {
   size_t name_index = IteratorSymbolConstantPoolEntry();
@@ -864,6 +988,19 @@ BytecodeArrayBuilder& BytecodeArrayBuilder::LoadIteratorProperty(
 BytecodeArrayBuilder& BytecodeArrayBuilder::GetIterator(
     Register object, int load_feedback_slot, int call_feedback_slot) {
   OutputGetIterator(object, load_feedback_slot, call_feedback_slot);
+  return *this;
+}
+
+BytecodeArrayBuilder& BytecodeArrayBuilder::ArrayDestructure(
+    RegisterList outputs, int count) {
+  OutputArrayDestructure(outputs, count);
+  return *this;
+}
+
+BytecodeArrayBuilder& BytecodeArrayBuilder::ForOfNext(Register object,
+                                                      Register next,
+                                                      int call_slot) {
+  OutputForOfNext(object, next, call_slot);
   return *this;
 }
 
@@ -976,7 +1113,11 @@ BytecodeArrayBuilder& BytecodeArrayBuilder::CreateCatchContext(
 BytecodeArrayBuilder& BytecodeArrayBuilder::CreateFunctionContext(
     const Scope* scope, int slots) {
   size_t scope_index = GetConstantPoolEntry(scope);
-  OutputCreateFunctionContext(scope_index, slots);
+  if (scope->has_context_cells()) {
+    OutputCreateFunctionContextWithCells(scope_index, slots);
+  } else {
+    OutputCreateFunctionContext(scope_index, slots);
+  }
   return *this;
 }
 
@@ -1075,8 +1216,8 @@ BytecodeArrayBuilder& BytecodeArrayBuilder::ToObject(Register out) {
   return *this;
 }
 
-BytecodeArrayBuilder& BytecodeArrayBuilder::ToName(Register out) {
-  OutputToName(out);
+BytecodeArrayBuilder& BytecodeArrayBuilder::ToName() {
+  OutputToName();
   return *this;
 }
 
@@ -1113,7 +1254,10 @@ BytecodeArrayBuilder& BytecodeArrayBuilder::Bind(BytecodeLabel* label) {
 
   // Flush the register optimizer when binding a label to ensure all
   // expected registers are valid when jumping to this label.
-  if (register_optimizer_) register_optimizer_->Flush();
+  if (register_optimizer_) {
+    register_optimizer_->Flush();
+    register_optimizer_->ResetTypeHintForAccumulator();
+  }
   bytecode_array_writer_.BindLabel(label);
   return *this;
 }
@@ -1122,7 +1266,10 @@ BytecodeArrayBuilder& BytecodeArrayBuilder::Bind(
     BytecodeLoopHeader* loop_header) {
   // Flush the register optimizer when starting a loop to ensure all expected
   // registers are valid when jumping to the loop header.
-  if (register_optimizer_) register_optimizer_->Flush();
+  if (register_optimizer_) {
+    register_optimizer_->Flush();
+    register_optimizer_->ResetTypeHintForAccumulator();
+  }
   bytecode_array_writer_.BindLoopHeader(loop_header);
   return *this;
 }
@@ -1131,7 +1278,10 @@ BytecodeArrayBuilder& BytecodeArrayBuilder::Bind(BytecodeJumpTable* jump_table,
                                                  int case_value) {
   // Flush the register optimizer when binding a jump table entry to ensure
   // all expected registers are valid when jumping to this location.
-  if (register_optimizer_) register_optimizer_->Flush();
+  if (register_optimizer_) {
+    register_optimizer_->Flush();
+    register_optimizer_->ResetTypeHintForAccumulator();
+  }
   bytecode_array_writer_.BindJumpTableEntry(jump_table, case_value);
   return *this;
 }
@@ -1142,6 +1292,8 @@ BytecodeArrayBuilder& BytecodeArrayBuilder::MarkHandler(
   // let control fall through into it.
   DCHECK_IMPLIES(register_optimizer_,
                  register_optimizer_->EnsureAllRegistersAreFlushed());
+  DCHECK_IMPLIES(register_optimizer_,
+                 register_optimizer_->IsAccumulatorReset());
   bytecode_array_writer_.BindHandlerTarget(handler_table_builder(), handler_id);
   handler_table_builder()->SetPrediction(handler_id, catch_prediction);
   return *this;
@@ -1159,7 +1311,15 @@ BytecodeArrayBuilder& BytecodeArrayBuilder::MarkTryBegin(int handler_id,
 }
 
 BytecodeArrayBuilder& BytecodeArrayBuilder::MarkTryEnd(int handler_id) {
+  if (register_optimizer_) {
+    register_optimizer_->ResetTypeHintForAccumulator();
+  }
   bytecode_array_writer_.BindTryRegionEnd(handler_table_builder(), handler_id);
+  return *this;
+}
+
+BytecodeArrayBuilder& BytecodeArrayBuilder::DropHandlerEntry(int handler_id) {
+  handler_table_builder()->DropHandlerEntry(handler_id);
   return *this;
 }
 
@@ -1230,12 +1390,12 @@ BytecodeArrayBuilder& BytecodeArrayBuilder::JumpIfNotUndefined(
 BytecodeArrayBuilder& BytecodeArrayBuilder::JumpIfNil(BytecodeLabel* label,
                                                       Token::Value op,
                                                       NilValue nil) {
-  if (op == Token::EQ) {
+  if (op == Token::kEq) {
     // TODO(rmcilroy): Implement JumpIfUndetectable.
     return CompareUndetectable().JumpIfTrue(ToBooleanMode::kAlreadyBoolean,
                                             label);
   } else {
-    DCHECK_EQ(Token::EQ_STRICT, op);
+    DCHECK_EQ(Token::kEqStrict, op);
     if (nil == kUndefinedValue) {
       return JumpIfUndefined(label);
     } else {
@@ -1248,12 +1408,12 @@ BytecodeArrayBuilder& BytecodeArrayBuilder::JumpIfNil(BytecodeLabel* label,
 BytecodeArrayBuilder& BytecodeArrayBuilder::JumpIfNotNil(BytecodeLabel* label,
                                                          Token::Value op,
                                                          NilValue nil) {
-  if (op == Token::EQ) {
+  if (op == Token::kEq) {
     // TODO(rmcilroy): Implement JumpIfUndetectable.
     return CompareUndetectable().JumpIfFalse(ToBooleanMode::kAlreadyBoolean,
                                              label);
   } else {
-    DCHECK_EQ(Token::EQ_STRICT, op);
+    DCHECK_EQ(Token::kEqStrict, op);
     if (nil == kUndefinedValue) {
       return JumpIfNotUndefined(label);
     } else {
@@ -1267,6 +1427,13 @@ BytecodeArrayBuilder& BytecodeArrayBuilder::JumpIfJSReceiver(
     BytecodeLabel* label) {
   DCHECK(!label->is_bound());
   OutputJumpIfJSReceiver(label, 0);
+  return *this;
+}
+
+BytecodeArrayBuilder& BytecodeArrayBuilder::JumpIfForInDone(
+    BytecodeLabel* label, Register index, Register cache_length) {
+  DCHECK(!label->is_bound());
+  OutputJumpIfForInDone(label, 0, index, cache_length);
   return *this;
 }
 
@@ -1365,12 +1532,6 @@ BytecodeArrayBuilder& BytecodeArrayBuilder::ForInPrepare(
     RegisterList cache_info_triple, int feedback_slot) {
   DCHECK_EQ(3, cache_info_triple.register_count());
   OutputForInPrepare(cache_info_triple, feedback_slot);
-  return *this;
-}
-
-BytecodeArrayBuilder& BytecodeArrayBuilder::ForInContinue(
-    Register index, Register cache_length) {
-  OutputForInContinue(index, cache_length);
   return *this;
 }
 
@@ -1479,11 +1640,18 @@ BytecodeArrayBuilder& BytecodeArrayBuilder::ConstructWithSpread(
   return *this;
 }
 
+BytecodeArrayBuilder& BytecodeArrayBuilder::ConstructForwardAllArgs(
+    Register constructor, int feedback_slot_id) {
+  OutputConstructForwardAllArgs(constructor, feedback_slot_id);
+  return *this;
+}
+
 BytecodeArrayBuilder& BytecodeArrayBuilder::CallRuntime(
     Runtime::FunctionId function_id, RegisterList args) {
   DCHECK_EQ(1, Runtime::FunctionForId(function_id)->result_size);
   DCHECK_LE(Bytecodes::SizeForUnsignedOperand(function_id),
             OperandSize::kShort);
+  UpdateMaxArguments(args.register_count());
   if (IntrinsicsHelper::IsSupported(function_id)) {
     IntrinsicsHelper::IntrinsicId intrinsic_id =
         IntrinsicsHelper::FromRuntimeId(function_id);
@@ -1513,6 +1681,7 @@ BytecodeArrayBuilder& BytecodeArrayBuilder::CallRuntimeForPair(
   DCHECK_LE(Bytecodes::SizeForUnsignedOperand(function_id),
             OperandSize::kShort);
   DCHECK_EQ(2, return_pair.register_count());
+  UpdateMaxArguments(args.register_count());
   OutputCallRuntimeForPair(static_cast<uint16_t>(function_id), args,
                            args.register_count(), return_pair);
   return *this;
@@ -1525,6 +1694,7 @@ BytecodeArrayBuilder& BytecodeArrayBuilder::CallRuntimeForPair(
 
 BytecodeArrayBuilder& BytecodeArrayBuilder::CallJSRuntime(int context_index,
                                                           RegisterList args) {
+  UpdateMaxArguments(args.register_count());
   OutputCallJSRuntime(context_index, args, args.register_count());
   return *this;
 }
@@ -1543,6 +1713,11 @@ BytecodeArrayBuilder& BytecodeArrayBuilder::Delete(Register object,
 size_t BytecodeArrayBuilder::GetConstantPoolEntry(
     const AstRawString* raw_string) {
   return constant_array_builder()->Insert(raw_string);
+}
+
+size_t BytecodeArrayBuilder::GetConstantPoolEntry(
+    const AstConsString* cons_string) {
+  return constant_array_builder()->Insert(cons_string);
 }
 
 size_t BytecodeArrayBuilder::GetConstantPoolEntry(AstBigInt bigint) {
@@ -1572,6 +1747,13 @@ BytecodeJumpTable* BytecodeArrayBuilder::AllocateJumpTable(
 
   return zone()->New<BytecodeJumpTable>(constant_pool_index, size,
                                         case_value_base, zone());
+}
+
+void BytecodeArrayBuilder::TrimJumpTable(BytecodeJumpTable* jump_table,
+                                         int size) {
+  if (size == jump_table->size()) return;
+
+  bytecode_array_writer_.PatchJumpTableSize(jump_table, size);
 }
 
 size_t BytecodeArrayBuilder::AllocateDeferredConstantPoolEntry() {
@@ -1633,19 +1815,30 @@ uint32_t BytecodeArrayBuilder::GetOutputRegisterOperand(Register reg) {
   return static_cast<uint32_t>(reg.ToOperand());
 }
 
+uint32_t BytecodeArrayBuilder::GetInputOutputRegisterOperand(Register reg) {
+  DCHECK(RegisterIsValid(reg));
+  if (register_optimizer_) {
+    register_optimizer_->PrepareOutputRegister(reg);
+    DCHECK_EQ(reg, register_optimizer_->GetInputRegister(reg));
+  }
+  return static_cast<uint32_t>(reg.ToOperand());
+}
+
 uint32_t BytecodeArrayBuilder::GetInputRegisterListOperand(
     RegisterList reg_list) {
   DCHECK(RegisterListIsValid(reg_list));
-  if (register_optimizer_)
+  if (register_optimizer_) {
     reg_list = register_optimizer_->GetInputRegisterList(reg_list);
+  }
   return static_cast<uint32_t>(reg_list.first_register().ToOperand());
 }
 
 uint32_t BytecodeArrayBuilder::GetOutputRegisterListOperand(
     RegisterList reg_list) {
   DCHECK(RegisterListIsValid(reg_list));
-  if (register_optimizer_)
+  if (register_optimizer_) {
     register_optimizer_->PrepareOutputRegisterList(reg_list);
+  }
   return static_cast<uint32_t>(reg_list.first_register().ToOperand());
 }
 

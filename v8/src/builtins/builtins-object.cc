@@ -6,11 +6,11 @@
 #include "src/builtins/builtins.h"
 #include "src/common/message-template.h"
 #include "src/execution/isolate.h"
-#include "src/heap/heap-inl.h"  // For ToBoolean. TODO(jkummerow): Drop.
 #include "src/objects/keys.h"
 #include "src/objects/lookup.h"
 #include "src/objects/objects-inl.h"
 #include "src/objects/property-descriptor.h"
+#include "src/roots/roots-inl.h"
 
 namespace v8 {
 namespace internal {
@@ -21,25 +21,26 @@ namespace internal {
 // ES6 section 19.1.3.4 Object.prototype.propertyIsEnumerable ( V )
 BUILTIN(ObjectPrototypePropertyIsEnumerable) {
   HandleScope scope(isolate);
-  Handle<JSReceiver> object;
-  Handle<Name> name;
+  DirectHandle<JSReceiver> object;
+  DirectHandle<Name> name;
   ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
       isolate, name, Object::ToName(isolate, args.atOrUndefined(isolate, 1)));
   ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
       isolate, object, Object::ToObject(isolate, args.receiver()));
   Maybe<PropertyAttributes> maybe =
-      JSReceiver::GetOwnPropertyAttributes(object, name);
+      JSReceiver::GetOwnPropertyAttributes(isolate, object, name);
   if (maybe.IsNothing()) return ReadOnlyRoots(isolate).exception();
   if (maybe.FromJust() == ABSENT) return ReadOnlyRoots(isolate).false_value();
-  return isolate->heap()->ToBoolean((maybe.FromJust() & DONT_ENUM) == 0);
+  return ReadOnlyRoots(isolate).boolean_value((maybe.FromJust() & DONT_ENUM) ==
+                                              0);
 }
 
 // ES6 section 19.1.2.3 Object.defineProperties
 BUILTIN(ObjectDefineProperties) {
   HandleScope scope(isolate);
   DCHECK_LE(3, args.length());
-  Handle<Object> target = args.at(1);
-  Handle<Object> properties = args.at(2);
+  DirectHandle<Object> target = args.at(1);
+  DirectHandle<Object> properties = args.at(2);
 
   RETURN_RESULT_OR_FAILURE(
       isolate, JSReceiver::DefineProperties(isolate, target, properties));
@@ -49,8 +50,8 @@ BUILTIN(ObjectDefineProperties) {
 BUILTIN(ObjectDefineProperty) {
   HandleScope scope(isolate);
   DCHECK_LE(4, args.length());
-  Handle<Object> target = args.at(1);
-  Handle<Object> key = args.at(2);
+  DirectHandle<Object> target = args.at(1);
+  DirectHandle<Object> key = args.at(2);
   Handle<Object> attributes = args.at(3);
 
   return JSReceiver::DefineProperty(isolate, target, key, attributes);
@@ -59,14 +60,16 @@ BUILTIN(ObjectDefineProperty) {
 namespace {
 
 template <AccessorComponent which_accessor>
-Object ObjectDefineAccessor(Isolate* isolate, Handle<Object> object,
-                            Handle<Object> name, Handle<Object> accessor) {
+Tagged<Object> ObjectDefineAccessor(Isolate* isolate,
+                                    DirectHandle<JSAny> object,
+                                    DirectHandle<Object> name,
+                                    DirectHandle<Object> accessor) {
   // 1. Let O be ? ToObject(this value).
-  Handle<JSReceiver> receiver;
+  DirectHandle<JSReceiver> receiver;
   ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, receiver,
                                      Object::ToObject(isolate, object));
   // 2. If IsCallable(getter) is false, throw a TypeError exception.
-  if (!accessor->IsCallable()) {
+  if (!IsCallable(*accessor)) {
     MessageTemplate message =
         which_accessor == ACCESSOR_GETTER
             ? MessageTemplate::kObjectGetterExpectingFunction
@@ -77,10 +80,10 @@ Object ObjectDefineAccessor(Isolate* isolate, Handle<Object> object,
   //                                   [[Configurable]]: true}.
   PropertyDescriptor desc;
   if (which_accessor == ACCESSOR_GETTER) {
-    desc.set_get(accessor);
+    desc.set_get(Cast<JSAny>(accessor));
   } else {
     DCHECK(which_accessor == ACCESSOR_SETTER);
-    desc.set_set(accessor);
+    desc.set_set(Cast<JSAny>(accessor));
   }
   desc.set_enumerable(true);
   desc.set_configurable(true);
@@ -100,8 +103,10 @@ Object ObjectDefineAccessor(Isolate* isolate, Handle<Object> object,
   return ReadOnlyRoots(isolate).undefined_value();
 }
 
-Object ObjectLookupAccessor(Isolate* isolate, Handle<Object> object,
-                            Handle<Object> key, AccessorComponent component) {
+Tagged<Object> ObjectLookupAccessor(Isolate* isolate,
+                                    DirectHandle<JSAny> object,
+                                    DirectHandle<Object> key,
+                                    AccessorComponent component) {
   ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, object,
                                      Object::ToObject(isolate, object));
   // TODO(jkummerow/verwaest): PropertyKey(..., bool*) performs a
@@ -113,18 +118,17 @@ Object ObjectLookupAccessor(Isolate* isolate, Handle<Object> object,
   LookupIterator it(isolate, object, lookup_key,
                     LookupIterator::PROTOTYPE_CHAIN_SKIP_INTERCEPTOR);
 
-  for (; it.IsFound(); it.Next()) {
+  for (;; it.Next()) {
     switch (it.state()) {
       case LookupIterator::INTERCEPTOR:
-      case LookupIterator::NOT_FOUND:
       case LookupIterator::TRANSITION:
         UNREACHABLE();
 
       case LookupIterator::ACCESS_CHECK:
         if (it.HasAccess()) continue;
-        isolate->ReportFailedAccessCheck(it.GetHolder<JSObject>());
-        RETURN_FAILURE_IF_SCHEDULED_EXCEPTION(isolate);
-        return ReadOnlyRoots(isolate).undefined_value();
+        RETURN_FAILURE_ON_EXCEPTION(isolate, isolate->ReportFailedAccessCheck(
+                                                 it.GetHolder<JSObject>()));
+        UNREACHABLE();
 
       case LookupIterator::JSPROXY: {
         PropertyDescriptor desc;
@@ -140,85 +144,98 @@ Object ObjectLookupAccessor(Isolate* isolate, Handle<Object> object,
           }
           return ReadOnlyRoots(isolate).undefined_value();
         }
-        Handle<Object> prototype;
+        DirectHandle<JSPrototype> prototype;
         ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
             isolate, prototype, JSProxy::GetPrototype(it.GetHolder<JSProxy>()));
-        if (prototype->IsNull(isolate)) {
+        if (IsNull(*prototype)) {
           return ReadOnlyRoots(isolate).undefined_value();
         }
         return ObjectLookupAccessor(isolate, prototype, key, component);
       }
+      case LookupIterator::STRING_LOOKUP_START_OBJECT:
       case LookupIterator::WASM_OBJECT:
-      case LookupIterator::INTEGER_INDEXED_EXOTIC:
+        continue;  // Continue to the prototype, if present.
+      case LookupIterator::TYPED_ARRAY_INDEX_NOT_FOUND:
       case LookupIterator::DATA:
+      case LookupIterator::NOT_FOUND:
         return ReadOnlyRoots(isolate).undefined_value();
-
-      case LookupIterator::ACCESSOR: {
-        Handle<Object> maybe_pair = it.GetAccessors();
-        if (maybe_pair->IsAccessorPair()) {
-          Handle<NativeContext> native_context = it.GetHolder<JSReceiver>()
-                                                     ->GetCreationContext()
-                                                     .ToHandleChecked();
-          return *AccessorPair::GetComponent(
-              isolate, native_context, Handle<AccessorPair>::cast(maybe_pair),
-              component);
+      case LookupIterator::MODULE_NAMESPACE: {
+        // We need to trigger evaluation due to [[GetOwnProperty]].
+        // https://tc39.es/ecma262/#sec-object.prototype.__lookupGetter__
+        // https://tc39.es/ecma262/#sec-object.prototype.__lookupSetter__
+        if (JSDeferredModuleNamespace::TriggersEvaluation(&it)) {
+          DirectHandle<JSDeferredModuleNamespace> holder =
+              it.GetHolder<JSDeferredModuleNamespace>();
+          JSDeferredModuleNamespace::EvaluateModuleSync(isolate, holder);
+          RETURN_FAILURE_IF_EXCEPTION(isolate);
+          return ReadOnlyRoots(isolate).undefined_value();
         }
+        continue;
+      }
+      case LookupIterator::ACCESSOR: {
+        DirectHandle<Object> maybe_pair = it.GetAccessors();
+        if (IsAccessorPair(*maybe_pair)) {
+          DirectHandle<NativeContext> holder_realm(
+              it.GetHolder<JSReceiver>()->GetCreationContext().value(),
+              isolate);
+          return *AccessorPair::GetComponent(
+              isolate, holder_realm, Cast<AccessorPair>(maybe_pair), component);
+        }
+        continue;
       }
     }
+    UNREACHABLE();
   }
-
-  return ReadOnlyRoots(isolate).undefined_value();
 }
 
 }  // namespace
 
 // ES6 B.2.2.2 a.k.a.
-// https://tc39.github.io/ecma262/#sec-object.prototype.__defineGetter__
+// https://tc39.es/ecma262/#sec-object.prototype.__defineGetter__
 BUILTIN(ObjectDefineGetter) {
   HandleScope scope(isolate);
-  Handle<Object> object = args.at(0);  // Receiver.
-  Handle<Object> name = args.at(1);
-  Handle<Object> getter = args.at(2);
+  DirectHandle<JSAny> object = args.at<JSAny>(0);  // Receiver.
+  DirectHandle<Object> name = args.at(1);
+  DirectHandle<Object> getter = args.at(2);
   return ObjectDefineAccessor<ACCESSOR_GETTER>(isolate, object, name, getter);
 }
 
 // ES6 B.2.2.3 a.k.a.
-// https://tc39.github.io/ecma262/#sec-object.prototype.__defineSetter__
+// https://tc39.es/ecma262/#sec-object.prototype.__defineSetter__
 BUILTIN(ObjectDefineSetter) {
   HandleScope scope(isolate);
-  Handle<Object> object = args.at(0);  // Receiver.
-  Handle<Object> name = args.at(1);
-  Handle<Object> setter = args.at(2);
+  DirectHandle<JSAny> object = args.at<JSAny>(0);  // Receiver.
+  DirectHandle<Object> name = args.at(1);
+  DirectHandle<Object> setter = args.at(2);
   return ObjectDefineAccessor<ACCESSOR_SETTER>(isolate, object, name, setter);
 }
 
 // ES6 B.2.2.4 a.k.a.
-// https://tc39.github.io/ecma262/#sec-object.prototype.__lookupGetter__
+// https://tc39.es/ecma262/#sec-object.prototype.__lookupGetter__
 BUILTIN(ObjectLookupGetter) {
   HandleScope scope(isolate);
-  Handle<Object> object = args.at(0);
-  Handle<Object> name = args.at(1);
+  DirectHandle<JSAny> object = args.at<JSAny>(0);
+  DirectHandle<Object> name = args.at(1);
   return ObjectLookupAccessor(isolate, object, name, ACCESSOR_GETTER);
 }
 
 // ES6 B.2.2.5 a.k.a.
-// https://tc39.github.io/ecma262/#sec-object.prototype.__lookupSetter__
+// https://tc39.es/ecma262/#sec-object.prototype.__lookupSetter__
 BUILTIN(ObjectLookupSetter) {
   HandleScope scope(isolate);
-  Handle<Object> object = args.at(0);
-  Handle<Object> name = args.at(1);
+  DirectHandle<JSAny> object = args.at<JSAny>(0);
+  DirectHandle<Object> name = args.at(1);
   return ObjectLookupAccessor(isolate, object, name, ACCESSOR_SETTER);
 }
 
 // ES6 section 19.1.2.5 Object.freeze ( O )
 BUILTIN(ObjectFreeze) {
   HandleScope scope(isolate);
-  Handle<Object> object = args.atOrUndefined(isolate, 1);
-  if (object->IsJSReceiver()) {
-    MAYBE_RETURN(
-        JSReceiver::SetIntegrityLevel(isolate, Handle<JSReceiver>::cast(object),
-                                      FROZEN, kThrowOnError),
-        ReadOnlyRoots(isolate).exception());
+  DirectHandle<Object> object = args.atOrUndefined(isolate, 1);
+  if (IsJSReceiver(*object)) {
+    MAYBE_RETURN(JSReceiver::SetIntegrityLevel(
+                     isolate, Cast<JSReceiver>(object), FROZEN, kThrowOnError),
+                 ReadOnlyRoots(isolate).exception());
   }
   return *object;
 }
@@ -227,7 +244,7 @@ BUILTIN(ObjectFreeze) {
 BUILTIN(ObjectPrototypeGetProto) {
   HandleScope scope(isolate);
   // 1. Let O be ? ToObject(this value).
-  Handle<JSReceiver> receiver;
+  DirectHandle<JSReceiver> receiver;
   ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
       isolate, receiver, Object::ToObject(isolate, args.receiver()));
 
@@ -240,8 +257,8 @@ BUILTIN(ObjectPrototypeGetProto) {
 BUILTIN(ObjectPrototypeSetProto) {
   HandleScope scope(isolate);
   // 1. Let O be ? RequireObjectCoercible(this value).
-  Handle<Object> object = args.receiver();
-  if (object->IsNullOrUndefined(isolate)) {
+  DirectHandle<Object> object = args.receiver();
+  if (IsNullOrUndefined(*object)) {
     THROW_NEW_ERROR_RETURN_FAILURE(
         isolate, NewTypeError(MessageTemplate::kCalledOnNullOrUndefined,
                               isolate->factory()->NewStringFromAsciiChecked(
@@ -249,14 +266,14 @@ BUILTIN(ObjectPrototypeSetProto) {
   }
 
   // 2. If Type(proto) is neither Object nor Null, return undefined.
-  Handle<Object> proto = args.at(1);
-  if (!proto->IsNull(isolate) && !proto->IsJSReceiver()) {
+  DirectHandle<Object> proto = args.at(1);
+  if (!IsNull(*proto) && !IsJSReceiver(*proto)) {
     return ReadOnlyRoots(isolate).undefined_value();
   }
 
   // 3. If Type(O) is not Object, return undefined.
-  if (!object->IsJSReceiver()) return ReadOnlyRoots(isolate).undefined_value();
-  Handle<JSReceiver> receiver = Handle<JSReceiver>::cast(object);
+  if (!IsJSReceiver(*object)) return ReadOnlyRoots(isolate).undefined_value();
+  DirectHandle<JSReceiver> receiver = Cast<JSReceiver>(object);
 
   // 4. Let status be ? O.[[SetPrototypeOf]](proto).
   // 5. If status is false, throw a TypeError exception.
@@ -270,14 +287,14 @@ BUILTIN(ObjectPrototypeSetProto) {
 
 namespace {
 
-Object GetOwnPropertyKeys(Isolate* isolate, BuiltinArguments args,
-                          PropertyFilter filter) {
+Tagged<Object> GetOwnPropertyKeys(Isolate* isolate, BuiltinArguments args,
+                                  PropertyFilter filter) {
   HandleScope scope(isolate);
-  Handle<Object> object = args.atOrUndefined(isolate, 1);
-  Handle<JSReceiver> receiver;
+  DirectHandle<Object> object = args.atOrUndefined(isolate, 1);
+  DirectHandle<JSReceiver> receiver;
   ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, receiver,
                                      Object::ToObject(isolate, object));
-  Handle<FixedArray> keys;
+  DirectHandle<FixedArray> keys;
   ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
       isolate, keys,
       KeyAccumulator::GetKeys(isolate, receiver, KeyCollectionMode::kOwnOnly,
@@ -295,56 +312,55 @@ BUILTIN(ObjectGetOwnPropertySymbols) {
 // ES6 section 19.1.2.12 Object.isFrozen ( O )
 BUILTIN(ObjectIsFrozen) {
   HandleScope scope(isolate);
-  Handle<Object> object = args.atOrUndefined(isolate, 1);
-  Maybe<bool> result =
-      object->IsJSReceiver()
-          ? JSReceiver::TestIntegrityLevel(
-                isolate, Handle<JSReceiver>::cast(object), FROZEN)
-          : Just(true);
+  DirectHandle<Object> object = args.atOrUndefined(isolate, 1);
+  Maybe<bool> result = IsJSReceiver(*object)
+                           ? JSReceiver::TestIntegrityLevel(
+                                 isolate, Cast<JSReceiver>(object), FROZEN)
+                           : Just(true);
   MAYBE_RETURN(result, ReadOnlyRoots(isolate).exception());
-  return isolate->heap()->ToBoolean(result.FromJust());
+  return ReadOnlyRoots(isolate).boolean_value(result.FromJust());
 }
 
 // ES6 section 19.1.2.13 Object.isSealed ( O )
 BUILTIN(ObjectIsSealed) {
   HandleScope scope(isolate);
-  Handle<Object> object = args.atOrUndefined(isolate, 1);
-  Maybe<bool> result =
-      object->IsJSReceiver()
-          ? JSReceiver::TestIntegrityLevel(
-                isolate, Handle<JSReceiver>::cast(object), SEALED)
-          : Just(true);
+  DirectHandle<Object> object = args.atOrUndefined(isolate, 1);
+  Maybe<bool> result = IsJSReceiver(*object)
+                           ? JSReceiver::TestIntegrityLevel(
+                                 isolate, Cast<JSReceiver>(object), SEALED)
+                           : Just(true);
   MAYBE_RETURN(result, ReadOnlyRoots(isolate).exception());
-  return isolate->heap()->ToBoolean(result.FromJust());
+  return ReadOnlyRoots(isolate).boolean_value(result.FromJust());
 }
 
 BUILTIN(ObjectGetOwnPropertyDescriptors) {
   HandleScope scope(isolate);
-  Handle<Object> object = args.atOrUndefined(isolate, 1);
+  DirectHandle<Object> object = args.atOrUndefined(isolate, 1);
 
-  Handle<JSReceiver> receiver;
+  DirectHandle<JSReceiver> receiver;
   ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, receiver,
                                      Object::ToObject(isolate, object));
 
-  Handle<FixedArray> keys;
+  DirectHandle<FixedArray> keys;
   ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
       isolate, keys,
       KeyAccumulator::GetKeys(isolate, receiver, KeyCollectionMode::kOwnOnly,
                               ALL_PROPERTIES,
                               GetKeysConversion::kConvertToString));
 
-  Handle<JSObject> descriptors =
+  DirectHandle<JSObject> descriptors =
       isolate->factory()->NewJSObject(isolate->object_function());
 
-  for (int i = 0; i < keys->length(); ++i) {
-    Handle<Name> key = Handle<Name>::cast(FixedArray::get(*keys, i, isolate));
+  uint32_t keys_len = keys->ulength().value();
+  for (uint32_t i = 0; i < keys_len; ++i) {
+    DirectHandle<Name> key(Cast<Name>(keys->get(i)), isolate);
     PropertyDescriptor descriptor;
     Maybe<bool> did_get_descriptor = JSReceiver::GetOwnPropertyDescriptor(
         isolate, receiver, key, &descriptor);
     MAYBE_RETURN(did_get_descriptor, ReadOnlyRoots(isolate).exception());
 
     if (!did_get_descriptor.FromJust()) continue;
-    Handle<Object> from_descriptor = descriptor.ToObject(isolate);
+    DirectHandle<Object> from_descriptor = descriptor.ToObject(isolate);
 
     Maybe<bool> success = JSReceiver::CreateDataProperty(
         isolate, descriptors, key, from_descriptor, Just(kDontThrow));
@@ -357,12 +373,11 @@ BUILTIN(ObjectGetOwnPropertyDescriptors) {
 // ES6 section 19.1.2.17 Object.seal ( O )
 BUILTIN(ObjectSeal) {
   HandleScope scope(isolate);
-  Handle<Object> object = args.atOrUndefined(isolate, 1);
-  if (object->IsJSReceiver()) {
-    MAYBE_RETURN(
-        JSReceiver::SetIntegrityLevel(isolate, Handle<JSReceiver>::cast(object),
-                                      SEALED, kThrowOnError),
-        ReadOnlyRoots(isolate).exception());
+  DirectHandle<Object> object = args.atOrUndefined(isolate, 1);
+  if (IsJSReceiver(*object)) {
+    MAYBE_RETURN(JSReceiver::SetIntegrityLevel(
+                     isolate, Cast<JSReceiver>(object), SEALED, kThrowOnError),
+                 ReadOnlyRoots(isolate).exception());
   }
   return *object;
 }

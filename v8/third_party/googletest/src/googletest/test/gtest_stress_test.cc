@@ -30,12 +30,15 @@
 // Tests that SCOPED_TRACE() and various Google Test assertions can be
 // used in a large number of threads concurrently.
 
+#include <algorithm>
+#include <memory>
+#include <string>
 #include <vector>
 
 #include "gtest/gtest.h"
 #include "src/gtest-internal-inl.h"
 
-#if GTEST_IS_THREADSAFE
+#ifdef GTEST_IS_THREADSAFE
 
 namespace testing {
 namespace {
@@ -92,9 +95,9 @@ void ManyAsserts(int id) {
 
     // RecordProperty() should interact safely with other threads as well.
     // The shared_key forces property updates.
-    Test::RecordProperty(IdToKey(id, "string").c_str(), IdToString(id).c_str());
+    Test::RecordProperty(IdToKey(id, "string"), IdToString(id));
     Test::RecordProperty(IdToKey(id, "int").c_str(), id);
-    Test::RecordProperty("shared_key", IdToString(id).c_str());
+    Test::RecordProperty("shared_key", IdToString(id));
 
     // This assertion should fail kThreadCount times per thread.  It
     // is for testing whether Google Test can handle failed assertions in a
@@ -118,8 +121,8 @@ TEST(StressTest, CanUseScopedTraceAndAssertionsInManyThreads) {
     std::unique_ptr<ThreadWithParam<int> > threads[kThreadCount];
     Notification threads_can_start;
     for (int i = 0; i != kThreadCount; i++)
-      threads[i].reset(
-          new ThreadWithParam<int>(&ManyAsserts, i, &threads_can_start));
+      threads[i] = std::make_unique<ThreadWithParam<int>>(&ManyAsserts, i,
+                                                          &threads_can_start);
 
     threads_can_start.Notify();
 

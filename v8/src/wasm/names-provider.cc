@@ -5,8 +5,12 @@
 #include "src/wasm/names-provider.h"
 
 #include "src/strings/unicode-decoder.h"
+#include "src/wasm/canonical-types.h"
 #include "src/wasm/module-decoder.h"
+#include "src/wasm/std-object-sizes.h"
 #include "src/wasm/string-builder.h"
+#include "src/wasm/wasm-code-manager.h"
+#include "src/wasm/wasm-engine.h"
 
 namespace v8 {
 namespace internal {
@@ -34,8 +38,13 @@ void NamesProvider::DecodeNamesIfNotYetDone() {
 void NamesProvider::ComputeFunctionNamesFromImportsExports() {
   DCHECK(!has_computed_function_import_names_);
   has_computed_function_import_names_ = true;
+  // When tracing streaming compilations, we might not yet have wire bytes.
+  if (wire_bytes_.empty()) return;
   for (const WasmImport& import : module_->import_table) {
-    if (import.kind != kExternalFunction) continue;
+    if (import.kind != kExternalFunction &&
+        import.kind != kExternalExactFunction) {
+      continue;
+    }
     if (module_->lazily_generated_names.Has(import.index)) continue;
     ComputeImportName(import, import_export_function_names_);
   }
@@ -49,10 +58,13 @@ void NamesProvider::ComputeFunctionNamesFromImportsExports() {
 void NamesProvider::ComputeNamesFromImportsExports() {
   DCHECK(!has_computed_import_names_);
   has_computed_import_names_ = true;
+  // When tracing streaming compilations, we might not yet have wire bytes.
+  if (wire_bytes_.empty()) return;
   DCHECK(has_decoded_);
   for (const WasmImport import : module_->import_table) {
     switch (import.kind) {
       case kExternalFunction:
+      case kExternalExactFunction:
         continue;  // Functions are handled separately.
       case kExternalTable:
         if (name_section_names_->table_names_.Has(import.index)) continue;
@@ -75,6 +87,7 @@ void NamesProvider::ComputeNamesFromImportsExports() {
   for (const WasmExport& ex : module_->export_table) {
     switch (ex.kind) {
       case kExternalFunction:
+      case kExternalExactFunction:
         continue;  // Functions are handled separately.
       case kExternalTable:
         if (name_section_names_->table_names_.Has(ex.index)) continue;
@@ -120,6 +133,7 @@ static constexpr char kIdentifierChar[] = {
 // rendered and simplify this to "one '_' per invalid UTF8 byte".
 void SanitizeUnicodeName(StringBuilder& out, const uint8_t* utf8_src,
                          size_t length) {
+  if (length == 0) return;  // Illegal nullptrs arise below when length == 0.
   base::Vector<const uint8_t> utf8_data(utf8_src, length);
   Utf8Decoder decoder(utf8_data);
   std::vector<uint16_t> utf16(decoder.utf16_length());
@@ -380,7 +394,8 @@ void NamesProvider::PrintTagName(StringBuilder& out, uint32_t tag_index,
 }
 
 void NamesProvider::PrintHeapType(StringBuilder& out, HeapType type) {
-  if (type.is_index()) {
+  if (type.has_index()) {
+    if (type.is_exact()) out << "exact ";
     PrintTypeName(out, type.ref_index());
   } else {
     out << type.name();
@@ -388,25 +403,157 @@ void NamesProvider::PrintHeapType(StringBuilder& out, HeapType type) {
 }
 
 void NamesProvider::PrintValueType(StringBuilder& out, ValueType type) {
+  if (type.has_index()) {
+    out << (type.is_nullable() ? "(ref null " : "(ref ");
+    if (type.is_exact()) out << "exact ";
+    PrintTypeName(out, type.ref_index());
+    out << ')';
+  } else {
+    out << type.name();
+  }
+}
+
+namespace {
+size_t StringMapSize(const std::map<uint32_t, std::string>& map) {
+  size_t result = ContentSize(map);
+  for (const auto& entry : map) {
+    result += entry.second.size();
+  }
+  return result;
+}
+}  // namespace
+
+size_t NamesProvider::EstimateCurrentMemoryConsumption() const {
+  UPDATE_WHEN_CLASS_CHANGES(NamesProvider, 176);
+  size_t result = sizeof(NamesProvider);
+  if (name_section_names_) {
+    DecodedNameSection* names = name_section_names_.get();
+    result += names->local_names_.EstimateCurrentMemoryConsumption();
+    result += names->label_names_.EstimateCurrentMemoryConsumption();
+    result += names->type_names_.EstimateCurrentMemoryConsumption();
+    result += names->table_names_.EstimateCurrentMemoryConsumption();
+    result += names->memory_names_.EstimateCurrentMemoryConsumption();
+    result += names->global_names_.EstimateCurrentMemoryConsumption();
+    result += names->element_segment_names_.EstimateCurrentMemoryConsumption();
+    result += names->data_segment_names_.EstimateCurrentMemoryConsumption();
+    result += names->field_names_.EstimateCurrentMemoryConsumption();
+    result += names->tag_names_.EstimateCurrentMemoryConsumption();
+  }
+  {
+    base::MutexGuard lock(&mutex_);
+    result += StringMapSize(import_export_function_names_);
+    result += StringMapSize(import_export_table_names_);
+    result += StringMapSize(import_export_memory_names_);
+    result += StringMapSize(import_export_global_names_);
+    result += StringMapSize(import_export_tag_names_);
+  }
+  if (v8_flags.trace_wasm_offheap_memory) {
+    PrintF("NamesProvider: %zu\n", result);
+  }
+  return result;
+}
+
+size_t CanonicalTypeNamesProvider::EstimateCurrentMemoryConsumption() const {
+  base::MutexGuard lock(&mutex_);
+  size_t result = sizeof(this) + payload_size_estimate_;
+  result += type_names_.capacity() * sizeof(StringT);
+  result += ContentSize(field_names_);
+  for (const auto& entry : field_names_) {
+    const std::vector<StringT>& vec = entry.second;
+    result += vec.capacity() * sizeof(StringT);
+  }
+  if (v8_flags.trace_wasm_offheap_memory) {
+    PrintF("CanonicalTypeNamesProvider: %zu\n", result);
+  }
+  return result;
+}
+
+void CanonicalTypeNamesProvider::DecodeNameSections() {
+  mutex_.AssertHeld();
+  GetWasmEngine()->DecodeAllNameSections(this);
+}
+
+void CanonicalTypeNamesProvider::DecodeNames(NativeModule* native_module) {
+  mutex_.AssertHeld();  // Only called indirectly from {DecodeNameSections}.
+  // If the NativeModule is still under construction, skip it for now.
+  if (!native_module->HasWireBytes()) return;
+  const WasmModule* module = native_module->module();
+  if (module->canonical_typenames_decoded) return;
+  module->canonical_typenames_decoded = true;
+  base::Vector<const uint8_t> wire_bytes = native_module->wire_bytes();
+  WireBytesRef name_section = module->name_section;
+  if (name_section.is_empty()) return;
+  // The caller of this function holds a lock on the WasmEngine's mutex,
+  // so we can rely on the number of known canonical types not changing
+  // concurrently.
+  type_names_.resize(GetTypeCanonicalizer()->GetCurrentNumberOfTypes());
+  size_t added_size = 0;
+  DecodeCanonicalTypeNames(wire_bytes, module, type_names_, field_names_,
+                           &added_size);
+  payload_size_estimate_ += added_size;
+}
+
+void CanonicalTypeNamesProvider::PrintTypeName(
+    StringBuilder& out, CanonicalTypeIndex type_index,
+    NamesProvider::IndexAsComment index_as_comment) {
+  base::MutexGuard lock(&mutex_);
+  uint32_t index = type_index.index;
+  if (index >= type_names_.size() || type_names_[index].empty()) {
+    DecodeNameSections();
+  }
+  // {index} should now always be in range, but let's be robust towards
+  // invalid parameter values.
+  if (index >= type_names_.size() || type_names_[index].empty()) {
+    out << "$canon" << index;
+    return;
+  }
+  StringT& name = type_names_[index];
+  out << '$';
+  out.write(name.data(), name.size());
+  MaybeAddComment(out, index, index_as_comment);
+}
+
+void CanonicalTypeNamesProvider::PrintValueType(StringBuilder& out,
+                                                CanonicalValueType type) {
   switch (type.kind()) {
     case kRef:
     case kRefNull:
       if (type.encoding_needs_heap_type()) {
         out << (type.kind() == kRef ? "(ref " : "(ref null ");
-        PrintHeapType(out, type.heap_type());
+        if (type.is_exact()) out << "exact ";
+        if (type.has_index()) {
+          PrintTypeName(out, type.ref_index());
+        } else {
+          out << type.name();
+        }
         out << ')';
       } else {
-        out << type.heap_type().name() << "ref";
+        out << type.name();
       }
-      break;
-    case kRtt:
-      out << "(rtt ";
-      PrintTypeName(out, type.ref_index());
-      out << ')';
       break;
     default:
       out << wasm::name(type.kind());
   }
+}
+
+void CanonicalTypeNamesProvider::PrintFieldName(StringBuilder& out,
+                                                CanonicalTypeIndex struct_index,
+                                                uint32_t field_index) {
+  base::MutexGuard lock(&mutex_);
+  uint32_t index = struct_index.index;
+  if (index >= type_names_.size()) DecodeNameSections();
+
+  auto per_type = field_names_.find(index);
+  if (per_type != field_names_.end()) {
+    std::vector<StringT>& field_names = per_type->second;
+    if (field_index < field_names.size() && !field_names[field_index].empty()) {
+      const StringT& name = field_names[field_index];
+      out << '$';
+      out.write(name.data(), name.size());
+      return;
+    }
+  }
+  out << "$field" << field_index;
 }
 
 }  // namespace wasm

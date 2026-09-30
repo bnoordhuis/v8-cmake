@@ -2,14 +2,16 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#ifndef V8_WASM_WASM_TIER_H_
+#define V8_WASM_WASM_TIER_H_
+
 #if !V8_ENABLE_WEBASSEMBLY
 #error This header should only be included if WebAssembly is enabled.
 #endif  // !V8_ENABLE_WEBASSEMBLY
 
-#ifndef V8_WASM_WASM_TIER_H_
-#define V8_WASM_WASM_TIER_H_
-
 #include <cstdint>
+
+#include "src/base/logging.h"
 
 namespace v8 {
 namespace internal {
@@ -18,6 +20,9 @@ namespace wasm {
 // All the tiers of Wasm execution.
 enum class ExecutionTier : int8_t {
   kNone,
+#if V8_ENABLE_DRUMBRAKE
+  kInterpreter,
+#endif  // V8_ENABLE_DRUMBRAKE
   kLiftoff,
   kTurbofan,
 };
@@ -28,9 +33,14 @@ inline const char* ExecutionTierToString(ExecutionTier tier) {
       return "turbofan";
     case ExecutionTier::kLiftoff:
       return "liftoff";
+#if V8_ENABLE_DRUMBRAKE
+    case ExecutionTier::kInterpreter:
+      return "interpreter";
+#endif  // V8_ENABLE_DRUMBRAKE
     case ExecutionTier::kNone:
       return "none";
   }
+  UNREACHABLE();
 }
 
 // {kForDebugging} is used for default tiered-down code, {kWithBreakpoints} if

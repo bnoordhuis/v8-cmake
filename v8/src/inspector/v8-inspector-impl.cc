@@ -32,7 +32,9 @@
 
 #include <vector>
 
+#include "include/cppgc/allocation.h"
 #include "include/v8-context.h"
+#include "include/v8-cppgc.h"
 #include "include/v8-local-handle.h"
 #include "include/v8-microtask-queue.h"
 #include "include/v8-platform.h"
@@ -66,15 +68,18 @@ V8InspectorImpl::V8InspectorImpl(v8::Isolate* isolate,
       m_client(client),
       m_debugger(new V8Debugger(isolate, this)),
       m_lastExceptionId(0),
-      m_lastContextId(0),
-      m_isolateId(generateUniqueId()) {
+      m_lastContextId(0) {
   v8::debug::SetInspector(m_isolate, this);
   v8::debug::SetConsoleDelegate(m_isolate, console());
+  v8::debug::SetIsolateId(m_isolate, generateUniqueId());
 }
 
 V8InspectorImpl::~V8InspectorImpl() {
   v8::debug::SetInspector(m_isolate, nullptr);
   v8::debug::SetConsoleDelegate(m_isolate, nullptr);
+  if (m_console) {
+    m_console->clearInspector();
+  }
 }
 
 int V8InspectorImpl::contextGroupId(v8::Local<v8::Context> context) const {
@@ -94,22 +99,22 @@ int V8InspectorImpl::resolveUniqueContextId(
 
 v8::MaybeLocal<v8::Value> V8InspectorImpl::compileAndRunInternalScript(
     v8::Local<v8::Context> context, v8::Local<v8::String> source) {
+  v8::Isolate::AllowJavascriptExecutionScope allow_script(m_isolate);
   v8::Local<v8::UnboundScript> unboundScript;
   if (!v8::debug::CompileInspectorScript(m_isolate, source)
-           .ToLocal(&unboundScript))
+           .ToLocal(&unboundScript)) {
     return v8::MaybeLocal<v8::Value>();
+  }
   v8::MicrotasksScope microtasksScope(context,
                                       v8::MicrotasksScope::kDoNotRunMicrotasks);
   v8::Context::Scope contextScope(context);
-  v8::Isolate::SafeForTerminationScope allowTermination(m_isolate);
   return unboundScript->BindToCurrentContext()->Run(context);
 }
 
 v8::MaybeLocal<v8::Script> V8InspectorImpl::compileScript(
     v8::Local<v8::Context> context, const String16& code,
     const String16& fileName) {
-  v8::ScriptOrigin origin(m_isolate, toV8String(m_isolate, fileName), 0, 0,
-                          false);
+  v8::ScriptOrigin origin(toV8String(m_isolate, fileName), 0, 0, false);
   v8::ScriptCompiler::Source source(toV8String(m_isolate, code), origin);
   return v8::ScriptCompiler::Compile(context, &source,
                                      v8::ScriptCompiler::kNoCompileOptions);
@@ -126,13 +131,23 @@ void V8InspectorImpl::unmuteExceptions(int contextGroupId) {
 V8ConsoleMessageStorage* V8InspectorImpl::ensureConsoleMessageStorage(
     int contextGroupId) {
   auto storageIt = m_consoleStorageMap.find(contextGroupId);
-  if (storageIt == m_consoleStorageMap.end())
+  if (storageIt == m_consoleStorageMap.end()) {
     storageIt = m_consoleStorageMap
                     .insert(std::make_pair(
                         contextGroupId,
                         std::unique_ptr<V8ConsoleMessageStorage>(
                             new V8ConsoleMessageStorage(this, contextGroupId))))
                     .first;
+  }
+  return storageIt->second.get();
+}
+
+V8ConsoleMessageStorage* V8InspectorImpl::consoleMessageStorage(
+    int contextGroupId) {
+  auto storageIt = m_consoleStorageMap.find(contextGroupId);
+  if (storageIt == m_consoleStorageMap.end()) {
+    return nullptr;
+  }
   return storageIt->second.get();
 }
 
@@ -146,9 +161,70 @@ std::unique_ptr<V8StackTrace> V8InspectorImpl::createStackTrace(
   return m_debugger->createStackTrace(stackTrace);
 }
 
+namespace {
+
+// Wrapper to make Channel look like a ManagedChannel so we can just use
+// ManagedChannel in V8InspectorSessionImpl.
+class ChannelWrapper : public V8Inspector::ManagedChannel {
+ public:
+  explicit ChannelWrapper(V8Inspector::Channel* channel) : channel_(channel) {}
+  ~ChannelWrapper() override = default;
+
+  void sendResponse(int callId,
+                    std::unique_ptr<StringBuffer> message) override {
+    channel_->sendResponse(callId, std::move(message));
+  }
+
+  void sendNotification(std::unique_ptr<StringBuffer> message) override {
+    channel_->sendNotification(std::move(message));
+  }
+
+  void flushProtocolNotifications() override {
+    channel_->flushProtocolNotifications();
+  }
+
+ private:
+  V8Inspector::Channel* channel_;
+};
+
+}  // namespace
+
 std::unique_ptr<V8InspectorSession> V8InspectorImpl::connect(
     int contextGroupId, V8Inspector::Channel* channel, StringView state,
     ClientTrustLevel client_trust_level, SessionPauseState pause_state) {
+  ChannelWrapper* wrappedChannel = cppgc::MakeGarbageCollected<ChannelWrapper>(
+      m_isolate->GetCppHeap()->GetAllocationHandle(), channel);
+  return std::unique_ptr<V8InspectorSession>(
+      connectImpl(contextGroupId, wrappedChannel, state, client_trust_level,
+                  pause_state, V8EmbedderState()));
+}
+
+std::shared_ptr<V8InspectorSession> V8InspectorImpl::connectShared(
+    int contextGroupId, V8Inspector::Channel* channel, StringView state,
+    ClientTrustLevel client_trust_level, SessionPauseState pause_state) {
+  ChannelWrapper* wrappedChannel = cppgc::MakeGarbageCollected<ChannelWrapper>(
+      m_isolate->GetCppHeap()->GetAllocationHandle(), channel);
+  return connectShared(contextGroupId, wrappedChannel, state,
+                       client_trust_level, pause_state, V8EmbedderState());
+}
+
+std::shared_ptr<V8InspectorSession> V8InspectorImpl::connectShared(
+    int contextGroupId, V8Inspector::ManagedChannel* channel, StringView state,
+    ClientTrustLevel client_trust_level, SessionPauseState pause_state,
+    V8EmbedderState embedder_state) {
+  std::shared_ptr<V8InspectorSessionImpl> session(
+      connectImpl(contextGroupId, channel, state, client_trust_level,
+                  pause_state, std::move(embedder_state)));
+  // TODO(crbug.com/40071155): Move to V8InspectorSessionImpl::create once the
+  // unique_ptr version is no longer required.
+  session->setWeakThis(session);
+  return session;
+}
+
+V8InspectorSessionImpl* V8InspectorImpl::connectImpl(
+    int contextGroupId, V8Inspector::ManagedChannel* channel, StringView state,
+    ClientTrustLevel client_trust_level, SessionPauseState pause_state,
+    V8EmbedderState embedder_state) {
   int sessionId = ++m_lastSessionId;
   std::shared_ptr<V8DebuggerBarrier> debuggerBarrier;
   if (pause_state == kWaitingForDebugger) {
@@ -164,12 +240,11 @@ std::unique_ptr<V8InspectorSession> V8InspectorImpl::connect(
       m_debuggerBarriers.insert(it, {contextGroupId, debuggerBarrier});
     }
   }
-  std::unique_ptr<V8InspectorSessionImpl> session =
-      V8InspectorSessionImpl::create(this, contextGroupId, sessionId, channel,
-                                     state, client_trust_level,
-                                     std::move(debuggerBarrier));
-  m_sessions[contextGroupId][sessionId] = session.get();
-  return std::move(session);
+  V8InspectorSessionImpl* session = V8InspectorSessionImpl::create(
+      this, contextGroupId, sessionId, channel, state, client_trust_level,
+      std::move(debuggerBarrier), std::move(embedder_state));
+  m_sessions[contextGroupId][sessionId] = session;
+  return session;
 }
 
 void V8InspectorImpl::disconnect(V8InspectorSessionImpl* session) {
@@ -181,8 +256,8 @@ void V8InspectorImpl::disconnect(V8InspectorSessionImpl* session) {
   }
 }
 
-InspectedContext* V8InspectorImpl::getContext(int groupId,
-                                              int contextId) const {
+std::shared_ptr<InspectedContext> V8InspectorImpl::getContext(
+    int groupId, int contextId) const {
   if (!groupId || !contextId) return nullptr;
 
   auto contextGroupIt = m_contexts.find(groupId);
@@ -191,24 +266,29 @@ InspectedContext* V8InspectorImpl::getContext(int groupId,
   auto contextIt = contextGroupIt->second->find(contextId);
   if (contextIt == contextGroupIt->second->end()) return nullptr;
 
-  return contextIt->second.get();
+  return contextIt->second;
 }
 
-InspectedContext* V8InspectorImpl::getContext(int contextId) const {
+std::shared_ptr<InspectedContext> V8InspectorImpl::getContext(
+    int contextId) const {
   return getContext(contextGroupId(contextId), contextId);
 }
 
 v8::MaybeLocal<v8::Context> V8InspectorImpl::contextById(int contextId) {
-  InspectedContext* context = getContext(contextId);
+  std::shared_ptr<InspectedContext> context = getContext(contextId);
   return context ? context->context() : v8::MaybeLocal<v8::Context>();
 }
 
 V8DebuggerId V8InspectorImpl::uniqueDebuggerId(int contextId) {
-  InspectedContext* context = getContext(contextId);
+  std::shared_ptr<InspectedContext> context = getContext(contextId);
   internal::V8DebuggerId unique_id;
   if (context) unique_id = m_debugger->debuggerIdFor(context->contextGroupId());
 
   return unique_id.toV8DebuggerId();
+}
+
+uint64_t V8InspectorImpl::isolateId() {
+  return v8::debug::GetIsolateId(m_isolate);
 }
 
 void V8InspectorImpl::contextCreated(const V8ContextInfo& info) {
@@ -222,21 +302,25 @@ void V8InspectorImpl::contextCreated(const V8ContextInfo& info) {
       std::make_pair(context->uniqueId().pair(), contextId));
 
   auto contextIt = m_contexts.find(info.contextGroupId);
-  if (contextIt == m_contexts.end())
+  if (contextIt == m_contexts.end()) {
     contextIt = m_contexts
                     .insert(std::make_pair(
                         info.contextGroupId,
                         std::unique_ptr<ContextByIdMap>(new ContextByIdMap())))
                     .first;
+  }
   const auto& contextById = contextIt->second;
 
   DCHECK(contextById->find(contextId) == contextById->cend());
   (*contextById)[contextId].reset(context);
-  forEachSession(
-      info.contextGroupId, [&context](V8InspectorSessionImpl* session) {
-        session->runtimeAgent()->addBindings(context);
-        session->runtimeAgent()->reportExecutionContextCreated(context);
-      });
+  int contextGroupId = info.contextGroupId;
+  forEachSession(contextGroupId, [this, contextGroupId, contextId,
+                                  &context](V8InspectorSessionImpl* session) {
+    if (!getContext(contextGroupId, contextId)) return;
+    session->runtimeAgent()->addBindings(context);
+    if (!getContext(contextGroupId, contextId)) return;
+    session->runtimeAgent()->reportExecutionContextCreated(context);
+  });
 }
 
 void V8InspectorImpl::contextDestroyed(v8::Local<v8::Context> context) {
@@ -249,16 +333,20 @@ void V8InspectorImpl::contextCollected(int groupId, int contextId) {
   m_contextIdToGroupIdMap.erase(contextId);
 
   auto storageIt = m_consoleStorageMap.find(groupId);
-  if (storageIt != m_consoleStorageMap.end())
+  if (storageIt != m_consoleStorageMap.end()) {
     storageIt->second->contextDestroyed(contextId);
+  }
 
-  InspectedContext* inspectedContext = getContext(groupId, contextId);
+  std::shared_ptr<InspectedContext> inspectedContext =
+      getContext(groupId, contextId);
   if (!inspectedContext) return;
 
   forEachSession(groupId, [&inspectedContext](V8InspectorSessionImpl* session) {
-    session->runtimeAgent()->reportExecutionContextDestroyed(inspectedContext);
+    session->runtimeAgent()->reportExecutionContextDestroyed(
+        inspectedContext.get());
   });
   discardInspectedContext(groupId, contextId);
+  m_promiseHandlerTracker.makeWeakForContext(contextId);
 }
 
 void V8InspectorImpl::resetContextGroup(int contextGroupId) {
@@ -267,8 +355,9 @@ void V8InspectorImpl::resetContextGroup(int contextGroupId) {
   auto contextsIt = m_contexts.find(contextGroupId);
   // Context might have been removed already by discardContextScript()
   if (contextsIt != m_contexts.end()) {
-    for (const auto& map_entry : *contextsIt->second)
+    for (const auto& map_entry : *contextsIt->second) {
       m_uniqueIdToContextId.erase(map_entry.second->uniqueId().pair());
+    }
     m_contexts.erase(contextsIt);
   }
   forEachSession(contextGroupId,
@@ -377,7 +466,7 @@ v8::MaybeLocal<v8::Context> V8InspectorImpl::exceptionMetaDataContext() {
 
 void V8InspectorImpl::discardInspectedContext(int contextGroupId,
                                               int contextId) {
-  auto* context = getContext(contextGroupId, contextId);
+  auto context = getContext(contextGroupId, contextId);
   if (!context) return;
   m_uniqueIdToContextId.erase(context->uniqueId().pair());
   m_contexts[contextGroupId]->erase(contextId);
@@ -393,8 +482,11 @@ V8InspectorSessionImpl* V8InspectorImpl::sessionById(int contextGroupId,
 }
 
 V8Console* V8InspectorImpl::console() {
-  if (!m_console) m_console.reset(new V8Console(this));
-  return m_console.get();
+  if (!m_console) {
+    m_console = cppgc::MakeGarbageCollected<V8Console>(
+        m_isolate->GetCppHeap()->GetAllocationHandle(), this);
+  }
+  return m_console.Get();
 }
 
 void V8InspectorImpl::forEachContext(
@@ -429,7 +521,11 @@ void V8InspectorImpl::forEachSession(
     it = m_sessions.find(contextGroupId);
     if (it == m_sessions.end()) continue;
     auto sessionIt = it->second.find(sessionId);
-    if (sessionIt != it->second.end()) callback(sessionIt->second);
+    if (sessionIt != it->second.end()) {
+      V8InspectorSessionImpl::KeepSessionAliveScope keepAlive(
+          *sessionIt->second);
+      callback(sessionIt->second);
+    }
   }
 }
 
@@ -442,9 +538,7 @@ int64_t V8InspectorImpl::generateUniqueId() {
 
 V8InspectorImpl::EvaluateScope::EvaluateScope(
     const InjectedScript::Scope& scope)
-    : m_scope(scope),
-      m_isolate(scope.inspector()->isolate()),
-      m_safeForTerminationScope(m_isolate) {}
+    : m_scope(scope), m_isolate(scope.inspector()->isolate()) {}
 
 struct V8InspectorImpl::EvaluateScope::CancelToken {
   v8::base::Mutex m_mutex;
@@ -485,7 +579,8 @@ protocol::Response V8InspectorImpl::EvaluateScope::setTimeout(double timeout) {
     return protocol::Response::ServerError("Execution was terminated");
   }
   m_cancelToken.reset(new CancelToken());
-  v8::debug::GetCurrentPlatform()->CallDelayedOnWorkerThread(
+  v8::debug::GetCurrentPlatform()->PostDelayedTaskOnWorkerThread(
+      v8::TaskPriority::kUserVisible,
       std::make_unique<TerminateTask>(m_isolate, m_cancelToken), timeout);
   return protocol::Response::Success();
 }
@@ -502,9 +597,10 @@ bool V8InspectorImpl::associateExceptionData(v8::Local<v8::Context>,
   v8::TryCatch tryCatch(m_isolate);
   v8::Context::Scope contextScope(context);
   v8::HandleScope handles(m_isolate);
-  if (m_exceptionMetaData.IsEmpty())
+  if (m_exceptionMetaData.IsEmpty()) {
     m_exceptionMetaData.Reset(m_isolate,
                               v8::debug::EphemeronTable::New(m_isolate));
+  }
 
   v8::Local<v8::debug::EphemeronTable> map = m_exceptionMetaData.Get(m_isolate);
   v8::MaybeLocal<v8::Value> entry = map->Get(m_isolate, exception);
@@ -536,8 +632,9 @@ v8::MaybeLocal<v8::Object> V8InspectorImpl::getAssociatedExceptionData(
   v8::Local<v8::debug::EphemeronTable> map = m_exceptionMetaData.Get(m_isolate);
   auto entry = map->Get(m_isolate, exception);
   v8::Local<v8::Value> object;
-  if (!entry.ToLocal(&object) || !object->IsObject())
+  if (!entry.ToLocal(&object) || !object->IsObject()) {
     return v8::MaybeLocal<v8::Object>();
+  }
   return scope.Escape(object.As<v8::Object>());
 }
 

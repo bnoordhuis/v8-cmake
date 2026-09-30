@@ -1,0 +1,24 @@
+build/*
+Testing/*
+.cache/
+compile_commands.json
+bazel-*
+
+# Visual studio
+.vs/
+Debug/
+Release/
+/out/
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.psess
+*.vspx
+*.vsp
+*.diagsession
+*.hint
+
+# VS CMake
+/out/
+/CMakeSettings.json

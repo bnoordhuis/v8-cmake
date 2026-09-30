@@ -2,10 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Flags: --experimental-wasm-gc
-
 d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
-
 
 (function testNonNullRefWrapperNullCheck() {
   print(arguments.callee.name);
@@ -14,6 +11,7 @@ d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
     'any': kWasmAnyRef,
     'func': kWasmFuncRef,
     'array': kWasmArrayRef,
+    'exn': kWasmExnRef,
   })) {
     print(`- ${name}`);
     let builder = new WasmModuleBuilder();

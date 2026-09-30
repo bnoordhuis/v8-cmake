@@ -25,6 +25,18 @@ constexpr auto CallInterfaceDescriptor::DefaultDoubleRegisterArray() {
   return registers;
 }
 
+constexpr auto CallInterfaceDescriptor::DefaultReturnRegisterArray() {
+  auto registers =
+      RegisterArray(kReturnRegister0, kReturnRegister1, kReturnRegister2);
+  return registers;
+}
+
+constexpr auto CallInterfaceDescriptor::DefaultReturnDoubleRegisterArray() {
+  // Padding to have as many double return registers as GP return registers.
+  auto registers = DoubleRegisterArray(kFPReturnRegister0, no_dreg, no_dreg);
+  return registers;
+}
+
 #if DEBUG
 template <typename DerivedDescriptor>
 void StaticCallInterfaceDescriptor<DerivedDescriptor>::
@@ -74,6 +86,21 @@ constexpr Register KeyedLoadWithVectorDescriptor::VectorRegister() {
 }
 
 // static
+constexpr Register EnumeratedKeyedLoadBaselineDescriptor::EnumIndexRegister() {
+  return x4;
+}
+
+// static
+constexpr Register EnumeratedKeyedLoadBaselineDescriptor::CacheTypeRegister() {
+  return x5;
+}
+
+// static
+constexpr Register EnumeratedKeyedLoadBaselineDescriptor::SlotRegister() {
+  return x2;
+}
+
+// static
 constexpr Register KeyedHasICBaselineDescriptor::ReceiverRegister() {
   return kInterpreterAccumulatorRegister;
 }
@@ -112,9 +139,9 @@ constexpr Register DefineKeyedOwnDescriptor::FlagsRegister() { return x5; }
 constexpr Register StoreTransitionDescriptor::MapRegister() { return x5; }
 
 // static
-constexpr Register ApiGetterDescriptor::HolderRegister() { return x0; }
-// static
-constexpr Register ApiGetterDescriptor::CallbackRegister() { return x3; }
+constexpr Register CallApiGetterDescriptor::NameRegister() {
+  return kCArgRegs[0];
+}
 
 // static
 constexpr Register GrowArrayElementsDescriptor::ObjectRegister() { return x0; }
@@ -131,6 +158,22 @@ constexpr Register BaselineLeaveFrameDescriptor::WeightRegister() { return x4; }
 // static
 // static
 constexpr Register TypeConversionDescriptor::ArgumentRegister() { return x0; }
+
+// static
+constexpr Register
+MaglevOptimizeCodeOrTailCallOptimizedCodeSlotDescriptor::FlagsRegister() {
+  return x8;
+}
+// static
+constexpr Register MaglevOptimizeCodeOrTailCallOptimizedCodeSlotDescriptor::
+    FeedbackVectorRegister() {
+  return x9;
+}
+// static
+constexpr Register
+MaglevOptimizeCodeOrTailCallOptimizedCodeSlotDescriptor::TemporaryRegister() {
+  return x5;
+}
 
 // static
 constexpr auto TypeofDescriptor::registers() { return RegisterArray(x0); }
@@ -178,6 +221,14 @@ constexpr auto CallFunctionTemplateDescriptor::registers() {
   // x1 : function template info
   // x2 : number of arguments (on the stack)
   return RegisterArray(x1, x2);
+}
+
+// static
+constexpr auto CallFunctionTemplateGenericDescriptor::registers() {
+  // x1 : function template info
+  // x2 : number of arguments (on the stack)
+  // x3 : topmost script-having context
+  return RegisterArray(x1, x2, x3);
 }
 
 // static
@@ -257,6 +308,42 @@ constexpr auto Compare_BaselineDescriptor::registers() {
   return RegisterArray(x1, x0, x2);
 }
 
+#ifdef V8_ENABLE_SPARKPLUG_PLUS
+// static
+constexpr auto CompareAndTryPatchCodeDescriptor::registers() {
+  // x1: left operand
+  // x0: right operand
+  // x2: current feedback value
+  // x3: feedback offset
+  return RegisterArray(x1, x0, x2, x3);
+}
+
+// static
+constexpr auto BinaryOpAndTryPatchCodeDescriptor::registers() {
+  // x1: left operand
+  // x0: right operand
+  // x2: current feedback value
+  // x3: feedback offset
+  return RegisterArray(x1, x0, x2, x3);
+}
+
+// static
+constexpr auto UnaryOpAndTryPatchCodeDescriptor::registers() {
+  // x0: value
+  // x2: current feedback value
+  // x3: feedback offset
+  return RegisterArray(x0, x2, x3);
+}
+#endif  // V8_ENABLE_SPARKPLUG_PLUS
+
+// static
+constexpr auto Compare_WithEmbeddedFeedbackOffsetDescriptor::registers() {
+  // x1: left operand
+  // x0: right operand
+  // x2: feedback offset
+  return RegisterArray(x1, x0, x2);
+}
+
 // static
 constexpr auto BinaryOpDescriptor::registers() {
   // x1: left operand
@@ -273,11 +360,11 @@ constexpr auto BinaryOp_BaselineDescriptor::registers() {
 }
 
 // static
-constexpr auto BinarySmiOp_BaselineDescriptor::registers() {
-  // x0: left operand
-  // x1: right operand
-  // x2: feedback slot
-  return RegisterArray(x0, x1, x2);
+constexpr auto BinaryOp_WithEmbeddedFeedbackOffsetDescriptor::registers() {
+  // x1: left operand
+  // x0: right operand
+  // x2: feedback offset
+  return RegisterArray(x1, x0, x2);
 }
 
 // static
@@ -291,12 +378,9 @@ CallApiCallbackOptimizedDescriptor::ActualArgumentsCountRegister() {
   return x2;
 }
 // static
-constexpr Register CallApiCallbackOptimizedDescriptor::CallDataRegister() {
+constexpr Register
+CallApiCallbackOptimizedDescriptor::FunctionTemplateInfoRegister() {
   return x3;
-}
-// static
-constexpr Register CallApiCallbackOptimizedDescriptor::HolderRegister() {
-  return x0;
 }
 
 // static
@@ -305,12 +389,14 @@ CallApiCallbackGenericDescriptor::ActualArgumentsCountRegister() {
   return x2;
 }
 // static
-constexpr Register CallApiCallbackGenericDescriptor::CallHandlerInfoRegister() {
-  return x3;
+constexpr Register
+CallApiCallbackGenericDescriptor::TopmostScriptHavingContextRegister() {
+  return x1;
 }
 // static
-constexpr Register CallApiCallbackGenericDescriptor::HolderRegister() {
-  return x0;
+constexpr Register
+CallApiCallbackGenericDescriptor::FunctionTemplateInfoRegister() {
+  return x3;
 }
 
 // static
@@ -338,6 +424,12 @@ constexpr auto InterpreterPushArgsThenConstructDescriptor::registers() {
 }
 
 // static
+constexpr auto ConstructForwardAllArgsDescriptor::registers() {
+  return RegisterArray(x1,   // constructor to call
+                       x3);  // new target
+}
+
+// static
 constexpr auto ResumeGeneratorDescriptor::registers() {
   return RegisterArray(x0,   // the value to pass to the generator
                        x1);  // the JSGeneratorObject to resume
@@ -348,7 +440,7 @@ constexpr auto RunMicrotasksEntryDescriptor::registers() {
   return RegisterArray(x0, x1);
 }
 
-constexpr auto WasmNewJSToWasmWrapperDescriptor::registers() {
+constexpr auto WasmJSToWasmWrapperDescriptor::registers() {
   // Arbitrarily picked register.
   return RegisterArray(x8);
 }

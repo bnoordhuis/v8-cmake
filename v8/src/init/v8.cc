@@ -7,34 +7,47 @@
 #include <fstream>
 
 #include "include/cppgc/platform.h"
+#include "include/v8-sandbox.h"
 #include "src/api/api.h"
+#include "src/base/abort-mode.h"
 #include "src/base/atomicops.h"
 #include "src/base/once.h"
 #include "src/base/platform/platform.h"
 #include "src/codegen/cpu-features.h"
 #include "src/codegen/interface-descriptors.h"
 #include "src/common/code-memory-access.h"
+#include "src/common/synchronization-point-support.h"
 #include "src/debug/debug.h"
 #include "src/deoptimizer/deoptimizer.h"
 #include "src/execution/frames.h"
 #include "src/execution/isolate.h"
 #include "src/execution/simulator.h"
+#include "src/flags/flags.h"
 #include "src/init/bootstrapper.h"
 #include "src/libsampler/sampler.h"
 #include "src/objects/elements.h"
 #include "src/objects/objects-inl.h"
 #include "src/profiler/heap-profiler.h"
+#include "src/sandbox/hardware-support.h"
 #include "src/sandbox/sandbox.h"
+#include "src/sandbox/testing.h"
 #include "src/snapshot/snapshot.h"
+#if defined(V8_USE_PERFETTO)
+#include "src/tracing/code-data-source.h"
+#endif  // defined(V8_USE_PERFETTO)
 #include "src/tracing/tracing-category-observer.h"
 
 #if V8_ENABLE_WEBASSEMBLY
 #include "src/wasm/wasm-engine.h"
 #endif  // V8_ENABLE_WEBASSEMBLY
 
-#if defined(V8_OS_WIN) && defined(V8_ENABLE_ETW_STACK_WALKING)
+#if defined(V8_ENABLE_ETW_STACK_WALKING)
 #include "src/diagnostics/etw-jit-win.h"
-#endif
+#endif  // V8_ENABLE_ETW_STACK_WALKING
+
+#if defined(V8_ENABLE_SANDBOX) && defined(V8_ENABLE_MEMORY_CORRUPTION_API)
+#include "src/sandbox/external-strings-cage.h"
+#endif  // V8_ENABLE_SANDBOX && V8_ENABLE_MEMORY_CORRUPTION_API
 
 namespace v8 {
 namespace internal {
@@ -99,13 +112,19 @@ void V8::InitializePlatform(v8::Platform* platform) {
   CHECK_NOT_NULL(platform);
   platform_ = platform;
   v8::base::SetPrintStackTrace(platform_->GetStackTracePrinter());
-  v8::tracing::TracingCategoryObserver::SetUp();
-#if defined(V8_OS_WIN) && defined(V8_ENABLE_ETW_STACK_WALKING)
-  if (v8_flags.enable_etw_stack_walking) {
-    // TODO(sartang@microsoft.com): Move to platform specific diagnostics object
-    v8::internal::ETWJITInterface::Register();
+#if defined(V8_USE_PERFETTO)
+  // TrackEvent must be registered before TracingCategoryObserver::SetUp().
+  if (perfetto::Tracing::IsInitialized()) {
+    TrackEvent::Register();
   }
 #endif
+  v8::tracing::TracingCategoryObserver::SetUp();
+#if defined(V8_ENABLE_ETW_STACK_WALKING)
+  if (v8_flags.enable_etw_stack_walking ||
+      v8_flags.enable_etw_by_custom_filter_only) {
+    v8::internal::ETWJITInterface::Register();
+  }
+#endif  // V8_ENABLE_ETW_STACK_WALKING
 
   // Initialization needs to happen on platform-level, as this sets up some
   // cppgc internals that are needed to allow gracefully failing during cppgc
@@ -125,116 +144,45 @@ void V8::InitializePlatformForTesting(v8::Platform* platform) {
   V8::InitializePlatform(platform);
 }
 
-#define DISABLE_FLAG(flag)                                                    \
-  if (v8_flags.flag) {                                                        \
-    PrintF(stderr,                                                            \
-           "Warning: disabling flag --" #flag " due to conflicting flags\n"); \
-    v8_flags.flag = false;                                                    \
+namespace {
+base::AbortMode ChooseAbortMode() {
+  if (v8_flags.sandbox_fuzzing || v8_flags.hole_fuzzing) {
+    // In this mode, controlled crashes are harmless. Furthermore, DCHECK
+    // failures should be ignored (and execution should continue past them) as
+    // they may otherwise hide issues.
+    return base::AbortMode::kExitWithFailureAndIgnoreDcheckFailures;
   }
+  if (v8_flags.sandbox_testing && !v8_flags.run_as_sandbox_security_poc) {
+    // Similar to the above case, but here we want to exit with a status
+    // indicating success (e.g. zero on unix). This is useful for example for
+    // sandbox regression tests, which should "pass" if they crash in a
+    // controlled fashion (e.g. in a SBXCHECK).
+    return base::AbortMode::kExitWithSuccessAndIgnoreDcheckFailures;
+  }
+  if (v8_flags.fuzzing || v8_flags.allow_natives_for_differential_fuzzing ||
+      v8_flags.run_as_security_poc || v8_flags.run_as_sandbox_security_poc) {
+    // For fuzzing, we want to ignore certain types of crashes that are known
+    // to be safe (no security impact), such as OOMs and similar issues.
+    return base::AbortMode::kExitIfNoSecurityImpact;
+  }
+  if (v8_flags.hard_abort) {
+    return base::AbortMode::kImmediateCrash;
+  }
+  return base::AbortMode::kDefault;
+}
+}  // namespace
 
 void V8::Initialize() {
   AdvanceStartupState(V8StartupState::kV8Initializing);
   CHECK(platform_);
 
-  // Update logging information before enforcing flag implications.
-  FlagValue<bool>* log_all_flags[] = {&v8_flags.log_all,
-                                      &v8_flags.log_code,
-                                      &v8_flags.log_code_disassemble,
-                                      &v8_flags.log_source_code,
-                                      &v8_flags.log_source_position,
-                                      &v8_flags.log_feedback_vector,
-                                      &v8_flags.log_function_events,
-                                      &v8_flags.log_internal_timer_events,
-                                      &v8_flags.log_deopt,
-                                      &v8_flags.log_ic,
-                                      &v8_flags.log_maps};
-  if (v8_flags.log_all) {
-    // Enable all logging flags
-    for (auto* flag : log_all_flags) {
-      *flag = true;
-    }
-    v8_flags.log = true;
-  } else if (!v8_flags.log) {
-    // Enable --log if any log flag is set.
-    for (const auto* flag : log_all_flags) {
-      if (!*flag) continue;
-      v8_flags.log = true;
-      break;
-    }
-    // Profiling flags depend on logging.
-    v8_flags.log = v8_flags.log || v8_flags.perf_prof ||
-                   v8_flags.perf_basic_prof || v8_flags.ll_prof ||
-                   v8_flags.prof || v8_flags.prof_cpp || v8_flags.gdbjit;
-  }
+  SynchronizationPointSupport::Initialize();
+
+  // Setting `g_abort_mode` needs to happen before `EnforceFlagImplications` so
+  // it can apply to flag contradictions.
+  base::g_abort_mode = ChooseAbortMode();
 
   FlagList::EnforceFlagImplications();
-
-  if (v8_flags.predictable && v8_flags.random_seed == 0) {
-    // Avoid random seeds in predictable mode.
-    v8_flags.random_seed = 12347;
-  }
-
-  if (v8_flags.stress_compaction) {
-    v8_flags.force_marking_deque_overflows = true;
-    v8_flags.gc_global = true;
-    v8_flags.max_semi_space_size = 1;
-  }
-
-  if (v8_flags.trace_turbo) {
-    // Create an empty file shared by the process (e.g. the wasm engine).
-    std::ofstream(Isolate::GetTurboCfgFileName(nullptr).c_str(),
-                  std::ios_base::trunc);
-  }
-
-  // Do not expose wasm in jitless mode.
-  //
-  // Even in interpreter-only mode, wasm currently still creates executable
-  // memory at runtime. Unexpose wasm until this changes.
-  // The correctness fuzzers are a special case: many of their test cases are
-  // built by fetching a random property from the the global object, and thus
-  // the global object layout must not change between configs. That is why we
-  // continue exposing wasm on correctness fuzzers even in jitless mode.
-  // TODO(jgruber): Remove this once / if wasm can run without executable
-  // memory.
-#if V8_ENABLE_WEBASSEMBLY
-  if (v8_flags.jitless && !v8_flags.correctness_fuzzer_suppressions) {
-    DISABLE_FLAG(expose_wasm);
-  }
-#endif
-
-  // When fuzzing and concurrent compilation is enabled, disable Turbofan
-  // tracing flags since reading/printing heap state is not thread-safe and
-  // leads to false positives on TSAN bots.
-  // TODO(chromium:1205289): Teach relevant fuzzers to not pass TF tracing
-  // flags instead, and remove this section.
-  if (v8_flags.fuzzing && v8_flags.concurrent_recompilation) {
-    DISABLE_FLAG(trace_turbo);
-    DISABLE_FLAG(trace_turbo_graph);
-    DISABLE_FLAG(trace_turbo_scheduled);
-    DISABLE_FLAG(trace_turbo_reduction);
-    DISABLE_FLAG(trace_turbo_trimming);
-    DISABLE_FLAG(trace_turbo_jt);
-    DISABLE_FLAG(trace_turbo_ceq);
-    DISABLE_FLAG(trace_turbo_loop);
-    DISABLE_FLAG(trace_turbo_alloc);
-    DISABLE_FLAG(trace_all_uses);
-    DISABLE_FLAG(trace_representation);
-    DISABLE_FLAG(trace_turbo_stack_accesses);
-  }
-
-  // The --jitless and --interpreted-frames-native-stack flags are incompatible
-  // since the latter requires code generation while the former prohibits code
-  // generation.
-  CHECK(!v8_flags.interpreted_frames_native_stack || !v8_flags.jitless);
-
-  base::OS::Initialize(v8_flags.hard_abort, v8_flags.gc_fake_mmap);
-
-  if (v8_flags.random_seed) {
-    GetPlatformPageAllocator()->SetRandomMmapSeed(v8_flags.random_seed);
-    GetPlatformVirtualAddressSpace()->SetRandomSeed(v8_flags.random_seed);
-  }
-
-  if (v8_flags.print_flag_values) FlagList::PrintValues();
 
   // Initialize the default FlagList::Hash.
   FlagList::Hash();
@@ -244,20 +192,66 @@ void V8::Initialize() {
   // already reads flags, so they should not be changed afterwards.
   if (v8_flags.freeze_flags_after_init) FlagList::FreezeFlags();
 
-#if defined(V8_ENABLE_SANDBOX)
-  // If enabled, the sandbox must be initialized first.
-  GetProcessWideSandbox()->Initialize(GetPlatformVirtualAddressSpace());
-  CHECK_EQ(kSandboxSize, GetProcessWideSandbox()->size());
+  // Verify the abort mode was not changed by flag implications.
+  DCHECK_EQ(ChooseAbortMode(), base::g_abort_mode);
 
-#if defined(V8_CODE_POINTER_SANDBOXING)
-  GetProcessWideCodePointerTable()->Initialize();
-#endif
-#endif
+  if (v8_flags.trace_turbo) {
+    // Create an empty file shared by the process (e.g. the wasm engine).
+    std::ofstream(Isolate::GetTurboCfgFileName(nullptr).c_str(),
+                  std::ios_base::trunc);
+  }
+
+  // The --jitless and --interpreted-frames-native-stack flags are incompatible
+  // since the latter requires code generation while the former prohibits code
+  // generation.
+  CHECK(!v8_flags.interpreted_frames_native_stack || !v8_flags.jitless);
+
+  base::OS::Initialize(v8_flags.gc_fake_mmap);
+
+  if (v8_flags.random_seed) {
+    GetPlatformPageAllocator()->SetRandomMmapSeed(v8_flags.random_seed);
+    GetPlatformVirtualAddressSpace()->SetRandomSeed(v8_flags.random_seed);
+  }
+
+  if (v8_flags.print_flag_values) FlagList::PrintValues();
+
+  // Fetch the ThreadIsolatedAllocator once since we need to keep the pointer in
+  // protected memory.
+  ThreadIsolation::Initialize(
+      GetCurrentPlatform()->GetThreadIsolatedAllocator());
+
+#ifdef V8_ENABLE_SANDBOX
+  // If enabled, the sandbox must be initialized first.
+  Sandbox::InitializeDefaultOncePerProcess(GetCurrentPlatform(),
+                                           GetPlatformVirtualAddressSpace());
+  CHECK_EQ(kSandboxSize, Sandbox::current()->size());
+
+#ifdef V8_ENABLE_MEMORY_CORRUPTION_API
+  ExternalStringsCage::InitializeOncePerProcess();
+#endif  // V8_ENABLE_MEMORY_CORRUPTION_API
+
+  // Enable sandbox testing mode if requested.
+  //
+  // This will install the sandbox crash filter to ignore all crashes that do
+  // not represent sandbox violations.
+  //
+  // Note: this should happen before the Wasm trap handler is installed, so that
+  // the wasm trap handler is invoked first (and can handle Wasm OOB accesses),
+  // then forwards all "real" crashes to the sandbox crash filter.
+  if (v8_flags.sandbox_testing || v8_flags.sandbox_fuzzing) {
+    SandboxTesting::Mode mode = v8_flags.sandbox_testing
+                                    ? SandboxTesting::Mode::kForTesting
+                                    : SandboxTesting::Mode::kForFuzzing;
+    SandboxTesting::Enable(mode);
+  }
+#endif  // V8_ENABLE_SANDBOX
 
 #if defined(V8_USE_PERFETTO)
-  if (perfetto::Tracing::IsInitialized()) TrackEvent::Register();
+  if (perfetto::Tracing::IsInitialized() && v8_flags.perfetto_code_logger) {
+    v8::internal::CodeDataSource::Register();
+  }
 #endif
-  IsolateAllocator::InitializeOncePerProcess();
+  IsolateGroup::InitializeOncePerProcess();
   Isolate::InitializeOncePerProcess();
 
 #if defined(USE_SIMULATOR)
@@ -268,21 +262,14 @@ void V8::Initialize() {
   Bootstrapper::InitializeOncePerProcess();
   CallDescriptors::InitializeOncePerProcess();
 
-  // Fetch the ThreadIsolatedAllocator once since we need to keep the pointer in
-  // protected memory.
-  ThreadIsolation::Initialize(
-      GetCurrentPlatform()->GetThreadIsolatedAllocator());
-
 #if V8_ENABLE_WEBASSEMBLY
   wasm::WasmEngine::InitializeOncePerProcess();
 #endif  // V8_ENABLE_WEBASSEMBLY
 
-  ExternalReferenceTable::InitializeOncePerProcess();
-
+  ExternalReferenceTable::InitializeOncePerIsolateGroup(
+      IsolateGroup::current()->external_ref_table());
   AdvanceStartupState(V8StartupState::kV8Initialized);
 }
-
-#undef DISABLE_FLAG
 
 void V8::Dispose() {
   AdvanceStartupState(V8StartupState::kV8Disposing);
@@ -297,6 +284,10 @@ void V8::Dispose() {
   ElementsAccessor::TearDown();
   RegisteredExtension::UnregisterAll();
   FlagList::ReleaseDynamicAllocations();
+  IsolateGroup::TearDownOncePerProcess();
+#if defined(V8_ENABLE_SANDBOX) && defined(V8_ENABLE_MEMORY_CORRUPTION_API)
+  ExternalStringsCage::TearDown();
+#endif  // V8_ENABLE_SANDBOX && V8_ENABLE_MEMORY_CORRUPTION_API
   AdvanceStartupState(V8StartupState::kV8Disposed);
 }
 
@@ -304,7 +295,8 @@ void V8::DisposePlatform() {
   AdvanceStartupState(V8StartupState::kPlatformDisposing);
   CHECK(platform_);
 #if defined(V8_OS_WIN) && defined(V8_ENABLE_ETW_STACK_WALKING)
-  if (v8_flags.enable_etw_stack_walking) {
+  if (v8_flags.enable_etw_stack_walking ||
+      v8_flags.enable_etw_by_custom_filter_only) {
     v8::internal::ETWJITInterface::Unregister();
   }
 #endif
@@ -312,16 +304,12 @@ void V8::DisposePlatform() {
   v8::base::SetPrintStackTrace(nullptr);
 
 #ifdef V8_ENABLE_SANDBOX
-  // TODO(chromium:1218005) alternatively, this could move to its own
-  // public TearDownSandbox function.
-  GetProcessWideSandbox()->TearDown();
+  Sandbox::TearDownDefault();
 #endif  // V8_ENABLE_SANDBOX
 
   platform_ = nullptr;
 
-#if DEBUG
-  internal::ThreadIsolation::CheckTrackedMemoryEmpty();
-#endif
+  ThreadIsolation::TearDown();
 
   AdvanceStartupState(V8StartupState::kPlatformDisposed);
 }
@@ -351,4 +339,12 @@ void V8::SetSnapshotBlob(StartupData* snapshot_blob) {
 double Platform::SystemClockTimeMillis() {
   return base::OS::TimeCurrentMillis();
 }
+
+// static
+void SandboxHardwareSupport::InitializeBeforeThreadCreation() {
+#ifdef V8_ENABLE_SANDBOX_HARDWARE_SUPPORT
+  internal::SandboxHardwareSupport::TryActivateBeforeThreadCreation();
+#endif  // V8_ENABLE_SANDBOX_HARDWARE_SUPPORT
+}
+
 }  // namespace v8

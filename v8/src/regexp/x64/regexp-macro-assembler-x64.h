@@ -5,12 +5,14 @@
 #ifndef V8_REGEXP_X64_REGEXP_MACRO_ASSEMBLER_X64_H_
 #define V8_REGEXP_X64_REGEXP_MACRO_ASSEMBLER_X64_H_
 
+#include "src/base/functional/function-ref.h"
 #include "src/codegen/macro-assembler.h"
 #include "src/regexp/regexp-macro-assembler.h"
 #include "src/zone/zone-chunk-list.h"
 
 namespace v8 {
 namespace internal {
+namespace regexp {
 
 class V8_EXPORT_PRIVATE RegExpMacroAssemblerX64
     : public NativeRegExpMacroAssembler {
@@ -18,7 +20,6 @@ class V8_EXPORT_PRIVATE RegExpMacroAssemblerX64
   RegExpMacroAssemblerX64(Isolate* isolate, Zone* zone, Mode mode,
                           int registers_to_save);
   ~RegExpMacroAssemblerX64() override;
-  int stack_limit_slack() override;
   void AdvanceCurrentPosition(int by) override;
   void AdvanceRegister(int reg, int by) override;
   void Backtrack() override;
@@ -29,9 +30,9 @@ class V8_EXPORT_PRIVATE RegExpMacroAssemblerX64
                               Label* on_equal) override;
   void CheckCharacterGT(base::uc16 limit, Label* on_greater) override;
   void CheckCharacterLT(base::uc16 limit, Label* on_less) override;
-  // A "greedy loop" is a loop that is both greedy and with a simple
+  // A "fixed length loop" is a loop that is both greedy and with a simple
   // body. It has a particularly simple implementation.
-  void CheckGreedyLoop(Label* on_tos_equals_current_position) override;
+  void CheckFixedLengthLoop(Label* on_tos_equals_current_position) override;
   void CheckNotAtStart(int cp_offset, Label* on_not_at_start) override;
   void CheckNotBackReference(int start_reg, bool read_backward,
                              Label* on_no_match) override;
@@ -53,14 +54,49 @@ class V8_EXPORT_PRIVATE RegExpMacroAssemblerX64
   bool CheckCharacterNotInRangeArray(const ZoneList<CharacterRange>* ranges,
                                      Label* on_not_in_range) override;
   void CheckBitInTable(Handle<ByteArray> table, Label* on_bit_set) override;
-
+  void SkipUntilBitInTable(int cp_offset, Handle<ByteArray> table,
+                           Handle<ByteArray> nibble_table, int advance_by,
+                           int bounds_check_offset, Label* on_match,
+                           Label* on_no_match) override;
+  bool SkipUntilBitInTableUseSimd(int advance_by) override;
+  bool SkipUntilCharAndUseSimd(int advance_by) override;
+  void SkipUntilCharAndSimd(int cp_offset, int advance_by, unsigned character,
+                            unsigned mask, int bounds_check_offset,
+                            Label* on_match, Label* on_no_match) override;
+  void SkipUntilOneOfMasked(int cp_offset, int advance_by, unsigned both_chars,
+                            unsigned both_mask, int max_offset, unsigned chars1,
+                            unsigned mask1, unsigned chars2, unsigned mask2,
+                            Label* on_match1, Label* on_match2,
+                            Label* on_failure) override;
+  bool SkipUntilOneOfMaskedUseSimd(int advance_by);
+  bool SkipUntilOneOfMasked3UseSimd(
+      const SkipUntilOneOfMasked3Args& args) override;
+  void SkipUntilOneOfMasked3(const SkipUntilOneOfMasked3Args& args) override;
+  bool SkipUntilCharOrCharUseSimd(int advance_by) override;
+  void SkipUntilCharOrCharSimd(int cp_offset, int advance_by, unsigned char1,
+                               unsigned char2, int bounds_check_offset,
+                               Label* on_match, Label* on_no_match) override;
+  bool SkipUntilCharUseSimd(int advance_by) override;
+  void SkipUntilCharSimd(int cp_offset, int advance_by, unsigned character,
+                         int bounds_check_offset, Label* on_match,
+                         Label* on_no_match) override;
   // Checks whether the given offset from the current position is before
   // the end of the string.
   void CheckPosition(int cp_offset, Label* on_outside_input) override;
-  bool CheckSpecialClassRanges(StandardCharacterSet type,
+  void CheckSpecialClassRanges(StandardCharacterSet type,
                                Label* on_no_match) override;
+
+  bool CanTableSwitchOnBits() override;
+  void TableSwitchOnBits(int shift, int table_size, Label* table) override;
+  void EmitTableSwitchTable(Label* table,
+                            base::Vector<Label* const> targets) override;
+
+  void BindJumpTarget(Label* label) override;
+
   void Fail() override;
-  Handle<HeapObject> GetCode(Handle<String> source) override;
+  bool prologue_pushes_fail_label() const override { return true; }
+  DirectHandle<HeapObject> GetCode(DirectHandle<RegExpData> re_data,
+                                   Flags flags) override;
   void GoTo(Label* label) override;
   void IfRegisterGE(int reg, int comparand, Label* if_ge) override;
   void IfRegisterLT(int reg, int comparand, Label* if_lt) override;
@@ -83,12 +119,17 @@ class V8_EXPORT_PRIVATE RegExpMacroAssemblerX64
   void ClearRegisters(int reg_from, int reg_to) override;
   void WriteStackPointerToRegister(int reg) override;
 
+  void RecordComment(std::string_view comment) override {
+    masm_.RecordComment(comment);
+  }
+  MacroAssembler* masm() override { return &masm_; }
+
   // Called from RegExp if the stack-guard is triggered.
   // If the code object is relocated, the return address is fixed before
   // returning.
   // {raw_code} is an Address because this is called via ExternalReference.
   static int CheckStackGuardState(Address* return_address, Address raw_code,
-                                  Address re_frame);
+                                  Address re_frame, uintptr_t extra_space);
 
  private:
   // Offsets from rbp of function parameters and stored registers.
@@ -156,13 +197,15 @@ class V8_EXPORT_PRIVATE RegExpMacroAssemblerX64
   static constexpr int kBackupRsiOffset = kFrameTypeOffset - kSystemPointerSize;
   static constexpr int kBackupRdiOffset = kBackupRsiOffset - kSystemPointerSize;
   static constexpr int kBackupRbxOffset = kBackupRdiOffset - kSystemPointerSize;
-  static constexpr int kNumCalleeSaveRegisters = 3;
-  static constexpr int kLastCalleeSaveRegister = kBackupRbxOffset;
+  static constexpr int kBackupR12Offset = kBackupRbxOffset - kSystemPointerSize;
+  static constexpr int kNumCalleeSaveRegisters = 4;
+  static constexpr int kLastCalleeSaveRegister = kBackupR12Offset;
 #else
   static constexpr int kBackupRbxOffset =
       kNumOutputRegistersOffset - kSystemPointerSize;
-  static constexpr int kNumCalleeSaveRegisters = 1;
-  static constexpr int kLastCalleeSaveRegister = kBackupRbxOffset;
+  static constexpr int kBackupR12Offset = kBackupRbxOffset - kSystemPointerSize;
+  static constexpr int kNumCalleeSaveRegisters = 2;
+  static constexpr int kLastCalleeSaveRegister = kBackupR12Offset;
 #endif
 
   // When adding local variables remember to push space for them in
@@ -197,8 +240,9 @@ class V8_EXPORT_PRIVATE RegExpMacroAssemblerX64
 
   // Check whether we are exceeding the stack limit on the backtrack stack.
   void CheckStackLimit();
+  void AssertAboveStackLimitMinusSlack();
 
-  void CallCheckStackGuardState();
+  void CallCheckStackGuardState(Immediate extra_space = Immediate(0));
   void CallIsCharacterInRangeArray(const ZoneList<CharacterRange>* ranges);
 
   // The rbp-relative location of a regexp register.
@@ -209,18 +253,27 @@ class V8_EXPORT_PRIVATE RegExpMacroAssemblerX64
 
   // The register containing the backtrack stack top. Provides a meaningful
   // name to the register.
-  static constexpr Register backtrack_stackpointer() { return rcx; }
+  static constexpr Register backtrack_stackpointer() { return rbx; }
 
   // The registers containing a self pointer to this code's InstructionStream
   // object.
   static constexpr Register code_object_pointer() { return r8; }
 
-  // Byte size of chars in the string to match (decided by the Mode argument)
-  inline int char_size() { return static_cast<int>(mode_); }
+  inline ScaleFactor CharSizeScaleFactor() {
+    switch (mode()) {
+      case LATIN1:
+        return ScaleFactor::times_1;
+      case UC16:
+        return ScaleFactor::times_2;
+    }
+    UNREACHABLE();
+  }
 
-  // Equivalent to an unconditional branch to the label, unless the label
-  // is nullptr, in which case it is a Backtrack.
-  void BranchOrBacktrack(Label* to);
+  // The real backtrack dispatch (pop a code offset and jump to it), emitted
+  // once in GetCode at backtrack_label_ when the backtrack stack is used.
+  // Backtrack() itself only jumps there, so emitting it does not by itself
+  // mark the backtrack stack as used.
+  void EmitBacktrack();
 
   // Equivalent to a conditional branch to the label, unless the label
   // is nullptr, in which case it is a conditional Backtrack.
@@ -239,24 +292,25 @@ class V8_EXPORT_PRIVATE RegExpMacroAssemblerX64
   inline void SafeReturn();
 
   // Pushes the value of a register on the backtrack stack. Decrements the
-  // stack pointer (rcx) by a word size and stores the register's value there.
+  // backtrack_stackpointer by a word size and stores the register's value
+  // there.
   inline void Push(Register source);
 
-  // Pushes a value on the backtrack stack. Decrements the stack pointer (rcx)
-  // by a word size and stores the value there.
+  // Pushes a value on the backtrack stack. Decrements the
+  // backtrack_stackpointer by a word size and stores the value there.
   inline void Push(Immediate value);
 
   // Pushes the InstructionStream object relative offset of a label on the
-  // backtrack stack (i.e., a backtrack target). Decrements the stack pointer
-  // (rcx) by a word size and stores the value there.
+  // backtrack stack (i.e., a backtrack target). Decrements the
+  // backtrace_stackpointer by a word size and stores the value there.
   inline void Push(Label* label);
 
-  // Pops a value from the backtrack stack. Reads the word at the stack pointer
-  // (rcx) and increments it by a word size.
+  // Pops a value from the backtrack stack. Reads the word at the
+  // backtrack_stackpointer and increments it by a word size.
   inline void Pop(Register target);
 
   // Drops the top value from the backtrack stack without reading it.
-  // Increments the stack pointer (rcx) by a word size.
+  // Increments the backtrack_stackpointer by a word size.
   inline void Drop();
 
   void LoadRegExpStackPointerFromMemory(Register dst);
@@ -265,6 +319,14 @@ class V8_EXPORT_PRIVATE RegExpMacroAssemblerX64
   void PopRegExpBasePointer(Register scratch_pointer_out, Register scratch);
 
   inline void ReadPositionFromRegister(Register dst, int reg);
+
+  void EmitSkipUntilBitInTableSimdHelper(
+      int cp_offset, int advance_by, Handle<ByteArray> nibble_table_handle,
+      int bounds_check_offset, Label* scalar_fallback,
+      base::FunctionRef<void(Register, Register)> on_match);
+  void SplatToXMM(XMMRegister dst, uint64_t splat_value, Register scratch);
+  void SplatCharactersToXMM(XMMRegister dst, uint32_t value,
+                            int character_count, Register scratch);
 
   Isolate* isolate() const { return masm_.isolate(); }
 
@@ -279,9 +341,6 @@ class V8_EXPORT_PRIVATE RegExpMacroAssemblerX64
   const NoRootArrayScope no_root_array_scope_;
 
   ZoneChunkList<int> code_relative_fixup_positions_;
-
-  // Which mode to generate code for (LATIN1 or UC16).
-  const Mode mode_;
 
   // One greater than maximal register index actually used.
   int num_registers_;
@@ -301,6 +360,7 @@ class V8_EXPORT_PRIVATE RegExpMacroAssemblerX64
   Label fallback_label_;
 };
 
+}  // namespace regexp
 }  // namespace internal
 }  // namespace v8
 

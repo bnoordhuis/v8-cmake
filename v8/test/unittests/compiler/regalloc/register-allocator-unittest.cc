@@ -4,6 +4,7 @@
 
 #include "src/codegen/assembler-inl.h"
 #include "src/compiler/pipeline.h"
+#include "src/compiler/turboshaft/pipelines.h"
 #include "test/unittests/compiler/backend/instruction-sequence-unittest.h"
 
 namespace v8 {
@@ -78,7 +79,27 @@ class RegisterAllocatorTest : public InstructionSequenceTest {
  public:
   void Allocate() {
     WireBlocks();
-    Pipeline::AllocateRegistersForTesting(config(), sequence(), false, true);
+
+    InstructionSequence* sequence = this->sequence();
+
+    OptimizedCompilationInfo info(base::ArrayVector("testing"),
+                                  sequence->zone(), CodeKind::FOR_TESTING);
+    ZoneStats zone_stats(sequence->isolate()->allocator());
+    turboshaft::PipelineData data(
+        &zone_stats, turboshaft::TurboshaftPipelineKind::kCSA, nullptr, &info,
+        AssemblerOptions(sequence->isolate()));
+    data.InitializeCodegenComponent(nullptr);
+    data.InitializeFrameData(nullptr);
+    data.InitializeInstructionComponentWithSequence(sequence);
+
+    if (info.trace_turbo_json()) {
+      TurboJsonFile json_of(&info, std::ios_base::trunc);
+      json_of << "{\"function\":\"" << info.GetDebugName().get()
+              << "\", \"source\":\"\",\n\"phases\":[";
+    }
+
+    turboshaft::Pipeline pipeline(&data, turboshaft::kNoLinkage);
+    CHECK(pipeline.AllocateRegisters(config(), nullptr, true));
   }
 };
 
@@ -92,6 +113,31 @@ TEST_F(RegisterAllocatorTest, CanAllocateThreeRegisters) {
   EndBlock(Last());
 
   Allocate();
+}
+
+TEST_F(RegisterAllocatorTest, CombineFPAliasingSimd128InactiveDouble) {
+  if (kFPAliasing != AliasingKind::kCombine) return;
+  // Four double registers give two Simd128 registers under combine aliasing;
+  // the second Simd128 register aliases the two upper double registers.
+  SetNumRegs(4, 4);
+
+  StartBlock();
+  // Occupy the first Simd128 register for the whole block.
+  auto blocker = Define(FPReg(0, kSimd128));
+  // The Simd128 value below has to share resources with the fixed double
+  // definition that follows, since that double aliases the only remaining
+  // Simd128 register.
+  auto simd = EmitOI(FPReg(kNoValue, kSimd128));
+  EmitOI(FPReg(2, kFloat64));
+  Instruction* use = EmitI(Reg(simd));
+  EmitI(Reg(blocker, 0));
+  EndBlock(Last());
+
+  Allocate();
+
+  AllocatedOperand d2(LocationOperand::REGISTER, kFloat64, 2);
+  EXPECT_TRUE(use->InputAt(0)->IsAnyLocationOperand());
+  EXPECT_FALSE(use->InputAt(0)->InterferesWith(d2));
 }
 
 TEST_F(RegisterAllocatorTest, CanAllocateFPRegisters) {

@@ -8,9 +8,13 @@ A **matcher** matches a *single* argument. You can use it inside `ON_CALL()` or
 | `EXPECT_THAT(actual_value, matcher)` | Asserts that `actual_value` matches `matcher`. |
 | `ASSERT_THAT(actual_value, matcher)` | The same as `EXPECT_THAT(actual_value, matcher)`, except that it generates a **fatal** failure. |
 
-{: .callout .note}
-**Note:** Although equality matching via `EXPECT_THAT(actual_value,
-expected_value)` is supported, prefer to make the comparison explicit via
+{: .callout .warning}
+**WARNING:** Equality matching via `EXPECT_THAT(actual_value, expected_value)`
+is supported, however note that implicit conversions can cause surprising
+results. For example, `EXPECT_THAT(some_bool, "some string")` will compile and
+may pass unintentionally.
+
+**BEST PRACTICE:** Prefer to make the comparison explicit via
 `EXPECT_THAT(actual_value, Eq(expected_value))` or `EXPECT_EQ(actual_value,
 expected_value)`.
 
@@ -38,11 +42,14 @@ Matcher                     | Description
 | `Lt(value)`            | `argument < value`                                  |
 | `Ne(value)`            | `argument != value`                                 |
 | `IsFalse()`            | `argument` evaluates to `false` in a Boolean context. |
+| `DistanceFrom(target, m)` | The distance between `argument` and `target` (computed by `abs(argument - target)`) matches `m`. |
+| `DistanceFrom(target, get_distance, m)` | The distance between `argument` and `target` (computed by `get_distance(argument, target)`) matches `m`. |
 | `IsTrue()`             | `argument` evaluates to `true` in a Boolean context. |
 | `IsNull()`             | `argument` is a `NULL` pointer (raw or smart).      |
 | `NotNull()`            | `argument` is a non-null pointer (raw or smart).    |
 | `Optional(m)`          | `argument` is `optional<>` that contains a value matching `m`. (For testing whether an `optional<>` is set, check for equality with `nullopt`. You may need to use `Eq(nullopt)` if the inner type doesn't have `==`.)|
 | `VariantWith<T>(m)`    | `argument` is `variant<>` that holds the alternative of type T with a value matching `m`. |
+| `AnyWith<T>(m)`        | `argument` is `any<>` that holds a value of type T with a value matching `m`. |
 | `Ref(variable)`        | `argument` is a reference to `variable`.            |
 | `TypedEq<type>(value)` | `argument` has type `type` and is equal to `value`. You may need to use this instead of `Eq(value)` when the mock function is overloaded. |
 
@@ -98,12 +105,39 @@ The `argument` can be either a C string or a C++ string object:
 | `StrCaseNe(string)`      | `argument` is not equal to `string`, ignoring case. |
 | `StrEq(string)`          | `argument` is equal to `string`.                  |
 | `StrNe(string)`          | `argument` is not equal to `string`.              |
-| `WhenBase64Unescaped(m)` | `argument` is a base-64 escaped string whose unescaped string matches `m`. |
+| `WhenBase64Unescaped(m)` | `argument` is a base-64 escaped string whose unescaped string matches `m`.  The web-safe format from [RFC 4648](https://www.rfc-editor.org/rfc/rfc4648#section-5) is supported. |
 
 `ContainsRegex()` and `MatchesRegex()` take ownership of the `RE` object. They
 use the regular expression syntax defined
 [here](../advanced.md#regular-expression-syntax). All of these matchers, except
 `ContainsRegex()` and `MatchesRegex()` work for wide strings as well.
+
+## Exception Matchers
+
+| Matcher                                   | Description                      |
+| :---------------------------------------- | :------------------------------- |
+| `Throws<E>()` | The `argument` is a callable object that, when called, throws an exception of the expected type `E`. |
+| `Throws<E>(m)` | The `argument` is a callable object that, when called, throws an exception of type `E` that satisfies the matcher `m`. |
+| `ThrowsMessage<E>(m)` | The `argument` is a callable object that, when called, throws an exception of type `E` with a message that satisfies the matcher `m`. |
+
+Examples:
+
+```cpp
+auto argument = [] { throw std::runtime_error("error msg"); };
+
+// Checks if the lambda throws a `std::runtime_error`.
+EXPECT_THAT(argument, Throws<std::runtime_error>());
+
+// Checks if the lambda throws a `std::runtime_error` with a specific message
+// that matches "error msg".
+EXPECT_THAT(argument,
+            Throws<std::runtime_error>(Property(&std::runtime_error::what,
+                                                Eq("error msg"))));
+
+// Checks if the lambda throws a `std::runtime_error` with a message that
+// contains "msg".
+EXPECT_THAT(argument, ThrowsMessage<std::runtime_error>(HasSubstr("msg")));
+```
 
 ## Container Matchers
 
@@ -167,6 +201,11 @@ messages, you can use:
 | `Property(&class::property, m)` | `argument.property()` (or `argument->property()` when `argument` is a plain pointer) matches matcher `m`, where `argument` is an object of type _class_. The method `property()` must take no argument and be declared as `const`. |
 | `Property(property_name, &class::property, m)` | The same as the two-parameter version, but provides a better error message.
 
+{: .callout .warning}
+Warning: Don't use `Property()` against member functions that you do not own,
+because taking addresses of functions is fragile and generally not part of the
+contract of the function.
+
 **Notes:**
 
 *   You can use `FieldsAre()` to match any type that supports structured
@@ -184,10 +223,6 @@ messages, you can use:
     MyStruct s;
     EXPECT_THAT(s, FieldsAre(42, "aloha"));
     ```
-
-*   Don't use `Property()` against member functions that you do not own, because
-    taking addresses of functions is fragile and generally not part of the
-    contract of the function.
 
 ## Matching the Result of a Function, Functor, or Callback
 
@@ -282,5 +317,17 @@ which must be a permanent callback.
     ```cpp
     MATCHER_P(NestedPropertyMatches, matcher, "") {
       return ExplainMatchResult(matcher, arg.nested().property(), result_listener);
+    }
+    ```
+
+5.  You can use `DescribeMatcher<>` to describe another matcher. For example:
+
+    ```cpp
+    MATCHER_P(XAndYThat, matcher,
+              "X that " + DescribeMatcher<int>(matcher, negation) +
+                  (negation ? " or" : " and") + " Y that " +
+                  DescribeMatcher<double>(matcher, negation)) {
+      return ExplainMatchResult(matcher, arg.x(), result_listener) &&
+             ExplainMatchResult(matcher, arg.y(), result_listener);
     }
     ```

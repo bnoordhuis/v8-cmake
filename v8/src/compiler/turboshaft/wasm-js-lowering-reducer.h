@@ -2,19 +2,17 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#ifndef V8_COMPILER_TURBOSHAFT_WASM_JS_LOWERING_REDUCER_H_
+#define V8_COMPILER_TURBOSHAFT_WASM_JS_LOWERING_REDUCER_H_
+
 #if !V8_ENABLE_WEBASSEMBLY
 #error This header should only be included if WebAssembly is enabled.
 #endif  // !V8_ENABLE_WEBASSEMBLY
 
-#ifndef V8_COMPILER_TURBOSHAFT_WASM_JS_LOWERING_REDUCER_H_
-#define V8_COMPILER_TURBOSHAFT_WASM_JS_LOWERING_REDUCER_H_
-
 #include "src/compiler/turboshaft/assembler.h"
-#include "src/compiler/turboshaft/graph.h"
 #include "src/compiler/turboshaft/operations.h"
-#include "src/compiler/turboshaft/representations.h"
+#include "src/compiler/turboshaft/phase.h"
 #include "src/compiler/wasm-graph-assembler.h"
-#include "src/wasm/wasm-code-manager.h"
 
 namespace v8::internal::compiler::turboshaft {
 
@@ -28,37 +26,51 @@ namespace v8::internal::compiler::turboshaft {
 template <class Next>
 class WasmJSLoweringReducer : public Next {
  public:
-  TURBOSHAFT_REDUCER_BOILERPLATE()
+  TURBOSHAFT_REDUCER_BOILERPLATE(WasmJSLowering)
 
-  OpIndex REDUCE(TrapIf)(OpIndex condition, OpIndex frame_state, bool negated,
+  V<None> REDUCE(WasmTrap)(OptionalV<EagerFrameState> frame_state,
+                           TrapId trap_id) {
+    LowerWasmTrap(frame_state, trap_id);
+    return V<None>::Invalid();
+  }
+
+  V<None> REDUCE(TrapIf)(V<Word32> condition,
+                         OptionalV<EagerFrameState> frame_state, bool negated,
                          TrapId trap_id) {
-    // All TrapIf nodes in JS need to have a FrameState.
+    V<Word32> should_trap = negated ? __ Word32Equal(condition, 0) : condition;
+    IF (UNLIKELY(should_trap)) {
+      LowerWasmTrap(frame_state, trap_id);
+    }
+
+    return V<None>::Invalid();
+  }
+
+ private:
+  void LowerWasmTrap(OptionalV<EagerFrameState> frame_state, TrapId trap_id) {
+    // All WasmTrap nodes in JS need to have a FrameState.
     DCHECK(frame_state.valid());
-    Builtin trap = wasm::RuntimeStubIdToBuiltinName(
-        static_cast<wasm::WasmCode::RuntimeStubId>(trap_id));
-    // The call is not marked as Operator::kNoDeopt. While it cannot actually
-    // deopt, deopt info based on the provided FrameState is required for stack
-    // trace creation of the wasm trap.
+    Builtin trap = static_cast<Builtin>(trap_id);
     const bool needs_frame_state = true;
     const CallDescriptor* tf_descriptor = GetBuiltinCallDescriptor(
         trap, Asm().graph_zone(), StubCallMode::kCallBuiltinPointer,
         needs_frame_state, Operator::kNoProperties);
     const TSCallDescriptor* ts_descriptor =
-        TSCallDescriptor::Create(tf_descriptor, Asm().graph_zone());
+        TSCallDescriptor::Create(tf_descriptor, CanThrow{true},
+                                 LazyDeoptOnThrow{false}, Asm().graph_zone());
 
-    OpIndex new_frame_state = CreateFrameStateWithUpdatedBailoutId(frame_state);
-    OpIndex should_trap = negated ? __ Word32Equal(condition, 0) : condition;
-    IF (UNLIKELY(should_trap)) {
-      OpIndex call_target = __ NumberConstant(static_cast<int>(trap));
-      __ Call(call_target, new_frame_state, {}, ts_descriptor);
-      __ Unreachable();  // The trap builtin never returns.
-    }
-    END_IF
-    return OpIndex::Invalid();
+    V<LazyFrameState> new_frame_state =
+        CreateFrameStateForStackTrace(frame_state.value());
+    OpIndex call_target = __ NumberConstant(static_cast<int>(trap));
+    __ Call(call_target, new_frame_state, {}, ts_descriptor);
+    __ Unreachable();  // The trap builtin never returns.
   }
 
- private:
-  OpIndex CreateFrameStateWithUpdatedBailoutId(OpIndex frame_state) {
+  V<LazyFrameState> CreateFrameStateForStackTrace(
+      V<EagerFrameState> frame_state) {
+    // TODO(dmercadier, dlehmann): Since this frame state is only used for stack
+    // trace capturing and unwinding (as execution never resumes here), we could
+    // optimize this to construct a simpler frame state (e.g., with empty/dead
+    // locals) rather than copying all inputs from the original frame state.
     // Create new FrameState with the correct source position (the position of
     // the trap location).
     const FrameStateOp& frame_state_op =
@@ -66,7 +78,7 @@ class WasmJSLoweringReducer : public Next {
     const FrameStateData* data = frame_state_op.data;
     const FrameStateInfo& info = data->frame_state_info;
 
-    OpIndex origin = Asm().current_operation_origin();
+    V<AnyOrNone> origin = Asm().current_operation_origin();
     DCHECK(origin.valid());
     int offset = __ input_graph().source_positions()[origin].ScriptOffset();
 
@@ -76,13 +88,12 @@ class WasmJSLoweringReducer : public Next {
     FrameStateData* new_data = Asm().graph_zone()->template New<FrameStateData>(
         FrameStateData{*new_info, data->instructions, data->machine_types,
                        data->int_operands});
-    return __ FrameState(frame_state_op.inputs(), frame_state_op.inlined,
-                         new_data);
+    return __ template FrameState<LazyFrameState>(
+        frame_state_op.inputs(), frame_state_op.inlined, new_data);
   }
 
-  Isolate* isolate_ = PipelineData::Get().isolate();
-  SourcePositionTable* source_positions_ =
-      PipelineData::Get().source_positions();
+  Isolate* isolate_ = __ data() -> isolate();
+  SourcePositionTable* source_positions_ = __ data() -> source_positions();
 };
 
 #include "src/compiler/turboshaft/undef-assembler-macros.inc"

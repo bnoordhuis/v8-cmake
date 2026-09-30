@@ -5,10 +5,23 @@
 #if V8_TARGET_ARCH_ARM64
 
 #include "src/codegen/arm64/instructions-arm64.h"
+
 #include "src/codegen/arm64/assembler-arm64-inl.h"
+#include "src/common/code-memory-access-inl.h"
 
 namespace v8 {
 namespace internal {
+
+void Instruction::SetInstructionBits(Instr new_instr,
+                                     WritableJitAllocation* jit_allocation) {
+  // Usually this is aligned, but when de/serializing that's not guaranteed.
+  if (jit_allocation) {
+    jit_allocation->WriteUnalignedValue(reinterpret_cast<Address>(this),
+                                        new_instr);
+  } else {
+    base::WriteUnalignedValue(reinterpret_cast<Address>(this), new_instr);
+  }
+}
 
 bool Instruction::IsLoad() const {
   if (Mask(LoadStoreAnyFMask) != LoadStoreAnyFixed) {
@@ -153,18 +166,17 @@ double Instruction::ImmNEONFP64() const {
   return Imm8ToFP64(ImmNEONabcdefgh());
 }
 
-unsigned CalcLSDataSize(LoadStoreOp op) {
-  DCHECK_EQ(static_cast<unsigned>(LSSize_offset + LSSize_width),
-            kInstrSize * 8);
-  unsigned size = static_cast<Instr>(op) >> LSSize_offset;
+unsigned CalcLSDataSizeLog2(LoadStoreOp op) {
+  DCHECK_EQ(LSSize_offset + LSSize_width, kInstrSize * 8);
+  unsigned size_log2 = static_cast<Instr>(op) >> LSSize_offset;
   if ((op & LSVector_mask) != 0) {
     // Vector register memory operations encode the access size in the "size"
     // and "opc" fields.
-    if ((size == 0) && ((op & LSOpc_mask) >> LSOpc_offset) >= 2) {
-      size = kQRegSizeLog2;
+    if (size_log2 == 0 && ((op & LSOpc_mask) >> LSOpc_offset) >= 2) {
+      size_log2 = kQRegSizeLog2;
     }
   }
-  return size;
+  return size_log2;
 }
 
 unsigned CalcLSPairDataSize(LoadStorePairOp op) {
@@ -214,10 +226,10 @@ bool Instruction::IsTargetInImmPCOffsetRange(Instruction* target) {
   return IsValidImmPCOffset(BranchType(), DistanceTo(target));
 }
 
-void Instruction::SetImmPCOffsetTarget(const AssemblerOptions& options,
+void Instruction::SetImmPCOffsetTarget(Zone* zone, AssemblerOptions options,
                                        Instruction* target) {
   if (IsPCRelAddressing()) {
-    SetPCRelImmTarget(options, target);
+    SetPCRelImmTarget(zone, options, target);
   } else if (IsCondBranchImm()) {
     SetBranchImmTarget<CondBranchType>(target);
   } else if (IsUncondBranchImm()) {
@@ -227,14 +239,14 @@ void Instruction::SetImmPCOffsetTarget(const AssemblerOptions& options,
   } else if (IsTestBranch()) {
     SetBranchImmTarget<TestBranchType>(target);
   } else if (IsUnresolvedInternalReference()) {
-    SetUnresolvedInternalReferenceImmTarget(options, target);
+    SetUnresolvedInternalReferenceImmTarget(zone, options, target);
   } else {
     // Load literal (offset from PC).
     SetImmLLiteral(target);
   }
 }
 
-void Instruction::SetPCRelImmTarget(const AssemblerOptions& options,
+void Instruction::SetPCRelImmTarget(Zone* zone, AssemblerOptions options,
                                     Instruction* target) {
   // ADRP is not supported, so 'this' must point to an ADR instruction.
   DCHECK(IsAdr());
@@ -245,14 +257,14 @@ void Instruction::SetPCRelImmTarget(const AssemblerOptions& options,
     imm = Assembler::ImmPCRelAddress(static_cast<int>(target_offset));
     SetInstructionBits(Mask(~ImmPCRel_mask) | imm);
   } else {
-    PatchingAssembler patcher(options, reinterpret_cast<uint8_t*>(this),
+    PatchingAssembler patcher(zone, options, reinterpret_cast<uint8_t*>(this),
                               PatchingAssembler::kAdrFarPatchableNInstrs);
     patcher.PatchAdrFar(target_offset);
   }
 }
 
 void Instruction::SetUnresolvedInternalReferenceImmTarget(
-    const AssemblerOptions& options, Instruction* target) {
+    Zone* zone, AssemblerOptions options, Instruction* target) {
   DCHECK(IsUnresolvedInternalReference());
   DCHECK(IsAligned(DistanceTo(target), kInstrSize));
   DCHECK(is_int32(DistanceTo(target) >> kInstrSizeLog2));
@@ -261,7 +273,7 @@ void Instruction::SetUnresolvedInternalReferenceImmTarget(
   uint32_t high16 = unsigned_bitextract_32(31, 16, target_offset);
   uint32_t low16 = unsigned_bitextract_32(15, 0, target_offset);
 
-  PatchingAssembler patcher(options, reinterpret_cast<uint8_t*>(this), 2);
+  PatchingAssembler patcher(zone, options, reinterpret_cast<uint8_t*>(this), 2);
   patcher.brk(high16);
   patcher.brk(low16);
 }
@@ -400,6 +412,48 @@ uint8_t NEONFormatDecoder::PickBits(const uint8_t bits[]) {
   }
   return result;
 }
+
+VectorFormat SVESizeDecoder::GetVectorFormat(void) {
+  // Treat scalable vector registers as SIMD&FP ones for the time being and
+  // ignore all register bits except for the least significant 128.
+  switch (instrbits_ & SVESizeFieldMask) {
+    case SVE_B:
+      return kFormat16B;
+    case SVE_H:
+      return kFormat8H;
+    case SVE_S:
+      return kFormat4S;
+    case SVE_D:
+      return kFormat2D;
+    default:
+      UNREACHABLE();
+  }
+}
+
+const char* SVESizeDecoder::Substitute(const char* string) {
+  const char* size = "";
+
+  switch (instrbits_ & SVESizeFieldMask) {
+    case SVE_B:
+      size = "b";
+      break;
+    case SVE_H:
+      size = "h";
+      break;
+    case SVE_S:
+      size = "s";
+      break;
+    case SVE_D:
+      size = "d";
+      break;
+    default:
+      UNREACHABLE();
+  }
+
+  snprintf(form_buffer_, sizeof(form_buffer_), string, size, size, size);
+  return form_buffer_;
+}
+
 }  // namespace internal
 }  // namespace v8
 

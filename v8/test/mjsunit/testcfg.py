@@ -30,7 +30,6 @@ import itertools
 import os
 import re
 
-from testrunner.local import statusfile
 from testrunner.local import testsuite
 from testrunner.objects import testcase
 from testrunner.outproc import base as outproc
@@ -38,22 +37,21 @@ from testrunner.outproc import base as outproc
 
 FILES_PATTERN = re.compile(r"//\s+Files:(.*)")
 ENV_PATTERN = re.compile(r"//\s+Environment Variables:(.*)")
-SELF_SCRIPT_PATTERN = re.compile(r"//\s+Env: TEST_FILE_NAME")
 NO_HARNESS_PATTERN = re.compile(r"^// NO HARNESS$", flags=re.MULTILINE)
 
 
 # Flags known to misbehave when combining arbitrary mjsunit tests. Can also
 # be compiled regular expressions.
-MISBEHAVING_COMBINED_TESTS_FLAGS= [
-  '--check-handle-count',
-  '--enable-tracing',
-  re.compile('--experimental.*'),
-  '--expose-trigger-failure',
-  re.compile('--harmony.*'),
-  '--mock-arraybuffer-allocator',
-  '--print-ast',
-  re.compile('--trace.*'),
-  '--wasm-lazy-compilation',
+MISBEHAVING_COMBINED_TESTS_FLAGS = [
+    '--check-handle-count',
+    '--enable-tracing',
+    re.compile('--experimental.*'),
+    '--expose-trigger-failure',
+    re.compile('--harmony.*'),
+    '--mock-arraybuffer-allocator',
+    '--print-ast',
+    re.compile('--trace.*'),
+    '--wasm-lazy-compilation',
 ]
 
 
@@ -84,7 +82,7 @@ class TestCase(testcase.D8TestCase):
     source = self.get_source()
 
     files_list = []  # List of file names to append to command arguments.
-    files_match = FILES_PATTERN.search(source);
+    files_match = FILES_PATTERN.search(source)
     # Accept several lines of 'Files:'.
     while True:
       if files_match:
@@ -92,21 +90,19 @@ class TestCase(testcase.D8TestCase):
         files_match = FILES_PATTERN.search(source, files_match.end())
       else:
         break
-    files = [ os.path.normpath(os.path.join(self.suite.root, '..', '..', f))
-              for f in files_list ]
-    testfilename = self._get_source_path()
-    if SELF_SCRIPT_PATTERN.search(source):
-      files = (
-        ["-e", "TEST_FILE_NAME=\"%s\"" % testfilename.replace("\\", "\\\\")] +
-        files)
+    files = [
+        os.path.normpath(os.path.join(self.suite.root, '..', '..', f))
+        for f in files_list
+    ]
+    testfilename = str(self._get_source_path())
 
     if NO_HARNESS_PATTERN.search(source):
       mjsunit_files = []
     else:
-      mjsunit_files = [os.path.join(self.suite.root, "mjsunit.js")]
+      mjsunit_files = [self.suite.root / "mjsunit.js"]
 
     if self.framework_name == 'num_fuzzer':
-      mjsunit_files.append(os.path.join(self.suite.root, "mjsunit_numfuzz.js"))
+      mjsunit_files.append(self.suite.root / "mjsunit_numfuzz.js")
 
     self._source_files = files
     self._source_flags = self._parse_source_flags(source)
@@ -127,26 +123,26 @@ class TestCase(testcase.D8TestCase):
     return self._source_flags
 
   def _get_files_params(self):
-    files = list(self._source_files)
+    files = []
     if not self.test_config.no_harness:
       files += self._mjsunit_files
+    files += list(self._source_files)
     files += self._files_suffix
     if self.test_config.isolates:
       files += ['--isolate'] + files
-
     return files
 
   def _get_cmd_env(self):
     return self._env
 
   def _get_source_path(self):
-    base_path = os.path.join(self.suite.root, self.path)
     # Try .js first, and fall back to .mjs.
     # TODO(v8:9406): clean this up by never separating the path from
     # the extension in the first place.
-    if os.path.exists(base_path + self._get_suffix()):
-      return base_path + self._get_suffix()
-    return base_path + '.mjs'
+    js_file = self.suite.root / self.path_js
+    if js_file.exists():
+      return js_file
+    return self.suite.root / self.path_mjs
 
 
 class TestCombiner(testsuite.TestCombiner):

@@ -2,8 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Flags: --harmony-array-grouping
-
 var array = [-0, 1, 0, 2];
 var group = () => {
   let result = Object.groupBy(array, v => v > 0);
@@ -178,3 +176,15 @@ assertThrows(
   () => Object.groupBy(array, 'foobar'),
   TypeError,
 );
+
+// Lots of groups to hit grow path in the intermediate OrderedHashMap
+Object.groupBy('Strings are iterable, actually,', (x) => x);
+
+// Large group.
+Object.groupBy(new Int8Array(65536), function() {});
+
+// Large object.
+{
+  let groupKey = 0;
+  Object.groupBy(new Uint8Array(18000), () => groupKey++);
+}

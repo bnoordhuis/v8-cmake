@@ -61,9 +61,16 @@ enum RegisterCode {
 class Register : public RegisterBase<Register, kRegAfterLast> {
  public:
   constexpr bool is_byte_register() const { return code() <= 3; }
+  // Return the fifth bit of the register code as a 0 or 1.  Used often
+  // when constructing the REX2 prefix byte.
+  constexpr int bit4() const { return (code() >> 4) & 0x1; }
+#ifdef V8_ENABLE_APX_F
   // Return the high bit of the register code as a 0 or 1.  Used often
   // when constructing the REX prefix byte.
+  constexpr int high_bit() const { return (code() >> 3) & 0x1; }
+#else
   constexpr int high_bit() const { return code() >> 3; }
+#endif
   // Return the 3 low bits of the register code.  Used when encoding registers
   // in modR/M, SIB, and opcode bytes.
   constexpr int low_bits() const { return code() & 0x7; }
@@ -89,9 +96,10 @@ static_assert(sizeof(Register) <= sizeof(int),
               "Register can efficiently be passed by value");
 
 // Assign |source| value to |no_reg| and return the |source|'s previous value.
-inline Register ReassignRegister(Register& source) {
-  Register result = source;
-  source = Register::no_reg();
+template <typename RegT>
+inline RegT ReassignRegister(RegT& source) {
+  RegT result = source;
+  source = RegT::no_reg();
   return result;
 }
 
@@ -105,11 +113,8 @@ constexpr int kNumRegs = 16;
 
 #ifdef V8_TARGET_OS_WIN
 // Windows calling convention
-constexpr Register arg_reg_1 = rcx;
-constexpr Register arg_reg_2 = rdx;
-constexpr Register arg_reg_3 = r8;
-constexpr Register arg_reg_4 = r9;
-constexpr int kRegisterPassedArguments = 4;
+constexpr Register kCArgRegs[] = {rcx, rdx, r8, r9};
+
 // The Windows 64 ABI always reserves spill slots on the stack for the four
 // register arguments even if the function takes fewer than four arguments.
 // These stack slots are sometimes called 'home space', sometimes 'shadow
@@ -118,12 +123,10 @@ constexpr int kRegisterPassedArguments = 4;
 constexpr int kWindowsHomeStackSlots = 4;
 #else
 // AMD64 calling convention
-constexpr Register arg_reg_1 = rdi;
-constexpr Register arg_reg_2 = rsi;
-constexpr Register arg_reg_3 = rdx;
-constexpr Register arg_reg_4 = rcx;
-constexpr int kRegisterPassedArguments = 6;
+constexpr Register kCArgRegs[] = {rdi, rsi, rdx, rcx, r8, r9};
 #endif  // V8_TARGET_OS_WIN
+
+constexpr int kRegisterPassedArguments = arraysize(kCArgRegs);
 
 #define DOUBLE_REGISTERS(V) \
   V(xmm0)                   \
@@ -143,8 +146,36 @@ constexpr int kRegisterPassedArguments = 6;
   V(xmm14)                  \
   V(xmm15)
 
-#define FLOAT_REGISTERS DOUBLE_REGISTERS
-#define SIMD128_REGISTERS DOUBLE_REGISTERS
+#define EXTENDED_XMM_REGISTERS(V) \
+  V(xmm16)                        \
+  V(xmm17)                        \
+  V(xmm18)                        \
+  V(xmm19)                        \
+  V(xmm20)                        \
+  V(xmm21)                        \
+  V(xmm22)                        \
+  V(xmm23)                        \
+  V(xmm24)                        \
+  V(xmm25)                        \
+  V(xmm26)                        \
+  V(xmm27)                        \
+  V(xmm28)                        \
+  V(xmm29)                        \
+  V(xmm30)                        \
+  V(xmm31)
+
+#define DOUBLE_REGISTERS_AVX512(V) \
+  DOUBLE_REGISTERS(V)              \
+  EXTENDED_XMM_REGISTERS(V)
+
+#ifdef V8_ENABLE_AVX10_1
+#define ALL_XMM_REGISTERS(V) DOUBLE_REGISTERS_AVX512(V)
+#else
+#define ALL_XMM_REGISTERS(V) DOUBLE_REGISTERS(V)
+#endif  // V8_ENABLE_AVX10_1
+
+#define FLOAT_REGISTERS ALL_XMM_REGISTERS
+#define SIMD128_REGISTERS ALL_XMM_REGISTERS
 
 #define ALLOCATABLE_DOUBLE_REGISTERS(V) \
   V(xmm0)                               \
@@ -181,6 +212,44 @@ constexpr int kRegisterPassedArguments = 6;
   V(ymm14)               \
   V(ymm15)
 
+#define EXTENDED_YMM_REGISTERS(V) \
+  V(ymm16)                        \
+  V(ymm17)                        \
+  V(ymm18)                        \
+  V(ymm19)                        \
+  V(ymm20)                        \
+  V(ymm21)                        \
+  V(ymm22)                        \
+  V(ymm23)                        \
+  V(ymm24)                        \
+  V(ymm25)                        \
+  V(ymm26)                        \
+  V(ymm27)                        \
+  V(ymm28)                        \
+  V(ymm29)                        \
+  V(ymm30)                        \
+  V(ymm31)
+
+#define YMM_REGISTERS_AVX512(V) \
+  YMM_REGISTERS(V)              \
+  EXTENDED_YMM_REGISTERS(V)
+
+#ifdef V8_ENABLE_AVX10_1
+#define ALL_YMM_REGISTERS(V) YMM_REGISTERS_AVX512(V)
+#else
+#define ALL_YMM_REGISTERS(V) YMM_REGISTERS(V)
+#endif  // V8_ENABLE_AVX10_1
+
+#ifdef V8_TARGET_OS_WIN
+#define C_CALL_CALLEE_SAVE_REGISTERS rbx, rdi, rsi, r12, r13, r14, r15
+#define C_CALL_CALLEE_SAVE_FP_REGISTERS \
+  xmm6, xmm7, xmm8, xmm9, xmm10, xmm11, xmm12, xmm13, xmm14, xmm15
+
+#else  // V8_TARGET_OS_WIN
+#define C_CALL_CALLEE_SAVE_REGISTERS rbx, r12, r13, r14, r15
+#define C_CALL_CALLEE_SAVE_FP_REGISTERS
+#endif  // V8_TARGET_OS_WIN
+
 // Returns the number of padding slots needed for stack pointer alignment.
 constexpr int ArgumentPaddingSlots(int argument_count) {
   // No argument padding required.
@@ -192,14 +261,14 @@ constexpr bool kSimdMaskRegisters = false;
 
 enum DoubleRegisterCode {
 #define REGISTER_CODE(R) kDoubleCode_##R,
-  DOUBLE_REGISTERS(REGISTER_CODE)
+  ALL_XMM_REGISTERS(REGISTER_CODE)
 #undef REGISTER_CODE
       kDoubleAfterLast
 };
 
 enum YMMRegisterCode {
 #define REGISTER_CODE(R) kYMMCode_##R,
-  YMM_REGISTERS(REGISTER_CODE)
+  ALL_YMM_REGISTERS(REGISTER_CODE)
 #undef REGISTER_CODE
       kYMMAfterLast
 };
@@ -210,9 +279,20 @@ static_assert(static_cast<int>(kDoubleAfterLast) ==
 
 class XMMRegister : public RegisterBase<XMMRegister, kDoubleAfterLast> {
  public:
+  // bit4() feeds the vector-form EVEX prefix emitter, which is shared by
+  // AVX10.1 and APX, so it must be available whenever either is enabled.
+#if defined(V8_ENABLE_AVX10_1) || defined(V8_ENABLE_APX_F)
+  // Return the fifth bit of the register code as a 0 or 1. Used together with
+  // high_bit() to encode xmm16-31 in the EVEX prefix.
+  int bit4() const { return (code() >> 4) & 0x1; }
+  // Return the high bit of the register code as a 0 or 1.  Used often
+  // when constructing the REX prefix byte.
+  int high_bit() const { return (code() >> 3) & 0x1; }
+#else
   // Return the high bit of the register code as a 0 or 1.  Used often
   // when constructing the REX prefix byte.
   int high_bit() const { return code() >> 3; }
+#endif  // V8_ENABLE_AVX10_1 || V8_ENABLE_APX_F
   // Return the 3 low bits of the register code.  Used when encoding registers
   // in modR/M, SIB, and opcode bytes.
   int low_bits() const { return code() & 0x7; }
@@ -231,6 +311,10 @@ class YMMRegister : public XMMRegister {
   static constexpr YMMRegister from_code(int code) {
     V8_ASSUME(code >= 0 && code < XMMRegister::kNumRegisters);
     return YMMRegister(code);
+  }
+
+  static constexpr YMMRegister from_xmm(XMMRegister xmm) {
+    return YMMRegister(xmm.code());
   }
 
  private:
@@ -252,21 +336,22 @@ using Simd256Register = YMMRegister;
 
 #define DECLARE_REGISTER(R) \
   constexpr DoubleRegister R = DoubleRegister::from_code(kDoubleCode_##R);
-DOUBLE_REGISTERS(DECLARE_REGISTER)
+ALL_XMM_REGISTERS(DECLARE_REGISTER)
 #undef DECLARE_REGISTER
 constexpr DoubleRegister no_dreg = DoubleRegister::no_reg();
 
 #define DECLARE_REGISTER(R) \
   constexpr YMMRegister R = YMMRegister::from_code(kYMMCode_##R);
-YMM_REGISTERS(DECLARE_REGISTER)
+ALL_YMM_REGISTERS(DECLARE_REGISTER)
 #undef DECLARE_REGISTER
 
 // Define {RegisterName} methods for the register types.
 DEFINE_REGISTER_NAMES(Register, GENERAL_REGISTERS)
-DEFINE_REGISTER_NAMES(XMMRegister, DOUBLE_REGISTERS)
-DEFINE_REGISTER_NAMES(YMMRegister, YMM_REGISTERS)
+DEFINE_REGISTER_NAMES(XMMRegister, ALL_XMM_REGISTERS)
+DEFINE_REGISTER_NAMES(YMMRegister, ALL_YMM_REGISTERS)
 
 // Give alias names to registers for calling conventions.
+constexpr Register kStackPointerRegister = rsp;
 constexpr Register kReturnRegister0 = rax;
 constexpr Register kReturnRegister1 = rdx;
 constexpr Register kReturnRegister2 = r8;
@@ -283,11 +368,13 @@ constexpr Register kJavaScriptCallCodeStartRegister = rcx;
 constexpr Register kJavaScriptCallTargetRegister = kJSFunctionRegister;
 constexpr Register kJavaScriptCallNewTargetRegister = rdx;
 constexpr Register kJavaScriptCallExtraArg1Register = rbx;
+constexpr Register kJavaScriptCallDispatchHandleRegister = r15;
 
 constexpr Register kRuntimeCallFunctionRegister = rbx;
 constexpr Register kRuntimeCallArgCountRegister = rax;
 constexpr Register kRuntimeCallArgvRegister = r15;
-constexpr Register kWasmInstanceRegister = rsi;
+constexpr Register kWasmImplicitArgRegister = rsi;
+constexpr Register kWasmTrapHandlerFaultAddressRegister = r10;
 
 // Default scratch register used by MacroAssembler (and other code that needs
 // a spare register). The register isn't callee save, and not used by the

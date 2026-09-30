@@ -6,6 +6,7 @@
 #define V8_OBJECTS_JS_PROXY_H_
 
 #include "src/objects/js-objects.h"
+#include "src/objects/oddball.h"
 #include "torque-generated/builtin-definitions.h"
 
 // Has to be the last include (doesn't have include guards):
@@ -14,122 +15,163 @@
 namespace v8 {
 namespace internal {
 
-#include "torque-generated/src/objects/js-proxy-tq.inc"
+class KeyAccumulator;
 
-// The JSProxy describes EcmaScript Harmony proxies
-class JSProxy : public TorqueGeneratedJSProxy<JSProxy, JSReceiver> {
+// The JSProxy describes ECMAScript Harmony proxies
+V8_OBJECT class JSProxy : public JSReceiver {
  public:
-  V8_WARN_UNUSED_RESULT static MaybeHandle<JSProxy> New(Isolate* isolate,
-                                                        Handle<Object>,
-                                                        Handle<Object>);
+  inline Tagged<UnionOf<JSReceiver, Null>> target() const;
+  inline void set_target(Tagged<UnionOf<JSReceiver, Null>> value,
+                         WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
 
+  inline Tagged<UnionOf<JSReceiver, Null>> handler() const;
+  inline void set_handler(Tagged<UnionOf<JSReceiver, Null>> value,
+                          WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+
+  inline int flags() const;
+  inline void set_flags(int value);
+  V8_WARN_UNUSED_RESULT static MaybeDirectHandle<JSProxy> New(
+      Isolate* isolate, DirectHandle<Object>, DirectHandle<Object>,
+      bool revocable);
+
+  V8_INLINE bool is_revocable() const;
   V8_INLINE bool IsRevoked() const;
-  static void Revoke(Handle<JSProxy> proxy);
+  static void Revoke(DirectHandle<JSProxy> proxy);
 
   // ES6 9.5.1
-  static MaybeHandle<HeapObject> GetPrototype(Handle<JSProxy> receiver);
+  static MaybeDirectHandle<JSPrototype> GetPrototype(
+      DirectHandle<JSProxy> receiver);
 
   // ES6 9.5.2
   V8_WARN_UNUSED_RESULT static Maybe<bool> SetPrototype(
-      Isolate* isolate, Handle<JSProxy> proxy, Handle<Object> value,
-      bool from_javascript, ShouldThrow should_throw);
+      Isolate* isolate, DirectHandle<JSProxy> proxy,
+      DirectHandle<JSPrototype> value, bool from_javascript,
+      ShouldThrow should_throw);
   // ES6 9.5.3
-  V8_WARN_UNUSED_RESULT static Maybe<bool> IsExtensible(Handle<JSProxy> proxy);
+  V8_WARN_UNUSED_RESULT static Maybe<bool> IsExtensible(
+      DirectHandle<JSProxy> proxy);
 
-  // ES6, #sec-isarray.  NOT to be confused with %_IsArray.
-  V8_WARN_UNUSED_RESULT static Maybe<bool> IsArray(Handle<JSProxy> proxy);
+  // https://tc39.es/ecma262/#sec-isarray.  NOT to be confused with %_IsArray.
+  V8_WARN_UNUSED_RESULT static Maybe<bool> IsArray(DirectHandle<JSProxy> proxy);
 
   // ES6 9.5.4 (when passed kDontThrow)
   V8_WARN_UNUSED_RESULT static Maybe<bool> PreventExtensions(
-      Handle<JSProxy> proxy, ShouldThrow should_throw);
+      DirectHandle<JSProxy> proxy, ShouldThrow should_throw);
 
   // ES6 9.5.5
   V8_WARN_UNUSED_RESULT static Maybe<bool> GetOwnPropertyDescriptor(
-      Isolate* isolate, Handle<JSProxy> proxy, Handle<Name> name,
+      Isolate* isolate, DirectHandle<JSProxy> proxy, DirectHandle<Name> name,
       PropertyDescriptor* desc);
 
   // ES6 9.5.6
   V8_WARN_UNUSED_RESULT static Maybe<bool> DefineOwnProperty(
-      Isolate* isolate, Handle<JSProxy> object, Handle<Object> key,
+      Isolate* isolate, DirectHandle<JSProxy> object, DirectHandle<Object> key,
       PropertyDescriptor* desc, Maybe<ShouldThrow> should_throw);
 
   // ES6 9.5.7
-  V8_WARN_UNUSED_RESULT static Maybe<bool> HasProperty(Isolate* isolate,
-                                                       Handle<JSProxy> proxy,
-                                                       Handle<Name> name);
+  V8_WARN_UNUSED_RESULT static Maybe<bool> HasProperty(
+      Isolate* isolate, DirectHandle<JSProxy> proxy, DirectHandle<Name> name);
 
   // This function never returns false.
   // It returns either true or throws.
   V8_WARN_UNUSED_RESULT static Maybe<bool> CheckHasTrap(
-      Isolate* isolate, Handle<Name> name, Handle<JSReceiver> target);
+      Isolate* isolate, DirectHandle<Name> name,
+      DirectHandle<JSReceiver> target);
 
   // ES6 9.5.10
   V8_WARN_UNUSED_RESULT static Maybe<bool> CheckDeleteTrap(
-      Isolate* isolate, Handle<Name> name, Handle<JSReceiver> target);
+      Isolate* isolate, DirectHandle<Name> name,
+      DirectHandle<JSReceiver> target);
 
   // ES6 9.5.8
-  V8_WARN_UNUSED_RESULT static MaybeHandle<Object> GetProperty(
-      Isolate* isolate, Handle<JSProxy> proxy, Handle<Name> name,
-      Handle<Object> receiver, bool* was_found);
+  V8_WARN_UNUSED_RESULT static MaybeHandle<JSAny> GetProperty(
+      Isolate* isolate, DirectHandle<JSProxy> proxy, DirectHandle<Name> name,
+      DirectHandle<JSAny> receiver, bool* was_found);
 
   enum AccessKind { kGet, kSet };
 
-  static MaybeHandle<Object> CheckGetSetTrapResult(Isolate* isolate,
-                                                   Handle<Name> name,
-                                                   Handle<JSReceiver> target,
-                                                   Handle<Object> trap_result,
-                                                   AccessKind access_kind);
+  static MaybeHandle<JSAny> CheckGetSetTrapResult(
+      Isolate* isolate, DirectHandle<Name> name,
+      DirectHandle<JSReceiver> target, DirectHandle<Object> trap_result,
+      AccessKind access_kind);
 
   // ES6 9.5.9
   V8_WARN_UNUSED_RESULT static Maybe<bool> SetProperty(
-      Handle<JSProxy> proxy, Handle<Name> name, Handle<Object> value,
-      Handle<Object> receiver, Maybe<ShouldThrow> should_throw);
+      DirectHandle<JSProxy> proxy, DirectHandle<Name> name,
+      DirectHandle<Object> value, DirectHandle<JSAny> receiver,
+      Maybe<ShouldThrow> should_throw);
 
   // ES6 9.5.10 (when passed LanguageMode::kSloppy)
   V8_WARN_UNUSED_RESULT static Maybe<bool> DeletePropertyOrElement(
-      Handle<JSProxy> proxy, Handle<Name> name, LanguageMode language_mode);
-
-  // ES6 9.5.12
-  V8_WARN_UNUSED_RESULT static Maybe<bool> OwnPropertyKeys(
-      Isolate* isolate, Handle<JSReceiver> receiver, Handle<JSProxy> proxy,
-      PropertyFilter filter, KeyAccumulator* accumulator);
+      DirectHandle<JSProxy> proxy, DirectHandle<Name> name,
+      LanguageMode language_mode);
 
   V8_WARN_UNUSED_RESULT static Maybe<PropertyAttributes> GetPropertyAttributes(
       LookupIterator* it);
 
   // Dispatched behavior.
+  DECL_PRINTER(JSProxy)
   DECL_VERIFIER(JSProxy)
 
   static const int kMaxIterationLimit = 100 * 1024;
 
-  // kTargetOffset aliases with the elements of JSObject. The fact that
-  // JSProxy::target is a Javascript value which cannot be confused with an
-  // elements backing store is exploited by loading from this offset from an
-  // unknown JSReceiver.
-  static_assert(static_cast<int>(JSObject::kElementsOffset) ==
-                static_cast<int>(JSProxy::kTargetOffset));
+  class BodyDescriptor;
 
-  using BodyDescriptor =
-      FixedBodyDescriptor<JSReceiver::kPropertiesOrHashOffset, kSize, kSize>;
-
-  static Maybe<bool> SetPrivateSymbol(Isolate* isolate, Handle<JSProxy> proxy,
-                                      Handle<Symbol> private_name,
+  static Maybe<bool> SetPrivateSymbol(Isolate* isolate,
+                                      DirectHandle<JSProxy> proxy,
+                                      DirectHandle<Symbol> private_name,
                                       PropertyDescriptor* desc,
                                       Maybe<ShouldThrow> should_throw);
 
-  TQ_OBJECT_CONSTRUCTORS(JSProxy)
-};
+  using IsRevocableBit = base::BitField<bool, 0, 1>;
+
+  static constexpr int kIsRevocableBit = IsRevocableBit::encode(true);
+
+#if TAGGED_SIZE_8_BYTES
+  static const int kPaddingOffset;
+#endif
+  static const int kHeaderSize;
+  static const int kSize;
+
+ public:
+  TaggedMember<UnionOf<JSReceiver, Null>> target_;
+  TaggedMember<UnionOf<JSReceiver, Null>> handler_;
+  int32_t flags_;
+#if TAGGED_SIZE_8_BYTES
+  uint32_t padding_;
+#endif
+} V8_OBJECT_END;
+
+#if TAGGED_SIZE_8_BYTES
+inline constexpr int JSProxy::kPaddingOffset = offsetof(JSProxy, padding_);
+#endif
+inline constexpr int JSProxy::kHeaderSize = sizeof(JSProxy);
+inline constexpr int JSProxy::kSize = JSProxy::kHeaderSize;
+
+// kTargetOffset aliases with the elements of JSObject. The fact that
+// JSProxy::target is a Javascript value which cannot be confused with an
+// elements backing store is exploited by loading from this offset from an
+// unknown JSReceiver.
+static_assert(static_cast<int>(offsetof(JSObject, elements_)) ==
+              static_cast<int>(offsetof(JSProxy, target_)));
 
 // JSProxyRevocableResult is just a JSObject with a specific initial map.
 // This initial map adds in-object properties for "proxy" and "revoke".
-// See https://tc39.github.io/ecma262/#sec-proxy.revocable
-class JSProxyRevocableResult
-    : public TorqueGeneratedJSProxyRevocableResult<JSProxyRevocableResult,
-                                                   JSObject> {
+// See https://tc39.es/ecma262/#sec-proxy.revocable
+// Shape-style: no own C++ storage; fields live in the parent JSObject's
+// in-object property slots at fixed offsets past JSObject::kHeaderSize.
+class JSProxyRevocableResult : public JSObject {
  public:
-  // Indices of in-object properties.
-  static const int kProxyIndex = 0;
-  static const int kRevokeIndex = 1;
+  static constexpr int kProxySlotIndex = 0;
+  static constexpr int kRevokeSlotIndex = 1;
+  static constexpr int kInObjectPropertyCount = 2;
+
+  static constexpr int kProxyOffset =
+      JSObject::kHeaderSize + kProxySlotIndex * kTaggedSize;
+  static constexpr int kRevokeOffset =
+      JSObject::kHeaderSize + kRevokeSlotIndex * kTaggedSize;
+  static constexpr int kSize =
+      JSObject::kHeaderSize + kInObjectPropertyCount * kTaggedSize;
 
  private:
   DISALLOW_IMPLICIT_CONSTRUCTORS(JSProxyRevocableResult);

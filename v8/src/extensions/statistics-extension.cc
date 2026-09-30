@@ -5,11 +5,15 @@
 #include "src/extensions/statistics-extension.h"
 
 #include "include/v8-template.h"
+#include "src/api/api.h"
 #include "src/common/assert-scope.h"
 #include "src/execution/isolate.h"
 #include "src/heap/heap-inl.h"  // crbug.com/v8/8499
+#include "src/heap/heap-layout-inl.h"
 #include "src/logging/counters.h"
+#include "src/objects/tagged.h"
 #include "src/roots/roots.h"
+#include "src/sandbox/check.h"
 
 namespace v8 {
 namespace internal {
@@ -30,21 +34,24 @@ static void AddCounter(v8::Isolate* isolate,
                        StatsCounter* counter,
                        const char* name) {
   if (counter->Enabled()) {
-    object
-        ->Set(isolate->GetCurrentContext(),
-              v8::String::NewFromUtf8(isolate, name).ToLocalChecked(),
-              v8::Number::New(isolate, *counter->GetInternalPointer()))
-        .FromJust();
+    v8::Local<v8::Context> context = isolate->GetCurrentContext();
+    v8::Local<v8::String> key =
+        v8::String::NewFromUtf8(isolate, name).ToLocalChecked();
+    v8::Local<v8::Number> value =
+        v8::Number::New(isolate, *counter->GetInternalPointer());
+    // Ignore failure due to throwing setters.
+    std::ignore = object->CreateDataProperty(context, key, value);
   }
 }
 
 static void AddNumber(v8::Isolate* isolate, v8::Local<v8::Object> object,
                       double value, const char* name) {
-  object
-      ->Set(isolate->GetCurrentContext(),
-            v8::String::NewFromUtf8(isolate, name).ToLocalChecked(),
-            v8::Number::New(isolate, value))
-      .FromJust();
+  v8::Local<v8::Context> context = isolate->GetCurrentContext();
+  v8::Local<v8::String> key =
+      v8::String::NewFromUtf8(isolate, name).ToLocalChecked();
+  v8::Local<v8::Number> val = v8::Number::New(isolate, value);
+  // Ignore failure due to throwing setters.
+  std::ignore = object->CreateDataProperty(context, key, val);
 }
 
 
@@ -52,11 +59,13 @@ static void AddNumber64(v8::Isolate* isolate,
                         v8::Local<v8::Object> object,
                         int64_t value,
                         const char* name) {
-  object
-      ->Set(isolate->GetCurrentContext(),
-            v8::String::NewFromUtf8(isolate, name).ToLocalChecked(),
-            v8::Number::New(isolate, static_cast<double>(value)))
-      .FromJust();
+  v8::Local<v8::Context> context = isolate->GetCurrentContext();
+  v8::Local<v8::String> key =
+      v8::String::NewFromUtf8(isolate, name).ToLocalChecked();
+  v8::Local<v8::Number> val =
+      v8::Number::New(isolate, static_cast<double>(value));
+  // Ignore failure due to throwing setters.
+  std::ignore = object->CreateDataProperty(context, key, val);
 }
 
 void StatisticsExtension::GetCounters(
@@ -74,6 +83,8 @@ void StatisticsExtension::GetCounters(
 
   Counters* counters = isolate->counters();
   v8::Local<v8::Object> result = v8::Object::New(info.GetIsolate());
+
+  heap->FreeMainThreadLinearAllocationAreas();
 
   struct StatisticsCounter {
     v8::internal::StatsCounter* counter;
@@ -126,6 +137,15 @@ void StatisticsExtension::GetCounters(
       {heap->code_lo_space()->Available(), "code_lo_space_available_bytes"},
       {heap->code_lo_space()->CommittedMemory(),
        "code_lo_space_commited_bytes"},
+      {heap->trusted_space()->Size(), "trusted_space_live_bytes"},
+      {heap->trusted_space()->Available(), "trusted_space_available_bytes"},
+      {heap->trusted_space()->CommittedMemory(),
+       "trusted_space_commited_bytes"},
+      {heap->trusted_lo_space()->Size(), "trusted_lo_space_live_bytes"},
+      {heap->trusted_lo_space()->Available(),
+       "trusted_lo_space_available_bytes"},
+      {heap->trusted_lo_space()->CommittedMemory(),
+       "trusted_lo_space_commited_bytes"},
   };
 
   for (size_t i = 0; i < arraysize(numbers); i++) {
@@ -141,26 +161,28 @@ void StatisticsExtension::GetCounters(
     HeapObjectIterator iterator(
         reinterpret_cast<Isolate*>(info.GetIsolate())->heap());
     DCHECK(!AllowGarbageCollection::IsAllowed());
-    for (HeapObject obj = iterator.Next(); !obj.is_null();
+    for (Tagged<HeapObject> obj = iterator.Next(); !obj.is_null();
          obj = iterator.Next()) {
-      Object maybe_source_positions;
-      if (obj.IsCode()) {
-        Code code = Code::cast(obj);
-        reloc_info_total += code.relocation_size();
-        // Baseline code doesn't have source positions since it uses
-        // interpreter code positions.
-        if (code.kind() == CodeKind::BASELINE) continue;
-        maybe_source_positions = code.source_position_table();
-      } else if (obj.IsBytecodeArray()) {
+      Tagged<Object> maybe_source_positions;
+      if (Is<Code>(obj)) {
+        SBXCHECK(TrustedHeapLayout::InTrustedSpace(obj));
+        Tagged<Code> code = TrustedCast<Code>(obj);
+        reloc_info_total += code->relocation_size();
+        if (!code->has_source_position_table()) continue;
+        maybe_source_positions = code->source_position_table();
+      } else if (Is<BytecodeArray>(obj)) {
+        SBXCHECK(TrustedHeapLayout::InTrustedSpace(obj));
+        Tagged<BytecodeArray> bytecode_array = TrustedCast<BytecodeArray>(obj);
         maybe_source_positions =
-            BytecodeArray::cast(obj).source_position_table(kAcquireLoad);
+            bytecode_array->raw_source_position_table(kAcquireLoad);
       } else {
         continue;
       }
-      if (!maybe_source_positions.IsByteArray()) continue;
-      ByteArray source_positions = ByteArray::cast(maybe_source_positions);
-      if (source_positions.length() == 0) continue;
-      source_position_table_total += source_positions.Size();
+      if (!Is<TrustedByteArray>(maybe_source_positions)) continue;
+      Tagged<TrustedByteArray> source_positions =
+          TrustedCast<TrustedByteArray>(maybe_source_positions);
+      if (source_positions->ulength().value() == 0) continue;
+      source_position_table_total += source_positions->AllocatedSize();
     }
   }
 

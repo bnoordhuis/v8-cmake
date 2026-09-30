@@ -45,6 +45,16 @@ macro IsContext(o: HeapObject): bool {
 }
 
 @export
+macro IsExtendedMap(o: HeapObject): bool {
+  return Is<ExtendedMap>(o);
+}
+
+@export
+macro IsJSInterceptorMap(o: HeapObject): bool {
+  return Is<JSInterceptorMap>(o);
+}
+
+@export
 macro IsCoverageInfo(o: HeapObject): bool {
   return Is<CoverageInfo>(o);
 }
@@ -72,6 +82,16 @@ macro IsFeedbackVector(o: HeapObject): bool {
 @export
 macro IsHeapNumber(o: HeapObject): bool {
   return Is<HeapNumber>(o);
+}
+
+@export
+macro IsJSModuleNamespace(o: Object): bool {
+  return Is<JSModuleNamespace>(o);
+}
+
+@export
+macro IsJSPrototype(o: HeapObject): bool {
+  return Is<JSPrototype>(o);
 }
 
 @export
@@ -119,6 +139,11 @@ macro IsSymbol(o: HeapObject): bool {
   return Is<Symbol>(o);
 }
 
+@export
+macro IsTuple2(o: HeapObject): bool {
+  return Is<Tuple2>(o);
+}
+
 extern macro TaggedToHeapObject(Object): HeapObject
     labels CastError;
 extern macro TaggedToSmi(Object): Smi
@@ -131,17 +156,15 @@ extern macro HeapObjectToCallable(HeapObject): Callable
     labels CastError;
 extern macro HeapObjectToConstructor(HeapObject): Constructor
     labels CastError;
-extern macro HeapObjectToJSFunctionWithPrototypeSlot(HeapObject):
-    JSFunctionWithPrototypeSlot
-    labels CastError;
 
-macro Cast<A : type extends WeakHeapObject>(o: A|Object): A labels CastError {
+macro Cast<A : type extends WeakHeapObject>(o: A|Object):
+    A labels CastError {
   if (!IsWeakOrCleared(o)) goto CastError;
   return %RawDownCast<A>(o);
 }
 
-macro Cast<A : type extends Object>(implicit context: Context)(o: MaybeObject):
-    A labels CastError {
+macro Cast<A : type extends Object>(
+    implicit context: Context)(o: MaybeObject): A labels CastError {
   typeswitch (o) {
     case (WeakHeapObject): {
       goto CastError;
@@ -334,6 +357,25 @@ Cast<Number|TheHole>(o: Object): Number|TheHole labels CastError {
   }
 }
 
+@if(V8_ENABLE_UNDEFINED_DOUBLE)
+  Cast<Number|Undefined|TheHole>(o: Object): Number|Undefined|
+      TheHole labels CastError {
+    typeswitch (o) {
+      case (o: Number): {
+        return o;
+      }
+      case (o: Undefined): {
+        return o;
+      }
+      case (o: TheHole): {
+        return o;
+      }
+      case (Object): {
+        goto CastError;
+      }
+    }
+  }
+
 Cast<Context|Zero|Undefined>(o: Object): Context|Zero|Undefined
     labels CastError {
   typeswitch (o) {
@@ -417,11 +459,15 @@ Cast<Undefined|JSFunction>(o: HeapObject): Undefined|JSFunction
 
 macro Cast<T : type extends Symbol>(o: Symbol): T labels CastError;
 Cast<PublicSymbol>(s: Symbol): PublicSymbol labels CastError {
-  if (s.flags.is_private) goto CastError;
+  if (s.flags.private_symbol_kind != PrivateSymbolKind::kPublic) {
+    goto CastError;
+  }
   return %RawDownCast<PublicSymbol>(s);
 }
 Cast<PrivateSymbol>(s: Symbol): PrivateSymbol labels CastError {
-  if (s.flags.is_private) return %RawDownCast<PrivateSymbol>(s);
+  if (s.flags.private_symbol_kind != PrivateSymbolKind::kPublic) {
+    return %RawDownCast<PrivateSymbol>(s);
+  }
   goto CastError;
 }
 Cast<PublicSymbol>(o: HeapObject): PublicSymbol labels CastError {
@@ -443,11 +489,6 @@ Cast<Constructor>(o: HeapObject): Constructor
   return HeapObjectToConstructor(o) otherwise CastError;
 }
 
-Cast<JSFunctionWithPrototypeSlot>(o: HeapObject): JSFunctionWithPrototypeSlot
-    labels CastError {
-  return HeapObjectToJSFunctionWithPrototypeSlot(o) otherwise CastError;
-}
-
 Cast<BigInt>(o: HeapObject): BigInt labels CastError {
   if (IsBigInt(o)) return %RawDownCast<BigInt>(o);
   goto CastError;
@@ -459,8 +500,22 @@ Cast<JSRegExpResult>(implicit context: Context)(o: HeapObject): JSRegExpResult
   goto CastError;
 }
 
-Cast<JSSloppyArgumentsObject>(implicit context: Context)(o: HeapObject):
-    JSSloppyArgumentsObject
+Cast<ExtendedMap>(o: HeapObject): ExtendedMap labels CastError {
+  const map = Cast<Map>(o) otherwise CastError;
+  if (!map.bit_field.is_extended_map) goto CastError;
+  return %RawDownCast<ExtendedMap>(map);
+}
+
+Cast<JSInterceptorMap>(o: HeapObject): JSInterceptorMap labels CastError {
+  const map = Cast<ExtendedMap>(o) otherwise CastError;
+  if (map.bit_field_ex.map_kind != ExtendedMapKind::kJSInterceptorMap) {
+    goto CastError;
+  }
+  return %RawDownCast<JSInterceptorMap>(map);
+}
+
+Cast<JSSloppyArgumentsObject>(
+    implicit context: Context)(o: HeapObject): JSSloppyArgumentsObject
     labels CastError {
   const map: Map = o.map;
   if (IsFastAliasedArgumentsMap(map) || IsSloppyArgumentsMap(map) ||
@@ -470,16 +525,16 @@ Cast<JSSloppyArgumentsObject>(implicit context: Context)(o: HeapObject):
   goto CastError;
 }
 
-Cast<JSStrictArgumentsObject>(implicit context: Context)(o: HeapObject):
-    JSStrictArgumentsObject
+Cast<JSStrictArgumentsObject>(
+    implicit context: Context)(o: HeapObject): JSStrictArgumentsObject
     labels CastError {
   const map: Map = o.map;
   if (!IsStrictArgumentsMap(map)) goto CastError;
   return %RawDownCast<JSStrictArgumentsObject>(o);
 }
 
-Cast<JSArgumentsObjectWithLength>(implicit context: Context)(o: HeapObject):
-    JSArgumentsObjectWithLength
+Cast<JSArgumentsObjectWithLength>(
+    implicit context: Context)(o: HeapObject): JSArgumentsObjectWithLength
     labels CastError {
   typeswitch (o) {
     case (o: JSStrictArgumentsObject): {
@@ -506,8 +561,13 @@ Cast<FastJSRegExp>(implicit context: Context)(o: HeapObject): FastJSRegExp
   goto CastError;
 }
 
-Cast<FastJSArray>(implicit context: Context)(o: HeapObject): FastJSArray
-    labels CastError {
+struct CastResult<T: type> {
+  object: T;
+  elementsKind: ElementsKind;
+}
+
+macro CastFastJSArray(implicit context: Context)(o: HeapObject):
+    CastResult<FastJSArray>labels CastError {
   if (IsForceSlowPath()) goto CastError;
 
   if (!Is<JSArray>(o)) goto CastError;
@@ -521,12 +581,20 @@ Cast<FastJSArray>(implicit context: Context)(o: HeapObject): FastJSArray
   if (!IsPrototypeInitialArrayPrototype(map)) goto CastError;
 
   if (IsNoElementsProtectorCellInvalid()) goto CastError;
-  return %RawDownCast<FastJSArray>(o);
+  return CastResult<FastJSArray>{
+    object: %RawDownCast<FastJSArray>(o),
+    elementsKind: elementsKind
+  };
 }
 
-Cast<FastJSArrayForRead>(implicit context: Context)(o: HeapObject):
-    FastJSArrayForRead
+Cast<FastJSArray>(implicit context: Context)(o: HeapObject): FastJSArray
     labels CastError {
+  const result = CastFastJSArray(o) otherwise CastError;
+  return result.object;
+}
+
+macro CastFastJSArrayForRead(implicit context: Context)(o: HeapObject):
+    CastResult<FastJSArrayForRead>labels CastError {
   if (!Is<JSArray>(o)) goto CastError;
 
   // Bailout if receiver has slow elements.
@@ -540,11 +608,21 @@ Cast<FastJSArrayForRead>(implicit context: Context)(o: HeapObject):
   if (!IsPrototypeInitialArrayPrototype(map)) goto CastError;
 
   if (IsNoElementsProtectorCellInvalid()) goto CastError;
-  return %RawDownCast<FastJSArrayForRead>(o);
+  return CastResult<FastJSArrayForRead>{
+    object: %RawDownCast<FastJSArrayForRead>(o),
+    elementsKind: elementsKind
+  };
 }
 
-Cast<FastJSArrayForCopy>(implicit context: Context)(o: HeapObject):
-    FastJSArrayForCopy
+Cast<FastJSArrayForRead>(
+    implicit context: Context)(o: HeapObject): FastJSArrayForRead
+    labels CastError {
+  const result = CastFastJSArrayForRead(o) otherwise CastError;
+  return result.object;
+}
+
+Cast<FastJSArrayForCopy>(
+    implicit context: Context)(o: HeapObject): FastJSArrayForCopy
     labels CastError {
   if (IsArraySpeciesProtectorCellInvalid()) goto CastError;
   // TODO(victorgomes): Check if we can cast from FastJSArrayForRead instead.
@@ -552,23 +630,24 @@ Cast<FastJSArrayForCopy>(implicit context: Context)(o: HeapObject):
   return %RawDownCast<FastJSArrayForCopy>(a);
 }
 
-Cast<FastJSArrayForConcat>(implicit context: Context)(o: HeapObject):
-    FastJSArrayForConcat
+Cast<FastJSArrayForConcat>(
+    implicit context: Context)(o: HeapObject): FastJSArrayForConcat
     labels CastError {
   if (IsIsConcatSpreadableProtectorCellInvalid()) goto CastError;
   const a = Cast<FastJSArrayForCopy>(o) otherwise CastError;
   return %RawDownCast<FastJSArrayForConcat>(a);
 }
 
-Cast<FastJSArrayWithNoCustomIteration>(implicit context: Context)(
-    o: HeapObject): FastJSArrayWithNoCustomIteration
+Cast<FastJSArrayWithNoCustomIteration>(
+    implicit context: Context)(o: HeapObject): FastJSArrayWithNoCustomIteration
     labels CastError {
   if (IsArrayIteratorProtectorCellInvalid()) goto CastError;
   const a = Cast<FastJSArray>(o) otherwise CastError;
   return %RawDownCast<FastJSArrayWithNoCustomIteration>(a);
 }
 
-Cast<FastJSArrayForReadWithNoCustomIteration>(implicit context: Context)(
+Cast<FastJSArrayForReadWithNoCustomIteration>(
+    implicit context: Context)(
     o: HeapObject): FastJSArrayForReadWithNoCustomIteration
     labels CastError {
   if (IsArrayIteratorProtectorCellInvalid()) goto CastError;
@@ -576,20 +655,86 @@ Cast<FastJSArrayForReadWithNoCustomIteration>(implicit context: Context)(
   return %RawDownCast<FastJSArrayForReadWithNoCustomIteration>(a);
 }
 
-Cast<JSSetWithNoCustomIteration>(implicit context: Context)(o: HeapObject):
-    JSSetWithNoCustomIteration
+// LINT.IfChange
+Cast<JSArrayForFastToString>(
+    implicit context: Context)(o: HeapObject): JSArrayForFastToString
+    labels CastError {
+  if (IsForceSlowPath()) goto CastError;
+
+  // We are checking initial JSArray maps against current native context
+  // because
+  // a) it's faster to load it from current context,
+  // b) in case array belongs to another native context the initial map check
+  //    will just fail (we consider this a rare case).
+  const nativeContext = LoadNativeContext(context);
+
+  const map: Map = o.map;
+  const elementsKind = map.elements_kind;
+  // TODO(ishell): add all JSArray initial maps to the native context.
+  if (IsFastElementsKind(elementsKind)) {
+    // Faster check for fast JSArray cases (ensures both instance type is
+    // JS_ARRAY_TYPE and prototype is the initial array prototype).
+    const initialArrayMap =
+        LoadJSArrayElementsMap(map.elements_kind, nativeContext);
+    if (map != initialArrayMap) goto CastError;
+
+  } else {
+    // Check other JSArray cases (non-extensible elements kinds, dictionary
+    // elements).
+
+    // Verify that the prototype is the initial array prototype.
+    const initialArrayPrototype = *NativeContextSlot(
+        nativeContext, ContextSlot::INITIAL_ARRAY_PROTOTYPE_INDEX);
+    if (map.prototype != initialArrayPrototype) goto CastError;
+
+    // Ensure it's a JSArray which doesn't have any properties except "length".
+    if (!IsJSArrayMap(map) || map.bit_field3.number_of_own_descriptors != 1) {
+      goto CastError;
+    }
+    dcheck(TaggedEqual(
+        %RawDownCast<DescriptorArray>(map.instance_descriptors)
+            .descriptors[0]
+            .key,
+        kLengthString));
+  }
+
+  // Verify that the initial array prototype is not modified.
+  const validityCell = *NativeContextSlot(
+      nativeContext, ContextSlot::INITIAL_ARRAY_PROTOTYPE_VALIDITY_CELL_INDEX);
+  if (TaggedEqual(validityCell.maybe_value, kPrototypeChainInvalid)) {
+    goto CastError;
+  }
+
+  return %RawDownCast<JSArrayForFastToString>(o);
+}
+// LINT.ThenChange(/src/builtins/builtins-string-tsa-inl.h)
+
+Cast<JSSetWithNoCustomIteration>(
+    implicit context: Context)(o: HeapObject): JSSetWithNoCustomIteration
     labels CastError {
   if (IsSetIteratorProtectorCellInvalid()) goto CastError;
   const a = Cast<JSSet>(o) otherwise CastError;
   return %RawDownCast<JSSetWithNoCustomIteration>(a);
 }
 
-Cast<JSMapWithNoCustomIteration>(implicit context: Context)(o: HeapObject):
-    JSMapWithNoCustomIteration
+Cast<JSMapWithNoCustomIteration>(
+    implicit context: Context)(o: HeapObject): JSMapWithNoCustomIteration
     labels CastError {
   if (IsMapIteratorProtectorCellInvalid()) goto CastError;
   const a = Cast<JSMap>(o) otherwise CastError;
   return %RawDownCast<JSMapWithNoCustomIteration>(a);
+}
+
+Cast<StableOrderedHashSet>(implicit context: Context)(o: HeapObject):
+    StableOrderedHashSet labels CastError {
+  const table = Cast<OrderedHashSet>(o) otherwise CastError;
+  return %RawDownCast<StableOrderedHashSet>(table);
+}
+
+Cast<StableOrderedHashMap>(implicit context: Context)(o: HeapObject):
+    StableOrderedHashMap labels CastError {
+  const table = Cast<OrderedHashMap>(o) otherwise CastError;
+  return %RawDownCast<StableOrderedHashMap>(table);
 }
 
 macro Cast<T: type>(o: String): T labels CastError;
@@ -713,13 +858,28 @@ Cast<JSReceiver|Null>(o: HeapObject): JSReceiver|Null
   }
 }
 
-Cast<JSReceiver|Symbol>(implicit context: Context)(o: Object): JSReceiver|Symbol
+Cast<JSReceiver|Symbol>(implicit context: Context)(o: Object): JSReceiver|
+    Symbol
     labels CastError {
   typeswitch (o) {
     case (o: JSReceiver): {
       return o;
     }
     case (o: Symbol): {
+      return o;
+    }
+    case (Object): {
+      goto CastError;
+    }
+  }
+}
+
+Cast<Undefined|JSPromise>(o: Object): Undefined|JSPromise labels CastError {
+  typeswitch (o) {
+    case (o: Undefined): {
+      return o;
+    }
+    case (o: JSPromise): {
       return o;
     }
     case (Object): {
@@ -772,8 +932,9 @@ Cast<Zero|PromiseReaction>(implicit context: Context)(o: Object): Zero|
   }
 }
 
-Cast<JSFunction|JSBoundFunction|JSWrappedFunction>(implicit context: Context)(
-    o: Object): JSFunction|JSBoundFunction|JSWrappedFunction labels CastError {
+Cast<JSFunction|JSBoundFunction|JSWrappedFunction>(
+    implicit context: Context)(o: Object): JSFunction|JSBoundFunction|
+    JSWrappedFunction labels CastError {
   typeswitch (o) {
     case (o: JSFunction): {
       return o;
@@ -805,6 +966,21 @@ Cast<FixedArray|Undefined>(o: HeapObject): FixedArray|
   }
 }
 
+Cast<FixedDoubleArray|Undefined>(o: HeapObject): FixedDoubleArray|
+    Undefined labels CastError {
+  typeswitch (o) {
+    case (o: Undefined): {
+      return o;
+    }
+    case (o: FixedDoubleArray): {
+      return o;
+    }
+    case (Object): {
+      goto CastError;
+    }
+  }
+}
+
 Cast<JSProxy|Null>(o: HeapObject): JSProxy|Null labels CastError {
   typeswitch (o) {
     case (o: Null): {
@@ -825,8 +1001,20 @@ macro Is<A : type extends Object, B : type extends Object>(
   return true;
 }
 
-macro UnsafeCast<A : type extends Object>(implicit context: Context)(o: Object):
-    A {
+macro Is<A : type extends Object>(
+    implicit context: Context)(o: MaybeObject): bool {
+  Cast<A>(o) otherwise return false;
+  return true;
+}
+
+macro UnsafeCast<A : type extends Object>(
+    implicit context: Context)(o: Object): A {
+  dcheck(Is<A>(o));
+  return %RawDownCast<A>(o);
+}
+
+macro UnsafeCast<A : type extends Object>(
+    implicit context: Context)(o: MaybeObject): A {
   dcheck(Is<A>(o));
   return %RawDownCast<A>(o);
 }
@@ -835,25 +1023,13 @@ macro UnsafeConstCast<T: type>(r: const &T):&T {
   return %RawDownCast<&T>(r);
 }
 
-UnsafeCast<RegExpMatchInfo>(implicit context: Context)(o: Object):
-    RegExpMatchInfo {
-  dcheck(Is<FixedArray>(o));
-  return %RawDownCast<RegExpMatchInfo>(o);
-}
-
-UnsafeCast<ArrayList>(implicit context: Context)(o: Object): ArrayList {
-  dcheck(Is<FixedArray>(o));
-  return %RawDownCast<ArrayList>(o);
-}
-
 macro UnsafeCast<A : type extends WeakHeapObject>(o: A|Object): A {
   dcheck(IsWeakOrCleared(o));
   return %RawDownCast<A>(o);
 }
 
-macro
-CastOrDefault<T: type, Arg: type, Default: type>(implicit context: Context)(
-    x: Arg, default: Default): T|Default {
+macro CastOrDefault<T: type, Arg: type, Default: type>(
+    implicit context: Context)(x: Arg, default: Default): T|Default {
   return Cast<T>(x) otherwise return default;
 }
 

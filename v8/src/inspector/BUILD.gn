@@ -31,7 +31,10 @@ _protocol_generated = [
 action("protocol_compatibility") {
   visibility = [ ":*" ]  # Only targets in this file can depend on this.
   script = "$_inspector_protocol/check_protocol_compatibility.py"
-  inputs = [ v8_inspector_js_protocol ]
+  inputs = [
+    v8_inspector_js_protocol,
+    "$_inspector_protocol/pdl.py",
+  ]
   _stamp = "$target_gen_dir/js_protocol.stamp"
   outputs = [ _stamp ]
   args = [
@@ -57,6 +60,15 @@ inspector_protocol_generate("protocol_generated_sources") {
 }
 
 config("inspector_config") {
+  # Only targets in this file and v8_internal_headers can depend on this.
+  visibility = [
+    ":*",
+    "../..:v8_internal_headers",
+  ]
+  include_dirs = [ "$target_gen_dir/../../include" ]
+}
+
+config("inspector_internal_config") {
   visibility = [ ":*" ]  # Only targets in this file can depend on this.
 
   configs = [ "../../:internal_config" ]
@@ -64,7 +76,7 @@ config("inspector_config") {
 }
 
 v8_header_set("inspector_test_headers") {
-  configs = [ ":inspector_config" ]
+  configs = [ ":inspector_internal_config" ]
 
   public_deps = [ "../..:v8_headers" ]
 
@@ -94,7 +106,9 @@ v8_source_set("inspector") {
     "../../:v8_libbase",
   ]
 
-  configs = [ ":inspector_config" ]
+  configs = [ ":inspector_internal_config" ]
+
+  public_configs = [ ":inspector_config" ]
 
   sources = rebase_path(_protocol_generated, ".", target_gen_dir)
   sources += [

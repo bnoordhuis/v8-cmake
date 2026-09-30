@@ -7,11 +7,12 @@
 
 #include <cstdint>
 
+#include "include/cppgc/garbage-collected.h"
 #include "include/v8-function-callback.h"
+#include "include/v8-isolate.h"
 #include "include/v8-local-handle.h"
 #include "src/base/logging.h"
 #include "src/base/macros.h"
-#include "v8-isolate.h"
 
 namespace v8 {
 
@@ -51,7 +52,8 @@ enum DebugAsyncActionType {
   kDebugPromiseCatch,
   kDebugPromiseFinally,
   kDebugWillHandle,
-  kDebugDidHandle
+  kDebugDidHandle,
+  kDebugStackTraceCaptured
 };
 
 enum BreakLocationType {
@@ -75,7 +77,8 @@ enum class CoverageMode {
   // precise binary coverage resets counters for incremental updates.
   kPreciseBinary,
   // Similar to the precise coverage modes but provides coverage at a
-  // lower granularity. Design doc: goo.gl/lA2swZ.
+  // lower granularity. Design doc:
+  // https://docs.google.com/document/d/1wCydi2HEZRF0skDeLb6CH0abZnTyVo5Vz5u-jhwi7es
   kBlockCount,
   kBlockBinary,
 };
@@ -130,7 +133,7 @@ class ConsoleContext {
   v8::Local<v8::String> name_;
 };
 
-class ConsoleDelegate {
+class V8_EXPORT_PRIVATE ConsoleDelegate : public cppgc::GarbageCollectedMixin {
  public:
   virtual void Debug(const ConsoleCallArguments& args,
                      const ConsoleContext& context) {}
@@ -176,6 +179,7 @@ class ConsoleDelegate {
                        const ConsoleContext& context) {}
   virtual void TimeStamp(const ConsoleCallArguments& args,
                          const ConsoleContext& context) {}
+  void Trace(cppgc::Visitor* visitor) const override {}
   virtual ~ConsoleDelegate() = default;
 };
 

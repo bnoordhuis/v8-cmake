@@ -7,12 +7,12 @@
 #include <string.h>
 
 #include "src/base/bits.h"
+#include "src/base/numerics/safe_conversions.h"
 #include "src/base/overflowing-math.h"
-#include "src/base/safe_conversions.h"
 #include "src/codegen/assembler-inl.h"
 #include "src/objects/objects-inl.h"
 #include "test/cctest/cctest.h"
-#include "test/cctest/wasm/wasm-run-utils.h"
+#include "test/cctest/wasm/wasm-runner.h"
 #include "test/common/value-helper.h"
 #include "test/common/wasm/test-signatures.h"
 #include "test/common/wasm/wasm-macro-gen.h"
@@ -128,6 +128,49 @@ WASM_EXEC_TEST(I64MulUseOnlyLowWord) {
     }
   }
 }
+
+#if V8_TARGET_ARCH_X64
+WASM_EXEC_TEST(I64MulWideS) {
+  i::v8_flags.wasm_wide_arithmetic = true;
+  WasmRunner<int64_t, int64_t, int64_t> r(execution_tier);
+  const WasmGlobal* global = r.builder().AddGlobal(kWasmI64);
+  r.Build({WASM_LOCAL_GET(0), WASM_LOCAL_GET(1),
+           WASM_NUMERIC_OP(kExprI64MulWideS), kExprGlobalSet, 0});
+  FOR_INT64_INPUTS(i) {
+    FOR_INT64_INPUTS(j) {
+      int64_t expected_low = base::MulWithWraparound(i, j);
+      int64_t expected_high = base::bits::SignedMulHigh64(i, j);
+
+      int64_t actual_low = r.Call(i, j);
+      int64_t actual_high = r.builder().ReadGlobal(*global).to_i64();
+
+      CHECK_EQ(expected_low, actual_low);
+      CHECK_EQ(expected_high, actual_high);
+    }
+  }
+}
+
+WASM_EXEC_TEST(I64MulWideU) {
+  i::v8_flags.wasm_wide_arithmetic = true;
+  WasmRunner<int64_t, int64_t, int64_t> r(execution_tier);
+  const WasmGlobal* global = r.builder().AddGlobal(kWasmI64);
+  r.Build({WASM_LOCAL_GET(0), WASM_LOCAL_GET(1),
+           WASM_NUMERIC_OP(kExprI64MulWideU), kExprGlobalSet, 0});
+  FOR_UINT64_INPUTS(i) {
+    FOR_UINT64_INPUTS(j) {
+      int64_t expected_low = static_cast<int64_t>(i * j);
+      int64_t expected_high =
+          static_cast<int64_t>(base::bits::UnsignedMulHigh64(i, j));
+
+      int64_t actual_low = r.Call(i, j);
+      int64_t actual_high = r.builder().ReadGlobal(*global).to_i64();
+
+      CHECK_EQ(expected_low, actual_low);
+      CHECK_EQ(expected_high, actual_high);
+    }
+  }
+}
+#endif
 
 WASM_EXEC_TEST(I64ShlUseOnlyLowWord) {
   WasmRunner<int32_t, int64_t, int64_t> r(execution_tier);
@@ -1349,18 +1392,20 @@ WASM_EXEC_TEST(StoreMemI64_alignment) {
 
 WASM_EXEC_TEST(I64Global) {
   WasmRunner<int32_t, int32_t> r(execution_tier);
-  int64_t* global = r.builder().AddGlobal<int64_t>();
+  const WasmGlobal* global = r.builder().AddGlobal(kWasmI64);
   // global = global + p0
   r.Build({WASM_GLOBAL_SET(
                0, WASM_I64_AND(WASM_GLOBAL_GET(0),
                                WASM_I64_SCONVERT_I32(WASM_LOCAL_GET(0)))),
            WASM_ZERO});
 
-  r.builder().WriteMemory<int64_t>(global, 0xFFFFFFFFFFFFFFFFLL);
+  r.builder().WriteGlobal(
+      *global, WasmValue(static_cast<int64_t>(0xFFFFFFFFFFFFFFFFLL)));
   for (int i = 9; i < 444444; i += 111111) {
-    int64_t expected = *global & i;
+    int64_t global_val = r.builder().ReadGlobal(*global).to_i64();
+    int64_t expected = global_val & i;
     r.Call(i);
-    CHECK_EQ(expected, *global);
+    CHECK_EQ(expected, r.builder().ReadGlobal(*global).to_i64());
   }
 }
 
@@ -1505,7 +1550,6 @@ WASM_EXEC_TEST(Compile_Wasm_CallIndirect_Many_i64) {
 static void Run_WasmMixedCall_N(TestExecutionTier execution_tier, int start) {
   const int kExpected = 6333;
   const int kElemSize = 8;
-  TestSignatures sigs;
 
   static MachineType mixed[] = {
       MachineType::Int32(),   MachineType::Float32(), MachineType::Int64(),
@@ -1531,7 +1575,7 @@ static void Run_WasmMixedCall_N(TestExecutionTier execution_tier, int start) {
     for (int i = 0; i < num_params; i++) {
       b.AddParam(ValueType::For(memtypes[i]));
     }
-    WasmFunctionCompiler& f = r.NewFunction(b.Build());
+    WasmFunctionCompiler& f = r.NewFunction(b.Get());
     f.Build({WASM_LOCAL_GET(which)});
 
     // =========================================================================

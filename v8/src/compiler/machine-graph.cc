@@ -4,6 +4,9 @@
 
 #include "src/compiler/machine-graph.h"
 
+#include <bit>
+
+#include "src/base/macros.h"
 #include "src/codegen/external-reference.h"
 
 namespace v8 {
@@ -85,6 +88,11 @@ Node* MachineGraph::RelocatableIntPtrConstant(intptr_t value,
              : RelocatableInt32Constant(static_cast<int>(value), rmode);
 }
 
+Node* MachineGraph::RelocatableWasmBuiltinCallTarget(Builtin builtin) {
+  return RelocatableIntPtrConstant(static_cast<intptr_t>(builtin),
+                                   RelocInfo::WASM_STUB_CALL);
+}
+
 Node* MachineGraph::Float32Constant(float value) {
   Node** loc = cache_.FindFloat32Constant(value);
   if (*loc == nullptr) {
@@ -94,6 +102,10 @@ Node* MachineGraph::Float32Constant(float value) {
 }
 
 Node* MachineGraph::Float64Constant(double value) {
+  return Float64Constant(Float64::FromBits(base::bit_cast<uint64_t>(value)));
+}
+
+Node* MachineGraph::Float64Constant(Float64 value) {
   Node** loc = cache_.FindFloat64Constant(value);
   if (*loc == nullptr) {
     *loc = graph()->NewNode(common()->Float64Constant(value));

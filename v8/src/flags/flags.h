@@ -5,7 +5,8 @@
 #ifndef V8_FLAGS_FLAGS_H_
 #define V8_FLAGS_FLAGS_H_
 
-#include "src/base/optional.h"
+#include <optional>
+
 #include "src/common/globals.h"
 
 #if V8_ENABLE_WEBASSEMBLY
@@ -25,7 +26,7 @@ class FlagValue {
   // We currently allow the following types to be used for flags:
   // - Arithmetic types like bool, int, size_t, double; those will trivially be
   //   protected.
-  // - base::Optional<bool>, which is basically a POD, and can also be
+  // - std::optional<bool>, which is basically a POD, and can also be
   //   protected.
   // - const char*, for which we currently do not protect the actual string
   //   value. TODO(12887): Also protect the string storage.
@@ -34,10 +35,11 @@ class FlagValue {
   // works for them.
   static_assert(std::is_same_v<std::decay_t<T>, T>);
   static_assert(std::is_arithmetic_v<T> ||
-                std::is_same_v<base::Optional<bool>, T> ||
+                std::is_same_v<std::optional<bool>, T> ||
                 std::is_same_v<const char*, T>);
 
  public:
+  using underlying_type = T;
   explicit constexpr FlagValue(T value) : value_(value) {}
 
   // Implicitly convert to a {T}. Not marked {constexpr} so we do not get
@@ -71,9 +73,27 @@ struct alignas(kMinimumOSPageSize) FlagValues {
 
 V8_EXPORT_PRIVATE extern FlagValues v8_flags;
 
+// Controls the behavior of the flag processing logic, such as how
+// contradictory flags or implication cycles are handled.
+enum class FlagProcessingMode {
+  // Flag errors lead to abnormal termination (via Abort). This is typically
+  // the default behavior as it clearly indicates flag misconfigurations.
+  kAbortOnError,
+  // Flag errors lead to termination via Exit(-1). This is useful for automated
+  // bug detection systems that may set custom flags. This way, flag
+  // misconfigurations are not treated as crashes but only as failed executions.
+  kExitOnError,
+  // Flag contradictions are explicitly ignored. This can be useful when
+  // fuzzing with random flags that are likely to contradict each other. In
+  // these cases, the testcase will still be executed and the last
+  // specification of each flag will be used.
+  kIgnoreContradictions
+};
+
 // The global list of all flags.
 class V8_EXPORT_PRIVATE FlagList {
  public:
+  static FlagProcessingMode GetFlagProcessingMode();
   class HelpOptions {
    public:
     enum ExitBehavior : bool { kExit = true, kDontExit = false };
@@ -132,6 +152,14 @@ class V8_EXPORT_PRIVATE FlagList {
   static void PrintHelp();
 
   static void PrintValues();
+
+  // Prints JS and Wasm feature flags, categorized by in-progress, staging, and
+  // shipping, as JSON. Used by scripts to clean up flags in test files.
+  static void PrintFeatureFlagsJSON();
+
+  // Reset some contradictory flags provided on the command line during
+  // fuzzing.
+  static void ResolveContradictionsWhenFuzzing();
 
   // Set flags as consequence of being implied by another flag.
   static void EnforceFlagImplications();

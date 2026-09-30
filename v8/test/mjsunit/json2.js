@@ -127,6 +127,11 @@ assertThrows(function() { JSON.stringify(tojson_ex, null, 0); });
 var obj = { toJSON: function(key) { return this.a + key; }, a: "x" };
 TestStringify('{"y":"xy"}', {y: obj});
 
+// Test invalid string length exception.
+assertThrows(function() {
+  JSON.stringify('a'.repeat(%StringMaxLength() - 1));
+});
+
 // Test holes in arrays.
 var fast_smi = [1, 2, 3, 4];
 fast_smi.__proto__ = [7, 7, 7, 7];
@@ -190,3 +195,23 @@ var o = {};
 o.somespecialproperty = 10;
 o["\x19"] = 10;
 assertThrows("JSON.parse('{\"somespecialproperty\":100, \"\x19\":10}')");
+
+let exception_count = 0;
+function foo(v) {
+  try {
+    v["set-i32"];
+  } catch (e) {
+    exception_count++;
+  }
+  try {
+    JSON.stringify(v);
+  } catch (e) {}
+}
+let obj1 = Object('2');
+obj1.__proto__ = { toString: function () {} };
+Object.defineProperty(obj1, "toString", {value: foo});
+%EnsureFeedbackVectorForFunction(foo);
+foo(obj1);
+assertEquals(1, exception_count);
+foo({obj1, b: { toJSON: function () {} }});
+assertEquals(2, exception_count);

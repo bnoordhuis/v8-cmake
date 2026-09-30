@@ -15,12 +15,15 @@ AstFunctionLiteralIdReindexer::AstFunctionLiteralIdReindexer(size_t stack_limit,
 
 AstFunctionLiteralIdReindexer::~AstFunctionLiteralIdReindexer() = default;
 
-void AstFunctionLiteralIdReindexer::Reindex(Expression* pattern) {
+void AstFunctionLiteralIdReindexer::Reindex(Expression* pattern,
+                                            const AllowReindexScope& scope) {
 #ifdef DEBUG
   visited_.clear();
 #endif
   Visit(pattern);
-  CheckVisited(pattern);
+  if (!CheckStackOverflow()) {
+    CheckVisited(pattern);
+  }
 }
 
 void AstFunctionLiteralIdReindexer::VisitFunctionLiteral(FunctionLiteral* lit) {
@@ -29,6 +32,13 @@ void AstFunctionLiteralIdReindexer::VisitFunctionLiteral(FunctionLiteral* lit) {
 
   AstTraversalVisitor::VisitFunctionLiteral(lit);
   lit->set_function_literal_id(lit->function_literal_id() + delta_);
+}
+
+void AstFunctionLiteralIdReindexer::VisitCall(Call* expr) {
+  AstTraversalVisitor::VisitCall(expr);
+  if (expr->is_possibly_eval()) {
+    expr->adjust_eval_scope_info_index(delta_);
+  }
 }
 
 void AstFunctionLiteralIdReindexer::VisitClassLiteral(ClassLiteral* expr) {
@@ -50,10 +60,11 @@ void AstFunctionLiteralIdReindexer::VisitClassLiteral(ClassLiteral* expr) {
   for (int i = 0; i < private_members->length(); ++i) {
     ClassLiteralProperty* prop = private_members->at(i);
 
-    // Private fields have their key and value present in
+    // Private fields and auto-accessors have their key and value present in
     // instance_members_initializer_function, so they will
     // already have been visited.
-    if (prop->kind() == ClassLiteralProperty::Kind::FIELD) {
+    if (prop->kind() == ClassLiteralProperty::Kind::FIELD ||
+        prop->kind() == ClassLiteralProperty::Kind::AUTO_ACCESSOR) {
       CheckVisited(prop->value());
     } else {
       Visit(prop->value());
@@ -63,11 +74,14 @@ void AstFunctionLiteralIdReindexer::VisitClassLiteral(ClassLiteral* expr) {
   for (int i = 0; i < props->length(); ++i) {
     ClassLiteralProperty* prop = props->at(i);
 
-    // Public fields with computed names have their key
-    // and value present in instance_members_initializer_function, so they will
+    // Public fields and auto-accessors with computed names have their key and
+    // value present in instance_members_initializer_function, so they will
     // already have been visited.
-    if (prop->is_computed_name() &&
-        prop->kind() == ClassLiteralProperty::Kind::FIELD) {
+    // The value of auto-accessors is always present in
+    // instance_members_initializer_function.
+    if ((prop->is_computed_name() &&
+         prop->kind() == ClassLiteralProperty::Kind::FIELD) ||
+        (prop->kind() == ClassLiteralProperty::Kind::AUTO_ACCESSOR)) {
       if (!prop->key()->IsLiteral()) {
         CheckVisited(prop->key());
       }
@@ -104,6 +118,7 @@ class AstFunctionLiteralIdReindexChecker final
 }  // namespace
 
 void AstFunctionLiteralIdReindexer::CheckVisited(Expression* expr) {
+  DCHECK(!HasStackOverflow());
   AstFunctionLiteralIdReindexChecker(stack_limit(), &visited_).Visit(expr);
 }
 #endif

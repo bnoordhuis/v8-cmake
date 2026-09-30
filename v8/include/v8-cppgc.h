@@ -32,62 +32,15 @@ class CppHeap;
 
 class CustomSpaceStatisticsReceiver;
 
-/**
- * Describes how V8 wrapper objects maintain references to garbage-collected C++
- * objects.
- */
-struct WrapperDescriptor final {
-  /**
-   * The index used on `v8::Ojbect::SetAlignedPointerFromInternalField()` and
-   * related APIs to add additional data to an object which is used to identify
-   * JS->C++ references.
-   */
-  using InternalFieldIndex = int;
-
-  /**
-   * Unknown embedder id. The value is reserved for internal usages and must not
-   * be used with `CppHeap`.
-   */
-  static constexpr uint16_t kUnknownEmbedderId = UINT16_MAX;
-
-  constexpr WrapperDescriptor(InternalFieldIndex wrappable_type_index,
-                              InternalFieldIndex wrappable_instance_index,
-                              uint16_t embedder_id_for_garbage_collected)
-      : wrappable_type_index(wrappable_type_index),
-        wrappable_instance_index(wrappable_instance_index),
-        embedder_id_for_garbage_collected(embedder_id_for_garbage_collected) {}
-
-  /**
-   * Index of the wrappable type.
-   */
-  InternalFieldIndex wrappable_type_index;
-
-  /**
-   * Index of the wrappable instance.
-   */
-  InternalFieldIndex wrappable_instance_index;
-
-  /**
-   * Embedder id identifying instances of garbage-collected objects. It is
-   * expected that the first field of the wrappable type is a uint16_t holding
-   * the id. Only references to instances of wrappables types with an id of
-   * `embedder_id_for_garbage_collected` will be considered by CppHeap.
-   */
-  uint16_t embedder_id_for_garbage_collected;
-};
-
 struct V8_EXPORT CppHeapCreateParams {
-  CppHeapCreateParams(
-      std::vector<std::unique_ptr<cppgc::CustomSpaceBase>> custom_spaces,
-      WrapperDescriptor wrapper_descriptor)
-      : custom_spaces(std::move(custom_spaces)),
-        wrapper_descriptor(wrapper_descriptor) {}
+  explicit CppHeapCreateParams(
+      std::vector<std::unique_ptr<cppgc::CustomSpaceBase>> custom_spaces)
+      : custom_spaces(std::move(custom_spaces)) {}
 
   CppHeapCreateParams(const CppHeapCreateParams&) = delete;
   CppHeapCreateParams& operator=(const CppHeapCreateParams&) = delete;
 
   std::vector<std::unique_ptr<cppgc::CustomSpaceBase>> custom_spaces;
-  WrapperDescriptor wrapper_descriptor;
   /**
    * Specifies which kind of marking are supported by the heap. The type may be
    * further reduced via runtime flags when attaching the heap to an Isolate.
@@ -100,6 +53,11 @@ struct V8_EXPORT CppHeapCreateParams {
    */
   cppgc::Heap::SweepingType sweeping_support =
       cppgc::Heap::SweepingType::kIncrementalAndConcurrent;
+  /**
+   * Optional marker representing the stack start of the thread creating the
+   * heap.
+   */
+  std::optional<cppgc::StackStartMarker> stack_start_marker = std::nullopt;
 };
 
 /**
@@ -129,14 +87,6 @@ class V8_EXPORT CppHeap {
   cppgc::HeapHandle& GetHeapHandle();
 
   /**
-   * Terminate clears all roots and performs multiple garbage collections to
-   * reclaim potentially newly created objects in destructors.
-   *
-   * After this call, object allocation is prohibited.
-   */
-  void Terminate();
-
-  /**
    * \param detail_level specifies whether should return detailed
    *   statistics or only brief summary statistics.
    * \returns current CppHeap statistics regarding memory consumption
@@ -148,7 +98,7 @@ class V8_EXPORT CppHeap {
   /**
    * Collects statistics for the given spaces and reports them to the receiver.
    *
-   * \param custom_spaces a collection of custom space indicies.
+   * \param custom_spaces a collection of custom space indices.
    * \param receiver an object that gets the results.
    */
   void CollectCustomSpaceStatisticsAtLastGC(
@@ -176,6 +126,28 @@ class V8_EXPORT CppHeap {
    */
   void CollectGarbageInYoungGenerationForTesting(
       cppgc::EmbedderStackState stack_state);
+
+  /**
+   * Controls whether forced garbage collections sweep atomically.
+   *
+   * A forced garbage collection (including
+   * `Isolate::RequestGarbageCollectionForTesting()`) normally sweeps
+   * atomically, so finalizers have already run by the time the collection
+   * returns. When this is enabled, forced collections instead sweep according
+   * to the heap's sweeping support, leaving finalization deferred as it would
+   * be in a natural garbage collection. This lets a test observe an object in
+   * the window between being discovered unreachable and being finalized.
+   *
+   * Note that sweeping may then be concurrent; pass `--single-threaded-gc` for
+   * sweeping that only makes progress on the main thread, and use
+   * `FinishSweepingForTesting()` to close the window deterministically.
+   */
+  void SetForceIncrementalSweepingForTesting(bool value);
+
+  /**
+   * Finishes any in-progress sweeping, running the finalizers it discovers.
+   */
+  void FinishSweepingForTesting();
 
  private:
   CppHeap() = default;

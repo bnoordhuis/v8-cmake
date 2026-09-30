@@ -15,6 +15,11 @@ using CodeLayoutTest = TestWithContext;
 namespace internal {
 
 TEST_F(CodeLayoutTest, CodeLayoutWithoutUnwindingInfo) {
+#ifdef V8_ENABLE_GENERATED_CODE_VALIDATOR
+  // The hardcoded buffer used in this test will fail validation.
+  v8_flags.validate_generated_code = false;
+#endif  // V8_ENABLE_GENERATED_CODE_VALIDATOR
+
   HandleScope handle_scope(i_isolate());
 
   // "Hello, World!" in ASCII, padded to kCodeAlignment.
@@ -34,6 +39,8 @@ TEST_F(CodeLayoutTest, CodeLayoutWithoutUnwindingInfo) {
   code_desc.handler_table_size = 0;
   code_desc.constant_pool_offset = buffer_size;
   code_desc.constant_pool_size = 0;
+  code_desc.jump_table_info_offset = buffer_size;
+  code_desc.jump_table_info_size = 0;
   code_desc.code_comments_offset = buffer_size;
   code_desc.code_comments_size = 0;
   code_desc.reloc_offset = buffer_size;
@@ -42,7 +49,7 @@ TEST_F(CodeLayoutTest, CodeLayoutWithoutUnwindingInfo) {
   code_desc.unwinding_info_size = 0;
   code_desc.origin = nullptr;
 
-  Handle<Code> code =
+  DirectHandle<Code> code =
       Factory::CodeBuilder(i_isolate(), code_desc, CodeKind::FOR_TESTING)
           .Build();
 
@@ -56,6 +63,11 @@ TEST_F(CodeLayoutTest, CodeLayoutWithoutUnwindingInfo) {
 }
 
 TEST_F(CodeLayoutTest, CodeLayoutWithUnwindingInfo) {
+#ifdef V8_ENABLE_GENERATED_CODE_VALIDATOR
+  // The hardcoded buffers used in this test will fail validation.
+  v8_flags.validate_generated_code = false;
+#endif  // V8_ENABLE_GENERATED_CODE_VALIDATOR
+
   HandleScope handle_scope(i_isolate());
 
   // "Hello, World!" in ASCII, padded to kCodeAlignment.
@@ -81,6 +93,8 @@ TEST_F(CodeLayoutTest, CodeLayoutWithUnwindingInfo) {
   code_desc.handler_table_size = 0;
   code_desc.constant_pool_offset = buffer_size;
   code_desc.constant_pool_size = 0;
+  code_desc.jump_table_info_offset = buffer_size;
+  code_desc.jump_table_info_size = 0;
   code_desc.code_comments_offset = buffer_size;
   code_desc.code_comments_size = 0;
   code_desc.reloc_offset = buffer_size;
@@ -89,7 +103,7 @@ TEST_F(CodeLayoutTest, CodeLayoutWithUnwindingInfo) {
   code_desc.unwinding_info_size = unwinding_info_size;
   code_desc.origin = nullptr;
 
-  Handle<Code> code =
+  DirectHandle<Code> code =
       Factory::CodeBuilder(i_isolate(), code_desc, CodeKind::FOR_TESTING)
           .Build();
 

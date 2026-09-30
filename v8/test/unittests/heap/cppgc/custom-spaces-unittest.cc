@@ -4,8 +4,8 @@
 
 #include "include/cppgc/allocation.h"
 #include "include/cppgc/custom-space.h"
-#include "src/heap/cppgc/heap-page.h"
-#include "src/heap/cppgc/raw-heap.h"
+#include "src/heap/cppgc-internal/heap-page.h"
+#include "src/heap/cppgc-internal/raw-heap.h"
 #include "test/unittests/heap/cppgc/tests.h"
 
 namespace cppgc {
@@ -101,7 +101,7 @@ struct SpaceTrait<internal::CustomGCed2> {
 
 template <typename T>
 struct SpaceTrait<
-    T, std::enable_if_t<std::is_base_of<internal::CustomGCedBase, T>::value>> {
+    T, std::enable_if_t<std::is_base_of_v<internal::CustomGCedBase, T>>> {
   using Space = CustomSpace1;
 };
 

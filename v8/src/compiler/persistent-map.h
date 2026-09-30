@@ -8,7 +8,7 @@
 #include <array>
 #include <tuple>
 
-#include "src/base/functional.h"
+#include "src/base/hashing.h"
 #include "src/zone/zone-containers.h"
 
 namespace v8 {
@@ -490,10 +490,11 @@ const Value& PersistentMap<Key, Value, Hasher>::GetFocusedValue(
   }
   if (tree->more) {
     auto it = tree->more->find(key);
-    if (it == tree->more->end())
+    if (it == tree->more->end()) {
       return def_value_;
-    else
+    } else {
       return it->second;
+    }
   } else {
     if (key == tree->key_value.key()) {
       return tree->key_value.value();

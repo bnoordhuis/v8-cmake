@@ -5,8 +5,12 @@
 #ifndef V8_EXECUTION_LOCAL_ISOLATE_INL_H_
 #define V8_EXECUTION_LOCAL_ISOLATE_INL_H_
 
-#include "src/execution/isolate.h"
 #include "src/execution/local-isolate.h"
+// Include the non-inl header before the rest of the headers.
+
+#include <utility>
+
+#include "src/execution/isolate.h"
 #include "src/roots/roots-inl.h"
 
 namespace v8 {
@@ -22,7 +26,16 @@ ReadOnlyHeap* LocalIsolate::read_only_heap() const {
   return isolate_->read_only_heap();
 }
 
-Object LocalIsolate::root(RootIndex index) const {
+bool LocalIsolate::is_short_builtin_calls_enabled() const {
+  return isolate_->is_short_builtin_calls_enabled();
+}
+
+RootsTable& LocalIsolate::roots_table() { return isolate_->roots_table(); }
+const RootsTable& LocalIsolate::roots_table() const {
+  return isolate_->roots_table();
+}
+
+Tagged<Object> LocalIsolate::root(RootIndex index) const {
   DCHECK(RootsTable::IsImmortalImmovable(index));
   return isolate_->root(index);
 }
@@ -33,8 +46,17 @@ Handle<Object> LocalIsolate::root_handle(RootIndex index) const {
 }
 
 template <typename Callback>
-V8_INLINE void LocalIsolate::BlockMainThreadWhileParked(Callback callback) {
-  heap_.BlockMainThreadWhileParked(callback);
+V8_INLINE void LocalIsolate::ExecuteMainThreadWhileParked(Callback callback) {
+  heap_.ExecuteMainThreadWhileParked(std::move(callback));
+}
+
+template <typename Callback>
+V8_INLINE void LocalIsolate::ParkIfOnBackgroundAndExecute(Callback callback) {
+  if (is_main_thread()) {
+    callback();
+  } else {
+    heap_.ExecuteBackgroundThreadWhileParked(std::move(callback));
+  }
 }
 
 }  // namespace internal

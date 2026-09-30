@@ -4,17 +4,15 @@
 
 #include "src/heap/cppgc-js/unified-heap-marking-visitor.h"
 
+#include "src/heap/cppgc-internal/marking-state.h"
+#include "src/heap/cppgc-internal/visitor.h"
 #include "src/heap/cppgc-js/unified-heap-marking-state-inl.h"
-#include "src/heap/cppgc/heap.h"
-#include "src/heap/cppgc/marking-state.h"
-#include "src/heap/cppgc/visitor.h"
 #include "src/heap/heap.h"
 #include "src/heap/mark-compact.h"
+#include "src/heap/minor-mark-sweep.h"
 
 namespace v8 {
 namespace internal {
-
-struct Dummy;
 
 namespace {
 std::unique_ptr<MarkingWorklists::Local> GetV8MarkingWorklists(
@@ -23,7 +21,7 @@ std::unique_ptr<MarkingWorklists::Local> GetV8MarkingWorklists(
   auto* worklist =
       (collection_type == cppgc::internal::CollectionType::kMajor)
           ? heap->mark_compact_collector()->marking_worklists()
-          : heap->minor_mark_compact_collector()->marking_worklists();
+          : heap->minor_mark_sweep_collector()->marking_worklists();
   return std::make_unique<MarkingWorklists::Local>(worklist);
 }
 }  // namespace
@@ -121,12 +119,27 @@ ConcurrentUnifiedHeapMarkingVisitor::ConcurrentUnifiedHeapMarkingVisitor(
                                     concurrent_unified_heap_marking_state_),
       local_marking_worklist_(GetV8MarkingWorklists(v8_heap, collection_type)),
       concurrent_unified_heap_marking_state_(
-          v8_heap, local_marking_worklist_.get(), collection_type) {}
+          v8_heap, local_marking_worklist_.get(), collection_type) {
+  // For testing there also exist configurations with stand-alone CppHeap's that
+  // are not yet attached to an Isolate.
+  if (v8_heap) {
+    current_isolate_scope_.emplace(v8_heap->isolate());
+#ifdef V8_COMPRESS_POINTERS_IN_MULTIPLE_CAGES
+    // This method might be called on a thread that's not bound to any Isolate
+    // and thus IsolateGroup::current could be unset.
+    saved_isolate_group_ = IsolateGroup::current();
+    IsolateGroup::set_current(v8_heap->isolate()->isolate_group());
+#endif
+  }
+}
 
 ConcurrentUnifiedHeapMarkingVisitor::~ConcurrentUnifiedHeapMarkingVisitor() {
   if (local_marking_worklist_) {
     local_marking_worklist_->Publish();
   }
+#ifdef V8_COMPRESS_POINTERS_IN_MULTIPLE_CAGES
+  IsolateGroup::set_current(saved_isolate_group_);
+#endif
 }
 
 bool ConcurrentUnifiedHeapMarkingVisitor::DeferTraceToMutatorThreadIfConcurrent(
@@ -135,7 +148,9 @@ bool ConcurrentUnifiedHeapMarkingVisitor::DeferTraceToMutatorThreadIfConcurrent(
   marking_state_.concurrent_marking_bailout_worklist().Push(
       {parameter, callback, deferred_size});
   static_cast<cppgc::internal::ConcurrentMarkingState&>(marking_state_)
-      .AccountDeferredMarkedBytes(deferred_size);
+      .AccountDeferredMarkedBytes(
+          cppgc::internal::BasePage::FromPayload(const_cast<void*>(parameter)),
+          deferred_size);
   return true;
 }
 

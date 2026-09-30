@@ -5,7 +5,8 @@
 #ifndef V8_DIAGNOSTICS_CODE_TRACER_H_
 #define V8_DIAGNOSTICS_CODE_TRACER_H_
 
-#include "src/base/optional.h"
+#include <optional>
+
 #include "src/base/platform/platform.h"
 #include "src/base/platform/wrappers.h"
 #include "src/base/strings.h"
@@ -28,7 +29,7 @@ class CodeTracer final : public Malloced {
 
     if (v8_flags.redirect_code_traces_to != nullptr) {
       base::StrNCpy(filename_, v8_flags.redirect_code_traces_to,
-                    filename_.length());
+                    filename_.size());
     } else if (isolate_id >= 0) {
       base::SNPrintF(filename_, "code-%d-%d.asm",
                      base::OS::GetCurrentProcessId(), isolate_id);
@@ -68,8 +69,8 @@ class CodeTracer final : public Malloced {
 
    private:
     // Exactly one of these two will be initialized.
-    base::Optional<StdoutStream> stdout_stream_;
-    base::Optional<OFStream> file_stream_;
+    std::optional<StdoutStream> stdout_stream_;
+    std::optional<OFStream> file_stream_;
   };
 
   void OpenFile() {

@@ -18,18 +18,22 @@ with different test suite extensions and build configurations.
 # TODO(majeski): Add some tests for the fuzzers.
 
 from collections import deque
-import os
+from pathlib import Path
+
+import re
 import sys
 import unittest
-from os.path import dirname as up
 from mock import patch
 
-TOOLS_ROOT = up(up(os.path.abspath(__file__)))
-sys.path.append(TOOLS_ROOT)
+TOOLS_ROOT = Path(__file__).resolve().parent.parent
+sys.path.append(str(TOOLS_ROOT))
+
 from testrunner import standard_runner
 from testrunner import num_fuzzer
 from testrunner.testproc import base
 from testrunner.testproc import fuzzer
+from testrunner.testproc import resultdb
+from testrunner.testproc.resultdb_server_mock import RDBMockServer
 from testrunner.utils.test_utils import (
     temp_base,
     TestRunnerTest,
@@ -37,7 +41,17 @@ from testrunner.utils.test_utils import (
     FakeOSContext,
 )
 
+
 class StandardRunnerTest(TestRunnerTest):
+
+  def setUp(self):
+    self.mock_rdb_server = RDBMockServer()
+    resultdb.TESTING_SINK = dict(
+        auth_token='none', address=self.mock_rdb_server.address)
+
+  def tearDown(self):
+    resultdb.TESTING_SINK = None
+
   def get_runner_class(self):
     return standard_runner.StandardTestRunner
 
@@ -124,12 +138,69 @@ class StandardRunnerTest(TestRunnerTest):
     result.stdout_includes('sweet/strawberries default: FAIL')
     result.has_returncode(1)
 
+  def testQuiet(self):
+    """Test that quiet mode drops everything but failures and the counts."""
+    result = self.run_tests(
+        '--quiet',
+        '--variants=default',
+        'sweet/bananas',
+        'sweet/strawberries',
+        infra_staging=False,
+    )
+    result.stdout_includes('sweet/strawberries')
+    result.stdout_includes('1 tests failed')
+    result.stdout_includes('>>> 2 tests ran')
+    result.stdout_excludes('Statusfile variables')
+    result.stdout_excludes('Build found')
+    result.stdout_excludes('Running with test processors')
+    result.stdout_excludes('non-filtered tests')
+    result.has_returncode(1)
+
+  def testQuietReportsZeroTestsRan(self):
+    """Test that quiet mode doesn't report a filter matching nothing as a
+    plain success."""
+    result = self.run_tests(
+        '--quiet',
+        '--variants=default',
+        'sweet/no-such-test',
+        infra_staging=False,
+    )
+    result.stdout_includes('>>> 0 tests ran')
+    result.has_returncode(2)
+
+  def testQuietFromAiAgentEnv(self):
+    """Test that an AI agent environment implies quiet mode."""
+    result = self.run_tests(
+        '--variants=default',
+        'sweet/bananas',
+        infra_staging=False,
+        ai_agent_vars=['AI_AGENT'],
+    )
+    result.stdout_includes('Detected AI agent env (AI_AGENT)')
+    result.stdout_includes('>>> 1 tests ran')
+    result.stdout_excludes('Statusfile variables')
+    result.stdout_excludes('non-filtered tests')
+    result.has_returncode(0)
+
+  def testNoQuietOverridesAiAgentEnv(self):
+    """Test that --no-quiet wins over the environment."""
+    result = self.run_tests(
+        '--no-quiet',
+        '--variants=default',
+        'sweet/bananas',
+        infra_staging=False,
+        ai_agent_vars=['AI_AGENT'],
+    )
+    result.stdout_includes('Statusfile variables')
+    result.stdout_excludes('Detected AI agent env')
+    result.has_returncode(0)
+
   def testGN(self):
     """Test setup with legacy GN out dir."""
     result = self.run_tests('--gn', baseroot="testroot5", outdir='out.gn')
     result.stdout_includes('>>> Latest GN build found: build')
     result.stdout_includes('Build found: ')
-    result.stdout_includes('v8_test_/out.gn/build')
+    result.stdout_includes('_v8_test/out.gn/build')
     result.has_returncode(2)
 
   def testMalformedJsonConfig(self):
@@ -155,7 +226,7 @@ class StandardRunnerTest(TestRunnerTest):
     # With test processors we don't count reruns as separated failures.
     # TODO(majeski): fix it?
     result.stdout_includes('1 tests failed')
-    result.has_returncode(0)
+    result.has_returncode(1)
 
     # TODO(majeski): Previously we only reported the variant flags in the
     # flags field of the test result.
@@ -178,17 +249,17 @@ class StandardRunnerTest(TestRunnerTest):
           infra_staging=False,
       )
 
-      self.assertEquals(len(records), 3)
-      self.assertEquals(records[0]['testId'], 'sweet/bananaflakes//stress')
-      self.assertEquals(tag_dict(records[0]['tags'])['run'], '1')
+      self.assertEqual(len(records), 3)
+      self.assertEqual(records[0]['testId'], 'sweet/bananaflakes//stress')
+      self.assertEqual(tag_dict(records[0]['tags'])['run'], '1')
       self.assertFalse(records[0]['expected'])
 
-      self.assertEquals(records[1]['testId'], 'sweet/bananaflakes//stress')
-      self.assertEquals(tag_dict(records[1]['tags'])['run'], '2')
+      self.assertEqual(records[1]['testId'], 'sweet/bananaflakes//stress')
+      self.assertEqual(tag_dict(records[1]['tags'])['run'], '2')
       self.assertTrue(records[1]['expected'])
 
-      self.assertEquals(records[2]['testId'], 'sweet/bananaflakes//default')
-      self.assertEquals(tag_dict(records[2]['tags'])['run'], '1')
+      self.assertEqual(records[2]['testId'], 'sweet/bananaflakes//default')
+      self.assertEqual(tag_dict(records[2]['tags'])['run'], '1')
       self.assertTrue(records[2]['expected'])
 
   def testFlakeWithRerunAndJSON(self):
@@ -207,8 +278,14 @@ class StandardRunnerTest(TestRunnerTest):
     result.stdout_includes('=== sweet/bananaflakes (flaky) ===')
     result.stdout_includes('1 tests failed')
     result.stdout_includes('1 tests were flaky')
-    result.has_returncode(0)
+    result.has_returncode(1)
     result.json_content_equals('expected_test_results2.json')
+    self.assertTrue(re.search(
+        r'sweet/bananaflakes default: FAIL \(\d+\.\d+:\d+\.\d+\)',
+        result.test_schedule))
+    self.assertTrue(re.search(
+        r'sweet/bananaflakes default: PASS \(\d+\.\d+:\d+\.\d+\)',
+        result.test_schedule))
 
   def testAutoDetect(self):
     """Fake a build with several auto-detected options.
@@ -227,17 +304,32 @@ class StandardRunnerTest(TestRunnerTest):
             dcheck_always_on=True,
             has_webassembly=True,
             msan=True,
+            sandbox_hardware_support=True,
             target_cpu='x86',
             tsan=True,
             ubsan=True,
             use_sanitizer=True,
             v8_target_cpu='x86',
         ))
-    result.stdout_includes('>>> Autodetected:')
+    result.stdout_includes('>>> Statusfile variables:')
     result.stdout_includes(
-        'arch="ia32", asan, cfi, dcheck_always_on, has_webassembly, i18n, '
-        'msan, target_cpu="x86", tsan, ubsan, use_sanitizer, '
-        'v8_target_cpu="x86"')
+        "DEBUG_defined=False, all_arm64_features=False, "
+        "arch=ia32, asan=True, byteorder=little, "
+        "cfi=True, code_comments=False, component_build=False, "
+        "dcheck_always_on=True, debug_code=False, debugging_features=False, "
+        "deopt_fuzzer=False, device_type=None, "
+        "dict_property_const_tracking=False, disassembler=False, dumpling=False, "
+        "endurance_fuzzer=False, full_debug=False, gc_fuzzer=False, "
+        "gc_stress=False, gdbjit=False, has_jitless=False, has_maglev=False, "
+        "has_turbofan=False, has_webassembly=True, i18n=True, "
+        "interrupt_fuzzer=False, is_android=False, is_ios=False, "
+        "isolates=False, lite_mode=False, memory_corruption_api=False, "
+        "mode=debug, msan=True, no_harness=False, no_simd_hardware=False, "
+        "novfp3=False, num_fuzzer=False, optimize_for_size=False, sandbox_hardware_support=True, "
+        "simulator_run=False, single_generation=False, slow_dchecks=False, "
+        "system=linux, target_cpu=x86, tsan=True, ubsan=True, "
+        "use_sanitizer=True, v8_target_cpu=x86, "
+        "verify_heap=False, verify_predictable=False")
     result.stdout_includes('>>> Running tests for ia32.release')
     result.has_returncode(0)
     # TODO(machenbach): Test some more implications of the auto-detected
@@ -262,8 +354,8 @@ class StandardRunnerTest(TestRunnerTest):
           '--progress=verbose',
           'sweet',
       )
-      result.stdout_includes('===>Starting stuff\n'
-                             '>>> Running tests for x64.release\n'
+      result.stdout_includes('===>Starting stuff')
+      result.stdout_includes('>>> Running tests for x64.release\n'
                              '>>> Running with test processors\n')
       result.stdout_includes('--- stdout ---\nfake stdout 1')
       result.stdout_includes('--- stderr ---\nfake stderr 1')
@@ -392,6 +484,32 @@ class StandardRunnerTest(TestRunnerTest):
     # We use a failing test so that the command is printed and we can verify
     # that the right random seed was passed.
     result.stdout_includes('--random-seed=123')
+    result.has_returncode(1)
+
+  def testRandomSeedStressWithNumfuzz(self):
+    """Test using random-seed-stress feature with numfuzz flavor as used by
+    flake bisect for flakes on numfuzz.
+    """
+    result = self.run_tests(
+        '--progress=verbose',
+        '--framework=num_fuzzer',
+        '--variants=default',
+        '--random-seed-stress-count=2',
+        'sweet/bananas',
+        'sweet/apples',
+        infra_staging=False,
+        baseroot='testroot7'
+    )
+
+    # The bananas test is expected to pass when --fuzzing, one of the numfuzz
+    # default flags is present. The apples test is expected to fail with this
+    # flag.
+    result.stdout_includes('sweet/bananas default: PASS')
+    result.stdout_includes('sweet/apples default: FAIL')
+
+    # We get everything twice due to the stress count above set to 2.
+    result.stdout_includes('2 tests failed')
+    result.stdout_includes('4 tests ran')
     result.has_returncode(1)
 
   def testSpecificVariants(self):
@@ -532,8 +650,7 @@ class StandardRunnerTest(TestRunnerTest):
         '-v',
     )
 
-    result.stdout_includes(
-        '--test bananas --random-seed=42 --nohard-abort --testing-d8-test-runner')
+    result.stdout_includes('--test bananas --random-seed=42 --nohard-abort')
     result.has_returncode(0)
 
 
@@ -565,7 +682,9 @@ class NumFuzzerTest(TestRunnerTest):
   def testNumFuzzer(self):
     fuzz_flags = [
       f'{flag}=1' for flag in self.get_runner_options()
-      if flag.startswith('--stress-')
+      if (flag.startswith('--stress-') or
+          flag.startswith('--allocation') or
+          flag.startswith('--scavenge'))
     ]
     self.assertEqual(len(fuzz_flags), len(fuzzer.FUZZERS))
     for fuzz_flag in fuzz_flags:
@@ -588,9 +707,48 @@ class NumFuzzerTest(TestRunnerTest):
               'sweet/bananas',
             )
             result.has_returncode(0)
-            result.stdout_includes('>>> Autodetected')
+            result.stdout_includes('>>> Statusfile variables:')
             result.stdout_includes('11 tests ran')
 
+  def _run_test_with_random_skip(self, prob):
+    """Run a test root that marks sweet/apples as RARE and pass a probability
+    for random skipping rare tests.
+    """
+    with patch('testrunner.testproc.timeout.TimeoutProc.create',
+               lambda x: FakeTimeoutProc(10)):
+      return self.run_tests(
+          '--command-prefix',
+          sys.executable,
+          '--outdir',
+          'out/build',
+          '--variants=default',
+          '--fuzzer-random-seed=12345',
+          '--total-timeout-sec=60',
+          '--allocation-offset=1',
+          '--progress=verbose',
+          f'--skip-rare-tests-prob={prob}',
+          'sweet',
+          baseroot="testroot8")
+
+  def testRandomSkip_Includes(self):
+    """Ensure that a test case marked as FUZZ_RARE (here apples) is still
+    included if the probability for skipping is 0.
+    """
+    result = self._run_test_with_random_skip(0.0)
+    result.has_returncode(0)
+    result.stdout_includes('sweet/apples default: PASS')
+    result.stdout_includes('sweet/bananas default: PASS')
+    result.stdout_includes('7 tests ran')
+
+  def testRandomSkip_Excludes(self):
+    """Ensure that a test case marked as FUZZ_RARE (here apples) is always
+    excluded if the probability for skipping is 1.
+    """
+    result = self._run_test_with_random_skip(1.0)
+    result.has_returncode(0)
+    result.stdout_excludes('sweet/apples')
+    result.stdout_includes('sweet/bananas default: PASS')
+    result.stdout_includes('6 tests ran')
 
 class OtherTest(TestRunnerTest):
   def testStatusFilePresubmit(self):
@@ -598,7 +756,7 @@ class OtherTest(TestRunnerTest):
     with temp_base() as basedir:
       from testrunner.local import statusfile
       self.assertTrue(statusfile.PresubmitCheck(
-          os.path.join(basedir, 'test', 'sweet', 'sweet.status')))
+          basedir / 'test' / 'sweet' / 'sweet.status'))
 
 
 if __name__ == '__main__':

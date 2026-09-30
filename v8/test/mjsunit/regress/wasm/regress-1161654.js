@@ -2,17 +2,15 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Flags: --wasm-staging
-
 // This is a fuzzer-generated test case that exposed a bug in Liftoff that only
 // affects ARM, where the fp register aliasing is different from other archs.
-// We were inncorrectly clearing the the high fp register in a LiftoffRegList
+// We were incorrectly clearing the high fp register in a LiftoffRegList
 // indicating registers to load, hitting a DCHECK.
 d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
 
 const builder = new WasmModuleBuilder();
-builder.addMemory(19, 32, false);
-builder.addGlobal(kWasmI32, 0);
+builder.addMemory(19, 32);
+builder.addGlobal(kWasmI32, false, false);
 builder.addType(makeSig([], []));
 builder.addType(makeSig([kWasmI64, kWasmS128, kWasmF32], [kWasmI32]));
 // Generate function 1 (out of 5).

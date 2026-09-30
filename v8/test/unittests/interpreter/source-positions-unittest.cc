@@ -106,7 +106,6 @@ class SourcePositionTest : public TestWithContext,
                                std::tuple<int, TestCaseData>> {
  public:
   static void SetUpTestSuite() {
-    v8_flags.always_turbofan = false;
     v8_flags.enable_lazy_source_positions = false;
     TestWithContext::SetUpTestSuite();
   }
@@ -159,9 +158,9 @@ Handle<BytecodeArray> SourcePositionTest::MakeBytecode(
 
           .ToLocalChecked()
           .As<Function>();
-  Handle<JSFunction> function =
-      Handle<JSFunction>::cast(v8::Utils::OpenHandle(*api_function));
-  return handle(function->shared().GetBytecodeArray(i_isolate()), i_isolate());
+  DirectHandle<JSFunction> function =
+      Cast<JSFunction>(v8::Utils::OpenDirectHandle(*api_function));
+  return handle(function->shared()->GetBytecodeArray(i_isolate()), i_isolate());
 }
 
 void SourcePositionTest::SetOptimizationFlags(int optimization_bitmap) {

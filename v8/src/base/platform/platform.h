@@ -2,6 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#ifndef V8_BASE_PLATFORM_PLATFORM_H_
+#define V8_BASE_PLATFORM_PLATFORM_H_
+
 // This module contains the platform-specific code. This make the rest of the
 // code less dependent on operating system, compilers and runtime libraries.
 // This module does specifically not deal with differences between different
@@ -18,21 +21,18 @@
 // implementation and the overhead of virtual methods for performance
 // sensitive like mutex locking/unlocking.
 
-#ifndef V8_BASE_PLATFORM_PLATFORM_H_
-#define V8_BASE_PLATFORM_PLATFORM_H_
-
 #include <cstdarg>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "include/v8-platform.h"
+#include "src/base/abort-mode.h"
 #include "src/base/base-export.h"
 #include "src/base/build_config.h"
 #include "src/base/compiler-specific.h"
 #include "src/base/macros.h"
-#include "src/base/optional.h"
-#include "src/base/platform/mutex.h"
 #include "src/base/platform/semaphore.h"
 #include "testing/gtest/include/gtest/gtest_prod.h"  // nogncheck
 
@@ -63,9 +63,17 @@ extern "C" unsigned long __readfsdword(unsigned long);  // NOLINT(runtime/int)
 #endif                                       // V8_CC_MSVC && V8_HOST_ARCH_IA32
 #endif                                       // V8_NO_FAST_TLS
 
-namespace v8 {
+#if V8_OS_OPENBSD
+#define PERMISSION_MUTABLE_SECTION __attribute__((section(".openbsd.mutable")))
+#else
+#define PERMISSION_MUTABLE_SECTION
+#endif
 
-namespace base {
+namespace heap::base {
+class Stack;
+}
+
+namespace v8::base {
 
 // ----------------------------------------------------------------------------
 // Fast TLS support
@@ -137,9 +145,8 @@ class VirtualAddressSubspace;
 class V8_BASE_EXPORT OS {
  public:
   // Initialize the OS class.
-  // - hard_abort: If true, OS::Abort() will crash instead of aborting.
   // - gc_fake_mmap: Name of the file for fake gc mmap used in ll_prof.
-  static void Initialize(bool hard_abort, const char* const gc_fake_mmap);
+  static void Initialize(const char* const gc_fake_mmap);
 
 #if V8_OS_WIN
   // On Windows, ensure the newer memory API is loaded if available.  This
@@ -150,13 +157,27 @@ class V8_BASE_EXPORT OS {
   // part of V8::Initialize, at which point this function can probably be
   // merged into OS::Initialize.
   static void EnsureWin32MemoryAPILoaded();
+
+  // Convert utf-8 encoded string to utf-16 encoded.
+  static std::wstring ConvertUtf8StringToUtf16(const char* str);
 #endif
+
+  // Check whether CET shadow stack is enabled.
+  static bool IsHardwareEnforcedShadowStacksEnabled();
+
+  // Ensure that an alternative stack is available for signal handlers on the
+  // current thread on platforms that support this. If necessary, this function
+  // will allocate memory for an alternative stack and register it with the OS.
+  static void EnsureAlternativeSignalStackIsAvailableForCurrentThread();
 
   // Returns the accumulated user time for thread. This routine
   // can be used for profiling. The implementation should
   // strive for high-precision timer resolution, preferable
   // micro-second resolution.
   static int GetUserTime(uint32_t* secs,  uint32_t* usecs);
+
+  // Obtain the peak memory usage in kilobytes
+  static int GetPeakMemoryUsageKb();
 
   // Returns current time as the number of milliseconds since
   // 00:00:00 UTC, January 1, 1970.
@@ -210,9 +231,9 @@ class V8_BASE_EXPORT OS {
   };
 
   // Helpers to create shared memory objects. Currently only used for testing.
-  static PlatformSharedMemoryHandle CreateSharedMemoryHandleForTesting(
+  static std::optional<SharedMemoryHandle> CreateSharedMemoryHandleForTesting(
       size_t size);
-  static void DestroySharedMemoryHandle(PlatformSharedMemoryHandle handle);
+  static void DestroySharedMemoryHandle(SharedMemoryHandle handle);
 
   static bool HasLazyCommits();
 
@@ -305,9 +326,10 @@ class V8_BASE_EXPORT OS {
     uintptr_t end = 0;
   };
 
-  // Find gaps between existing virtual memory ranges that have enough space
-  // to place a region with minimum_size within (boundary_start, boundary_end)
-  static std::vector<MemoryRange> GetFreeMemoryRangesWithin(
+  // Find the first gap between existing virtual memory ranges that has enough
+  // space to place a region with minimum_size within (boundary_start,
+  // boundary_end)
+  static std::optional<MemoryRange> GetFirstFreeMemoryRangeWithin(
       Address boundary_start, Address boundary_end, size_t minimum_size,
       size_t alignment);
 
@@ -316,7 +338,7 @@ class V8_BASE_EXPORT OS {
   // Whether the platform supports mapping a given address in another location
   // in the address space.
   V8_WARN_UNUSED_RESULT static constexpr bool IsRemapPageSupported() {
-#if (defined(V8_OS_DARWIN) || defined(V8_OS_LINUX)) && \
+#if (defined(V8_OS_MACOS) || defined(V8_OS_LINUX)) && \
     !(defined(V8_TARGET_ARCH_PPC64) || defined(V8_TARGET_ARCH_S390X))
     return true;
 #else
@@ -343,6 +365,15 @@ class V8_BASE_EXPORT OS {
   static void SetDataReadOnly(void* address, size_t size);
 
  private:
+  // Assign a name to a memory region.
+  //
+  // For example on Linux, if the kernel supports this, the name will
+  // afterwards show up in /proc/$pid/maps.
+  static bool SetMemoryRegionName(const void* address, size_t size,
+                                  const char* name);
+
+  static int GetCurrentThreadIdInternal();
+
   // These classes use the private memory management API below.
   friend class AddressSpaceReservation;
   friend class MemoryMappedFile;
@@ -360,9 +391,9 @@ class V8_BASE_EXPORT OS {
 
   static void* GetRandomMmapAddr();
 
-  V8_WARN_UNUSED_RESULT static void* Allocate(void* address, size_t size,
-                                              size_t alignment,
-                                              MemoryPermission access);
+  V8_WARN_UNUSED_RESULT static void* Allocate(
+      void* address, size_t size, size_t alignment, MemoryPermission access,
+      std::optional<SharedMemoryHandle> handle = std::nullopt);
 
   V8_WARN_UNUSED_RESULT static void* AllocateShared(size_t size,
                                                     MemoryPermission access);
@@ -373,9 +404,10 @@ class V8_BASE_EXPORT OS {
 
   static void Free(void* address, size_t size);
 
-  V8_WARN_UNUSED_RESULT static void* AllocateShared(
-      void* address, size_t size, OS::MemoryPermission access,
-      PlatformSharedMemoryHandle handle, uint64_t offset);
+  V8_WARN_UNUSED_RESULT static void* AllocateShared(void* address, size_t size,
+                                                    OS::MemoryPermission access,
+                                                    SharedMemoryHandle handle,
+                                                    uint64_t offset);
 
   static void FreeShared(void* address, size_t size);
 
@@ -392,11 +424,15 @@ class V8_BASE_EXPORT OS {
 
   V8_WARN_UNUSED_RESULT static bool DecommitPages(void* address, size_t size);
 
+  V8_WARN_UNUSED_RESULT static bool SealPages(void* address, size_t size);
+
   V8_WARN_UNUSED_RESULT static bool CanReserveAddressSpace();
 
-  V8_WARN_UNUSED_RESULT static Optional<AddressSpaceReservation>
-  CreateAddressSpaceReservation(void* hint, size_t size, size_t alignment,
-                                MemoryPermission max_permission);
+  V8_WARN_UNUSED_RESULT static std::optional<AddressSpaceReservation>
+  CreateAddressSpaceReservation(
+      void* hint, size_t size, size_t alignment,
+      MemoryPermission max_permission,
+      std::optional<SharedMemoryHandle> handle = std::nullopt);
 
   static void FreeAddressSpaceReservation(AddressSpaceReservation reservation);
 
@@ -409,16 +445,16 @@ class V8_BASE_EXPORT OS {
   DISALLOW_IMPLICIT_CONSTRUCTORS(OS);
 };
 
-#if (defined(_WIN32) || defined(_WIN64))
+#if defined(V8_OS_WIN)
 V8_BASE_EXPORT void EnsureConsoleOutputWin32();
-#endif  // (defined(_WIN32) || defined(_WIN64))
+#endif  // defined(V8_OS_WIN)
 
 inline void EnsureConsoleOutput() {
-#if (defined(_WIN32) || defined(_WIN64))
+#if defined(V8_OS_WIN)
   // Windows requires extra calls to send assert output to the console
   // rather than a dialog box.
   EnsureConsoleOutputWin32();
-#endif  // (defined(_WIN32) || defined(_WIN64))
+#endif  // defined(V8_OS_WIN)
 }
 
 // ----------------------------------------------------------------------------
@@ -451,7 +487,7 @@ class V8_BASE_EXPORT AddressSpaceReservation {
 
   V8_WARN_UNUSED_RESULT bool AllocateShared(void* address, size_t size,
                                             OS::MemoryPermission access,
-                                            PlatformSharedMemoryHandle handle,
+                                            SharedMemoryHandle handle,
                                             uint64_t offset);
 
   V8_WARN_UNUSED_RESULT bool FreeShared(void* address, size_t size);
@@ -466,8 +502,13 @@ class V8_BASE_EXPORT AddressSpaceReservation {
 
   V8_WARN_UNUSED_RESULT bool DecommitPages(void* address, size_t size);
 
-  V8_WARN_UNUSED_RESULT Optional<AddressSpaceReservation> CreateSubReservation(
-      void* address, size_t size, OS::MemoryPermission max_permission);
+  bool SetName(const char* name) {
+    return OS::SetMemoryRegionName(base_, size_, name);
+  }
+
+  V8_WARN_UNUSED_RESULT std::optional<AddressSpaceReservation>
+  CreateSubReservation(void* address, size_t size,
+                       OS::MemoryPermission max_permission);
 
   V8_WARN_UNUSED_RESULT static bool FreeSubReservation(
       AddressSpaceReservation reservation);
@@ -515,22 +556,32 @@ class V8_BASE_EXPORT Thread {
   // Opaque data type for thread-local storage keys.
 #if V8_OS_STARBOARD
   using LocalStorageKey = SbThreadLocalKey;
+#elif V8_OS_ZOS
+  using LocalStorageKey = pthread_key_t;
 #else
   using LocalStorageKey = int32_t;
 #endif
 
+  // Priority class for the thread. Use kDefault to keep the priority
+  // unchanged.
+  enum class Priority { kBestEffort, kUserVisible, kUserBlocking, kDefault };
+
   class Options {
    public:
-    Options() : name_("v8:<unknown>"), stack_size_(0) {}
+    Options() : Options("v8:<unknown>") {}
     explicit Options(const char* name, int stack_size = 0)
-        : name_(name), stack_size_(stack_size) {}
+        : Options(name, Priority::kDefault, stack_size) {}
+    Options(const char* name, Priority priority, int stack_size = 0)
+        : name_(name), priority_(priority), stack_size_(stack_size) {}
 
     const char* name() const { return name_; }
     int stack_size() const { return stack_size_; }
+    Priority priority() const { return priority_; }
 
    private:
     const char* name_;
-    int stack_size_;
+    const Priority priority_;
+    const int stack_size_;
   };
 
   // Create new thread.
@@ -590,11 +641,17 @@ class V8_BASE_EXPORT Thread {
 
   class PlatformData;
   PlatformData* data() { return data_; }
+  Priority priority() const { return priority_; }
 
-  void NotifyStartedAndRun() {
+  virtual void NotifyStartedAndDispatch() {
     if (start_semaphore_) start_semaphore_->Signal();
-    Run();
+    Dispatch();
   }
+
+ protected:
+  // The default implementation simply calls Run().
+  // This can be overridden to perform initialization before Run() is called.
+  virtual void Dispatch() { Run(); }
 
  private:
   void set_name(const char* name);
@@ -603,11 +660,14 @@ class V8_BASE_EXPORT Thread {
 
   char name_[kMaxThreadNameLength];
   int stack_size_;
+  Priority priority_;
   Semaphore* start_semaphore_;
 };
 
 // TODO(v8:10354): Make use of the stack utilities here in V8.
 class V8_BASE_EXPORT Stack {
+  struct PreventNonDefaultParameters {};
+
  public:
   // Convenience wrapper to use stack slots as unsigned values or void*
   // pointers.
@@ -625,6 +685,15 @@ class V8_BASE_EXPORT Stack {
 
   // Gets the start of the stack of the current thread.
   static StackSlot GetStackStart();
+  // Gets the lowest address that the stack can grow to.
+  static StackSlot GetReservedStackLimit();
+
+  // On Windows, the TEB's StackLimit changes during execution as the stack
+  // grows. Expose a function to get it.
+  static StackSlot GetCommittedStackLimit();
+
+  // Sets the TEB's StackLimit and StackBase on Windows.
+  static void SetCurrentThreadStackBounds(uintptr_t limit, uintptr_t base);
 
   // Returns the current stack top. Works correctly with ASAN and SafeStack.
   //
@@ -633,15 +702,22 @@ class V8_BASE_EXPORT Stack {
   // return an address significantly above the actual current stack position.
   static V8_NOINLINE StackSlot GetCurrentStackPosition();
 
-  // Same as `GetCurrentStackPosition()` with the difference that it is always
-  // inlined and thus always returns the current frame's stack top.
-  static V8_INLINE StackSlot GetCurrentFrameAddress() {
 #if V8_CC_MSVC
-    return _AddressOfReturnAddress();
+#define DEFAULT_CURRENT_FRAME_ADDRESS _AddressOfReturnAddress()
 #else
-    return __builtin_frame_address(0);
+#define DEFAULT_CURRENT_FRAME_ADDRESS __builtin_frame_address(0)
 #endif
+
+  // Same as `GetCurrentStackPosition()` with the difference that it uses a
+  // default parameter value and thus always returns the current frame's stack
+  // top even if this method is not inlined.
+  static V8_INLINE StackSlot GetCurrentFrameAddress(
+      PreventNonDefaultParameters = PreventNonDefaultParameters(),
+      void* frame_address = DEFAULT_CURRENT_FRAME_ADDRESS) {
+    return frame_address;
   }
+
+#undef DEFAULT_CURRENT_FRAME_ADDRESS
 
   // Returns the real stack frame if slot is part of a fake frame, and slot
   // otherwise.
@@ -662,15 +738,19 @@ class V8_BASE_EXPORT Stack {
   }
 
  private:
-  // Returns the current thread stack start pointer.
-  static Stack::StackSlot ObtainCurrentThreadStackStart();
+  // Return the current thread stack start pointer.
+  static StackSlot GetStackStartUnchecked();
+  static StackSlot ObtainCurrentThreadStackStart();
+  // Lowest address that the stack can grow to.
+  static StackSlot ObtainCurrentThreadStackReservedLimit();
+
+  friend class heap::base::Stack;
 };
 
 #if V8_HAS_PTHREAD_JIT_WRITE_PROTECT
 V8_BASE_EXPORT void SetJitWriteProtected(int enable);
 #endif
 
-}  // namespace base
-}  // namespace v8
+}  // namespace v8::base
 
 #endif  // V8_BASE_PLATFORM_PLATFORM_H_

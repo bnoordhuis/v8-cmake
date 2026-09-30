@@ -95,7 +95,7 @@ arr[1]= 42;
 assertEquals(42, arr[1]);
 
 
-// Test the the extensible flag is not inherited.
+// Test that the extensible flag is not inherited.
 var parent = {};
 parent.x = 42;
 Object.preventExtensions(parent);
@@ -165,7 +165,10 @@ assertTrue(%HaveSameMap(obj, obj2));
 
 // Test packed element array built-in functions with preventExtensions.
 obj = new Array(undefined, null, 1, -1, 'a', Symbol("test"));
-assertTrue(%HasPackedElements(obj));
+if(!%IsUndefinedDoubleEnabled()) {
+  // TODO(385155404): Consider reenabling when we can transition back to packed.
+  assertTrue(%HasPackedElements(obj));
+}
 Object.preventExtensions(obj);
 assertFalse(Object.isSealed(obj));
 assertFalse(Object.isFrozen(obj));
@@ -181,7 +184,10 @@ assertDoesNotThrow(function() {obj.splice(0, 0)});
 
 // Verify search, filter, iterator
 obj = new Array(undefined, null, 1, -1, 'a', Symbol("test"));
-assertTrue(%HasPackedElements(obj));
+if(!%IsUndefinedDoubleEnabled()) {
+  // TODO(385155404): Consider reenabling when we can transition back to packed.
+  assertTrue(%HasPackedElements(obj));
+}
 Object.preventExtensions(obj);
 assertFalse(Object.isSealed(obj));
 assertFalse(Object.isFrozen(obj));
